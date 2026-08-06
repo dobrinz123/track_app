@@ -20,7 +20,10 @@ See docs/implementation-plan.md (WP0–WP16).
 | id | state | owned paths | job id |
 |----|-------|-------------|--------|
 | WP0 | DONE (LEAD) | docs/**, .foreman/ledger.md | — |
-| WP1 | DISPATCHED (Sonnet, background) | package.json, .gitignore, README.md, tsconfig*, eslint/prettier configs, packages/core/**, apps/mobile/** | wave1-scaffold |
+| WP1 | REPORTED(DONE) + LEAD deterministic checks passed (typecheck/test/lint green, commit 79e974b); blind verification batched into core-group gate | root configs, packages/core scaffold, apps/mobile | wave1-scaffold |
+| WP5 | DISPATCHED (Codex, effort=high, background job br3xpj3dd, log .foreman/scratch/wp5-codex-output.log) | packages/core/src/geometry/** | br3xpj3dd |
+| WP8 | REPORTED(DONE_WITH_CONCERNS) — concerns triaged: test placement accepted (vitest convention); geometry failures belong to in-flight WP5, judged at WP5 collection | packages/core/src/statemachine/**, test/statemachine/** | wave2-sm |
+| WP11a | DISPATCHED (Sonnet, background) | packages/core/src/persistence/**, test/persistence/** | wave2-persist |
 | WP2 | ACCEPTED (DONE_WITH_CONCERNS; concerns dispositioned — see Decisions) | docs/research/**, data/osm/** | wave1-circuit |
 | WP3 | ACCEPTED (DONE; scout report consumed) | .foreman/scratch/platform-research.md | wave1-platform |
 | WP4–WP16 | PENDING | see plan | — |
@@ -29,6 +32,11 @@ See docs/implementation-plan.md (WP0–WP16).
 (append-only)
 - WP0 | 1 | LEAD | — | DONE | n/a | docs written | 2026-08-06
 - WP3 | 1 | Haiku scout | ticket inline | DONE→ACCEPTED | n/a (read-only) | .foreman/scratch/platform-research.md (Expo SDK 57, 1Hz GNSS, perf.now monotonic) | 2026-08-06
+- WP2 | 1 | Haiku scout | ticket inline | DONE_WITH_CONCERNS→ACCEPTED (concerns dispositioned in Decisions) | LEAD Overpass verification confirmed OSM ways | docs/research/transilvania-motor-ring.md, data/osm/ | 2026-08-06
+- WP1 | 1 | Sonnet | ticket inline | DONE; LEAD re-ran typecheck+test+lint = green | typecheck ✓ test 2/2 ✓ lint ✓ expo export ✓ (worker) re-verified by LEAD | commit 79e974b | 2026-08-06
+- WP5 | 1 | Codex effort=high | ticket-wp5-geometry.md | DISPATCHED | — | job br3xpj3dd → wp5-codex-output.log | 2026-08-06
+- WP8 | 1 | Sonnet | ticket-wp8-statemachine.md | DONE_WITH_CONCERNS; 257 sm tests pass; concerns triaged by LEAD | worker: typecheck ✓ lint ✓ sm-suite 257/257 ✓ | pending group verification | 2026-08-06
+- WP11a | 1 | Sonnet | ticket-wp11a-persistence-core.md | DISPATCHED | — | — | 2026-08-06
 
 ## Decisions
 - WP2 concerns dispositioned: (a) no public pit/SF/sector data → gates are app-defined + versioned per ADR-0002, never labeled official; (b) turn-count conflict (17 vs 10) → not modeled in MVP, documented; (c) OSM IDs missing → resolved by LEAD Overpass query: way 488429454 (circuit, closed, ~3706 m ≈ verified 3.708 km) + way 488429716 (pit lane); raw JSON archived in data/osm/, ODbL attribution mandated (ADR-0002). New task WP4b: deterministic TMR profile generator from OSM data.
