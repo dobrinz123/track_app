@@ -29,7 +29,12 @@ See docs/implementation-plan.md (WP0–WP16).
 | WP4 | REPORTED(DONE_WITH_CONCERNS→resolved: tests relocated by LEAD) + gates green 366/366, commit c8de532 | packages/core/src/profile/**, test/profile/** | wave3-schema |
 | WP4b | REPORTED(DONE_WITH_CONCERNS→resolved: test relocated) + gates 371/371, asset provenance verified by LEAD, commit 8eb9046 | packages/core/scripts/**, assets/** | wave3-tmr |
 | WP7 | DISPATCHED (Codex effort=high, background, log wp7-codex-output.log) | packages/core/src/matching/**, src/calibration/**, test/{matching,calibration}/** | bl0hsl1ru |
-| WP11b | DISPATCHED (Sonnet, background) | packages/core/src/persistence-sql/**, test/persistence*/**, core package.json, lockfile, apps/mobile/src/persistence/** | wave4-sqlite |
+| WP11b | REPORTED(DONE) + LEAD verified slice (64/64), commit d813aeb | persistence-sql + contract suite | wave4-sqlite |
+| WP12b | REPORTED(DONE_WITH_CONCERNS→resolved by ADR-0003 amendment: SDK gap accepted + WP14 watchdog mandate) commit d96d59b | apps/mobile platform + app.json | wave4-ios |
+| WP-docs | REPORTED(DONE, amendment applied) + LEAD spot-checks, commit 22515da | README, ios-no-mac-workflow, validation checklist | wave4-docs |
+| WP7 | REPORTED(DONE) + LEAD gates 423/423, commit 94b4d86; in core-group blind verification | matching/, calibration/ | bl0hsl1ru |
+| WP9 | DISPATCHED (Codex effort=high, background, log wp9-codex-output.log) | packages/core/src/reference/**, test/reference/** | bxebf85az |
+| VERIFY-CORE | VERDICT: PASS_WITH_NOTES — all 8 tickets OK, 7/7 adversarial probes passed, purity guard fires. Finding 1 (MEDIUM, uncommitted generate:tmr script) fixed by LEAD commit. Notes 3 (matcher hint gives no compute savings — full search every call; spec requires local-first search) → queued for WP-perf pass. Note 4 accepted (stricter debounce consistent with contracts). Core group = VERIFIED. | — | wave5-verify |
 | WP13a | REPORTED(DONE) + LEAD verified (tsc/lint/export 890-module 2MB hbc, commit b4c83bf) | apps/mobile/src/ui/**, src/session/**, App.tsx | wave3-ui |
 
 NOTE: WP11b (SQLite adapter) intentionally held until WP4b collects — package-lock.json write overlap (concurrent npm installs). Facade integration notes: add speedKph to FacadeState at WP14; SessionHistoryStore interface lives outside SessionFacade (accepted design call).
