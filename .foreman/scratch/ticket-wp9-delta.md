@@ -24,4 +24,4 @@ MUST NOT: modify files outside WRITE SET; add deps; spawn subagents; git commit.
 
 OUTPUT FORMAT: First line exactly one of DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED. Then files changed, assumptions, commands + pasted results, limitations, integration notes.
 
-WRITE SET: packages/core/src/reference/** (new files), colocated *.test.ts allowed.
+WRITE SET: packages/core/src/reference/** (new files), tests go in packages/core/test/<module>/ (root vitest only discovers test/**/*.test.ts).

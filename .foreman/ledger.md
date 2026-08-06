@@ -4,7 +4,7 @@ BASELINE: (empty repo, git initialized 2026-08-06, branch main, no commits yet) 
 
 MODE: Codex-boosted Full (Agent tool ✓, real shell ✓, Codex CLI 0.145.0 ✓ ChatGPT-subscription login — consent: user's mission spec explicitly requests Codex workers; echo check passed, default seat)
 
-SEATS: LEAD = Fable 5 (frontier). Claude: sonnet (WORKHORSE), haiku (FAST), opus/fable (FRONTIER). Codex: account-default seat verified via echo ("ok", 3k tokens); treated as WORKHORSE/FRONTIER-class for algorithmic work; per-dispatch effort via `-c model_reasoning_effort`.
+SEATS: LEAD = Fable 5 (frontier). Claude: sonnet (WORKHORSE), haiku (FAST), opus/fable (FRONTIER). Codex: account-default = gpt-5.6-sol (observed in exec headers), ChatGPT login; treated as FRONTIER-class for algorithmic work; per-dispatch effort via `-c model_reasoning_effort`.
 
 ## Plan
 See docs/implementation-plan.md (WP0–WP16).
@@ -25,7 +25,9 @@ See docs/implementation-plan.md (WP0–WP16).
 | WP6 | DISPATCHED (Codex, effort=high, background, log .foreman/scratch/wp6-codex-output.log) | packages/core/src/timing/** | wave2-timing |
 | WP8 | REPORTED(DONE_WITH_CONCERNS) — concerns triaged: test placement accepted (vitest convention); geometry failures belong to in-flight WP5, judged at WP5 collection | packages/core/src/statemachine/**, test/statemachine/** | wave2-sm |
 | WP11a | REPORTED(DONE) + LEAD verified slice (35/35, lint ✓, commit b6241b6); group gate pending | packages/core/src/persistence/**, test/persistence/** | wave2-persist |
-| WP12 | DISPATCHED (Sonnet, background) | apps/mobile/src/platform/**, app.json, mobile package.json, lockfile | wave2-platform |
+| WP12 | REPORTED(DONE) + LEAD verified (mobile tsc ✓ eslint ✓ expo export 1.5MB hbc ✓, commit 73d0d9c) | apps/mobile/src/platform/**, app.json | wave2-platform |
+| WP4 | DISPATCHED (Codex effort=medium, background, log wp4-codex-output.log) | packages/core/src/profile/**, test/profile/** | wave3-schema |
+| WP13a | DISPATCHED (Sonnet, background) | apps/mobile/src/ui/**, src/session/**, App.tsx | wave3-ui |
 | WP2 | ACCEPTED (DONE_WITH_CONCERNS; concerns dispositioned — see Decisions) | docs/research/**, data/osm/** | wave1-circuit |
 | WP3 | ACCEPTED (DONE; scout report consumed) | .foreman/scratch/platform-research.md | wave1-platform |
 | WP4–WP16 | PENDING | see plan | — |
