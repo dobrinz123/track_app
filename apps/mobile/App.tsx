@@ -7,9 +7,15 @@ import { StyleSheet, Text, View } from 'react-native';
 // from the Metro bundle, so a type-only import can't prove runtime wiring).
 import { CORE_PACKAGE_ID } from '@circuit/core';
 import type { MonotonicClock, SessionState } from '@circuit/core';
+// Value import (not type-only) of the platform integration layer, for the same
+// reason as CORE_PACKAGE_ID above: proves src/platform/** is actually resolved
+// and bundled by Metro from the app entry point, not just type-checked in
+// isolation. No feature UI wiring beyond this proof is in scope here.
+import { PerformanceNowClock } from './src/platform';
 
 const scaffoldClock: MonotonicClock = { now: () => 0 };
 const scaffoldState: SessionState = 'idle';
+const platformClock: MonotonicClock = new PerformanceNowClock();
 
 export default function App() {
   return (
@@ -18,6 +24,7 @@ export default function App() {
       <Text style={styles.subtitle}>
         {CORE_PACKAGE_ID} wired (state: {scaffoldState}, t0: {scaffoldClock.now()})
       </Text>
+      <Text style={styles.subtitle}>platform layer wired (t0: {platformClock.now()})</Text>
       <StatusBar style="auto" />
     </View>
   );
