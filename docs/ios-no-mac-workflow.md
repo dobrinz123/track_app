@@ -1,173 +1,261 @@
-# iOS without a Mac: Windows-host development and on-track workflow
+# iOS without a Mac: free sideload workflow (Windows-host, no Apple Developer account)
 
-Canonical guide for developing and running this app on an **iPhone**, entirely from a **Windows** machine with no Mac and no Xcode. This is the primary supported workflow (see `docs/decisions/ADR-0004-no-mac-ios-workflow.md`); Android remains supported and documented second (see the root `README.md`).
+Canonical guide for building, installing, and running this app on an **iPhone**, entirely
+from a **Windows** machine with no Mac and no Xcode, and with **no paid Apple Developer
+account**. This guide assumes you have never sideloaded an app before — every step is
+spelled out.
 
-Binding source: `docs/decisions/ADR-0004-no-mac-ios-workflow.md` (including its Amendment) and `docs/decisions/ADR-0003-ios-primary-target.md`. If anything here conflicts with those ADRs, the ADRs win.
-
-**Two distinct workflows, don't mix them up:**
-
-- **Development (Expo Go)** — fast iteration loop while building. Requires Metro running on your Windows machine and the iPhone on the same Wi-Fi (or a tunnel). **Not viable at the circuit** — there is no PC, Metro, or Wi-Fi on-track.
-- **On-track (standalone EAS build)** — the app you actually drive with. Installed once from Windows via EAS, then runs **fully offline**: no PC, no Wi-Fi, no Metro needed for a session. This is the primary on-track workflow and the build type required for the real-track validation checklist.
+Binding source: `docs/decisions/ADR-0005-free-install-path.md` (supersedes the Expo Go
+dev-loop portion of `docs/decisions/ADR-0004-no-mac-ios-workflow.md`) and
+`docs/decisions/ADR-0003-ios-primary-target.md`. If anything here conflicts with those
+ADRs, the ADRs win.
 
 ---
 
-## 1. Prerequisites (Windows)
+## a. What changed
 
-- Windows 11 (or 10), no Xcode/macOS required.
-- **Node.js 24.x** and **npm 11.x**.
-- The **Expo Go** app installed on your iPhone from the App Store (for the development loop only).
-- For the standalone build: either an Apple Developer Program account, or a free Apple ID plus AltStore or Sideloadly on Windows (see §5).
+Expo Go — the "scan a QR code, run the app instantly" development app — has been retired
+from the App Store for this project's Expo SDK version (SDK 57): Expo stopped submitting
+new Expo Go builds after SDK 55, with no SDK 57 release planned (source: Expo changelog,
+"Expo Go and the App Store", May 2026 — https://expo.dev/changelog/expo-go-and-app-store-may-2026,
+accessed 2026-08-06; full sourced packet: `.foreman/scratch/free-ios-install-research.md`). Since
+our app targets SDK 57, Expo Go can no longer run it at all, on any device.
 
-## 2. Install
+**This means sideloaded builds are now both the dev loop and the on-track path** — there
+is no more "fast Expo Go loop for development, standalone build for the track" split.
+Instead:
 
-From the repo root:
+- A GitHub Actions workflow (macOS runner, free/unlimited on public repos) builds two
+  **unsigned** `.ipa` files: a Release build (the on-track app) and a dev-client build
+  (the fast-iteration dev loop, using `expo-dev-client`).
+- You sideload either one to your iPhone from Windows using **Sideloadly** and your
+  **free Apple ID** — no $99/yr Apple Developer Program membership required.
+- The trade-off: a free-Apple-ID signature is only valid for **7 days**, so sideloaded
+  apps need periodic re-signing (§d).
 
-```
-npm install
-```
+## b. One-time setup
 
-This installs and links all workspaces (`packages/core`, `apps/mobile`) from the root — do not run `npm install` inside `apps/mobile` directly.
+Do these once, in order.
 
-## 3. Development loop: Expo Go on the iPhone, Metro on Windows
+1. **Create a free GitHub account**, if you don't already have one: go to
+   [github.com/join](https://github.com/join) and follow the signup flow.
 
-Use this for day-to-day development and replay verification. **Development-only — not viable on-track** (no PC/Metro/Wi-Fi at the circuit).
+2. **Create a GitHub repository** for this project.
+   - **Recommended: make it PUBLIC.** GitHub Actions macOS runners are free and
+     effectively unlimited on public repositories.
+   - If you'd rather keep it **private**, that's fine too — private repos get roughly
+     **200 free macOS Actions minutes/month**, which is enough for a build every few
+     days but not unlimited. (The repo contains no secrets or credentials — see
+     `docs/decisions/ADR-0005-free-install-path.md` §Consequences.)
 
-From the repo root:
+3. **Push this repo to your new GitHub remote.** From the repo root, on Windows:
 
-```
-cd apps/mobile
-npx expo start
-```
+   ```
+   git remote add origin https://github.com/<your-username>/<your-repo>.git
+   git push -u origin main
+   ```
 
-This starts the Metro bundler and prints a QR code in the terminal.
+   (Replace `<your-username>/<your-repo>` with your actual GitHub path, and `main` with
+   your default branch name if different.)
 
-- Open the iPhone's **Camera app** (not Expo Go directly) and point it at the QR code.
-- Tap the notification banner that appears — it opens the project in **Expo Go**.
+4. **Enable Actions** on the repository (usually on by default for a repo you created
+   and pushed to yourself; if you forked instead, go to the **Actions** tab and click
+   the button to enable workflows).
 
-### Tunnel variant (restrictive networks)
+5. **Run the build workflow:**
+   - Go to the **Actions** tab on GitHub.
+   - Click **"Build unsigned iOS"** in the left-hand workflow list.
+   - Click **"Run workflow"** (top-right dropdown button).
+   - Choose the branch and the `variant` input (`release`, `dev-client`, or `both` —
+     `both` is the default and what you want the first time).
+   - Click the green **"Run workflow"** button.
+   - Wait for the run to finish — a macOS runner building both variants typically takes
+     somewhere in the range of 10–20 minutes; watch the run's progress on the Actions
+     tab.
 
-If the iPhone and the Windows machine cannot reach each other on the local network (corporate/guest Wi-Fi, VPN, hotel networks, isolated SSIDs), use a tunnel instead:
+6. **Download the `.ipa` artifact(s):** once the run finishes (green check), open the
+   run's summary page and scroll to the **Artifacts** section at the bottom.
+   Download `CircuitTimer-release-unsigned` and/or `CircuitTimer-devclient-unsigned`
+   (each is a zip containing the `.ipa`) to your Windows machine and unzip it.
 
-```
-npx expo start --tunnel
-```
+7. **Install Sideloadly** on Windows: go to [sideloadly.io](https://sideloadly.io) and
+   download/install the Windows build.
 
-This routes the connection through Expo's tunnel service instead of relying on LAN discovery. Slower to connect and slightly higher latency on reload, but works across networks that block local device discovery.
+8. **Install iTunes from Apple's website** if you don't already have it —
+   `apple.com/itunes` (or Apple's support download page). **Important:** Sideloadly
+   needs the classic desktop iTunes installer, **not** the Microsoft Store version of
+   iTunes — the Store version doesn't expose the drivers Sideloadly needs to talk to
+   your iPhone over USB.
 
-### What works in Expo Go, and the Info.plist caveat
+9. **Connect your iPhone to the Windows PC via USB cable.** Unlock the phone. When the
+   **"Trust This Computer?"** prompt appears on the iPhone, tap **Trust** and enter your
+   passcode if asked.
 
-Per the dependency audit in ADR-0004: **every dependency in `apps/mobile/package.json` is Expo Go-compatible on SDK 57.** No custom native code, no dev client required for the MVP. In Expo Go you get the full app — foreground GNSS location, motion sensors, local persistence, screen keep-awake, the full replay/dashboard flow, and the dev replay screen.
+## c. Installing / re-signing with Sideloadly
 
-**Caveat (documented, acceptable per ADR-0004): the Info.plist customizations in `app.json` do NOT apply inside Expo Go.** Expo Go is itself a signed app with its own bundled Info.plist, so:
+Do this the first time you install a build, and again every time you re-sign (§d).
 
-- The custom `NSLocationWhenInUseUsageDescription` copy (ADR-0003 §2) is **not** shown — the permission prompt uses Expo Go's own generic copy instead.
-- The temporary full-accuracy request (`NSLocationTemporaryUsageDescriptionDictionary`, purpose key `TrackSession`, ADR-0003 §2) does **not** trigger through Expo Go's Info.plist.
+1. Open **Sideloadly** on Windows, with the iPhone still connected via USB.
+2. **Drag and drop the `.ipa` file** (e.g. `CircuitTimer-release-unsigned.ipa`) into the
+   Sideloadly window.
+3. Confirm your iPhone is selected in the device dropdown near the top of the window.
+4. In the **Apple ID** field, enter the email address of your free Apple ID.
+5. Click **Start**.
+6. Sideloadly will prompt for your Apple ID password to sign the app. **If your Apple
+   ID has two-factor authentication (2FA) enabled** (it should), a normal password
+   prompt may fail — generate an **app-specific password** at
+   [appleid.apple.com](https://appleid.apple.com) (Sign-In and Security →
+   App-Specific Passwords) and use that instead.
+7. Wait for Sideloadly to finish signing and installing — it shows progress in the
+   window; this normally takes well under a minute once the password is accepted.
 
-Precise-accuracy behavior and the exact permission copy **must be verified on a standalone build** — see §4–6. Foreground-only design (no `UIBackgroundModes: location`, per ADR-0003 §1) means there is no background-mode gap between Expo Go and a standalone build.
+**First-install phone steps** (only needed the first time you install this specific
+Apple ID's signature on the device, not on every re-sign):
 
-### Running the dev replay screen on-device
+8. On the iPhone: **Settings → General → VPN & Device Management** (sometimes labeled
+   **"Profiles & Device Management"**).
+9. Tap your Apple ID entry under **"Developer App"**.
+10. Tap **"Trust [your Apple ID]"**, then confirm **Trust** in the popup.
+11. Launch the app from the Home Screen — it should open normally now.
 
-The dev replay screen streams a deterministic fixture through the production pipeline (matcher → crossings → state machine → timing → delta) so you can validate app behavior without driving. With Metro running and the app open in Expo Go on the iPhone: navigate to the dev replay screen, select a fixture, and start playback. This is the fastest iteration loop for UI and state-machine work and requires no track time.
+**Notes:**
 
-## 4. Building the standalone app: EAS Build
+- **3-app limit:** a free Apple ID can have at most **3 apps** signed/installed via
+  sideloading at once. If Sideloadly reports you're at the limit, remove an older
+  sideloaded app first (**Settings → General → VPN & Device Management**, or delete it
+  from the Home Screen) and try again.
+- If 2FA keeps rejecting your normal password, that's the app-specific-password step
+  above — it's the most common first-time snag.
 
-The on-track app is built in Expo's cloud (EAS) — no local Xcode is ever needed. `eas.json` defines three profiles:
+## d. The 7-day cycle
 
-| Profile | Purpose | Output |
-|---|---|---|
-| `development` | Dev-client build, only if a custom dev client is ever needed (not required for the MVP) | Installable dev-client app |
-| `preview` | Internal-distribution `.ipa` | The artifact used for **free sideloading** (§5b) or ad-hoc install |
-| `production` | App Store / TestFlight distribution build | The artifact submitted to TestFlight (§5a) |
+A free Apple ID signature is only valid for **7 days** from the day you sign/install.
 
-One-time setup:
+- **What expiry looks like:** the app icon stays on the Home Screen exactly as before.
+  Tapping it either fails silently (brief launch flash, then back to the Home Screen)
+  or shows an "Unable to Install/Verify App" style message. This is expected — it does
+  not mean anything is broken.
+- **The re-sign routine (~2 minutes):** repeat §c with the same `.ipa` file you already
+  have (or a freshly downloaded one from a new workflow run — see §b step 5–6). Either
+  way, as long as the app's **bundle identifier stays the same across builds**, your app
+  data (settings, personal-best laps, session history) and any PBs are preserved across
+  re-signs — iOS treats it as an update to the same app, not a new install.
+  - The app's bundle identifier is set explicitly to `app.circuittimer.tmr` in
+    `apps/mobile/app.json` — do not change it, or iOS will treat the next sideload as a
+    brand-new app and your history/PBs will not carry over.
+- **Suggestion:** set a **recurring calendar reminder every 6 days** (a one-day buffer
+  before the hard 7-day cutoff) so you never show up at the circuit with an expired
+  build. The night before a track day is a natural time to re-sign regardless.
 
-```
-npm i -g eas-cli
-eas login
-eas build:configure
-```
+## e. Dev loop with the dev-client build
 
-`eas build:configure` creates `eas.json` in the project.
+This restores the fast-iteration "edit code, see it instantly on the phone" loop that
+Expo Go used to provide — but now via a real sideloaded build.
 
-Build the artifact for your chosen install path:
+1. Sideload the **dev-client** variant once, following §c
+   (`CircuitTimer-devclient-unsigned.ipa`).
+2. On Windows, from the repo root:
 
-```
-eas build --platform ios --profile production   # for TestFlight/ad-hoc, §5a
-eas build --platform ios --profile preview       # for free sideloading, §5b
-```
+   ```
+   cd apps/mobile
+   npx expo start
+   ```
 
-Once a build completes, EAS provides a download link (or, for `production`, a submission path to App Store Connect via `eas submit`) — download the resulting `.ipa` for sideloading, or submit it for TestFlight.
+   With `expo-dev-client` installed, this starts Metro in dev-client mode automatically.
 
-## 5. Installing the standalone build (two paths, both from Windows)
+3. Open the **sideloaded dev-client app** on the iPhone (not the release build — they're
+   separate installs). It shows a "connect to server" screen; scan the QR code Metro
+   printed, or enter the URL manually.
+   - Phone and Windows machine must be on the **same Wi-Fi network** for local
+     discovery to work.
+   - On a restrictive network (corporate/guest Wi-Fi, hotel, isolated SSID), use
+     `npx expo start --tunnel` instead.
 
-### (a) Paid, recommended: Apple Developer Program + TestFlight
+4. **What works vs. the release build:** the dev-client build gives you Metro's fast
+   refresh / hot reload and the dev menu, same as Expo Go used to — but unlike Expo Go,
+   it's a real standalone build, so ADR-0003's actual Info.plist and precise-accuracy
+   location configuration are in effect (no more "generic permission copy" caveat).
+   It still needs Metro/PC/Wi-Fi to do anything, so it remains **development-only, not
+   viable on-track**. It also carries the same free-Apple-ID **7-day signature expiry**
+   as the release build (§d) — re-sign it the same way when it lapses.
 
-**The only paid/credential dependency in this entire project: an Apple Developer Program membership ($99/yr)** — required by Apple for any distributable iOS build (TestFlight or ad-hoc). EAS can manage signing certificates and provisioning profiles automatically once you supply those Apple Developer credentials during `eas build`. EAS's free tier build queue is sufficient for this project's cadence.
+## f. Paid alternative (optional): TestFlight / EAS
 
-1. Build with `--profile production` (§4).
-2. Submit to App Store Connect / TestFlight (via `eas submit` or by following the prompts from `eas build`).
-3. On the iPhone, install the **TestFlight** app from the App Store if not already present.
-4. Accept the TestFlight invite (email or public link) associated with the build.
-5. Install the app through TestFlight.
+If you'd rather not deal with the 7-day re-sign cycle, an **Apple Developer Program**
+membership ($99/yr) unlocks EAS-built TestFlight distribution with no signature expiry.
+This is entirely optional and not part of the free path documented above — see
+`apps/mobile/eas.json` for the existing build profiles (`development`, `preview`,
+`production`) if you want to pursue this later. Not covered further here; the free
+Sideloadly path above is the reference install path for this project.
 
-No re-signing churn — builds last per normal App Store Connect / TestFlight rules. This is the recommended path for anything beyond short-term personal testing, and it's the build type the real-track validation checklist expects by default.
+## Offline on-track operation
 
-### (b) Free: sideloading with AltStore or Sideloadly
+Once installed via §c, the app needs **no PC, no Wi-Fi, and no Metro** to run a timed
+session (this applies to the Release build; the dev-client build still needs Metro, see
+§e):
 
-No paid account required — works with a free Apple ID. Trade-off: Apple limits free-account app signatures to **7 days**, after which the app expires and stops launching.
-
-1. Build with `--profile preview` (§4) to get the internal-distribution `.ipa`.
-2. Download the `.ipa` to your Windows machine.
-3. Install **AltStore** or **Sideloadly** on Windows and sideload the `.ipa` to the iPhone using your free Apple ID.
-4. **The app expires every 7 days** and must be re-signed/reinstalled:
-   - AltStore can **auto-refresh** the signature, but only while the iPhone is on the **same network as the AltStore server** (your Windows machine, or wherever AltServer is running) — it will not auto-refresh at the circuit.
-   - Without auto-refresh, re-sideload manually before the 7-day window lapses (e.g. the night before a track day).
-5. **3-app limit** applies per free Apple ID — sideloading counts against Apple's per-account free-signature app cap, so free-account users may need to remove other sideloaded apps to make room.
-
-Fine for personal testing; not a suitable long-term or team distribution path — prefer (a) for anything beyond short-term use.
-
-## 6. On-track usage builds
-
-Per ADR-0004 §3: **on-track sessions and the real-track validation pass MUST use the standalone EAS-built app (TestFlight, ad-hoc, or a sideloaded preview `.ipa`) — never Expo Go.** This is required for two independent reasons:
-
-1. **Offline operation** — there is no Metro/PC/Wi-Fi at the circuit; Expo Go depends on all three.
-2. **Configuration correctness** — only a standalone build has ADR-0003's Info.plist and precise-accuracy configuration actually in effect (see the Expo Go caveat in §3).
-
-The real-track validation checklist (`docs/verification/real-track-validation-checklist.md`) assumes a standalone build installed from Windows via one of the two paths in §5, and records which path was used.
-
-## 7. Offline on-track operation
-
-Once installed via §5, the app needs **no PC, no Wi-Fi, and no Metro** to run a timed session. Per the ADR-0004 Amendment:
-
-- The release build embeds the Hermes JS bundle — there is no Metro server to reach at runtime.
-- The Transilvania Motor Ring circuit profile is a **statically imported JSON asset**, compiled into that bundle at build time (never fetched over the network at session start or during a lap).
+- The release build embeds the Hermes JS bundle — there is no Metro server to reach at
+  runtime.
+- The Transilvania Motor Ring circuit profile is a **statically imported JSON asset**,
+  compiled into that bundle at build time (never fetched over the network at session
+  start or during a lap).
 - A timed session makes **zero network calls** on any session-critical path.
 
-Integration (WP14) is the point where both properties are verified: static `require`/`import` of the TMR profile, and no network calls anywhere in the session-critical path. The real-track validation checklist includes an airplane-mode-with-GPS test (§8 below, and see the checklist itself) as the on-site confirmation of this property.
+The real-track validation checklist (`docs/verification/real-track-validation-checklist.md`)
+includes an airplane-mode-with-GPS test as the on-site confirmation of this property.
 
-## 8. Troubleshooting
+## Troubleshooting
 
-**QR code scans but nothing happens / "can't connect" in Expo Go (development loop only):**
-- Confirm the iPhone and the Windows machine are on the same Wi-Fi network. Corporate, guest, or isolated networks often block device-to-device discovery.
-- Switch to the tunnel variant: `npx expo start --tunnel` (see §3).
+**Sideloaded app stopped launching / icon present but nothing happens:**
+- Expected after 7 days on a free Apple ID sideload (§d) — re-sign via Sideloadly (§c).
 
-**Expo Go shows a version mismatch / "this project requires a newer version of Expo Go" (or older):**
-- This app targets **Expo SDK 57**. Expo Go on the iPhone must support SDK 57 — update Expo Go from the App Store to the latest version.
-- If Expo Go's latest App Store version no longer supports SDK 57 (Expo Go typically supports only the current and a small number of recent SDKs), the standalone build (§4–5) becomes the only way to run the app on that device; note this as a limitation for future SDK upgrades.
+**Sideloadly can't see my iPhone:**
+- Confirm the iPhone is unlocked and you tapped **Trust** on the "Trust This Computer?"
+  prompt (§b step 9). Try a different USB cable/port — some cables are charge-only.
+- Confirm iTunes (the Apple.com installer, not the Microsoft Store one) is installed —
+  Sideloadly depends on its drivers (§b step 8).
 
-**Metro starts but the app never loads / times out (development loop only):**
-- Re-scan the QR code; Metro's QR encodes a session-specific URL that can go stale after a restart.
-- Try the tunnel variant even on a shared network — some routers block the mDNS/LAN discovery Expo Go relies on for local connections.
+**Sideloadly rejects my Apple ID password:**
+- If your Apple ID has 2FA (it should), use an app-specific password from
+  [appleid.apple.com](https://appleid.apple.com) instead of your normal password (§c
+  step 6).
+
+**Sideloadly reports the 3-app signature limit:**
+- Remove an older sideloaded app first (**Settings → General → VPN & Device
+  Management** on the iPhone, or delete it from the Home Screen), then retry (§c note).
+
+**Dev-client app shows "connect to server" but nothing loads:**
+- Confirm the iPhone and Windows machine are on the same Wi-Fi network; corporate,
+  guest, or isolated networks often block device-to-device discovery.
+- Switch to the tunnel variant: `npx expo start --tunnel` (§e).
 
 **Permission prompt copy looks generic, not the app's custom copy:**
-- Expected inside Expo Go — see the Info.plist caveat in §3. This is not a bug; verify the real copy on a standalone build instead.
+- Shouldn't happen on either sideloaded build (Release or dev-client) — both are real
+  standalone builds with ADR-0003's Info.plist in effect. If you see generic copy,
+  double-check you're not accidentally running an old Expo Go install (Expo Go is
+  retired for this SDK, see §a, and should be uninstalled).
 
-**Sideloaded app stopped launching:**
-- Expected after 7 days on a free Apple ID sideload (§5b) — re-sign/reinstall via AltStore/Sideloadly, or switch to the paid TestFlight path (§5a) to avoid the recurring expiry.
+**GitHub Actions workflow run fails or times out:**
+- Check the failing step's log in the Actions tab. The workflow
+  (`.github/workflows/build-unsigned-ios.yml`) has per-step timeouts and comments
+  explaining each stage (prebuild, archive, package, upload) — the log output combined
+  with those comments should localize the failure. This workflow's first real run on
+  GitHub's macOS runners has not been executed as part of this change; only its YAML
+  validity and the local `expo prebuild` config-plugin resolution have been verified —
+  see the workflow file's own header comment for the scheme/workspace derivation this
+  depends on.
 
 ## See also
 
-- `docs/decisions/ADR-0004-no-mac-ios-workflow.md` — the binding decision this guide implements, including the Amendment on standalone-build-primary and sideloading.
-- `docs/decisions/ADR-0003-ios-primary-target.md` — iOS platform configuration (Location accuracy, Info.plist, permissions).
-- `docs/verification/real-track-validation-checklist.md` — physical on-track validation protocol (requires a standalone build).
+- `docs/decisions/ADR-0005-free-install-path.md` — the binding decision this guide
+  implements: unsigned CI builds + Sideloadly, replacing the Expo Go dev loop.
+- `docs/decisions/ADR-0004-no-mac-ios-workflow.md` — prior ADR (Expo Go + EAS); its
+  dev-loop portion is superseded by ADR-0005, its standalone-build/offline-operation
+  reasoning still applies.
+- `docs/decisions/ADR-0003-ios-primary-target.md` — iOS platform configuration
+  (Location accuracy, Info.plist, permissions).
+- `docs/verification/real-track-validation-checklist.md` — physical on-track validation
+  protocol (requires a standalone build — Sideloaded or TestFlight).
+- `.github/workflows/build-unsigned-ios.yml` — the CI workflow that builds the unsigned
+  `.ipa` artifacts referenced throughout this guide.
 - Root `README.md` — quickstart and full docs index.

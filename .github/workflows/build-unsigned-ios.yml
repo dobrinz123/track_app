@@ -1,0 +1,173 @@
+# Build unsigned iOS .ipa artifacts (free install path, ADR-0005)
+#
+# Produces two CODE-SIGNING-DISABLED .ipa files from this repo, using a free
+# macOS GitHub Actions runner (no Apple Developer account, no secrets):
+#   - CircuitTimer-release-unsigned.ipa   (Release configuration, the on-track build)
+#   - CircuitTimer-devclient-unsigned.ipa (Debug configuration + expo-dev-client,
+#                                           the fast-iteration dev-loop build)
+#
+# The user downloads the artifact(s) from this workflow run and re-signs them
+# on Windows with Sideloadly + a free Apple ID (7-day signature, no paid
+# account). See docs/ios-no-mac-workflow.md for the full install guide.
+#
+# --- Scheme/workspace derivation (read this before touching xcodebuild args) ---
+# `apps/mobile/app.json`'s `expo.name` is "mobile". Expo's native-project
+# generator sanitizes that name for the Xcode project/workspace/scheme
+# (@expo/config-plugins build/ios/utils/Xcodeproj.js — sanitizedName(): strips
+# non-word characters and diacritics). "mobile" contains no such characters, so
+# it passes through unchanged. `npx expo prebuild --platform ios` therefore
+# generates apps/mobile/ios/mobile.xcworkspace with a default scheme "mobile".
+# Verified locally (Windows) via `npx expo config --type prebuild --json` in
+# apps/mobile, which resolves `"name":"mobile"`, and by reading the
+# sanitizedName() source directly — actual `expo prebuild --platform ios`
+# cannot run on Windows (Expo CLI 57 skips the iOS platform on win32; see
+# @expo/cli build/src/prebuild/resolveOptions.js and
+# docs/ios-no-mac-workflow.md). This macOS job is what actually exercises
+# prebuild for iOS and is the only place the derivation above gets a live check
+# (see the CI-run caveat in that doc).
+# ---------------------------------------------------------------------------
+#
+# No secrets are used anywhere in this workflow — the resulting .ipa is
+# unsigned by design (CODE_SIGNING_ALLOWED=NO); signing happens later, on the
+# user's Windows machine, with Sideloadly and the user's own free Apple ID.
+
+name: Build unsigned iOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "Which .ipa variant(s) to build"
+        type: choice
+        options:
+          - release
+          - dev-client
+          - both
+        default: both
+  push:
+    tags:
+      - "build-*"
+
+concurrency:
+  group: build-unsigned-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: package-lock.json
+
+      # Monorepo (npm workspaces) — install from the repo root, not apps/mobile.
+      - name: Install dependencies (repo root)
+        run: npm ci
+
+      # Tag-push triggers (`build-*`) have no `inputs`, so default to "both".
+      - name: Resolve build variant
+        id: variant
+        run: |
+          VARIANT="${{ github.event.inputs.variant }}"
+          if [ -z "$VARIANT" ]; then
+            VARIANT="both"
+          fi
+          echo "Resolved variant: $VARIANT"
+          echo "variant=$VARIANT" >> "$GITHUB_OUTPUT"
+          if [ "$VARIANT" = "release" ] || [ "$VARIANT" = "both" ]; then
+            echo "build_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_release=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "$VARIANT" = "dev-client" ] || [ "$VARIANT" = "both" ]; then
+            echo "build_devclient=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_devclient=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Generates apps/mobile/ios/ (never committed, see apps/mobile/.gitignore
+      # and the root .gitignore) and installs CocoaPods — only possible on
+      # macOS/Linux, which is why this step must run in CI, not on the
+      # contributor's Windows machine.
+      - name: Prebuild native iOS project
+        working-directory: apps/mobile
+        timeout-minutes: 15
+        run: npx expo prebuild --platform ios
+
+      - name: Archive Release (unsigned)
+        if: steps.variant.outputs.build_release == 'true'
+        working-directory: apps/mobile/ios
+        timeout-minutes: 25
+        run: |
+          xcodebuild \
+            -workspace mobile.xcworkspace \
+            -scheme mobile \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/app.xcarchive \
+            archive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Package Release .ipa (unsigned)
+        if: steps.variant.outputs.build_release == 'true'
+        working-directory: apps/mobile/ios
+        run: |
+          rm -rf ipa-release
+          mkdir -p ipa-release/Payload
+          cp -R build/app.xcarchive/Products/Applications/*.app ipa-release/Payload/
+          (cd ipa-release && zip -r -y ../CircuitTimer-release-unsigned.ipa Payload)
+          rm -rf ipa-release
+
+      - name: Upload Release .ipa
+        if: steps.variant.outputs.build_release == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: CircuitTimer-release-unsigned
+          path: apps/mobile/ios/CircuitTimer-release-unsigned.ipa
+          retention-days: 90
+
+      - name: Archive dev-client (unsigned, Debug)
+        if: steps.variant.outputs.build_devclient == 'true'
+        working-directory: apps/mobile/ios
+        timeout-minutes: 25
+        run: |
+          xcodebuild \
+            -workspace mobile.xcworkspace \
+            -scheme mobile \
+            -configuration Debug \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/app-devclient.xcarchive \
+            archive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Package dev-client .ipa (unsigned)
+        if: steps.variant.outputs.build_devclient == 'true'
+        working-directory: apps/mobile/ios
+        run: |
+          rm -rf ipa-devclient
+          mkdir -p ipa-devclient/Payload
+          cp -R build/app-devclient.xcarchive/Products/Applications/*.app ipa-devclient/Payload/
+          (cd ipa-devclient && zip -r -y ../CircuitTimer-devclient-unsigned.ipa Payload)
+          rm -rf ipa-devclient
+
+      - name: Upload dev-client .ipa
+        if: steps.variant.outputs.build_devclient == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: CircuitTimer-devclient-unsigned
+          path: apps/mobile/ios/CircuitTimer-devclient-unsigned.ipa
+          retention-days: 90

@@ -4,7 +4,7 @@ Printable, iOS-first physical validation protocol. This is the reference validat
 
 This app is **advisory and recreational**, not an official timing system. It does not replace organizer or FIM/FIA timing.
 
-**Precondition — build type and install path:** this protocol assumes a **standalone EAS-built app** (never Expo Go — there is no PC/Metro/Wi-Fi on-track). Per the ADR-0004 Amendment, record which install path was used before starting: ☐ TestFlight/ad-hoc (Apple Developer Program, paid) ☐ Sideloaded `preview` build (AltStore/Sideloadly, free, 7-day signature — confirm not expired). See `docs/ios-no-mac-workflow.md` §5–6 for both paths.
+**Precondition — build type and install path:** this protocol assumes an **unsigned Release `.ipa`, Sideloadly-signed with a free Apple ID** (the reference free path per ADR-0005) **or a TestFlight build (paid, optional alternative)** — never Expo Go, which is retired for this app's SDK and there is no PC/Metro/Wi-Fi on-track regardless. Per ADR-0005, record which install path was used before starting: ☐ Sideloaded Release `.ipa` (free Apple ID, GitHub Actions build — reference free path) ☐ TestFlight/ad-hoc (Apple Developer Program, paid, optional). See `docs/ios-no-mac-workflow.md` §b–d for the free path and §f for the paid alternative.
 
 ---
 
@@ -17,14 +17,14 @@ This app is **advisory and recreational**, not an official timing system. It doe
 | Circuit / layout | Transilvania Motor Ring, full layout |
 | **Device model** | |
 | **iOS version** | |
-| **Build type** | ☐ TestFlight standalone ☐ Ad-hoc standalone ☐ Sideloaded (`preview`, AltStore/Sideloadly) — REQUIRED for the reference pass, see note below ☐ Expo Go (dev/exploratory only, not a valid reference pass) |
-| **Install path** | ☐ (a) Apple Developer Program + TestFlight/ad-hoc ☐ (b) Free sideload (AltStore/Sideloadly) — if (b), signature date: __________ (7-day expiry) |
+| **Build type** | ☐ Sideloaded unsigned Release `.ipa` (Sideloadly, free Apple ID) — REQUIRED for the reference free pass, see note below ☐ TestFlight standalone (paid, optional alternative) ☐ Expo Go (not applicable — retired for this app's SDK, never a valid reference pass) |
+| **Install path** | ☐ (a) Free sideload (Sideloadly, free Apple ID) — reference free path — signature date: __________ (7-day expiry) ☐ (b) Apple Developer Program + TestFlight (paid, optional) |
 | App version / build number | |
 | **Phone mounting position** | |
 | Weather / conditions | |
 | Session duration (target) | |
 
-> **Build-type requirement:** the reference validation pass **must** use a standalone EAS-built app — TestFlight/ad-hoc or a sideloaded `preview` `.ipa` — per `docs/decisions/ADR-0004-no-mac-ios-workflow.md` §3 and its Amendment: on-track sessions require offline operation (no Metro/PC/Wi-Fi at the circuit) and only a standalone build has ADR-0003's Info.plist and precise-accuracy configuration actually in effect. Expo Go is for development and replay verification only — it is not viable on-track and a session recorded in Expo Go does not satisfy this checklist's reference-pass requirement (see `docs/ios-no-mac-workflow.md` §3 for the Info.plist caveat).
+> **Build-type requirement:** the reference validation pass **must** use a standalone build — a Sideloadly-signed unsigned Release `.ipa` (free path, reference) or a TestFlight build (paid, optional) — per `docs/decisions/ADR-0005-free-install-path.md` and `docs/decisions/ADR-0004-no-mac-ios-workflow.md` §3: on-track sessions require offline operation (no Metro/PC/Wi-Fi at the circuit) and only a standalone build has ADR-0003's Info.plist and precise-accuracy configuration actually in effect. Expo Go is retired for this app's SDK (ADR-0005 §a) and was never viable on-track regardless — a session recorded in Expo Go does not satisfy this checklist's reference-pass requirement.
 
 ---
 
@@ -100,8 +100,13 @@ Each item lists the expected outcome and a pass/fail field. Record actual observ
 - ☐ Screenshot attached
 
 ### 16. Offline operation (airplane-mode-with-GPS test)
-- **Expected:** with airplane mode **ON** and Location Services **ON**, a full session (calibration through session end) completes with no degradation attributable to lack of network connectivity — confirming the app makes zero network calls on any session-critical path (per the ADR-0004 Amendment and `docs/ios-no-mac-workflow.md` §7).
+- **Expected:** with airplane mode **ON** and Location Services **ON**, a full session (calibration through session end) completes with no degradation attributable to lack of network connectivity — confirming the app makes zero network calls on any session-critical path (per the ADR-0004 Amendment and `docs/ios-no-mac-workflow.md` §"Offline on-track operation").
 - ☐ Pass ☐ Fail — notes: ______________________
+
+### 17. Signature age < 7 days at session start (sideloaded builds)
+- **Expected:** for a Sideloadly-signed free-Apple-ID build, the signature is less than 7 days old at the start of this session (see `docs/ios-no-mac-workflow.md` §d) — confirming the app will not expire mid-session. Not applicable to TestFlight builds.
+- Signature date: __________ Session date: __________ Age (days): __________
+- ☐ Pass ☐ Fail ☐ N/A (TestFlight build) — notes: ______________________
 
 ---
 
@@ -120,4 +125,4 @@ Each item lists the expected outcome and a pass/fail field. Record actual observ
 
 ---
 
-See also: `docs/ios-no-mac-workflow.md` (build/install instructions), `docs/decisions/ADR-0002-circuit-geometry-source.md` (geometry provenance), `docs/decisions/ADR-0003-ios-primary-target.md` (iOS configuration), `docs/decisions/ADR-0004-no-mac-ios-workflow.md` (build-type requirement).
+See also: `docs/ios-no-mac-workflow.md` (build/install instructions), `docs/decisions/ADR-0002-circuit-geometry-source.md` (geometry provenance), `docs/decisions/ADR-0003-ios-primary-target.md` (iOS configuration), `docs/decisions/ADR-0005-free-install-path.md` (free install path, build-type requirement), `docs/decisions/ADR-0004-no-mac-ios-workflow.md` (offline-operation reasoning, superseded on the dev-loop portion by ADR-0005).

@@ -4,19 +4,22 @@ An **advisory, recreational** GNSS lap-timing app for the Transilvania Motor Rin
 
 See `docs/decisions/ADR-0001-stack.md` for the stack decision, `docs/decisions/ADR-0003-ios-primary-target.md` for why iOS is the primary target, and `docs/architecture/contracts.md` for the binding module contracts.
 
-## Quickstart (Windows + iPhone via Expo Go)
+## Quickstart (Windows + iPhone, free sideload path)
 
-Fast dev loop only — see [`docs/ios-no-mac-workflow.md`](docs/ios-no-mac-workflow.md) for the full guide, including the standalone build required for actual on-track use.
+Expo Go is retired for this app's SDK — there's no more QR-code dev loop. Both
+development and on-track use now go through a sideloaded standalone build. See
+[`docs/ios-no-mac-workflow.md`](docs/ios-no-mac-workflow.md) for the full,
+beginner-proof guide: the GitHub Actions workflow that builds unsigned `.ipa`
+artifacts, and installing/re-signing them on Windows with Sideloadly and a free
+Apple ID (no paid Apple Developer account required).
 
 ```
 npm install
-cd apps/mobile
-npx expo start
 ```
 
-Scan the printed QR code with the iPhone's **Camera app** to open the project in **Expo Go**. On a restrictive network, use `npx expo start --tunnel` instead.
-
-**On-track use requires a standalone build, not Expo Go** — there's no PC, Metro, or Wi-Fi at the circuit. Build and install it via EAS (TestFlight, or a free sideload with AltStore/Sideloadly); see [`docs/ios-no-mac-workflow.md`](docs/ios-no-mac-workflow.md) §4–7 for both install paths and offline operation.
+Then follow [`docs/ios-no-mac-workflow.md`](docs/ios-no-mac-workflow.md) §b onward to
+build via CI, sideload to your iPhone, and (§e) run the dev-client build against
+`npx expo start` from `apps/mobile` for fast iteration.
 
 ## Monorepo layout
 
@@ -70,15 +73,15 @@ npx expo export --platform ios --output-dir dist-export
 npx expo export --platform android --output-dir dist-export
 ```
 
-To run the app itself: Expo Go on a physical device (see Quickstart above and
-`docs/ios-no-mac-workflow.md`), or `npm run ios` / `npm run android` / `npm run web`
+To run the app itself on an iPhone: a sideloaded dev-client build (see Quickstart above
+and `docs/ios-no-mac-workflow.md`), or `npm run ios` / `npm run android` / `npm run web`
 from `apps/mobile` with the relevant SDK/simulator installed.
 
 ## Docs index
 
 - [`docs/ios-no-mac-workflow.md`](docs/ios-no-mac-workflow.md) — canonical Windows-host,
-  iPhone-device workflow: Expo Go dev loop, EAS standalone builds (paid TestFlight and
-  free sideloading paths), offline on-track operation, troubleshooting.
+  iPhone-device workflow: free unsigned-`.ipa` CI builds + Sideloadly (dev-client and
+  release, no paid account), offline on-track operation, troubleshooting.
 - [`docs/verification/real-track-validation-checklist.md`](docs/verification/real-track-validation-checklist.md) —
   printable physical validation protocol at Transilvania Motor Ring.
 - [`docs/verification/baseline.md`](docs/verification/baseline.md) — repository state at project start.
@@ -93,7 +96,9 @@ from `apps/mobile` with the relevant SDK/simulator installed.
 - [`docs/decisions/ADR-0003-ios-primary-target.md`](docs/decisions/ADR-0003-ios-primary-target.md) — iOS as the primary
   target platform: Location configuration, Info.plist, monotonic timing, thermal/battery, verification gates.
 - [`docs/decisions/ADR-0004-no-mac-ios-workflow.md`](docs/decisions/ADR-0004-no-mac-ios-workflow.md) — iOS without a Mac:
-  Expo Go development + EAS cloud builds, standalone-build-primary amendment, sideloading.
+  original Expo Go development + EAS cloud builds decision; dev-loop portion superseded by ADR-0005.
+- [`docs/decisions/ADR-0005-free-install-path.md`](docs/decisions/ADR-0005-free-install-path.md) — free iOS install
+  path: GitHub Actions unsigned `.ipa` builds + Sideloadly (free Apple ID), replacing the retired Expo Go dev loop.
 - [`docs/algorithms/calibration.md`](docs/algorithms/calibration.md) — the Learn-lap calibration engine: quality
   thresholds, coverage bins, direction detection, bounded bias estimation, acceptance criteria, confidence blend.
 - [`docs/algorithms/timing-and-crossings.md`](docs/algorithms/timing-and-crossings.md) — directed-gate crossing

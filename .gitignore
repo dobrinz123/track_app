@@ -7,3 +7,9 @@ dist-export/
 
 # TypeScript build info
 *.tsbuildinfo
+
+# Generated native projects (Expo CNG/prebuild) — never committed, see ADR-0005.
+# apps/mobile/.gitignore already ignores these relative to that workspace;
+# listed here too for repo-root visibility.
+apps/mobile/ios/
+apps/mobile/android/

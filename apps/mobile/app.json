@@ -7,9 +7,11 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
+      "bundleIdentifier": "app.circuittimer.tmr",
       "supportsTablet": false,
       "requireFullScreen": true,
       "infoPlist": {
+        "CFBundleDisplayName": "Circuit Timer",
         "NSLocationWhenInUseUsageDescription": "Circuit Timer records your position on track during an active session to time your laps and sectors. Location is only used while a session is running and never in the background.",
         "NSLocationTemporaryUsageDescriptionDictionary": {
           "TrackSession": "Circuit Timer needs precise location during this track session to time your laps and sectors accurately; approximate location isn't accurate enough for lap timing."
@@ -17,6 +19,7 @@
       }
     },
     "android": {
+      "package": "app.circuittimer.tmr",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
