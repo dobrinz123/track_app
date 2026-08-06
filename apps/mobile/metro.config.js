@@ -18,4 +18,9 @@ config.resolver.nodeModulesPaths = [
   path.resolve(workspaceRoot, 'node_modules'),
 ];
 
+// expo-sqlite's web worker imports its wa-sqlite WASM binary directly; treat
+// .wasm as a resolvable asset (dev/web-preview only — native iOS uses the
+// real SQLite binding and never hits this path).
+config.resolver.assetExts.push('wasm');
+
 module.exports = config;

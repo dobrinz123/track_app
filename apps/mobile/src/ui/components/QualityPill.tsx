@@ -61,7 +61,6 @@ const styles = StyleSheet.create({
   },
   label: {
     ...typography.label,
-    letterSpacing: 0.5,
   },
   labelCompact: {
     fontSize: 11,

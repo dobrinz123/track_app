@@ -57,7 +57,6 @@ const styles = StyleSheet.create({
   },
   value: {
     fontFamily: typography.display.fontFamily,
-    fontWeight: '700',
     fontVariant: ['tabular-nums'],
   },
   unit: {
@@ -65,6 +64,6 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     marginTop: -4,
     textTransform: 'uppercase',
-    letterSpacing: 1,
+    letterSpacing: 1.2,
   },
 });

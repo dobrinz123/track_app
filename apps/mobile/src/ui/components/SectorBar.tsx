@@ -1,6 +1,6 @@
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import { colors, radii, spacing, typography } from '../theme';
+import { colors, fontFamily, radii, spacing, typography } from '../theme';
 
 export interface SectorBarProps {
   /** 0-based index of the current sector. */
@@ -53,9 +53,11 @@ const styles = StyleSheet.create({
   },
   label: {
     ...typography.subtitle,
+    fontFamily: fontFamily.monoSemibold,
+    fontVariant: ['tabular-nums'],
   },
   labelActive: {
-    color: '#06101F',
+    color: colors.onAccent,
   },
   labelInactive: {
     color: colors.textSecondary,

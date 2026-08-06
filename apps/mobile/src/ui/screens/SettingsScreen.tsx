@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
-import { colors, radii, spacing, typography } from '../theme';
+import { colors, fontFamily, radii, spacing, typography } from '../theme';
 import {
   deleteAllStoredUserData,
   estimateObservedRateHz,
@@ -378,7 +378,7 @@ const styles = StyleSheet.create({
   container: { padding: spacing.lg, gap: spacing.lg },
   title: { ...typography.title, color: colors.textPrimary },
   section: { gap: spacing.sm },
-  sectionLabel: { ...typography.label, color: colors.textMuted, letterSpacing: 0.5 },
+  sectionLabel: { ...typography.label, color: colors.textMuted },
   segmented: { flexDirection: 'row', gap: spacing.sm },
   segment: {
     flex: 1,
@@ -391,7 +391,7 @@ const styles = StyleSheet.create({
   },
   segmentActive: { backgroundColor: colors.accent, borderColor: colors.accent },
   segmentText: { ...typography.body, color: colors.textSecondary },
-  segmentTextActive: { color: '#06101F', fontWeight: '700' },
+  segmentTextActive: { color: colors.onAccent, fontFamily: fontFamily.bodySemibold },
   stepperRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   stepperButton: {
     width: 44,
@@ -430,7 +430,7 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
   },
   deleteRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  deleteRowText: { ...typography.body, color: colors.danger, fontWeight: '600' },
+  deleteRowText: { ...typography.body, color: colors.danger, fontFamily: fontFamily.bodySemibold },
   deleteRowMeta: { ...typography.caption, color: colors.textMuted },
   confirmRow: { gap: spacing.sm },
   confirmText: { ...typography.body, color: colors.textPrimary },
@@ -453,7 +453,7 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     alignItems: 'center',
   },
-  confirmDeleteButtonText: { ...typography.body, color: colors.textPrimary, fontWeight: '700' },
+  confirmDeleteButtonText: { ...typography.body, color: colors.textPrimary, fontFamily: fontFamily.bodySemibold },
   successBanner: { ...typography.caption, color: colors.success },
   errorBanner: { ...typography.caption, color: colors.danger },
   devButton: {

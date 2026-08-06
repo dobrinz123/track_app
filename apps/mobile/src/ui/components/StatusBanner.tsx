@@ -1,6 +1,6 @@
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import { colors, radii, spacing, typography } from '../theme';
+import { colors, fontFamily, radii, spacing, typography } from '../theme';
 
 export type StatusBannerVariant = 'info' | 'warning' | 'error' | 'success';
 
@@ -44,6 +44,6 @@ const styles = StyleSheet.create({
   },
   text: {
     ...typography.body,
-    fontWeight: '600',
+    fontFamily: fontFamily.bodySemibold,
   },
 });

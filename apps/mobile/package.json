@@ -4,19 +4,26 @@
   "main": "index.ts",
   "dependencies": {
     "@circuit/core": "*",
+    "@expo-google-fonts/inter": "^0.4.2",
+    "@expo-google-fonts/jetbrains-mono": "^0.4.1",
+    "@expo-google-fonts/space-grotesk": "^0.4.1",
+    "@expo/metro-runtime": "~57.0.8",
     "@react-navigation/native": "^7.3.15",
     "@react-navigation/native-stack": "^7.18.7",
     "expo": "~57.0.11",
     "expo-dev-client": "~57.0.10",
+    "expo-font": "~57.0.1",
     "expo-keep-awake": "~57.0.1",
     "expo-location": "~57.0.8",
     "expo-sensors": "~57.0.2",
     "expo-sqlite": "~57.0.1",
     "expo-status-bar": "~57.0.1",
     "react": "19.2.3",
+    "react-dom": "19.2.3",
     "react-native": "0.86.2",
     "react-native-safe-area-context": "~5.7.0",
-    "react-native-screens": "~4.26.0"
+    "react-native-screens": "~4.26.0",
+    "react-native-web": "^0.21.2"
   },
   "devDependencies": {
     "@types/react": "~19.2.2",

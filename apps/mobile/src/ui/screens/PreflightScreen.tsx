@@ -111,30 +111,32 @@ export function PreflightScreen({ navigation }: Props): React.JSX.Element {
           </View>
         ) : null}
 
-        {rows.map((row) => (
-          <View
-            key={row.label}
-            style={styles.row}
-            accessibilityLabel={`${row.label}: ${row.pass ? 'passed' : 'failed'}${row.detail ? `, ${row.detail}` : ''}`}
-          >
-            <Text style={styles.rowLabel} maxFontSizeMultiplier={1.3}>
-              {row.label}
-            </Text>
-            <View style={styles.rowRight}>
-              {row.detail ? (
-                <Text style={styles.rowDetail} maxFontSizeMultiplier={1.3}>
-                  {row.detail}
-                </Text>
-              ) : null}
-              <Text
-                style={[styles.rowBadge, { color: row.pass ? colors.success : colors.danger }]}
-                maxFontSizeMultiplier={1.3}
-              >
-                {row.pass ? 'PASS' : 'FAIL'}
+        <View style={styles.list}>
+          {rows.map((row, index) => (
+            <View
+              key={row.label}
+              style={[styles.row, index > 0 && styles.rowBorder]}
+              accessibilityLabel={`${row.label}: ${row.pass ? 'passed' : 'failed'}${row.detail ? `, ${row.detail}` : ''}`}
+            >
+              <Text style={styles.rowLabel} maxFontSizeMultiplier={1.3}>
+                {row.label}
               </Text>
+              <View style={styles.rowRight}>
+                {row.detail ? (
+                  <Text style={styles.rowDetail} maxFontSizeMultiplier={1.3}>
+                    {row.detail}
+                  </Text>
+                ) : null}
+                <Text
+                  style={[styles.rowBadge, { color: row.pass ? colors.success : colors.danger }]}
+                  maxFontSizeMultiplier={1.3}
+                >
+                  {row.pass ? 'PASS' : 'FAIL'}
+                </Text>
+              </View>
             </View>
-          </View>
-        ))}
+          ))}
+        </View>
 
         {report && !report.pass ? (
           <View style={styles.failuresCard}>
@@ -183,16 +185,21 @@ const styles = StyleSheet.create({
   rationale: { ...typography.caption, color: colors.textSecondary },
   runningRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
   runningText: { ...typography.caption, color: colors.textSecondary, flexShrink: 1 },
+  list: {
+    borderRadius: radii.md,
+    overflow: 'hidden',
+    backgroundColor: colors.surface,
+  },
   row: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: colors.surface,
-    borderRadius: radii.sm,
-    borderWidth: 1,
-    borderColor: colors.border,
     paddingVertical: spacing.sm,
     paddingHorizontal: spacing.md,
+  },
+  rowBorder: {
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
   },
   rowLabel: { ...typography.body, color: colors.textPrimary, flexShrink: 1 },
   rowRight: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
@@ -209,7 +216,7 @@ const styles = StyleSheet.create({
   failureText: { ...typography.body, color: colors.textSecondary },
   button: { borderRadius: radii.lg, paddingVertical: spacing.md, alignItems: 'center' },
   primaryButton: { backgroundColor: colors.accent },
-  primaryButtonText: { ...typography.subtitle, color: '#06101F' },
+  primaryButtonText: { ...typography.subtitle, color: colors.onAccent },
   secondaryButton: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   secondaryButtonText: { ...typography.subtitle, color: colors.textPrimary },
 });

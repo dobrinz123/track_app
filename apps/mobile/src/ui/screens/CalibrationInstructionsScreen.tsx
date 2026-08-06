@@ -3,7 +3,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
-import { colors, radii, spacing, typography } from '../theme';
+import { colors, fontFamily, radii, spacing, typography } from '../theme';
 import { facade } from '../../session/composition';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'CalibrationInstructions'>;
@@ -83,9 +83,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  stepBadgeText: { color: '#06101F', fontWeight: '700', fontSize: 13 },
+  stepBadgeText: { color: colors.onAccent, fontFamily: fontFamily.bodySemibold, fontSize: 13 },
   stepText: { ...typography.body, color: colors.textPrimary, flex: 1 },
   button: { borderRadius: radii.lg, paddingVertical: spacing.md, alignItems: 'center' },
   primaryButton: { backgroundColor: colors.accent },
-  primaryButtonText: { ...typography.subtitle, color: '#06101F' },
+  primaryButtonText: { ...typography.subtitle, color: colors.onAccent },
 });

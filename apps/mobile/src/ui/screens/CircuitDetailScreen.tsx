@@ -3,7 +3,7 @@ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
-import { colors, radii, spacing, typography } from '../theme';
+import { colors, fontFamily, radii, spacing, typography } from '../theme';
 import { ADVISORY_NOTICE, TRANSILVANIA_MOTOR_RING } from '../data/circuit';
 import { discardRecovery, resumeRecovery, subscribeRecovery, type PendingRecovery } from '../../session/composition';
 
@@ -52,6 +52,9 @@ export function CircuitDetailScreen({ navigation }: Props): React.JSX.Element {
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
       <ScrollView contentContainerStyle={styles.container}>
+        <Text style={styles.kicker} maxFontSizeMultiplier={1.3}>
+          CIRCUIT
+        </Text>
         <Text style={styles.title} maxFontSizeMultiplier={1.3}>
           {circuit.displayName}
         </Text>
@@ -86,7 +89,7 @@ export function CircuitDetailScreen({ navigation }: Props): React.JSX.Element {
                 accessibilityLabel="Resume recovered session"
               >
                 {recoveryBusy ? (
-                  <ActivityIndicator color="#06101F" />
+                  <ActivityIndicator color={colors.onAccent} />
                 ) : (
                   <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.3}>
                     Resume
@@ -102,15 +105,6 @@ export function CircuitDetailScreen({ navigation }: Props): React.JSX.Element {
           <MetaRow label="Layout" value={circuit.layoutId} />
           <MetaRow label="Direction" value={circuit.direction === 'clockwise' ? 'Clockwise' : 'Counter-clockwise'} />
           <MetaRow label="Opened" value={String(circuit.openedYear)} />
-        </View>
-
-        <View style={styles.provenanceCard}>
-          <Text style={styles.provenanceLabel} maxFontSizeMultiplier={1.3}>
-            GEOMETRY PROVENANCE
-          </Text>
-          <Text style={styles.provenanceText} maxFontSizeMultiplier={1.3}>
-            {circuit.geometryProvenance}
-          </Text>
         </View>
 
         <Pressable
@@ -146,14 +140,11 @@ export function CircuitDetailScreen({ navigation }: Props): React.JSX.Element {
           </Text>
         </Pressable>
 
-        <View style={styles.footer}>
-          <Text style={styles.footerText} maxFontSizeMultiplier={1.3}>
-            {circuit.osmAttribution}
-          </Text>
-          <Text style={styles.advisoryText} maxFontSizeMultiplier={1.3}>
-            {ADVISORY_NOTICE}
-          </Text>
-        </View>
+        {/* Legal relocation (compliance): ODbL attribution + advisory disclaimer condensed to one small
+            muted line here; the full text lives in Settings > About (always reachable). */}
+        <Text style={styles.footerText} maxFontSizeMultiplier={1.3}>
+          {circuit.osmAttribution} · {ADVISORY_NOTICE}
+        </Text>
       </ScrollView>
     </SafeAreaView>
   );
@@ -168,8 +159,14 @@ const styles = StyleSheet.create({
     padding: spacing.lg,
     gap: spacing.md,
   },
+  kicker: {
+    ...typography.kicker,
+    color: colors.textMuted,
+    marginBottom: spacing.xs,
+  },
   title: {
     ...typography.title,
+    fontSize: 26,
     color: colors.textPrimary,
   },
   subtitle: {
@@ -207,24 +204,7 @@ const styles = StyleSheet.create({
   metaValue: {
     ...typography.body,
     color: colors.textPrimary,
-    fontWeight: '600',
-  },
-  provenanceCard: {
-    backgroundColor: colors.surfaceRaised,
-    borderRadius: radii.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: spacing.md,
-  },
-  provenanceLabel: {
-    ...typography.label,
-    color: colors.textMuted,
-    marginBottom: spacing.xs,
-  },
-  provenanceText: {
-    ...typography.caption,
-    color: colors.textSecondary,
-    lineHeight: 18,
+    fontFamily: fontFamily.bodySemibold,
   },
   button: {
     borderRadius: radii.lg,
@@ -237,7 +217,7 @@ const styles = StyleSheet.create({
   },
   primaryButtonText: {
     ...typography.subtitle,
-    color: '#06101F',
+    color: colors.onAccent,
   },
   secondaryButton: {
     backgroundColor: colors.surface,
@@ -248,17 +228,10 @@ const styles = StyleSheet.create({
     ...typography.subtitle,
     color: colors.textPrimary,
   },
-  footer: {
-    marginTop: spacing.lg,
-    gap: spacing.xs,
-  },
   footerText: {
     ...typography.caption,
+    fontSize: 11,
     color: colors.textMuted,
-  },
-  advisoryText: {
-    ...typography.caption,
-    color: colors.textMuted,
-    fontStyle: 'italic',
+    marginTop: spacing.lg,
   },
 });

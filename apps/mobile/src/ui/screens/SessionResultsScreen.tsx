@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { LapRecord } from '@circuit/core';
 import type { RootStackParamList } from '../navigation/types';
-import { colors, radii, spacing, typography } from '../theme';
+import { colors, fontFamily, radii, spacing, typography } from '../theme';
 import { TimeDisplay } from '../components/TimeDisplay';
 import { facade } from '../../session/composition';
 import { useFacadeState } from '../hooks/useFacadeState';
@@ -151,8 +151,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.xs,
   },
-  pbBadgeText: { ...typography.label, color: colors.success, letterSpacing: 0.5 },
-  sectionLabel: { ...typography.label, color: colors.textMuted, letterSpacing: 0.5 },
+  pbBadgeText: { ...typography.label, color: colors.success },
+  sectionLabel: { ...typography.label, color: colors.textMuted },
   sectorBestsCard: {
     backgroundColor: colors.surface,
     borderRadius: radii.md,
@@ -174,13 +174,13 @@ const styles = StyleSheet.create({
   },
   lapRowBest: { borderColor: colors.success },
   lapRowHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  lapNumber: { ...typography.body, color: colors.textPrimary, fontWeight: '600' },
+  lapNumber: { ...typography.body, color: colors.textPrimary, fontFamily: fontFamily.bodySemibold },
   invalidBlock: { marginTop: spacing.xs },
   invalidLabel: { ...typography.label, color: colors.danger },
   invalidReason: { ...typography.caption, color: colors.textSecondary },
   button: { borderRadius: radii.lg, paddingVertical: spacing.md, alignItems: 'center' },
   primaryButton: { backgroundColor: colors.accent },
-  primaryButtonText: { ...typography.subtitle, color: '#06101F' },
+  primaryButtonText: { ...typography.subtitle, color: colors.onAccent },
   secondaryButton: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   secondaryButtonText: { ...typography.subtitle, color: colors.textPrimary },
 });

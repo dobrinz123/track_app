@@ -86,7 +86,7 @@ const styles = StyleSheet.create({
   },
   invalidLabel: { ...typography.label, color: colors.danger },
   invalidReason: { ...typography.caption, color: colors.textSecondary },
-  sectionLabel: { ...typography.label, color: colors.textMuted, letterSpacing: 0.5, marginTop: spacing.sm },
+  sectionLabel: { ...typography.label, color: colors.textMuted, marginTop: spacing.sm },
   sectorRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',

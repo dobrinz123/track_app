@@ -194,7 +194,7 @@ const styles = StyleSheet.create({
   container: { padding: spacing.lg, gap: spacing.md },
   title: { ...typography.title, color: colors.textPrimary },
   intro: { ...typography.caption, color: colors.textSecondary, lineHeight: 18 },
-  sectionLabel: { ...typography.label, color: colors.textMuted, letterSpacing: 0.5, marginTop: spacing.sm },
+  sectionLabel: { ...typography.label, color: colors.textMuted, marginTop: spacing.sm },
   fixtureRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',

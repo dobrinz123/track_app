@@ -1,7 +1,7 @@
 import React from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import type { RootStackParamList } from './types';
-import { colors } from '../theme';
+import { colors, fontFamily } from '../theme';
 import { CircuitSelectionScreen } from '../screens/CircuitSelectionScreen';
 import { CircuitDetailScreen } from '../screens/CircuitDetailScreen';
 import { PreflightScreen } from '../screens/PreflightScreen';
@@ -25,13 +25,15 @@ export function RootNavigator(): React.JSX.Element {
       initialRouteName="CircuitSelection"
       screenOptions={{
         headerStyle: { backgroundColor: colors.surface },
-        headerTintColor: colors.textPrimary,
+        headerTintColor: colors.accent,
+        headerTitleStyle: { color: colors.textPrimary, fontFamily: fontFamily.displaySemibold, fontSize: 17 },
+        headerTitleAlign: 'left',
         headerShadowVisible: false,
         contentStyle: { backgroundColor: colors.background },
         animation: 'fade_from_bottom',
       }}
     >
-      <Stack.Screen name="CircuitSelection" component={CircuitSelectionScreen} options={{ title: 'Circuit Timer' }} />
+      <Stack.Screen name="CircuitSelection" component={CircuitSelectionScreen} options={{ headerShown: false }} />
       <Stack.Screen name="CircuitDetail" component={CircuitDetailScreen} options={{ title: 'Circuit' }} />
       <Stack.Screen name="Preflight" component={PreflightScreen} options={{ title: 'Preflight' }} />
       <Stack.Screen

@@ -84,21 +84,24 @@ export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Elemen
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
-  container: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.lg, gap: spacing.lg },
-  title: { ...typography.title, color: colors.textPrimary },
+  container: { flex: 1, justifyContent: 'center', padding: spacing.lg, gap: spacing.lg },
+  title: { ...typography.title, fontSize: 26, color: colors.textPrimary },
   subtitle: { ...typography.body, color: colors.textSecondary },
-  ringWrap: { marginVertical: spacing.md },
-  percent: { ...typography.timeLarge, color: colors.textPrimary, fontFamily: undefined },
+  // The ring itself is a circular graphic, not text content -- kept centered as a widget
+  // while the surrounding headings/badge/button stay left-aligned per the layout language.
+  ringWrap: { alignSelf: 'center', marginVertical: spacing.md },
+  percent: { ...typography.timeLarge, color: colors.textPrimary },
   percentLabel: { ...typography.label, color: colors.textMuted, marginTop: spacing.xs },
   onTrackBadge: {
     flexDirection: 'row',
     alignItems: 'center',
+    alignSelf: 'flex-start',
     borderWidth: 1,
     borderRadius: radii.pill,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
   },
   onTrackDot: { width: 10, height: 10, borderRadius: 5, marginRight: spacing.sm },
-  onTrackText: { ...typography.label, letterSpacing: 0.5 },
+  onTrackText: { ...typography.label },
   cancelWrap: { marginTop: spacing.xl, width: '100%' },
 });

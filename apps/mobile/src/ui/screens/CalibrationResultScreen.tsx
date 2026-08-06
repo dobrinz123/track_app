@@ -124,9 +124,9 @@ export function CalibrationResultScreen({ navigation }: Props): React.JSX.Elemen
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
   container: { flexGrow: 1, padding: spacing.lg, gap: spacing.lg, justifyContent: 'center' },
-  title: { ...typography.title, color: colors.textPrimary, textAlign: 'center' },
-  confidenceCard: { alignItems: 'center', gap: spacing.xs },
-  confidenceValue: { ...typography.display, color: colors.success, fontFamily: undefined },
+  title: { ...typography.title, fontSize: 24, color: colors.textPrimary },
+  confidenceCard: { alignItems: 'flex-start', gap: spacing.xs },
+  confidenceValue: { ...typography.display, color: colors.success },
   confidenceLabel: { ...typography.label, color: colors.textMuted },
   reasonsCard: {
     backgroundColor: colors.surface,
@@ -139,5 +139,5 @@ const styles = StyleSheet.create({
   reasonText: { ...typography.body, color: colors.textSecondary },
   button: { borderRadius: radii.lg, paddingVertical: spacing.md, alignItems: 'center' },
   primaryButton: { backgroundColor: colors.accent },
-  primaryButtonText: { ...typography.subtitle, color: '#06101F' },
+  primaryButtonText: { ...typography.subtitle, color: colors.onAccent },
 });

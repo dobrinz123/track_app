@@ -19,6 +19,9 @@ export function PersonalBestScreen({ navigation }: Props): React.JSX.Element {
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
       <ScrollView contentContainerStyle={styles.container}>
+        <Text style={styles.kicker} maxFontSizeMultiplier={1.3}>
+          PB
+        </Text>
         <Text style={styles.title} maxFontSizeMultiplier={1.3}>
           Personal Best
         </Text>
@@ -74,10 +77,11 @@ export function PersonalBestScreen({ navigation }: Props): React.JSX.Element {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
   container: { padding: spacing.lg, gap: spacing.md },
-  title: { ...typography.title, color: colors.textPrimary },
+  kicker: { ...typography.kicker, color: colors.textMuted },
+  title: { ...typography.title, fontSize: 26, color: colors.textPrimary, marginTop: -spacing.xs },
   circuit: { ...typography.body, color: colors.textSecondary },
   emptyText: { ...typography.body, color: colors.textMuted },
-  timeCard: { alignItems: 'center', gap: spacing.sm, marginVertical: spacing.md },
+  timeCard: { alignItems: 'flex-start', gap: spacing.sm, marginVertical: spacing.md },
   provenanceCard: {
     backgroundColor: colors.surface,
     borderRadius: radii.md,
@@ -86,7 +90,7 @@ const styles = StyleSheet.create({
     padding: spacing.md,
     gap: spacing.sm,
   },
-  provenanceLabel: { ...typography.label, color: colors.textMuted, letterSpacing: 0.5 },
+  provenanceLabel: { ...typography.label, color: colors.textMuted },
   provenanceRow: { flexDirection: 'row', justifyContent: 'space-between' },
   provenanceKey: { ...typography.body, color: colors.textSecondary },
   provenanceValue: { ...typography.body, color: colors.textPrimary },
