@@ -9,12 +9,27 @@ import { useFacadeState } from '../hooks/useFacadeState';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'CalibrationResult'>;
 
-/** Maps machine-readable failure/rejection reason codes to plain language. */
+/**
+ * Maps machine-readable failure/rejection reason codes to plain language.
+ * Kept in sync with the real codes `CalibrationEngine.finish()` can emit
+ * (`packages/core/src/calibration/calibration-engine.ts`'s `failureReasons`
+ * literals: INSUFFICIENT_COVERAGE, WRONG_DIRECTION, POOR_GNSS, RATE_TOO_LOW,
+ * COVERAGE_GAP, CALIBRATION_OVERRUN) -- NOT the previous bespoke set
+ * (ACCURACY_ABOVE_20M / DIRECTION_UNCERTAIN / LOW_SAMPLE_RATE), which the
+ * engine never actually produces and so silently fell through to the
+ * humanizer below for every real rejection. CANCELLED is also covered:
+ * not an engine code, but `SessionController.rejectCalibration()`
+ * (`packages/core/src/controller/sessionController.ts`) appends it to a
+ * mid-lap cancel's real result, so it's a code this screen can genuinely see.
+ */
 const REASON_COPY: Record<string, string> = {
-  ACCURACY_ABOVE_20M: 'GNSS accuracy was worse than 20 meters for part of the lap.',
   INSUFFICIENT_COVERAGE: "The lap didn't cover enough of the circuit to calibrate confidently.",
-  DIRECTION_UNCERTAIN: "The app couldn't confidently determine which direction you drove.",
-  LOW_SAMPLE_RATE: 'GNSS updates arrived too infrequently for a confident calibration.',
+  WRONG_DIRECTION: "The app detected you driving the wrong way around the circuit.",
+  POOR_GNSS: 'GNSS signal quality was too poor for too much of the lap.',
+  RATE_TOO_LOW: 'GNSS updates arrived too infrequently for a confident calibration.',
+  COVERAGE_GAP: "There's a gap in the circuit the lap never drove through.",
+  CALIBRATION_OVERRUN: 'Calibration ran far longer than a normal lap and was stopped.',
+  CANCELLED: 'Calibration was cancelled before it finished.',
 };
 
 function explain(reason: string): string {

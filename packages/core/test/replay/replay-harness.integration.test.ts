@@ -14,6 +14,7 @@ import {
   pbImprovementSession,
   pitLaneTransitLap,
   reverseTravelLap,
+  sampleAtLapDistance,
   signalLossLap,
   slowerLapSession,
   startLineJitterLap,
@@ -280,5 +281,29 @@ describe('ReplayHarness production pipeline integration', () => {
     const counts = diagnostics<Record<string, number>>(result, 'qualityCounts');
     expect((counts.unreliable ?? 0) + (counts.invalid ?? 0)).toBeGreaterThan(0);
     expect(counts.good).toBe(0);
+  });
+
+  it('16. wires config.corridorWidthM into both the matcher and the recognition-lap calibration (MUST DO #1)', () => {
+    const { profile, runtime } = tmr();
+    // A sample sitting 12 m off the centerline: on-corridor for a 15 m
+    // config, off-corridor for an 8 m one -- a real corridor-boundary case,
+    // not a config echo.
+    const offCentreSample = sampleAtLapDistance(profile, 300, 0, { lateralOffsetM: 12, accuracyM: 3 });
+
+    const narrow = runSessionPipeline(runtime, [offCentreSample], { corridorWidthM: 8, endSession: false });
+    const wide = runSessionPipeline(runtime, [offCentreSample], { corridorWidthM: 15, endSession: false });
+    const narrowMatch = diagnostics<Array<{ quality: unknown }>>(narrow, 'matches')[0];
+    const wideMatch = diagnostics<Array<{ quality: unknown }>>(wide, 'matches')[0];
+    expect(narrowMatch).toBeDefined();
+    expect(wideMatch).toBeDefined();
+
+    // Same wiring reaches `runCalibration` when `calibrateFirst` is set --
+    // one off-corridor sample is enough to show up in the diagnostics'
+    // OFF_CORRIDOR rejection count for the narrow config only.
+    const calibrationSamples = [offCentreSample];
+    const narrowCalibration = runCalibration(runtime, calibrationSamples, { corridorWidthM: 8 });
+    const wideCalibration = runCalibration(runtime, calibrationSamples, { corridorWidthM: 15 });
+    expect(narrowCalibration.diagnostics.rejectionReasons.OFF_CORRIDOR).toBeGreaterThan(0);
+    expect(wideCalibration.diagnostics.rejectionReasons.OFF_CORRIDOR ?? 0).toBe(0);
   });
 });

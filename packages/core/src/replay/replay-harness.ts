@@ -20,6 +20,15 @@ import { type CrossingDetectorConfig, type LapTimingEngineConfig } from '../timi
 export interface ReplayHarnessConfig {
   calibrateFirst?: readonly LocationSample[];
   referenceLap?: ReferenceLap | null;
+  /**
+   * Base corridor width (meters) -- `CircuitProfile.corridorWidthM` wiring
+   * (MUST DO #1). Applied as the base for BOTH the live matcher (via
+   * `SessionPipelineCore`'s `PipelineCoreConfig.corridorWidthM`) and, when
+   * `calibrateFirst` is set, the recognition-lap `CalibrationEngine`
+   * (`runCalibration`'s own `corridorWidthM` config). An explicit
+   * `matcher.corridorWidthM` still wins for the matcher.
+   */
+  corridorWidthM?: number;
   quality?: Partial<TelemetryQualityConfig>;
   matcher?: Partial<TrackMatcherConfig>;
   crossings?: CrossingDetectorConfig;
@@ -91,6 +100,7 @@ export function runSessionPipeline(
   config: ReplayHarnessConfig = {},
 ): SessionPipelineResult {
   const core = new SessionPipelineCore(runtimeProfile, {
+    corridorWidthM: config.corridorWidthM,
     quality: config.quality,
     matcher: config.matcher,
     crossings: config.crossings,
@@ -110,7 +120,11 @@ export function runSessionPipeline(
   const calibration =
     config.calibrateFirst === undefined
       ? alreadyCalibratedResult(runtimeProfile)
-      : runCalibration(runtimeProfile, config.calibrateFirst);
+      : runCalibration(
+          runtimeProfile,
+          config.calibrateFirst,
+          config.corridorWidthM === undefined ? {} : { corridorWidthM: config.corridorWidthM },
+        );
   core.dispatch({ type: 'CALIBRATION_FINISHED', result: calibration });
   core.dispatch({ type: calibration.accepted ? 'CALIBRATION_ACCEPTED' : 'CALIBRATION_REJECTED' });
 

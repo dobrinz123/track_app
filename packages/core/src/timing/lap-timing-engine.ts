@@ -18,6 +18,14 @@ export interface LapTimingEngineConfig {
   minLapMs?: number;
   lowQualityWindowMs?: number;
   reverseTravelThresholdM?: number;
+  /**
+   * Lap number the NEXT lap started by this engine will be assigned
+   * (default 1, matching every prior fresh-session behavior exactly).
+   * Additive, MUST DO #5: `SessionController.restoreFromCheckpoint` sets
+   * this to `maxRestoredLapNumber + 1` so recovered sessions don't renumber
+   * their next lap back to 1 and collide with restored history.
+   */
+  initialLapNumber?: number;
 }
 
 interface SectorGateSpec {
@@ -89,8 +97,9 @@ export class LapTimingEngine implements LapTimingEngineContract {
   private readonly minLapMs: number;
   private readonly lowQualityWindowMs: number;
   private readonly reverseTravelThresholdM: number;
+  private readonly initialLapNumber: number;
   private activeLap: ActiveLap | null = null;
-  private nextLapNumber = 1;
+  private nextLapNumber: number;
 
   constructor(profile: LapTimingProfile, config: LapTimingEngineConfig = {}) {
     this.totalLengthM = positiveFinite(profile.totalLengthM, 'totalLengthM');
@@ -109,11 +118,13 @@ export class LapTimingEngine implements LapTimingEngineContract {
       config.reverseTravelThresholdM ?? DEFAULT_REVERSE_TRAVEL_THRESHOLD_M,
       'reverseTravelThresholdM',
     );
+    this.initialLapNumber = positiveFinite(config.initialLapNumber ?? 1, 'initialLapNumber');
+    this.nextLapNumber = this.initialLapNumber;
   }
 
   reset(): void {
     this.activeLap = null;
-    this.nextLapNumber = 1;
+    this.nextLapNumber = this.initialLapNumber;
   }
 
   markInvalid(reason: string): void {

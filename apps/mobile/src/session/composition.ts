@@ -1,7 +1,20 @@
 import Constants from 'expo-constants';
-import type { LocationProvider, LocationSample, SessionMachineSnapshot, SqlDatabase, SqlSessionRepository } from '@circuit/core';
+import type {
+  LocationProvider,
+  LocationSample,
+  SessionControllerDiagnostics,
+  SessionMachineSnapshot,
+  SqlDatabase,
+  SqlSessionRepository,
+} from '@circuit/core';
 import { SessionController, deleteAllUserData, type DeleteUserDataResult } from '@circuit/core';
-import { GnssLocationProvider, PerformanceNowClock, ReplayLocationProvider } from '../platform';
+import {
+  GnssLocationProvider,
+  PerformanceNowClock,
+  ReplayLocationProvider,
+  startLifecycleListener,
+  type GnssDiagnostics,
+} from '../platform';
 import { openAppDatabase } from '../persistence/expoSqlDatabase';
 import { SqlSettingsStore } from '../persistence/sqlSettingsStore';
 import type { FacadeState, SessionFacade } from './facade';
@@ -205,6 +218,37 @@ let repository: SqlSessionRepository | null = null;
 let controller: SessionController | null = null;
 let gnssProvider: GnssLocationProvider | null = null;
 let historyStore: SqlSessionHistoryStore | null = null;
+/**
+ * The `SessionController` currently backing `facade` -- the production one,
+ * or (in `__DEV__`) `startDevReplaySession`'s replay controller. Tracked
+ * separately from `controller` (which stays the production instance for its
+ * whole lifetime) so both the background-checkpoint lifecycle hook (MUST DO
+ * #4) and `getLiveDiagnostics` (MUST DO #3) always act on whichever session
+ * is actually live, not a stale production reference during dev replay.
+ */
+let activeController: SessionController | null = null;
+
+// ---------------------------------------------------------------------------
+// App-lifecycle wiring (MUST DO #4). Registered once at module load --
+// independent of `bootstrapPromise` below -- so a background transition
+// during boot is a harmless no-op (`activeController` is still null) rather
+// than a missed event. `checkpointNow()` is itself a no-op with no active
+// session (`SessionController.checkpointNow`'s own doc comment), so this is
+// always safe to fire unconditionally on every background transition; no
+// separate "is a session active" check is needed here.
+//
+// Deliberately does NOT pause on background (keep-awake means backgrounding
+// during an active session is a deliberate user action -- timing continues,
+// the ADR-0003 §1 watchdog handles any resulting GNSS gap) and does nothing
+// special on foreground return (the ADR-0003 §3 recovery flow already covers
+// process death; a mere background/foreground cycle without process death
+// needs no extra action beyond the checkpoint already taken going in).
+// ---------------------------------------------------------------------------
+startLifecycleListener({
+  onBackground: () => {
+    void activeController?.checkpointNow();
+  },
+});
 
 async function getActiveSessionId(database: SqlDatabase): Promise<string | null> {
   const rows = await database.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
@@ -254,6 +298,7 @@ const bootstrapPromise = (async (): Promise<void> => {
     algorithmVersion: ALGORITHM_VERSION,
     restartProvider,
   });
+  activeController = controller;
 
   const history = new SqlSessionHistoryStore(
     repository,
@@ -393,10 +438,64 @@ export async function startDevReplaySession(samples: LocationSample[]): Promise<
     },
   });
 
+  activeController = devController;
   facadeWrapper.setInner(new RealSessionFacade(devController));
 }
 
 /** Swaps the active `facade` back to a fresh `MockSessionFacade` -- DevReplayScreen's `__DEV__` mock toggle. */
 export function useMockFacadeForDevReplay(): void {
+  activeController = null;
   facadeWrapper.setInner(new MockSessionFacade());
+}
+
+// ---------------------------------------------------------------------------
+// Live diagnostics (MUST DO #3). `GnssDiagnostics` (`platform/gnssLocationProvider.ts`)
+// previously had zero UI call sites -- surfaced here as a single composition-level
+// accessor `SettingsScreen` and `DevReplayScreen` both read, combining the raw
+// GNSS-provider counters with the session-level counters `SessionController.diagnostics()`
+// already tracked (rejected-sample count, watchdog restarts). Read-on-demand only
+// (screens call this on focus / a manual refresh button) -- deliberately NOT a
+// subscription or polling timer, so it adds no background work while a session
+// is timing (ticket's explicit "no polling timers while a session is timing").
+// ---------------------------------------------------------------------------
+
+export interface LiveDiagnosticsSnapshot {
+  controller: SessionControllerDiagnostics;
+  /**
+   * `null` when the active session isn't the production GNSS-backed one
+   * (e.g. mid dev-replay, which drives a `ReplayLocationProvider` instead --
+   * there's no real GNSS stream to report on) or before the production
+   * `GnssLocationProvider` has been constructed (still booting).
+   */
+  gnss: GnssDiagnostics | null;
+}
+
+/** Snapshot of whichever session is currently live, or `null` before any controller exists (still booting). */
+export function getLiveDiagnostics(): LiveDiagnosticsSnapshot | null {
+  if (activeController === null) return null;
+  return {
+    controller: activeController.diagnostics(),
+    gnss: activeController === controller && gnssProvider !== null ? gnssProvider.getDiagnostics() : null,
+  };
+}
+
+/**
+ * Estimates the observed GNSS fix rate (Hz) from `GnssDiagnostics.sampleIntervalHistogramMs`'s
+ * bucketed inter-sample-interval counts -- `GnssLocationProvider` itself tracks
+ * no single rate figure, only the histogram (`platform/gnssLocationProvider.ts`
+ * is outside this ticket's write set, so this stays a pure display computation
+ * here rather than a new field added there). Uses each bucket's midpoint
+ * (the open-ended last bucket's own upper bound plus 1s, arbitrarily but
+ * clearly marked in the UI as `5000ms+` when it dominates) weighted by count,
+ * inverted to Hz. `null` when no windowed samples have been observed yet.
+ */
+export function estimateObservedRateHz(histogram: GnssDiagnostics['sampleIntervalHistogramMs']): number | null {
+  const totalCount = histogram.reduce((sum, bucket) => sum + bucket.count, 0);
+  if (totalCount === 0) return null;
+  const weightedMs = histogram.reduce((sum, bucket) => {
+    const midpointMs = bucket.maxMs === null ? bucket.minMs + 1_000 : (bucket.minMs + bucket.maxMs) / 2;
+    return sum + midpointMs * bucket.count;
+  }, 0);
+  const meanIntervalMs = weightedMs / totalCount;
+  return meanIntervalMs > 0 ? 1_000 / meanIntervalMs : null;
 }

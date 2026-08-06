@@ -46,6 +46,13 @@ import {
  */
 
 export interface PipelineCoreConfig {
+  /**
+   * Base corridor width (meters) applied to the matcher as
+   * `matcher.corridorWidthM` when that field isn't explicitly set in
+   * `matcher` -- the wiring for `CircuitProfile.corridorWidthM` (MUST DO #1).
+   * An explicit `matcher.corridorWidthM` always wins over this base value.
+   */
+  corridorWidthM?: number;
   quality?: Partial<TelemetryQualityConfig>;
   matcher?: Partial<TrackMatcherConfig>;
   crossings?: CrossingDetectorConfig;
@@ -128,6 +135,7 @@ export function createPipelineComponents(
 ): PipelineComponents {
   const qualityEvaluator = new TelemetryQualityEvaluator(config.quality);
   const matcher = new TrackMatcher(runtimeProfile, {
+    ...(config.corridorWidthM === undefined ? {} : { corridorWidthM: config.corridorWidthM }),
     ...config.matcher,
     quality: { ...config.matcher?.quality, ...config.quality },
   });

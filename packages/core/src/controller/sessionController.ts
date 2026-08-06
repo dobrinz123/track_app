@@ -97,8 +97,18 @@ export interface SessionControllerConfig {
 
 export interface SessionControllerDeps {
   runtimeProfile: RuntimeProfile;
-  /** Provenance/geometry fields `buildReferenceLap`/`SessionSummary` need -- a subset of the full `CircuitProfile`. */
-  circuitProfile: Pick<CircuitProfile, 'circuitId' | 'layoutId' | 'layoutVersion' | 'schemaVersion' | 'totalLengthM'>;
+  /**
+   * Provenance/geometry fields `buildReferenceLap`/`SessionSummary` need -- a
+   * subset of the full `CircuitProfile`. Includes `corridorWidthM` (MUST DO
+   * #1): `RuntimeProfile` (the validated, projected companion) deliberately
+   * drops it, so the live matcher/calibration configs source their corridor
+   * base from here instead of silently falling back to each engine's own
+   * default.
+   */
+  circuitProfile: Pick<
+    CircuitProfile,
+    'circuitId' | 'layoutId' | 'layoutVersion' | 'schemaVersion' | 'totalLengthM' | 'corridorWidthM'
+  >;
   locationProvider: LocationProvider;
   clock: MonotonicClock;
   repository: LocalSessionRepository;
@@ -187,12 +197,32 @@ export class SessionController {
   private pbMs: number | null = null;
   private currentReference: ReferenceLap | null = null;
   private rawSamples: LocationSample[] = [];
+  /**
+   * Sync mechanism for MUST DO #5 (lap-number collision after recovery
+   * resume). `SessionMachineSnapshot.lapNumber` (the reducer's own counter,
+   * `statemachine/reducer.ts`) is intentionally unaware of restored history:
+   * its `armed`/`outLap -> timing` transition always stamps the literal `1`
+   * on the first live crossing, exactly as it would for a brand-new session
+   * -- the reducer is a pure function of state+event and has no way to know
+   * a resumed session already has laps 1..N on record. Rather than teach the
+   * reducer about recovery (out of this ticket's write set), the controller
+   * keeps the two counters in sync itself: `restoreFromCheckpoint` seeds
+   * this offset to the highest restored lap number, `LapTimingEngine` is
+   * separately given a matching `initialLapNumber` (so real `LapRecord`s it
+   * produces are already correct), and `snapshotState()` below adds this
+   * offset to the reducer's `state.lapNumber` whenever a lap is actually in
+   * progress (non-zero) so the live "current lap" display agrees with it.
+   * `0` for a session that was never restored, so fresh sessions are
+   * unaffected (offset addition is a no-op).
+   */
+  private lapNumberOffset = 0;
   private readonly listeners = new Set<(s: FacadeStateCore) => void>();
   /** Fire-and-forget async work (telemetry/checkpoint/PB persistence) started from the synchronous sample handler -- see `flush()`. */
   private pendingWork: Array<Promise<unknown>> = [];
 
   constructor(private readonly deps: SessionControllerDeps) {
     this.core = new SessionPipelineCore(deps.runtimeProfile, {
+      corridorWidthM: deps.circuitProfile.corridorWidthM,
       ...deps.config?.pipeline,
       boundedTelemetry: true,
     });
@@ -234,9 +264,13 @@ export class SessionController {
   private snapshotState(): FacadeStateCore {
     const currentLap = this.core.currentLap();
     const currentLapMs = currentLap !== null ? currentLap.elapsedMs(this.deps.clock.now()) : 0;
+    // See `lapNumberOffset`'s doc comment: only applied once a lap is
+    // actually in progress (non-zero), so idle/armed/pre-lap phases still
+    // read 0 exactly as a fresh session would.
+    const rawLapNumber = this.core.state.lapNumber;
     return {
       sessionState: this.core.state.state,
-      lapNumber: this.core.state.lapNumber,
+      lapNumber: rawLapNumber === 0 ? 0 : rawLapNumber + this.lapNumberOffset,
       currentLapMs,
       lastLapMs: this.lastLapMs,
       pbMs: this.pbMs,
@@ -283,7 +317,10 @@ export class SessionController {
     this.core.dispatch({ type: 'PREFLIGHT_PASSED' });
 
     if (phase === 'calibration') {
-      this.calibrationEngine = new CalibrationEngine(this.deps.runtimeProfile, this.deps.config?.calibration);
+      this.calibrationEngine = new CalibrationEngine(this.deps.runtimeProfile, {
+        corridorWidthM: this.deps.circuitProfile.corridorWidthM,
+        ...this.deps.config?.calibration,
+      });
       this.calibrationResult = null;
       this.calibrationSnapshot = { coverageFraction: 0, onTrack: true };
       this.core.dispatch({ type: 'CALIBRATION_STARTED' });
@@ -414,20 +451,34 @@ export class SessionController {
    */
   restoreFromCheckpoint(sessionId: string, snapshot: SessionMachineSnapshot, laps: LapRecord[]): void {
     this.sessionId = sessionId;
+
+    const priorState = snapshot.context.priorState;
+    const midSession =
+      MID_SESSION_STATES.has(snapshot.state) ||
+      (snapshot.state === 'paused' && typeof priorState === 'string' && MID_SESSION_STATES.has(priorState as SessionState));
+
+    // MUST DO #5: seed the lap-number sync offset from the highest restored
+    // lap number (including the synthetic in-flight RECOVERY lap below, if
+    // any) BEFORE the fresh pipeline is built, so both halves of the sync
+    // mechanism -- `LapTimingEngine.initialLapNumber` (real completed laps)
+    // and `lapNumberOffset` (the reducer-driven live display, applied in
+    // `snapshotState()`) -- agree on the same next-lap-number from the
+    // start. `0` when there's no restored history (matches a fresh session).
+    const restoredLapNumbers = laps.map((lap) => lap.lapNumber);
+    if (midSession) restoredLapNumbers.push(snapshot.lapNumber);
+    this.lapNumberOffset = restoredLapNumbers.length === 0 ? 0 : Math.max(...restoredLapNumbers);
+
     this.core = new SessionPipelineCore(this.deps.runtimeProfile, {
+      corridorWidthM: this.deps.circuitProfile.corridorWidthM,
       ...this.deps.config?.pipeline,
       boundedTelemetry: true,
+      timing: { ...this.deps.config?.pipeline?.timing, initialLapNumber: this.lapNumberOffset + 1 },
     });
     this.mode = 'idle';
     this.calibrationEngine = null;
     this.calibrationSnapshot = null;
     this.calibrationResult = null;
     this.paused = false;
-
-    const priorState = snapshot.context.priorState;
-    const midSession =
-      MID_SESSION_STATES.has(snapshot.state) ||
-      (snapshot.state === 'paused' && typeof priorState === 'string' && MID_SESSION_STATES.has(priorState as SessionState));
 
     for (const lap of laps) this.core.laps.push(lap);
     if (midSession) {
@@ -557,7 +608,16 @@ export class SessionController {
     this.core.setReference(stored);
   }
 
-  private async checkpointNow(): Promise<void> {
+  /**
+   * Persists a checkpoint immediately (MUST DO #4). Public so composition
+   * can drive it from outside a live sample callback -- specifically the
+   * app-background lifecycle listener (`apps/mobile/src/session/composition.ts`),
+   * which fires on an OS-level background transition, not a pipeline event.
+   * A no-op before any session has started (`sessionId === null`), so it's
+   * always safe to call unconditionally. Also used internally by `pause()`
+   * and after every completed lap.
+   */
+  async checkpointNow(): Promise<void> {
     const sessionId = this.sessionId;
     if (sessionId === null) return;
     await this.deps.repository.saveCheckpoint(sessionId, this.core.state, this.core.laps);

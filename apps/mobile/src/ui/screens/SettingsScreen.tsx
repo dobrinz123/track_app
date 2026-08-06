@@ -1,10 +1,19 @@
 import React from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, radii, spacing, typography } from '../theme';
-import { deleteAllStoredUserData, facade, sessionHistoryStore, settingsStore } from '../../session/composition';
+import {
+  deleteAllStoredUserData,
+  estimateObservedRateHz,
+  facade,
+  getLiveDiagnostics,
+  sessionHistoryStore,
+  settingsStore,
+  type LiveDiagnosticsSnapshot,
+} from '../../session/composition';
 import { useFacadeState } from '../hooks/useFacadeState';
 import { useSettings } from '../hooks/useSettings';
 import type { SpeedUnits } from '../../session/settingsStore';
@@ -68,6 +77,20 @@ function SegmentedControl<T extends string>({
   );
 }
 
+/** One label/value row in the DIAGNOSTICS section (MUST DO #3). */
+function DiagnosticsRow({ label, value }: { label: string; value: string }): React.JSX.Element {
+  return (
+    <View style={styles.diagnosticsRow}>
+      <Text style={styles.diagnosticsLabel} maxFontSizeMultiplier={1.3}>
+        {label}
+      </Text>
+      <Text style={styles.diagnosticsValue} maxFontSizeMultiplier={1.3}>
+        {value}
+      </Text>
+    </View>
+  );
+}
+
 /** S12 — units, delta deadband, coverage bins (in-memory for now); About/licenses/attribution; delete-my-data (M3 fix). */
 export function SettingsScreen({ navigation }: Props): React.JSX.Element {
   const settings = useSettings(settingsStore);
@@ -75,6 +98,15 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
   const [confirmingDelete, setConfirmingDelete] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
   const [deleteBanner, setDeleteBanner] = React.useState<'success' | 'error' | null>(null);
+  const [diagnostics, setDiagnostics] = React.useState<LiveDiagnosticsSnapshot | null>(null);
+
+  // MUST DO #3 -- read-on-focus + manual refresh only, never a polling
+  // timer, so this adds no background work while a session is timing.
+  useFocusEffect(
+    React.useCallback(() => {
+      setDiagnostics(getLiveDiagnostics());
+    }, []),
+  );
 
   const activeBinPreset =
     Object.entries(COVERAGE_BIN_PRESETS).find(
@@ -268,6 +300,60 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
           </View>
         </View>
 
+        <View style={styles.section}>
+          <View style={styles.diagnosticsHeaderRow}>
+            <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
+              DIAGNOSTICS
+            </Text>
+            <Pressable
+              onPress={() => setDiagnostics(getLiveDiagnostics())}
+              accessibilityRole="button"
+              accessibilityLabel="Refresh diagnostics"
+            >
+              <Text style={styles.refreshText} maxFontSizeMultiplier={1.3}>
+                Refresh
+              </Text>
+            </Pressable>
+          </View>
+          <View style={styles.aboutCard}>
+            {diagnostics === null ? (
+              <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                Not available yet.
+              </Text>
+            ) : (
+              <>
+                <DiagnosticsRow
+                  label="Observed GNSS rate"
+                  value={
+                    diagnostics.gnss === null
+                      ? 'n/a (not the live GNSS session)'
+                      : (() => {
+                          const hz = estimateObservedRateHz(diagnostics.gnss.sampleIntervalHistogramMs);
+                          return hz === null ? 'no samples yet' : `${hz.toFixed(2)} Hz`;
+                        })()
+                  }
+                />
+                <DiagnosticsRow
+                  label="Accuracy p50 / p95"
+                  value={
+                    diagnostics.gnss === null
+                      ? 'n/a'
+                      : diagnostics.gnss.accuracyDistributionM.sampleCount === 0
+                        ? 'no samples yet'
+                        : `${diagnostics.gnss.accuracyDistributionM.p50M?.toFixed(1) ?? '—'} m / ${diagnostics.gnss.accuracyDistributionM.p95M?.toFixed(1) ?? '—'} m`
+                  }
+                />
+                <DiagnosticsRow label="Rejected samples" value={String(diagnostics.controller.rejectedSampleCount)} />
+                <DiagnosticsRow label="Watchdog restarts" value={String(diagnostics.controller.watchRestarts)} />
+                <DiagnosticsRow
+                  label="Reduced accuracy (iOS)"
+                  value={diagnostics.gnss === null ? 'n/a' : diagnostics.gnss.reducedAccuracy ? 'yes' : 'no'}
+                />
+              </>
+            )}
+          </View>
+        </View>
+
         {
           // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
           __DEV__ ? (
@@ -330,6 +416,11 @@ const styles = StyleSheet.create({
   },
   aboutText: { ...typography.caption, color: colors.textSecondary, lineHeight: 18 },
   aboutSubLabel: { ...typography.label, color: colors.textMuted, marginTop: spacing.xs },
+  diagnosticsHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  refreshText: { ...typography.caption, color: colors.accent },
+  diagnosticsRow: { flexDirection: 'row', justifyContent: 'space-between' },
+  diagnosticsLabel: { ...typography.caption, color: colors.textMuted },
+  diagnosticsValue: { ...typography.caption, color: colors.textPrimary },
   dataCard: {
     backgroundColor: colors.surface,
     borderRadius: radii.md,

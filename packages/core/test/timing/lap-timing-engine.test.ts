@@ -242,6 +242,33 @@ describe('LapTimingEngine', () => {
     );
   });
 
+  it('starts fresh sessions at lap 1 by default (MUST DO #5, no behavior change)', () => {
+    const engine = new LapTimingEngine(profile);
+    feed(engine, 'sf', 'startFinish', 0, 0);
+    expect(engine.currentLap()?.lapNumber).toBe(1);
+  });
+
+  it('honors config.initialLapNumber for the first lap it starts (MUST DO #5)', () => {
+    const engine = new LapTimingEngine(profile, { initialLapNumber: 4 });
+    expect(feed(engine, 'sf', 'startFinish', 0, 0)).toBeNull();
+    expect(engine.currentLap()?.lapNumber).toBe(4);
+    const lap = feed(engine, 'sf', 'startFinish', 90_000, 1_000);
+    expect(lap?.lapNumber).toBe(4);
+    // Numbering continues normally past the seeded value.
+    expect(engine.currentLap()?.lapNumber).toBe(5);
+  });
+
+  it('reset() returns to initialLapNumber, not the hardcoded 1', () => {
+    const engine = new LapTimingEngine(profile, { initialLapNumber: 4 });
+    feed(engine, 'sf', 'startFinish', 0, 0);
+    feed(engine, 'sf', 'startFinish', 90_000, 1_000);
+    expect(engine.currentLap()?.lapNumber).toBe(5);
+    engine.reset();
+    expect(engine.currentLap()).toBeNull();
+    feed(engine, 'sf', 'startFinish', 0, 0);
+    expect(engine.currentLap()?.lapNumber).toBe(4);
+  });
+
   it('keeps valid sector sums within one millisecond of lap duration', () => {
     fc.assert(
       fc.property(

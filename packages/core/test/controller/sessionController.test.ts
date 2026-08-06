@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest';
 
 import type { LocationSample, ReferenceLap, SessionMachineSnapshot } from '../../src/contracts';
 import { SessionController, type FacadeStateCore } from '../../src/controller';
-import { cleanRecognitionLap, driveLap, multiLapSession, pbImprovementSession } from '../../src/fixtures';
+import {
+  cleanRecognitionLap,
+  driveLap,
+  multiLapSession,
+  pbImprovementSession,
+  sampleAtLapDistance,
+} from '../../src/fixtures';
 import { InMemorySessionRepository } from '../../src/persistence';
 
 import { FakeClock, FakeLocationProvider, FakeWatchdogScheduler, tmr } from './testSupport';
@@ -296,5 +302,114 @@ describe('SessionController', () => {
     // session would leave behind proportionally more buffered samples. With
     // per-lap trimming both stay small and close together.
     expect(longSessionBuffer).toBeLessThan(shortSessionBuffer + 50);
+  });
+
+  it('wires CircuitProfile.corridorWidthM into the live calibration engine (MUST DO #1)', async () => {
+    const { profile, controller, provider, clock, states } = setup();
+    // The real bundled TMR profile's corridorWidthM (15 m) is narrower than
+    // both TrackMatcher's and CalibrationEngine's own 20 m defaults -- a
+    // sample at 17 m lateral offset is a genuine corridor-boundary case:
+    // off-corridor for the real profile, on-corridor for the stale default.
+    expect(profile.corridorWidthM).toBe(15);
+
+    await controller.start('calibration');
+    const sample = sampleAtLapDistance(profile, 200, clock.now(), { lateralOffsetM: 17, accuracyM: 3 });
+    provider.push(sample);
+
+    // If corridorWidthM weren't wired (defaulting to 20 m), 17 m would still
+    // read onTrack=true -- this fails red without the MUST DO #1 fix.
+    expect(last(states).calibration?.onTrack).toBe(false);
+  });
+
+  it('checkpointNow() is public and persists the current state/laps on demand (MUST DO #4)', async () => {
+    const { profile, repository, controller, feed } = setup();
+    await controller.start('calibration');
+    feed(cleanRecognitionLap(profile, 801));
+    controller.acceptCalibration();
+    await controller.flush();
+    controller.arm();
+
+    const sessionId = controller.diagnostics().sessionId!;
+    // Nothing but 'calibration'/'acceptCalibration' has checkpointed yet in
+    // this flow beyond what those internally trigger; call the newly-public
+    // API directly, simulating the app-background lifecycle hook.
+    await controller.checkpointNow();
+
+    const checkpoint = await repository.loadCheckpoint(sessionId);
+    expect(checkpoint).not.toBeNull();
+    expect(checkpoint?.snapshot.state).toBe('armed');
+  });
+
+  it('checkpointNow() is a safe no-op before any session has started', async () => {
+    const { controller } = setup();
+    await expect(controller.checkpointNow()).resolves.toBeUndefined();
+  });
+
+  it('restoreFromCheckpoint seeds lap numbering past restored history so recovery does not collide (MUST DO #5)', async () => {
+    const { profile, controller, provider, clock, states } = setup();
+    const historicalLaps = [
+      {
+        lapNumber: 1,
+        tStart: 0,
+        tEnd: 90_000,
+        durationMs: 90_000,
+        sectorTimes: [],
+        valid: true,
+        invalidReasons: [],
+        quality: 'good' as const,
+      },
+      {
+        lapNumber: 2,
+        tStart: 90_000,
+        tEnd: 180_000,
+        durationMs: 90_000,
+        sectorTimes: [],
+        valid: true,
+        invalidReasons: [],
+        quality: 'good' as const,
+      },
+    ];
+    const snapshot: SessionMachineSnapshot = {
+      state: 'armed',
+      lapNumber: 0,
+      context: { lapNumber: 0, priorState: null, pendingInvalidReasons: [], gnssDegraded: false, preflightFailureReasons: [] },
+    };
+    controller.restoreFromCheckpoint('driver-1--recovered', snapshot, historicalLaps);
+    // Skip straight to armed off the stored reference, per the documented
+    // recovery flow (no live recalibration).
+    await controller.start('session');
+    expect(last(states).sessionState).toBe('armed');
+    controller.arm();
+
+    // Drive one full lap live. Without the MUST DO #5 fix, both the
+    // reducer-driven live lapNumber display AND the completed LapRecord
+    // would renumber back to 1, colliding with the restored lap 1.
+    const drivingSamples = driveLap(profile, { seed: 900, speedMps: 40, noiseSigmaM: 1 });
+    let wallClock = clock.now();
+    let previousTMono: number | null = null;
+    for (const sample of drivingSamples) {
+      const delta = previousTMono === null ? 0 : Math.max(0, sample.tMono - previousTMono);
+      previousTMono = sample.tMono;
+      wallClock += delta;
+      clock.set(wallClock);
+      provider.push(sample);
+    }
+    await controller.flush();
+
+    const finalState = last(states);
+    expect(finalState.laps).toHaveLength(3); // 2 restored + 1 freshly completed
+    const freshLap = finalState.laps[2]!;
+    expect(freshLap.lapNumber).toBe(3);
+
+    // The live "current lap" display (state.lapNumber, reducer-driven) must
+    // stay in sync with the real numbering too: while lap 3 was in progress
+    // it must read 3 (not 1, which is what the unfixed reducer would stamp
+    // on the very first live crossing after a resume) -- and it must never
+    // regress into the 1/2 range that would collide with the two restored
+    // historical laps.
+    const timingLapNumbers = states.filter((s) => s.sessionState === 'timing').map((s) => s.lapNumber);
+    expect(timingLapNumbers.length).toBeGreaterThan(0);
+    expect(timingLapNumbers).toContain(3);
+    expect(timingLapNumbers.every((n) => n >= 3)).toBe(true);
   });
 });

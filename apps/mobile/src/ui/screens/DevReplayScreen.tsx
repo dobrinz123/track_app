@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { CircuitProfile, TelemetryFixture } from '@circuit/core';
 import {
@@ -14,7 +15,13 @@ import {
 } from '@circuit/core';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, radii, spacing, typography } from '../theme';
-import { startDevReplaySession, useMockFacadeForDevReplay } from '../../session/composition';
+import {
+  estimateObservedRateHz,
+  getLiveDiagnostics,
+  startDevReplaySession,
+  useMockFacadeForDevReplay,
+  type LiveDiagnosticsSnapshot,
+} from '../../session/composition';
 import { TMR_CIRCUIT_PROFILE } from '../../session/tmrProfile';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'DevReplay'>;
@@ -53,6 +60,14 @@ const SCENARIOS: ScenarioDefinition[] = [
  */
 export function DevReplayScreen({ navigation }: Props): React.JSX.Element {
   const [runningId, setRunningId] = useState<string | null>(null);
+  const [diagnostics, setDiagnostics] = useState<LiveDiagnosticsSnapshot | null>(null);
+
+  // MUST DO #3 -- read-on-focus + manual refresh only, no polling timer.
+  useFocusEffect(
+    React.useCallback(() => {
+      setDiagnostics(getLiveDiagnostics());
+    }, []),
+  );
 
   const runScenario = async (scenario: ScenarioDefinition): Promise<void> => {
     setRunningId(scenario.id);
@@ -125,6 +140,50 @@ export function DevReplayScreen({ navigation }: Props): React.JSX.Element {
             run
           </Text>
         </Pressable>
+
+        <View style={styles.diagnosticsHeaderRow}>
+          <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
+            LIVE DIAGNOSTICS (currently active session)
+          </Text>
+          <Pressable
+            onPress={() => setDiagnostics(getLiveDiagnostics())}
+            accessibilityRole="button"
+            accessibilityLabel="Refresh diagnostics"
+          >
+            <Text style={styles.refreshText} maxFontSizeMultiplier={1.3}>
+              Refresh
+            </Text>
+          </Pressable>
+        </View>
+        {diagnostics === null ? (
+          <Text style={styles.intro} maxFontSizeMultiplier={1.3}>
+            Not available yet.
+          </Text>
+        ) : (
+          <View style={styles.diagnosticsCard}>
+            <Text style={styles.diagnosticsRow} maxFontSizeMultiplier={1.3}>
+              Observed rate:{' '}
+              {diagnostics.gnss === null
+                ? 'n/a (replay provider, not live GNSS)'
+                : (() => {
+                    const hz = estimateObservedRateHz(diagnostics.gnss.sampleIntervalHistogramMs);
+                    return hz === null ? 'no samples yet' : `${hz.toFixed(2)} Hz`;
+                  })()}
+            </Text>
+            <Text style={styles.diagnosticsRow} maxFontSizeMultiplier={1.3}>
+              Accuracy p50/p95:{' '}
+              {diagnostics.gnss === null
+                ? 'n/a'
+                : `${diagnostics.gnss.accuracyDistributionM.p50M?.toFixed(1) ?? '—'} m / ${diagnostics.gnss.accuracyDistributionM.p95M?.toFixed(1) ?? '—'} m`}
+            </Text>
+            <Text style={styles.diagnosticsRow} maxFontSizeMultiplier={1.3}>
+              Rejected samples: {diagnostics.controller.rejectedSampleCount}
+            </Text>
+            <Text style={styles.diagnosticsRow} maxFontSizeMultiplier={1.3}>
+              Watchdog restarts: {diagnostics.controller.watchRestarts}
+            </Text>
+          </View>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -148,4 +207,20 @@ const styles = StyleSheet.create({
   },
   fixtureName: { ...typography.body, color: colors.textPrimary, flexShrink: 1 },
   fixtureStatus: { ...typography.caption, color: colors.accent },
+  diagnosticsHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: spacing.sm,
+  },
+  refreshText: { ...typography.caption, color: colors.accent },
+  diagnosticsCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.sm,
+    gap: spacing.xs,
+  },
+  diagnosticsRow: { ...typography.caption, color: colors.textSecondary },
 });
