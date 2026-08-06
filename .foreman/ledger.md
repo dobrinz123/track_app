@@ -33,7 +33,13 @@ See docs/implementation-plan.md (WP0–WP16).
 | WP12b | REPORTED(DONE_WITH_CONCERNS→resolved by ADR-0003 amendment: SDK gap accepted + WP14 watchdog mandate) commit d96d59b | apps/mobile platform + app.json | wave4-ios |
 | WP-docs | REPORTED(DONE, amendment applied) + LEAD spot-checks, commit 22515da | README, ios-no-mac-workflow, validation checklist | wave4-docs |
 | WP7 | REPORTED(DONE) + LEAD gates 423/423, commit 94b4d86; in core-group blind verification | matching/, calibration/ | bl0hsl1ru |
-| WP9 | DISPATCHED (Codex effort=high, background, log wp9-codex-output.log) | packages/core/src/reference/**, test/reference/** | bxebf85az |
+| WP9 | REPORTED(DONE_WITH_CONCERNS→sandbox-only concern; LEAD gates 458/458) commit cf508e2 | reference/ | bxebf85az |
+| WP10 | REPORTED(DONE) + LEAD gates 474/474 + production-composition spot-check, commit b1e0dd8 | fixtures/, replay/ | brahtmjo2 |
+| WP14 | REPORTED(DONE_WITH_CONCERNS→deviations reviewed & accepted; limitations queued to known-limitations doc) + LEAD gates 484/484 + offline audit re-run + composition bootstrap inspection, commit 4f39338 | controller/, index.ts, session/, eas.json | wave6-integration |
+| WP-perf | DISPATCHED (Codex effort=high, background, log wp-perf-codex-output.log) | track-matcher.ts, test/perf/**, docs/verification/performance.md | bc35jr2w5 |
+| WP-sec | ACCEPTED (DONE): 0 CRIT/HIGH, 3 MED (M1 profile-array DoS, M2 unbounded session telemetry, M3 no deletion UI), 3 LOW, 6 INFO clean | .foreman/scratch/security-review-findings.md | wave7-sec |
+| WP-secfix | DISPATCHED (Sonnet, batch fix wave, all 6 findings) | profile schema/validation, controller caps, Settings delete UI, calibration cap, codec hardening, task-manager removal | wave7-fix |
+| WP-docs2 | DISPATCHED (Sonnet) | docs/algorithms/**, docs/*.md, README index | wave7-docs |
 | VERIFY-CORE | VERDICT: PASS_WITH_NOTES — all 8 tickets OK, 7/7 adversarial probes passed, purity guard fires. Finding 1 (MEDIUM, uncommitted generate:tmr script) fixed by LEAD commit. Notes 3 (matcher hint gives no compute savings — full search every call; spec requires local-first search) → queued for WP-perf pass. Note 4 accepted (stricter debounce consistent with contracts). Core group = VERIFIED. | — | wave5-verify |
 | WP13a | REPORTED(DONE) + LEAD verified (tsc/lint/export 890-module 2MB hbc, commit b4c83bf) | apps/mobile/src/ui/**, src/session/**, App.tsx | wave3-ui |
 

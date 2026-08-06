@@ -1,0 +1,19 @@
+TASK: Fix wave for the independent security review findings (all 6: M1-M3, L1-L3). The full findings report with file:line evidence is at .foreman/scratch/security-review-findings.md — read it first; the finding descriptions there are authoritative.
+
+EXPECTED OUTCOME: `npm run typecheck`, `npm test`, `npm run lint` pass from repo root; every fix has a test proving it (except L3); no behavior regressions (all 484+ existing tests stay green, adjusted only where a fix legitimately changes an assertion — justify each). Paste decisive output.
+
+CONTEXT: HEAD 4f39338 + concurrent workers own packages/core/src/matching/track-matcher.ts, packages/core/test/perf/**, docs/** — DO NOT touch those. Read the findings file, then the cited code.
+
+MUST DO (per finding):
+1. M1: zod `.max()` caps in circuitProfileSchema — centerline ≤ 5000, sectorGates ≤ 50, pitLane.polyline ≤ 1000; lower MAX_PROFILE_JSON_BYTES to 1 MB; replace the O(n²) sector-gate pairwise proximity check with sort-by-distanceM + neighbor comparison (same rejection semantics — all existing validation tests must still pass). Tests: oversized centerline/gates rejected with clear codes; 1 MB guard test updated.
+2. M2: SessionController.rawSamples trimmed on each completed lap to only in-flight samples (O(recent) not O(session)); pipelineCore's matches/rejectedSamples/stateHistory capped with rolling windows (keep last 2000 matches, 500 rejected, 200 state transitions — diagnostics counters keep full counts). deltas array in SessionPipelineResult: cap only in live-controller path, NOT in batch replay results (replay tests depend on full arrays — verify). Tests: simulate 3-lap session, assert rawSamples length after lap completions ≈ current-lap only; caps enforced.
+3. M3: SettingsScreen "Delete all my data" row → inline two-step confirm (tap → confirm button appears with count of stored sessions → tap again executes; NOT a modal) calling repository deleteUserData via a new facade/store method; on success, history store refreshes and a success banner shows. Only reachable outside an active session (hide/disable while sessionState is timing/calibrating etc.). Test: core-side — a small service function covering delete+verify-empty against in-memory repo (UI not unit-testable here; keep logic in a testable function).
+4. L1: CalibrationEngine — cap acceptedPoints at 10,000 samples (≈ 2.7 h at 1 Hz); on overflow, force-fail calibration with failure reason 'CALIBRATION_OVERRUN'. Test both the cap and the reason code.
+5. L2: checkpointCodec isSerializedCheckpoint — per-lap minimal shape validation (numeric lapNumber/tStart/tEnd/durationMs, boolean valid, array sectorTimes/invalidReasons); malformed lap → null (existing safe behavior). Test with a corrupted-lap payload.
+6. L3: remove expo-task-manager from apps/mobile/package.json (run `npm install` to update the lockfile); fix the doc comment in gnssLocationProvider.ts:97 to not reference it as present; verify `npm run export:ios` still exits 0.
+
+MUST NOT: touch track-matcher.ts, test/perf/**, docs/** (concurrent workers); weaken any existing test without written justification per test; introduce modals; spawn subagents; git commit.
+
+OUTPUT FORMAT: First line exactly one of DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED. Then per-finding fix summary with file:line + test name, commands + pasted results, any adjusted existing assertions with justification.
+
+WRITE SET: packages/core/src/profile/{schema.ts,validation.ts,loader.ts}, packages/core/src/controller/**, packages/core/src/calibration/calibration-engine.ts, packages/core/src/persistence/checkpointCodec.ts, packages/core/test/{profile,controller,calibration,persistence}/**, apps/mobile/src/ui/screens/{SettingsScreen,SessionHistoryScreen}.tsx, apps/mobile/src/session/** (facade/store method), apps/mobile/package.json, package-lock.json, apps/mobile/src/platform/gnssLocationProvider.ts (comment only).

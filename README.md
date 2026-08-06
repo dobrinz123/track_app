@@ -94,6 +94,22 @@ from `apps/mobile` with the relevant SDK/simulator installed.
   target platform: Location configuration, Info.plist, monotonic timing, thermal/battery, verification gates.
 - [`docs/decisions/ADR-0004-no-mac-ios-workflow.md`](docs/decisions/ADR-0004-no-mac-ios-workflow.md) — iOS without a Mac:
   Expo Go development + EAS cloud builds, standalone-build-primary amendment, sideloading.
+- [`docs/algorithms/calibration.md`](docs/algorithms/calibration.md) — the Learn-lap calibration engine: quality
+  thresholds, coverage bins, direction detection, bounded bias estimation, acceptance criteria, confidence blend.
+- [`docs/algorithms/timing-and-crossings.md`](docs/algorithms/timing-and-crossings.md) — directed-gate crossing
+  semantics, rearm/debounce, lap/sector validity rules and invalid-reason codes, monotonic-time rules.
+- [`docs/algorithms/live-delta.md`](docs/algorithms/live-delta.md) — reference-lap resampling, PB replacement rules,
+  live delta computation, EMA smoothing, confidence/staleness handling, sign convention.
+- [`docs/persistence-model.md`](docs/persistence-model.md) — SQL table schema (v1/v2), migration approach, checkpoint
+  cadence, ADR-0003 §3 recovery flow, `sessionId` convention, `deleteUserData` coverage, retention.
+- [`docs/testing-and-replay.md`](docs/testing-and-replay.md) — test architecture (unit/property/contract/integration),
+  the fixture catalog, how to run the suites, using `DevReplayScreen` on-device, determinism rules.
+- [`docs/known-limitations.md`](docs/known-limitations.md) — an honest list of the app's real constraints and
+  implementation gaps.
+- [`docs/privacy.md`](docs/privacy.md) — data inventory, permission posture, deletion path, diagnostics content,
+  the advisory-tool disclaimer.
+- [`docs/adding-a-circuit.md`](docs/adding-a-circuit.md) — onboarding a future circuit: profile schema, provenance
+  rules, the generator-script pattern, validation gates, `layoutVersion` discipline.
 
 ## License / attribution
 
