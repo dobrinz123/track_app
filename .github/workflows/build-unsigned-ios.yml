@@ -14,9 +14,9 @@
 # `apps/mobile/app.json`'s `expo.name` is "mobile". Expo's native-project
 # generator sanitizes that name for the Xcode project/workspace/scheme
 # (@expo/config-plugins build/ios/utils/Xcodeproj.js — sanitizedName(): strips
-# non-word characters and diacritics). "mobile" contains no such characters, so
+# non-word characters and diacritics). "TRACE" contains no such characters, so
 # it passes through unchanged. `npx expo prebuild --platform ios` therefore
-# generates apps/mobile/ios/mobile.xcworkspace with a default scheme "mobile".
+# generates apps/mobile/ios/TRACE.xcworkspace with a default scheme "TRACE".
 # Verified locally (Windows) via `npx expo config --type prebuild --json` in
 # apps/mobile, which resolves `"name":"mobile"`, and by reading the
 # sanitizedName() source directly — actual `expo prebuild --platform ios`
@@ -110,8 +110,8 @@ jobs:
         timeout-minutes: 25
         run: |
           xcodebuild \
-            -workspace mobile.xcworkspace \
-            -scheme mobile \
+            -workspace TRACE.xcworkspace \
+            -scheme TRACE \
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath build/app.xcarchive \
@@ -144,8 +144,8 @@ jobs:
         timeout-minutes: 25
         run: |
           xcodebuild \
-            -workspace mobile.xcworkspace \
-            -scheme mobile \
+            -workspace TRACE.xcworkspace \
+            -scheme TRACE \
             -configuration Debug \
             -destination 'generic/platform=iOS' \
             -archivePath build/app-devclient.xcarchive \

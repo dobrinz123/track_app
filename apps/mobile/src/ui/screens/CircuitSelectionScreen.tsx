@@ -5,6 +5,7 @@ import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
 import { APP_NAME } from '../branding';
+import { TraceLogo } from '../components/TraceLogo';
 import { circuitCatalog, type CircuitSummary } from '../../session/circuitCatalog';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'CircuitSelection'>;
@@ -22,12 +23,17 @@ export function CircuitSelectionScreen({ navigation }: Props): React.JSX.Element
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
       <ScrollView contentContainerStyle={styles.container}>
-        <Text style={styles.kicker} maxFontSizeMultiplier={1.3}>
-          CIRCUITS
-        </Text>
-        <Text style={styles.heading} maxFontSizeMultiplier={1.3}>
-          {APP_NAME}
-        </Text>
+        <View style={styles.brandRow}>
+          <TraceLogo size={44} />
+          <View style={styles.brandText}>
+            <Text style={styles.kicker} maxFontSizeMultiplier={1.3}>
+              CIRCUITS
+            </Text>
+            <Text style={styles.heading} maxFontSizeMultiplier={1.3}>
+              {APP_NAME}
+            </Text>
+          </View>
+        </View>
 
         <View style={styles.list}>
           {circuits.map((circuit, index) => (
@@ -99,6 +105,15 @@ const styles = StyleSheet.create({
   container: {
     padding: spacing.lg,
   },
+  brandRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    marginBottom: spacing.lg,
+  },
+  brandText: {
+    flex: 1,
+  },
   kicker: {
     ...typography.kicker,
     color: colors.textMuted,
@@ -107,7 +122,6 @@ const styles = StyleSheet.create({
   heading: {
     ...typography.title,
     color: colors.textPrimary,
-    marginBottom: spacing.lg,
   },
   list: {
     borderRadius: radii.md,

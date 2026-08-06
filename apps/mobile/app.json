@@ -1,27 +1,27 @@
 {
   "expo": {
-    "name": "mobile",
-    "slug": "mobile",
+    "name": "TRACE",
+    "slug": "trace",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
     "ios": {
       "bundleIdentifier": "app.circuittimer.tmr",
       "supportsTablet": false,
       "requireFullScreen": true,
       "infoPlist": {
         "CFBundleDisplayName": "TRACE",
-        "NSLocationWhenInUseUsageDescription": "Circuit Timer records your position on track during an active session to time your laps and sectors. Location is only used while a session is running and never in the background.",
+        "NSLocationWhenInUseUsageDescription": "TRACE records your position on track during an active session to time your laps and sectors. Location is only used while a session is running and never in the background.",
         "NSLocationTemporaryUsageDescriptionDictionary": {
-          "TrackSession": "Circuit Timer needs precise location during this track session to time your laps and sectors accurately; approximate location isn't accurate enough for lap timing."
+          "TrackSession": "TRACE needs precise location during this track session to time your laps and sectors accurately; approximate location isn't accurate enough for lap timing."
         }
       }
     },
     "android": {
       "package": "app.circuittimer.tmr",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#0E0F14",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
@@ -42,7 +42,7 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "Circuit Timer records your position on track during an active session to time your laps and sectors. Location is only used while a session is running and never in the background.",
+          "locationWhenInUsePermission": "TRACE records your position on track during an active session to time your laps and sectors. Location is only used while a session is running and never in the background.",
           "isAndroidForegroundServiceEnabled": true,
           "isAndroidBackgroundLocationEnabled": false,
           "locationAlwaysAndWhenInUsePermission": false,
