@@ -4,8 +4,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
-import { APP_NAME } from '../branding';
 import { TraceLogo } from '../components/TraceLogo';
+import { TraceWordmark } from '../components/TraceWordmark';
 import { circuitCatalog, type CircuitSummary } from '../../session/circuitCatalog';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'CircuitSelection'>;
@@ -24,14 +24,12 @@ export function CircuitSelectionScreen({ navigation }: Props): React.JSX.Element
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
       <ScrollView contentContainerStyle={styles.container}>
         <View style={styles.brandRow}>
-          <TraceLogo size={44} />
+          <TraceLogo size={56} />
           <View style={styles.brandText}>
             <Text style={styles.kicker} maxFontSizeMultiplier={1.3}>
               CIRCUITS
             </Text>
-            <Text style={styles.heading} maxFontSizeMultiplier={1.3}>
-              {APP_NAME}
-            </Text>
+            <TraceWordmark size={40} style={styles.wordmark} />
           </View>
         </View>
 
@@ -109,19 +107,19 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
-    marginBottom: spacing.lg,
+    marginBottom: spacing.xl,
   },
   brandText: {
     flex: 1,
+    justifyContent: 'center',
   },
   kicker: {
     ...typography.kicker,
     color: colors.textMuted,
-    marginBottom: spacing.xs,
+    marginBottom: spacing.xs / 2,
   },
-  heading: {
-    ...typography.title,
-    color: colors.textPrimary,
+  wordmark: {
+    alignSelf: 'flex-start',
   },
   list: {
     borderRadius: radii.md,
