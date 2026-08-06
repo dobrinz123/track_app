@@ -40,7 +40,8 @@ describe('loadProfileFromJson', () => {
     expect(loadProfileFromJson('{')).toEqual({ ok: false, errors: ['INVALID_JSON'] });
   });
 
-  it('rejects JSON inputs larger than 5 MB before parsing', () => {
+  it('rejects JSON inputs larger than 1 MB before parsing', () => {
+    expect(MAX_PROFILE_JSON_BYTES).toBe(1 * 1024 * 1024);
     const oversized = ' '.repeat(MAX_PROFILE_JSON_BYTES + 1);
     expect(loadProfileFromJson(oversized)).toEqual({ ok: false, errors: ['PROFILE_TOO_LARGE'] });
   });

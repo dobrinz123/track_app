@@ -52,4 +52,29 @@ describe('CheckpointCodec', () => {
     const payload = { snapshot: makeSnapshot({ context: { missing: undefined } }), laps: [] };
     expect(() => CheckpointCodec.serialize(payload)).toThrow(Error);
   });
+
+  it('deserialize returns null when a lap entry does not match the minimal LapRecord shape (L2 fix)', () => {
+    const validPayload = { snapshot: makeSnapshot(), laps: [makeLapRecord()] };
+    const validText = CheckpointCodec.serialize(validPayload);
+    const parsed: { laps: unknown[] } = JSON.parse(validText);
+
+    // An empty object is structurally-valid JSON but not a LapRecord --
+    // previously this would have passed through as-is.
+    const corrupted = { ...parsed, laps: [...parsed.laps, {}] };
+    expect(CheckpointCodec.deserialize(JSON.stringify(corrupted))).toBeNull();
+  });
+
+  it('deserialize returns null when a lap field has the wrong type (L2 fix)', () => {
+    const payload = { snapshot: makeSnapshot(), laps: [makeLapRecord({ lapNumber: 1 })] };
+    const text = CheckpointCodec.serialize(payload);
+    const parsed: { laps: Array<Record<string, unknown>> } = JSON.parse(text);
+    parsed.laps[0]!.durationMs = 'not-a-number';
+    expect(CheckpointCodec.deserialize(JSON.stringify(parsed))).toBeNull();
+  });
+
+  it('deserialize still accepts a payload whose laps all match the minimal shape', () => {
+    const payload = { snapshot: makeSnapshot({ lapNumber: 2 }), laps: [makeLapRecord(), makeLapRecord({ lapNumber: 2 })] };
+    const text = CheckpointCodec.serialize(payload);
+    expect(CheckpointCodec.deserialize(text)).toEqual(payload);
+  });
 });

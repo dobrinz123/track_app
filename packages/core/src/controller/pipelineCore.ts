@@ -55,6 +55,15 @@ export interface PipelineCoreConfig {
   pauseGapMs?: number;
   /** A tMono gap larger than this invalidates the active lap as LOW_QUALITY (default 10s). */
   lowQualityGapMs?: number;
+  /**
+   * When true, `matches`/`rejectedSamples`/`stateHistory` are trimmed to
+   * rolling windows (M2 fix) instead of growing for the life of the
+   * session -- appropriate for a live, long-running `SessionController`.
+   * Batch `runSessionPipeline` replay leaves this unset so its diagnostics
+   * arrays stay complete for the (bounded, fixture-sized) session under
+   * test. Full counts survive capping via `matchedTotal`/`rejectedTotal`.
+   */
+  boundedTelemetry?: boolean;
 }
 
 export interface MatchedTelemetrySample {
@@ -91,6 +100,10 @@ export interface SampleIngestResult {
 
 const DEFAULT_PAUSE_GAP_MS = 30_000;
 const DEFAULT_LOW_QUALITY_GAP_MS = 10_000;
+/** Rolling-window caps applied only when `boundedTelemetry` is set (M2 fix). */
+const MAX_MATCHES = 2_000;
+const MAX_REJECTED_SAMPLES = 500;
+const MAX_STATE_HISTORY = 200;
 
 export interface PipelineComponents {
   qualityEvaluator: TelemetryQualityEvaluator;
@@ -149,6 +162,7 @@ export class SessionPipelineCore {
   private readonly components: PipelineComponents;
   private readonly pauseGapMs: number;
   private readonly lowQualityGapMs: number;
+  private readonly boundedTelemetry: boolean;
 
   private snapshot: SessionMachineSnapshot = createInitialSessionSnapshot();
   private previousQualitySample: LocationSample | undefined;
@@ -165,6 +179,9 @@ export class SessionPipelineCore {
   readonly rejectedSamples: RejectedTelemetrySample[] = [];
   readonly stateHistory: SessionState[] = [];
   readonly appliedInvalidReasons = new Set<string>();
+  /** Full lifetime counts, unaffected by `boundedTelemetry` trimming the arrays above -- see M2 fix. */
+  matchedTotal = 0;
+  rejectedTotal = 0;
   readonly qualityCounts: Record<QualityLevel, number> = {
     good: 0,
     degraded: 0,
@@ -180,6 +197,7 @@ export class SessionPipelineCore {
     this.components = createPipelineComponents(runtimeProfile, config);
     this.pauseGapMs = config.pauseGapMs ?? DEFAULT_PAUSE_GAP_MS;
     this.lowQualityGapMs = config.lowQualityGapMs ?? DEFAULT_LOW_QUALITY_GAP_MS;
+    this.boundedTelemetry = config.boundedTelemetry ?? false;
   }
 
   get state(): SessionMachineSnapshot {
@@ -201,6 +219,7 @@ export class SessionPipelineCore {
   dispatch(event: SessionEvent): void {
     this.snapshot = sessionReducer(this.snapshot, event);
     this.stateHistory.push(this.snapshot.state);
+    if (this.boundedTelemetry && this.stateHistory.length > MAX_STATE_HISTORY) this.stateHistory.shift();
     this.syncInvalidReasons();
   }
 
@@ -259,6 +278,8 @@ export class SessionPipelineCore {
         reasons: [...assessment.reasons],
       };
       this.rejectedSamples.push(rejected);
+      this.rejectedTotal += 1;
+      if (this.boundedTelemetry && this.rejectedSamples.length > MAX_REJECTED_SAMPLES) this.rejectedSamples.shift();
       if (assessment.level !== 'invalid') this.previousQualitySample = sample;
       return {
         sampleIndex,
@@ -280,6 +301,8 @@ export class SessionPipelineCore {
       quality: { level: match.quality.level, reasons: [...match.quality.reasons] },
     };
     this.matches.push(matched);
+    this.matchedTotal += 1;
+    if (this.boundedTelemetry && this.matches.length > MAX_MATCHES) this.matches.shift();
 
     if (this.pendingPitEntryProgressM !== null && this.snapshot.state !== 'inPit') {
       if (match.onPitLane && Math.abs(match.lateralM) >= 5) {

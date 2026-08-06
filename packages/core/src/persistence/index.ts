@@ -3,3 +3,5 @@ export { CheckpointCodec, CHECKPOINT_SCHEMA_VERSION } from './checkpointCodec';
 export type { CheckpointPayload } from './checkpointCodec';
 export { assertJsonSerializable } from './jsonSerializable';
 export { validateReferenceLap } from './referenceLap';
+export { deleteAllUserData } from './deleteUserData';
+export type { DeleteUserDataResult } from './deleteUserData';

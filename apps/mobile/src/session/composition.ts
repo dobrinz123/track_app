@@ -1,6 +1,6 @@
 import Constants from 'expo-constants';
 import type { LocationProvider, LocationSample, SessionMachineSnapshot, SqlDatabase, SqlSessionRepository } from '@circuit/core';
-import { SessionController } from '@circuit/core';
+import { SessionController, deleteAllUserData, type DeleteUserDataResult } from '@circuit/core';
 import { GnssLocationProvider, PerformanceNowClock, ReplayLocationProvider } from '../platform';
 import { openAppDatabase } from '../persistence/expoSqlDatabase';
 import { SqlSettingsStore } from '../persistence/sqlSettingsStore';
@@ -204,6 +204,7 @@ let db: SqlDatabase | null = null;
 let repository: SqlSessionRepository | null = null;
 let controller: SessionController | null = null;
 let gnssProvider: GnssLocationProvider | null = null;
+let historyStore: SqlSessionHistoryStore | null = null;
 
 async function getActiveSessionId(database: SqlDatabase): Promise<string | null> {
   const rows = await database.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
@@ -263,6 +264,7 @@ const bootstrapPromise = (async (): Promise<void> => {
   );
   await history.refresh();
   historyWrapper.setInner(history);
+  historyStore = history;
 
   const settings = await SqlSettingsStore.create(db);
   settingsWrapper.setInner(settings);
@@ -331,6 +333,28 @@ export async function discardRecovery(): Promise<void> {
   );
   setPendingRecovery(null);
   await setActiveSessionId(database, null);
+}
+
+// ---------------------------------------------------------------------------
+// Data deletion (M3 security-review fix). `SettingsScreen`'s inline
+// two-step "Delete all my data" row calls this -- the core-side delete +
+// verify-empty logic lives in `@circuit/core`'s `deleteAllUserData` (unit
+// tested there; the mobile UI itself is not unit-testable in this repo).
+// Refreshes the shared `sessionHistoryStore` cache on success so
+// `SessionHistoryScreen` reflects the deletion without a manual reload.
+// ---------------------------------------------------------------------------
+
+export async function deleteAllStoredUserData(): Promise<DeleteUserDataResult> {
+  const { repository: repo } = await ready();
+  const result = await deleteAllUserData(
+    repo,
+    LOCAL_USER_ID,
+    TMR_CIRCUIT_PROFILE.circuitId,
+    TMR_CIRCUIT_PROFILE.layoutId,
+    TMR_CIRCUIT_PROFILE.layoutVersion,
+  );
+  if (result.ok && historyStore !== null) await historyStore.refresh();
+  return result;
 }
 
 // ---------------------------------------------------------------------------

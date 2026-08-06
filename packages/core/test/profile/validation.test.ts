@@ -71,6 +71,40 @@ describe('validateProfile', () => {
     if (!result.ok) expect(result.errors[0]).toContain('STRUCTURE:direction');
   });
 
+  it('rejects a centerline with more than 5000 vertices', () => {
+    const profile = clone(makeTestProfile());
+    const point = profile.centerline[0] as CircuitProfile['centerline'][number];
+    profile.centerline = Array.from({ length: 5001 }, () => ({ ...point }));
+    const result = validateProfile(profile);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors[0]).toContain('STRUCTURE:centerline');
+  });
+
+  it('rejects more than 50 sector gates', () => {
+    const profile = clone(makeTestProfile());
+    const gate = profile.sectorGates[0] as Gate;
+    profile.sectorGates = Array.from({ length: 51 }, (_, index) => ({
+      ...gate,
+      id: `sector-overflow-${index}`,
+    }));
+    const result = validateProfile(profile);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors[0]).toContain('STRUCTURE:sectorGates');
+  });
+
+  it('rejects a pit lane polyline with more than 1000 vertices', () => {
+    const profile = clone(makeTestProfile());
+    const point = profile.centerline[0] as CircuitProfile['centerline'][number];
+    profile.pitLane = {
+      polyline: Array.from({ length: 1001 }, () => ({ ...point })),
+      entryGate: { ...profile.startFinishGate, id: 'pit-entry', kind: 'pitEntry' },
+      exitGate: { ...profile.startFinishGate, id: 'pit-exit', kind: 'pitExit' },
+    };
+    const result = validateProfile(profile);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors[0]).toContain('STRUCTURE:pitLane.polyline');
+  });
+
   it('rejects fewer than 50 centerline vertices', () => {
     const profile = clone(makeTestProfile());
     profile.centerline = profile.centerline.slice(0, 49);

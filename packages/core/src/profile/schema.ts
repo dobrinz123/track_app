@@ -43,13 +43,13 @@ export const circuitProfileSchema: z.ZodType<CircuitProfile> = z
     geometryStatus: z.enum(['official', 'community-derived', 'dev-only']),
     sectorStatus: z.enum(['official', 'app-defined']),
     direction: z.enum(['clockwise', 'counterclockwise']),
-    centerline: z.array(latLonSchema),
+    centerline: z.array(latLonSchema).max(5000),
     totalLengthM: finiteNumber,
     startFinishGate: gateSchema,
-    sectorGates: z.array(gateSchema),
+    sectorGates: z.array(gateSchema).max(50),
     pitLane: z
       .object({
-        polyline: z.array(latLonSchema),
+        polyline: z.array(latLonSchema).max(1000),
         entryGate: gateSchema,
         exitGate: gateSchema,
       })

@@ -49,6 +49,8 @@ export interface SessionControllerDiagnostics {
   rejectedSampleCount: number;
   reverseTravelDetected: boolean;
   appliedInvalidReasons: string[];
+  /** Current size of the in-flight raw-sample buffer (M2 fix) -- trimmed to the current lap on every lap completion, not the whole session's sample count. */
+  rawSampleBufferSize: number;
 }
 
 /** Minimal timer abstraction the watchdog polls through -- see MUST DO #2 (ADR-0003 §1). Defaults to the platform's global `setInterval`/`clearInterval`; tests inject a fake to drive the poll deterministically with a fake clock. */
@@ -190,7 +192,10 @@ export class SessionController {
   private pendingWork: Array<Promise<unknown>> = [];
 
   constructor(private readonly deps: SessionControllerDeps) {
-    this.core = new SessionPipelineCore(deps.runtimeProfile, deps.config?.pipeline);
+    this.core = new SessionPipelineCore(deps.runtimeProfile, {
+      ...deps.config?.pipeline,
+      boundedTelemetry: true,
+    });
   }
 
   private trackAsync(work: Promise<unknown>): void {
@@ -250,10 +255,11 @@ export class SessionController {
       sessionId: this.sessionId,
       watchRestarts: this.watchRestarts,
       qualityCounts: { ...this.core.qualityCounts },
-      matchedSampleCount: this.core.matches.length,
-      rejectedSampleCount: this.core.rejectedSamples.length,
+      matchedSampleCount: this.core.matchedTotal,
+      rejectedSampleCount: this.core.rejectedTotal,
       reverseTravelDetected: this.core.reverseTravelDetected,
       appliedInvalidReasons: [...this.core.appliedInvalidReasons],
+      rawSampleBufferSize: this.rawSamples.length,
     };
   }
 
@@ -408,7 +414,10 @@ export class SessionController {
    */
   restoreFromCheckpoint(sessionId: string, snapshot: SessionMachineSnapshot, laps: LapRecord[]): void {
     this.sessionId = sessionId;
-    this.core = new SessionPipelineCore(this.deps.runtimeProfile, this.deps.config?.pipeline);
+    this.core = new SessionPipelineCore(this.deps.runtimeProfile, {
+      ...this.deps.config?.pipeline,
+      boundedTelemetry: true,
+    });
     this.mode = 'idle';
     this.calibrationEngine = null;
     this.calibrationSnapshot = null;
@@ -491,6 +500,11 @@ export class SessionController {
     const sessionId = this.sessionId;
     if (sessionId === null) return;
     const telemetry = this.rawSamples.filter((sample) => sample.tMono >= lap.tStart && sample.tMono <= lap.tEnd);
+    // Trim the buffer down to only the still in-flight tail (samples after
+    // this lap's end) so it stays O(current lap), not O(whole session) --
+    // M2 fix. Every sample up to and including this lap's end has now either
+    // been persisted above or belonged to an earlier, already-saved lap.
+    this.rawSamples = this.rawSamples.filter((sample) => sample.tMono > lap.tEnd);
     await this.deps.repository.saveTelemetry(sessionId, lap.lapNumber, telemetry);
     await this.checkpointNow();
     await this.maybeReplacePb(lap);

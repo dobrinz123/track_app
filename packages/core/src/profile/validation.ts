@@ -174,13 +174,24 @@ export function validateProfile(raw: unknown): ProfileValidationResult {
     if (circularDistance(gate.distanceM, projectedStartFinish.distanceM, computedLengthM) < 30) {
       errors.push('SECTOR_GATE_TOO_CLOSE_TO_START_FINISH');
     }
-    for (let otherIndex = index + 1; otherIndex < projectedSectors.length; otherIndex += 1) {
-      const other = projectedSectors[otherIndex];
+  }
+  // Sector gates lie on a closed loop (positions are distances-along-centerline, 0..computedLengthM).
+  // For points on a circle, the minimum pairwise circular distance is always achieved by some pair
+  // that is cyclically adjacent once sorted by position: any non-adjacent pair's forward/backward arc
+  // is a contiguous sum of >=2 adjacent gaps, which is >= the smallest adjacent gap. So checking only
+  // sorted-adjacent (with wraparound) pairs is equivalent to the full pairwise check, in O(n log n).
+  if (projectedSectors.length >= 2) {
+    const sortedByDistance = [...projectedSectors].sort((a, b) => a.distanceM - b.distanceM);
+    for (let index = 0; index < sortedByDistance.length; index += 1) {
+      const current = sortedByDistance[index];
+      const next = sortedByDistance[(index + 1) % sortedByDistance.length];
       if (
-        other !== undefined &&
-        circularDistance(gate.distanceM, other.distanceM, computedLengthM) < 30
+        current !== undefined &&
+        next !== undefined &&
+        circularDistance(current.distanceM, next.distanceM, computedLengthM) < 30
       ) {
         errors.push('SECTOR_GATES_TOO_CLOSE');
+        break;
       }
     }
   }

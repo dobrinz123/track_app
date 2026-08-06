@@ -1,7 +1,7 @@
 import { migrateProfile } from './migration';
 import { validateProfile, type ProfileValidationResult } from './validation';
 
-export const MAX_PROFILE_JSON_BYTES = 5 * 1024 * 1024;
+export const MAX_PROFILE_JSON_BYTES = 1 * 1024 * 1024;
 
 export function loadProfileFromJson(json: string): ProfileValidationResult {
   try {

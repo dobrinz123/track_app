@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { LocationSample, ReferenceLap, SessionMachineSnapshot } from '../../src/contracts';
 import { SessionController, type FacadeStateCore } from '../../src/controller';
-import { cleanRecognitionLap, driveLap, pbImprovementSession } from '../../src/fixtures';
+import { cleanRecognitionLap, driveLap, multiLapSession, pbImprovementSession } from '../../src/fixtures';
 import { InMemorySessionRepository } from '../../src/persistence';
 
 import { FakeClock, FakeLocationProvider, FakeWatchdogScheduler, tmr } from './testSupport';
@@ -255,5 +255,46 @@ describe('SessionController', () => {
 
     const deltaSeen = second.states.some((s) => s.delta !== null && s.delta.confidence > 0);
     expect(deltaSeen).toBe(true);
+  });
+
+  it('trims the raw-sample buffer to the in-flight lap on every lap completion (M2 fix)', async () => {
+    const { profile, controller, feed } = setup();
+    await controller.start('calibration');
+    feed(cleanRecognitionLap(profile, 701));
+    controller.acceptCalibration();
+    await controller.flush();
+    controller.arm();
+
+    const samples = pbImprovementSession(profile, 702);
+    feed(samples);
+    await controller.flush();
+
+    const diag = controller.diagnostics();
+    expect(diag.matchedSampleCount).toBeGreaterThan(0);
+    // The buffer must hold only the still in-flight tail after each lap's
+    // samples are persisted, not the whole 3-lap session's worth of samples.
+    expect(diag.rawSampleBufferSize).toBeLessThan(samples.length / 2);
+  });
+
+  it('raw-sample buffer size does not grow with total session length (M2 fix, O(current lap) not O(session))', async () => {
+    async function bufferSizeAfterLaps(laps: number, seed: number): Promise<number> {
+      const { profile, controller, feed } = setup();
+      await controller.start('calibration');
+      feed(cleanRecognitionLap(profile, seed));
+      controller.acceptCalibration();
+      await controller.flush();
+      controller.arm();
+      feed(multiLapSession(profile, laps, seed + 1));
+      await controller.flush();
+      return controller.diagnostics().rawSampleBufferSize;
+    }
+
+    const shortSessionBuffer = await bufferSizeAfterLaps(2, 710);
+    const longSessionBuffer = await bufferSizeAfterLaps(10, 720);
+
+    // If rawSamples grew unboundedly for the whole session, a 5x-longer
+    // session would leave behind proportionally more buffered samples. With
+    // per-lap trimming both stay small and close together.
+    expect(longSessionBuffer).toBeLessThan(shortSessionBuffer + 50);
   });
 });

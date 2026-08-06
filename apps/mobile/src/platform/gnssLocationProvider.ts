@@ -94,9 +94,11 @@ function computeAccuracyDistribution(windowM: number[]): AccuracyDistributionSum
  * `LocationOptions` Record decodes only `accuracy`/`distanceInterval`;
  * `activityType`/`pausesUpdatesAutomatically` are read exclusively by
  * `EXLocationTaskConsumer.m`, the background-location-task consumer used by
- * `Location.startLocationUpdatesAsync`). That API requires `expo-task-manager`
- * + `UIBackgroundModes: location`, which ADR-0003 §1 explicitly forbids
- * (foreground-only by design). So on the foreground `watchPositionAsync` path
+ * `Location.startLocationUpdatesAsync`). That API requires the separate
+ * `expo-task-manager` package -- deliberately NOT a dependency of this app
+ * (removed as unused/unjustified attack surface; see the security review's
+ * L3 finding) -- plus `UIBackgroundModes: location`, both of which ADR-0003
+ * §1 explicitly forbids (foreground-only by design). So on the foreground `watchPositionAsync` path
  * this app uses, expo-location SDK 57 has no wiring for `activityType` or
  * `pausesUpdatesAutomatically` at all — adding them to this object would
  * either fail to type-check (excess-property check against `LocationOptions`)

@@ -152,6 +152,43 @@ describe('CalibrationEngine', () => {
     expect(result.failureReasons).toContain('RATE_TOO_LOW');
   });
 
+  /** Feeds `iterations` clean, on-track samples walking repeatedly around the centerline (not all are necessarily accepted -- the odd wraparound sample can be rejected by continuity checks -- so callers read back `diagnostics.samplesAccepted` for the true count). */
+  function feedClean(engine: CalibrationEngine, runtime: RuntimeProfile, iterations: number): void {
+    const centerline = runtime.centerline;
+    for (let index = 0; index < iterations; index += 1) {
+      const point = centerline[index % centerline.length] as LocalPoint;
+      engine.feed({
+        ...runtime.projection.toLatLon(point),
+        tMono: index * 1_000,
+        accuracyM: 3,
+        source: 'replay',
+      });
+    }
+  }
+
+  it('does not overrun while accepted samples stay under the 10,000 cap (L1 fix)', () => {
+    const { runtime } = lapFixture();
+    const engine = new CalibrationEngine(runtime, { corridorWidthM: 20, direction: 'counterclockwise' });
+    feedClean(engine, runtime, 10_000);
+    const result = engine.finish();
+    expect(result.diagnostics.samplesAccepted).toBeLessThan(10_000);
+    expect(result.failureReasons).not.toContain('CALIBRATION_OVERRUN');
+  });
+
+  it('caps acceptedPoints at 10,000 and force-fails with CALIBRATION_OVERRUN once exceeded (L1 fix)', () => {
+    const { runtime } = lapFixture();
+    const engine = new CalibrationEngine(runtime, { corridorWidthM: 20, direction: 'counterclockwise' });
+    feedClean(engine, runtime, 20_000);
+    const result = engine.finish();
+    // Comfortably more than 10,000 samples were accepted by the pipeline
+    // (proving the array would have grown past the cap without it)...
+    expect(result.diagnostics.samplesAccepted).toBeGreaterThan(10_000);
+    // ...yet calibration is force-failed with the overrun reason, not just
+    // silently truncated.
+    expect(result.accepted).toBe(false);
+    expect(result.failureReasons).toContain('CALIBRATION_OVERRUN');
+  });
+
   it('reset clears accumulated observations and progress exposes last feed state', () => {
     const { runtime, samples } = lapFixture();
     const engine = new CalibrationEngine(runtime);

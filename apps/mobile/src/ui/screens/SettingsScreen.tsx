@@ -4,9 +4,23 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, radii, spacing, typography } from '../theme';
-import { settingsStore } from '../../session/composition';
+import { deleteAllStoredUserData, facade, sessionHistoryStore, settingsStore } from '../../session/composition';
+import { useFacadeState } from '../hooks/useFacadeState';
 import { useSettings } from '../hooks/useSettings';
 import type { SpeedUnits } from '../../session/settingsStore';
+
+/** Session states that mean "there is an active session in progress" -- the delete-my-data control is hidden/disabled during all of these so it can never race a live write (M3 fix). */
+const ACTIVE_SESSION_STATES = new Set([
+  'preflight',
+  'awaitingCalibration',
+  'calibrating',
+  'calibrationReview',
+  'armed',
+  'outLap',
+  'timing',
+  'inPit',
+  'paused',
+]);
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Settings'>;
 
@@ -54,14 +68,44 @@ function SegmentedControl<T extends string>({
   );
 }
 
-/** S12 — units, delta deadband, coverage bins (in-memory for now); About/licenses/attribution. */
+/** S12 — units, delta deadband, coverage bins (in-memory for now); About/licenses/attribution; delete-my-data (M3 fix). */
 export function SettingsScreen({ navigation }: Props): React.JSX.Element {
   const settings = useSettings(settingsStore);
+  const facadeState = useFacadeState(facade);
+  const [confirmingDelete, setConfirmingDelete] = React.useState(false);
+  const [deleting, setDeleting] = React.useState(false);
+  const [deleteBanner, setDeleteBanner] = React.useState<'success' | 'error' | null>(null);
 
   const activeBinPreset =
     Object.entries(COVERAGE_BIN_PRESETS).find(
       ([, thresholds]) => thresholds.length === settings.coverageBins.thresholds.length,
     )?.[0] ?? '4 bins';
+
+  const sessionCount = sessionHistoryStore.listSessions().length;
+  const sessionActive = ACTIVE_SESSION_STATES.has(facadeState.sessionState);
+  const sessionCountLabel = `${sessionCount} stored session${sessionCount === 1 ? '' : 's'}`;
+
+  function startDeleteConfirm(): void {
+    setDeleteBanner(null);
+    setConfirmingDelete(true);
+  }
+
+  function cancelDeleteConfirm(): void {
+    setConfirmingDelete(false);
+  }
+
+  async function confirmDelete(): Promise<void> {
+    setDeleting(true);
+    try {
+      const result = await deleteAllStoredUserData();
+      setDeleteBanner(result.ok ? 'success' : 'error');
+    } catch {
+      setDeleteBanner('error');
+    } finally {
+      setDeleting(false);
+      setConfirmingDelete(false);
+    }
+  }
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -157,6 +201,73 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
           </View>
         </View>
 
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
+            DATA
+          </Text>
+          <View style={styles.dataCard}>
+            {sessionActive ? (
+              <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                End the current session before deleting stored data.
+              </Text>
+            ) : !confirmingDelete ? (
+              <Pressable
+                style={styles.deleteRow}
+                onPress={startDeleteConfirm}
+                accessibilityRole="button"
+                accessibilityLabel={`Delete all my data. ${sessionCountLabel}.`}
+              >
+                <Text style={styles.deleteRowText} maxFontSizeMultiplier={1.3}>
+                  Delete all my data
+                </Text>
+                <Text style={styles.deleteRowMeta} maxFontSizeMultiplier={1.3}>
+                  {sessionCountLabel}
+                </Text>
+              </Pressable>
+            ) : (
+              <View style={styles.confirmRow}>
+                <Text style={styles.confirmText} maxFontSizeMultiplier={1.3}>
+                  Permanently delete {sessionCountLabel}? This cannot be undone.
+                </Text>
+                <View style={styles.confirmButtonsRow}>
+                  <Pressable
+                    style={styles.cancelButton}
+                    onPress={cancelDeleteConfirm}
+                    accessibilityRole="button"
+                    accessibilityLabel="Cancel deletion"
+                  >
+                    <Text style={styles.cancelButtonText} maxFontSizeMultiplier={1.3}>
+                      Cancel
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.confirmDeleteButton}
+                    onPress={() => void confirmDelete()}
+                    disabled={deleting}
+                    accessibilityRole="button"
+                    accessibilityLabel="Confirm permanent deletion of all my data"
+                    accessibilityState={{ disabled: deleting }}
+                  >
+                    <Text style={styles.confirmDeleteButtonText} maxFontSizeMultiplier={1.3}>
+                      {deleting ? 'Deleting…' : 'Tap again to delete'}
+                    </Text>
+                  </Pressable>
+                </View>
+              </View>
+            )}
+            {deleteBanner === 'success' ? (
+              <Text style={styles.successBanner} maxFontSizeMultiplier={1.3} accessibilityLiveRegion="polite">
+                All stored data deleted.
+              </Text>
+            ) : null}
+            {deleteBanner === 'error' ? (
+              <Text style={styles.errorBanner} maxFontSizeMultiplier={1.3} accessibilityLiveRegion="polite">
+                Could not delete data. Please try again.
+              </Text>
+            ) : null}
+          </View>
+        </View>
+
         {
           // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
           __DEV__ ? (
@@ -219,6 +330,41 @@ const styles = StyleSheet.create({
   },
   aboutText: { ...typography.caption, color: colors.textSecondary, lineHeight: 18 },
   aboutSubLabel: { ...typography.label, color: colors.textMuted, marginTop: spacing.xs },
+  dataCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.md,
+    gap: spacing.sm,
+  },
+  deleteRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  deleteRowText: { ...typography.body, color: colors.danger, fontWeight: '600' },
+  deleteRowMeta: { ...typography.caption, color: colors.textMuted },
+  confirmRow: { gap: spacing.sm },
+  confirmText: { ...typography.body, color: colors.textPrimary },
+  confirmButtonsRow: { flexDirection: 'row', gap: spacing.sm },
+  cancelButton: {
+    flex: 1,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+  },
+  cancelButtonText: { ...typography.body, color: colors.textSecondary },
+  confirmDeleteButton: {
+    flex: 1,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: colors.danger,
+    backgroundColor: colors.danger,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+  },
+  confirmDeleteButtonText: { ...typography.body, color: colors.textPrimary, fontWeight: '700' },
+  successBanner: { ...typography.caption, color: colors.success },
+  errorBanner: { ...typography.caption, color: colors.danger },
   devButton: {
     borderRadius: radii.lg,
     borderWidth: 1,

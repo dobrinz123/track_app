@@ -35,6 +35,9 @@ const DEFAULT_CONFIG: Omit<CalibrationConfig, 'direction'> = {
   matcher: {},
 };
 
+/** Hard ceiling on `acceptedPoints` (~2.7 h at 1 Hz) -- L1 fix. Calibration is expected to finish within one short Learn lap; a session left calibrating far past that is force-failed rather than growing this array forever. */
+const MAX_ACCEPTED_POINTS = 10_000;
+
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
 }
@@ -82,6 +85,8 @@ export class CalibrationEngine implements CalibrationEngineContract {
   private timestampCount = 0;
   private lastOnTrack = false;
   private lastQualityOk = false;
+  /** Set once `acceptedPoints` hits `MAX_ACCEPTED_POINTS` -- L1 fix. Sticky for the life of this engine instance (cleared only by `reset()`), so `finish()` always force-fails with `CALIBRATION_OVERRUN` after an overrun, however long calibration continues to run past it. */
+  private calibrationOverrun = false;
 
   constructor(
     private readonly profile: RuntimeProfile,
@@ -118,6 +123,7 @@ export class CalibrationEngine implements CalibrationEngineContract {
     this.timestampCount = 0;
     this.lastOnTrack = false;
     this.lastQualityOk = false;
+    this.calibrationOverrun = false;
   }
 
   feed(sample: LocationSample): void {
@@ -153,18 +159,22 @@ export class CalibrationEngine implements CalibrationEngineContract {
     }
     this.previousAcceptedProgressM = match.unwrappedProgressM;
 
-    const point = this.profile.projection.toLocal({ lat: sample.lat, lon: sample.lon });
-    const projected = projectOntoPolyline(
-      point,
-      this.profile.centerline,
-      this.profile.cumulativeDistancesM,
-      true,
-    );
-    this.acceptedPoints.push({
-      point,
-      lateralM: projected.lateralM,
-      segmentIndex: projected.segmentIndex,
-    });
+    if (this.acceptedPoints.length < MAX_ACCEPTED_POINTS) {
+      const point = this.profile.projection.toLocal({ lat: sample.lat, lon: sample.lon });
+      const projected = projectOntoPolyline(
+        point,
+        this.profile.centerline,
+        this.profile.cumulativeDistancesM,
+        true,
+      );
+      this.acceptedPoints.push({
+        point,
+        lateralM: projected.lateralM,
+        segmentIndex: projected.segmentIndex,
+      });
+    } else {
+      this.calibrationOverrun = true;
+    }
     this.previousQualitySample = sample;
   }
 
@@ -204,6 +214,7 @@ export class CalibrationEngine implements CalibrationEngineContract {
     if (rejectedFraction > 0.3) failureReasons.push('POOR_GNSS');
     if (observedRateHz < 0.5) failureReasons.push('RATE_TOO_LOW');
     if (this.longestUncoveredRunM() > 100) failureReasons.push('COVERAGE_GAP');
+    if (this.calibrationOverrun) failureReasons.push('CALIBRATION_OVERRUN');
 
     const qualityRatio = totalSamples === 0 ? 0 : this.samplesAccepted / totalSamples;
     const lateralTightness = clamp01(1 - p95LateralM / this.config.corridorWidthM);
