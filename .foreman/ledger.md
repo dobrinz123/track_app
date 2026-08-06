@@ -38,7 +38,13 @@ See docs/implementation-plan.md (WP0–WP16).
 | WP14 | REPORTED(DONE_WITH_CONCERNS→deviations reviewed & accepted; limitations queued to known-limitations doc) + LEAD gates 484/484 + offline audit re-run + composition bootstrap inspection, commit 4f39338 | controller/, index.ts, session/, eas.json | wave6-integration |
 | WP-perf | DISPATCHED (Codex effort=high, background, log wp-perf-codex-output.log) | track-matcher.ts, test/perf/**, docs/verification/performance.md | bc35jr2w5 |
 | WP-sec | ACCEPTED (DONE): 0 CRIT/HIGH, 3 MED (M1 profile-array DoS, M2 unbounded session telemetry, M3 no deletion UI), 3 LOW, 6 INFO clean | .foreman/scratch/security-review-findings.md | wave7-sec |
-| WP-secfix | DISPATCHED (Sonnet, batch fix wave, all 6 findings) | profile schema/validation, controller caps, Settings delete UI, calibration cap, codec hardening, task-manager removal | wave7-fix |
+| WP-secfix | REPORTED(DONE) + LEAD gates 502/502, commit 699b663 — all 6 findings fixed w/ tests | see ticket | wave7-fix |
+| WP-perf | REPORTED(DONE) + LEAD verified slice (3.67x measured, 44 relevant tests), commit fadf080 | matcher + perf tests + perf doc | bc35jr2w5 |
+| WP-docs2 | REPORTED(DONE) + LEAD spot-checks, commit e368945; surfaced 5 real integration oddities → WP-oddfix | docs set | wave7-docs |
+| WP-oddfix | REPORTED(DONE) + LEAD gates 513/513 + export:ios, commit 12a6378 — corridor wiring, reason copy, diagnostics UI, background checkpoint, recovery lap numbering | see ticket | wave8-odd |
+| FINAL-VERIFY | COMPLETE. Claude blind verifier: PASS_WITH_NOTES (18/18 DoD rows, 1 LOW → fixed bf9397a). Codex cross-review: nominal FAIL from sandbox write-denials (no app defect; gates pass in real workspace, dual-reproduced) + 1 MEDIUM (sectorIndex assertions → fixed c3ca773) + procedural note (HEAD moved mid-verify — logged). PROJECT VERIFIED at c3ca773: 515/515 tests, all gates green. | — | done |
+
+FINAL STATE: delivered. See docs/verification/final-report.md.
 | WP-docs2 | DISPATCHED (Sonnet) | docs/algorithms/**, docs/*.md, README index | wave7-docs |
 | VERIFY-CORE | VERDICT: PASS_WITH_NOTES — all 8 tickets OK, 7/7 adversarial probes passed, purity guard fires. Finding 1 (MEDIUM, uncommitted generate:tmr script) fixed by LEAD commit. Notes 3 (matcher hint gives no compute savings — full search every call; spec requires local-first search) → queued for WP-perf pass. Note 4 accepted (stricter debounce consistent with contracts). Core group = VERIFIED. | — | wave5-verify |
 | WP13a | REPORTED(DONE) + LEAD verified (tsc/lint/export 890-module 2MB hbc, commit b4c83bf) | apps/mobile/src/ui/**, src/session/**, App.tsx | wave3-ui |
