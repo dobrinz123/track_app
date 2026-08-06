@@ -9,6 +9,7 @@ import {
   impossibleJumpLap,
   lowQualitySamplesLap,
   multiLapSession,
+  noisyGpsLap,
   outOfOrderTimestampsLap,
   pauseResumeSession,
   pbImprovementSession,
@@ -305,5 +306,27 @@ describe('ReplayHarness production pipeline integration', () => {
     const wideCalibration = runCalibration(runtime, calibrationSamples, { corridorWidthM: 15 });
     expect(narrowCalibration.diagnostics.rejectionReasons.OFF_CORRIDOR).toBeGreaterThan(0);
     expect(wideCalibration.diagnostics.rejectionReasons.OFF_CORRIDOR ?? 0).toBe(0);
+  });
+
+  it('17. noisyGpsLap: deterministic characterization under 8 m noise', () => {
+    // Characterization pin, not a normative spec: under sigma-8m noise the
+    // pipeline's per-seed outcome is deterministic. Most seeds fail to
+    // complete a lap at all; seed 42 happens to complete one, and it is
+    // "good" because quality keys off REPORTED accuracy (8 m < the 12 m
+    // degraded threshold), not off actual noise. If a matcher/detector
+    // change shifts these outcomes, this test flags it for deliberate
+    // review rather than letting the noise path drift silently.
+    const { profile, runtime } = tmr();
+
+    const noLap = runSessionPipeline(runtime, noisyGpsLap(profile, 106));
+    expect(noLap.laps).toHaveLength(0);
+
+    const oneLap = runSessionPipeline(runtime, noisyGpsLap(profile, 42));
+    expect(oneLap.laps).toHaveLength(1);
+    expect(oneLap.laps[0]?.valid).toBe(true);
+
+    // Determinism: identical seed, identical byte-level result.
+    const rerun = runSessionPipeline(runtime, noisyGpsLap(profile, 42));
+    expect(JSON.stringify(rerun)).toBe(JSON.stringify(oneLap));
   });
 });
