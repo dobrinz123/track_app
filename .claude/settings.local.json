@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C \"D:\\\\CODE\\\\APLICTIE_Circuit\" status)",
+      "Bash(command -v codex)",
+      "Bash(codex --version)",
+      "Bash(command -v node)",
+      "Bash(command -v npm)",
+      "Bash(npm --version)",
+      "Bash(git init *)",
+      "Bash(mkdir -p .foreman/scratch docs/architecture docs/decisions docs/research docs/verification)",
+      "Bash(codex exec *)",
+      "Bash(printf 'node_modules/\\\\n.expo/\\\\ndist/\\\\n*.log\\\\n.DS_Store\\\\n')",
+      "Bash(git add *)",
+      "Bash(git commit -q -m 'WP0: baseline, ADR-0001 stack decision, module contracts, plan, foreman ledger *)"
+    ]
+  }
+}
