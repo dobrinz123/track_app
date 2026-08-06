@@ -10,7 +10,12 @@
 
 export { PerformanceNowClock } from './clock';
 
-export { GnssLocationProvider, type GnssDiagnostics } from './gnssLocationProvider';
+export {
+  GnssLocationProvider,
+  type GnssDiagnostics,
+  type SampleIntervalBucket,
+  type AccuracyDistributionSummary,
+} from './gnssLocationProvider';
 
 export { ReplayLocationProvider, type ReplayOptions } from './replayLocationProvider';
 
@@ -23,6 +28,7 @@ export {
 
 export {
   LOCATION_PERMISSION_RATIONALE,
+  PRECISE_LOCATION_INSTRUCTIONS,
   requestForegroundLocationPermission,
   getPermissionState,
   type PermissionState,
@@ -37,14 +43,17 @@ export {
   runPreflightChecks,
   collectLocationServicesEnabled,
   collectPermissionGranted,
+  collectReducedAccuracy,
   collectGnssFix,
   collectBatteryCheck,
   collectKeepAwakeActivatable,
+  collectThermalState,
   type PreflightInputs,
   type PreflightDecision,
   type PreflightReport,
   type GnssFixResult,
   type BatteryCheckResult,
+  type ThermalStateResult,
 } from './preflight';
 
 export { startLifecycleListener, type LifecycleCallbacks, type LifecycleController } from './lifecycle';

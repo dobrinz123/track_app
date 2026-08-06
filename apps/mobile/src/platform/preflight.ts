@@ -21,6 +21,24 @@ export interface GnssFixResult {
 }
 
 /**
+ * Result of the thermal-state check (ADR-0003 §4 / WP12b MUST DO #5).
+ *
+ * Gap: neither `expo-constants` (installed — checked
+ * `node_modules/expo-constants/build/Constants.types.d.ts`, no thermal field)
+ * nor `expo-device` (not an installed dependency, and adding it is out of
+ * scope — MUST NOT add dependencies) expose `ProcessInfo.thermalState` in
+ * this SDK generation. TODO: revisit once an installed Expo API surfaces
+ * thermal state; until then this always reports `available: false` — never
+ * fabricate a state value.
+ */
+export interface ThermalStateResult {
+  /** Whether a thermal-state API was resolvable without adding a dependency. */
+  available: boolean;
+  /** Raw platform thermal state string when available; always `null` today. */
+  state: string | null;
+}
+
+/**
  * Inputs to the pure decision function {@link evaluatePreflight}, gathered by
  * the async collectors below. Kept as a plain data shape (no promises, no I/O)
  * so `evaluatePreflight` is trivially unit-testable per MUST DO #6.
@@ -31,6 +49,16 @@ export interface PreflightInputs {
   gnssFix: GnssFixResult;
   battery: BatteryCheckResult;
   keepAwakeActivatable: boolean;
+  /**
+   * True when iOS reports reduced (approximate, ~1900 m) accuracy authorization
+   * (`LocationPermissionResponse.ios.accuracy === 'reduced'`) rather than full
+   * precision. Always `false` on Android/web, where the field doesn't exist.
+   * See `permissions.ts`'s `PermissionOutcome.iosAccuracy` and
+   * `PRECISE_LOCATION_INSTRUCTIONS`.
+   */
+  reducedAccuracy: boolean;
+  /** Diagnostic-only (does not gate `pass`) — see {@link ThermalStateResult}. */
+  thermalState: ThermalStateResult;
 }
 
 export interface PreflightDecision {
@@ -48,6 +76,9 @@ export function evaluatePreflight(inputs: PreflightInputs): PreflightDecision {
   const failures: string[] = [];
   if (!inputs.locationServicesEnabled) failures.push('LOCATION_SERVICES_DISABLED');
   if (!inputs.permissionGranted) failures.push('LOCATION_PERMISSION_NOT_GRANTED');
+  // Only meaningful once permission is granted — reduced-accuracy is a
+  // sub-state of a granted permission, not a substitute failure for it.
+  if (inputs.permissionGranted && inputs.reducedAccuracy) failures.push('PRECISE_LOCATION_OFF');
   if (!inputs.gnssFix.acquired) failures.push('GNSS_FIX_TIMEOUT');
   if (inputs.battery.available && inputs.battery.criticallyLow) failures.push('BATTERY_CRITICALLY_LOW');
   if (!inputs.keepAwakeActivatable) failures.push('KEEP_AWAKE_UNAVAILABLE');
@@ -70,6 +101,21 @@ export async function collectLocationServicesEnabled(): Promise<boolean> {
 export async function collectPermissionGranted(): Promise<boolean> {
   const outcome = await getPermissionState();
   return outcome.state === 'granted';
+}
+
+/**
+ * iOS reduced-accuracy detection (MUST DO #2). Reads current permission state
+ * without prompting; see `permissions.ts`'s `PermissionOutcome.iosAccuracy`.
+ * Always `false` on platforms without the `ios` field (Android/web).
+ */
+export async function collectReducedAccuracy(): Promise<boolean> {
+  const outcome = await getPermissionState();
+  return outcome.iosAccuracy === 'reduced';
+}
+
+/** See {@link ThermalStateResult} for why this always reports unavailable today. */
+export async function collectThermalState(): Promise<ThermalStateResult> {
+  return { available: false, state: null };
 }
 
 /**
@@ -160,13 +206,16 @@ export async function collectKeepAwakeActivatable(): Promise<boolean> {
 
 /** Runs every async collector and folds the result through {@link evaluatePreflight}. */
 export async function runPreflightChecks(): Promise<PreflightReport> {
-  const [locationServicesEnabled, permissionGranted, gnssFix, battery, keepAwakeActivatable] = await Promise.all([
-    collectLocationServicesEnabled(),
-    collectPermissionGranted(),
-    collectGnssFix(),
-    collectBatteryCheck(),
-    collectKeepAwakeActivatable(),
-  ]);
+  const [locationServicesEnabled, permissionGranted, gnssFix, battery, keepAwakeActivatable, reducedAccuracy, thermalState] =
+    await Promise.all([
+      collectLocationServicesEnabled(),
+      collectPermissionGranted(),
+      collectGnssFix(),
+      collectBatteryCheck(),
+      collectKeepAwakeActivatable(),
+      collectReducedAccuracy(),
+      collectThermalState(),
+    ]);
 
   const inputs: PreflightInputs = {
     locationServicesEnabled,
@@ -174,6 +223,8 @@ export async function runPreflightChecks(): Promise<PreflightReport> {
     gnssFix,
     battery,
     keepAwakeActivatable,
+    reducedAccuracy,
+    thermalState,
   };
   const decision = evaluatePreflight(inputs);
   return { ...inputs, ...decision };
