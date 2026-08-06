@@ -1,41 +1,28 @@
 import React, { useCallback, useState } from 'react';
 import type { LayoutChangeEvent, StyleProp, TextStyle, ViewStyle } from 'react-native';
-import { Platform, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import { colors, fontFamily } from '../theme';
-
-/**
- * `@react-native-masked-view/masked-view` ships native platform bindings.
- * Feature-detect it via `require` inside a try/catch (rather than a static
- * `import`) so that an environment where the native module fails to resolve
- * or link at runtime -- most plausibly an unusual web build -- degrades to
- * solid accent-colored text instead of crashing. On every officially
- * supported target (iOS, Android, Expo Go, and react-native-web) this
- * resolves normally and the gradient wordmark renders as designed.
- */
-type MaskedViewComponent = React.ComponentType<{
-  maskElement: React.ReactElement;
-  children?: React.ReactNode;
-}>;
-
-let MaskedView: MaskedViewComponent | null = null;
-// react-native-web's masked-view support is unreliable (renders children
-// unmasked, i.e. invisible text on dark backgrounds) — use the solid-accent
-// fallback on web unconditionally; the gradient mask is native-only.
-if (Platform.OS !== 'web') {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    MaskedView = require('@react-native-masked-view/masked-view').default as MaskedViewComponent;
-  } catch {
-    MaskedView = null;
-  }
-}
+import { fontFamily } from '../theme';
 
 const WORDMARK_TEXT = 'TRACE';
-/** Matches trace_logo.svg's `amberGrad` -- the logo's glowing telemetry gradient. */
-const GRADIENT_COLORS = ['#FF9100', '#FFC400', '#FFE57F'] as const;
-/** Amber fading to transparent, echoing the logo's glowing trace apex. */
-const TELEMETRY_LINE_COLORS = ['#FFC400', 'rgba(255, 196, 0, 0)'] as const;
+
+/**
+ * Per-letter colors stepping through trace_logo.svg's `amberGrad`
+ * (#FF9100 -> #FFC400 -> #FFE57F). Coloring each glyph individually renders
+ * IDENTICALLY on iOS, Android, and web — no MaskedView, no platform forks,
+ * no invisible-text failure modes.
+ */
+const LETTER_COLORS = ['#FF9100', '#FFAD00', '#FFC400', '#FFD54F', '#FFE57F'] as const;
+
+/** Soft neon halo behind every glyph, echoing the logo's glowing trace. */
+const GLOW = {
+  textShadowColor: 'rgba(255, 179, 0, 0.45)',
+  textShadowOffset: { width: 0, height: 0 },
+  textShadowRadius: 14,
+} as const;
+
+const TELEMETRY_CORE = ['#FFF7C2', '#FFC400', 'rgba(255, 196, 0, 0)'] as const;
+const TELEMETRY_HALO = ['rgba(255, 179, 0, 0.35)', 'rgba(255, 179, 0, 0)'] as const;
 
 interface TraceWordmarkProps {
   /** Font size of the "TRACE" glyphs. ~40-44 matches the logo mark's visual weight. */
@@ -45,10 +32,9 @@ interface TraceWordmarkProps {
 }
 
 /**
- * Brand wordmark: "TRACE" set in Space Grotesk Bold with the logo's amber
- * telemetry gradient masked onto the glyphs, plus a thin fading amber line
- * underneath that echoes the logo's glowing trace motif. Static -- no
- * animation.
+ * Brand wordmark: "TRACE" in Space Grotesk Bold, glyphs stepped through the
+ * logo's amber telemetry gradient with a neon glow and a slight forward lean
+ * (speed cue), over a layered glowing telemetry line. Static — no animation.
  */
 export const TraceWordmark: React.FC<TraceWordmarkProps> = ({ size = 42, style, textStyle }) => {
   const [glyphWidth, setGlyphWidth] = useState<number | null>(null);
@@ -57,44 +43,41 @@ export const TraceWordmark: React.FC<TraceWordmarkProps> = ({ size = 42, style, 
     setGlyphWidth(event.nativeEvent.layout.width);
   }, []);
 
-  const maskText = (
-    // Explicit opaque color: the mask uses the alpha channel of this element,
-    // so its color must never be affected by theme/inherited styles.
-    <Text style={[styles.text, { fontSize: size, color: '#000' }, textStyle]} maxFontSizeMultiplier={1.3}>
-      {WORDMARK_TEXT}
-    </Text>
-  );
-
   return (
     <View style={style} accessibilityRole="header" accessibilityLabel={WORDMARK_TEXT}>
       <View onLayout={handleGlyphLayout} style={styles.glyphRow}>
-        {MaskedView ? (
-          <MaskedView maskElement={maskText}>
-            <LinearGradient colors={GRADIENT_COLORS} start={{ x: 0, y: 1 }} end={{ x: 1, y: 0 }}>
-              <Text
-                style={[styles.text, { fontSize: size, opacity: 0 }, textStyle]}
-                maxFontSizeMultiplier={1.3}
-              >
-                {WORDMARK_TEXT}
-              </Text>
-            </LinearGradient>
-          </MaskedView>
-        ) : (
+        {WORDMARK_TEXT.split('').map((letter, i) => (
           <Text
-            style={[styles.text, styles.fallbackText, { fontSize: size }, textStyle]}
+            key={i}
+            style={[
+              styles.letter,
+              GLOW,
+              { fontSize: size, color: LETTER_COLORS[i % LETTER_COLORS.length] },
+              textStyle,
+            ]}
             maxFontSizeMultiplier={1.3}
+            accessibilityElementsHidden
+            importantForAccessibility="no"
           >
-            {WORDMARK_TEXT}
+            {letter}
           </Text>
-        )}
+        ))}
       </View>
       {glyphWidth ? (
-        <LinearGradient
-          colors={TELEMETRY_LINE_COLORS}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 0 }}
-          style={[styles.telemetryLine, { width: glyphWidth * 0.6 }]}
-        />
+        <View style={styles.lineStack}>
+          <LinearGradient
+            colors={TELEMETRY_HALO}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 0 }}
+            style={[styles.telemetryHalo, { width: glyphWidth * 0.85 }]}
+          />
+          <LinearGradient
+            colors={TELEMETRY_CORE}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 0 }}
+            style={[styles.telemetryCore, { width: glyphWidth * 0.72 }]}
+          />
+        </View>
       ) : null}
     </View>
   );
@@ -102,18 +85,27 @@ export const TraceWordmark: React.FC<TraceWordmarkProps> = ({ size = 42, style, 
 
 const styles = StyleSheet.create({
   glyphRow: {
+    flexDirection: 'row',
     alignSelf: 'flex-start',
+    // Slight forward lean — motorsport speed cue, matches the logo's slanted T.
+    transform: [{ skewX: '-6deg' }],
   },
-  text: {
+  letter: {
     fontFamily: fontFamily.displayBold,
     letterSpacing: 4,
   },
-  fallbackText: {
-    color: colors.accent,
+  lineStack: {
+    marginTop: 7,
+    height: 6,
+    justifyContent: 'center',
   },
-  telemetryLine: {
+  telemetryHalo: {
+    position: 'absolute',
+    height: 6,
+    borderRadius: 3,
+  },
+  telemetryCore: {
     height: 2.5,
     borderRadius: 2,
-    marginTop: 6,
   },
 });
