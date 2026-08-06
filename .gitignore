@@ -1,5 +1,9 @@
 node_modules/
 .expo/
 dist/
+dist-export/
 *.log
 .DS_Store
+
+# TypeScript build info
+*.tsbuildinfo
