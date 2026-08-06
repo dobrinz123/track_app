@@ -38,7 +38,7 @@ interface TmrFixture {
 
 function tmr(): TmrFixture {
   const json = readFileSync(
-    new URL('../../assets/circuits/transilvania-motor-ring.v1.json', import.meta.url),
+    new URL('../../assets/circuits/transilvania-motor-ring.v2.json', import.meta.url),
     'utf8',
   );
   const loaded = loadProfileFromJson(json);

@@ -6,7 +6,7 @@ import { loadProfileFromJson, type CircuitProfile, type RuntimeProfile } from '@
 // requirement depends on this being a real `import`, not a dynamic load; see
 // the static-bundle proof in the WP14 integration report for the verified
 // evidence that the asset is embedded.
-import tmrProfileJson from '@circuit/core/assets/circuits/transilvania-motor-ring.v1.json';
+import tmrProfileJson from '@circuit/core/assets/circuits/transilvania-motor-ring.v2.json';
 
 /**
  * The one circuit this MVP supports (Transilvania Motor Ring), loaded

@@ -10,6 +10,9 @@ const RESEARCH_LENGTH_M = 3_708;
 const RESEARCH_LENGTH_TOLERANCE = 0.01;
 const CORRIDOR_WIDTH_M = 15;
 const GATE_WIDTH_M = CORRIDOR_WIDTH_M * 2;
+export const TMR_CURVATURE_HALF_WINDOW_M = 40;
+export const TMR_STRAIGHT_CURVATURE_THRESHOLD_RAD_PER_M = 0.008;
+const SECTOR_SNAP_HALF_WINDOW_M = 180;
 const EARTH_RADIUS_M = 6_371_008.8;
 const DEG_TO_RAD = Math.PI / 180;
 const RAD_TO_DEG = 180 / Math.PI;
@@ -17,7 +20,8 @@ const RAD_TO_DEG = 180 / Math.PI;
 const GEOMETRY_INPUT_URL = new URL('../../../data/osm/overpass-tmr-geom.json', import.meta.url);
 const TAGS_INPUT_URL = new URL('../../../data/osm/overpass-tmr-tags.json', import.meta.url);
 const OUTPUT_DIRECTORY_URL = new URL('../assets/circuits/', import.meta.url);
-const OUTPUT_URL = new URL('../assets/circuits/transilvania-motor-ring.v1.json', import.meta.url);
+
+type TmrLayoutVersion = 1 | 2;
 
 interface OSMWay {
   geometry: LatLon[];
@@ -40,6 +44,18 @@ interface ClosedProjection extends LinePosition {
   distanceM: number;
   segmentIndex: number;
   segmentParameter: number;
+}
+
+interface SectorPlacement {
+  curvatureRadPerM: number;
+  distanceM: number;
+  fellBack: boolean;
+  position: LinePosition;
+}
+
+interface VertexCurvature {
+  curvatureRadPerM: number;
+  distanceM: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -309,6 +325,108 @@ function modulo(value: number, modulus: number): number {
   return ((value % modulus) + modulus) % modulus;
 }
 
+function segmentBearing(points: LocalPoint[], segmentIndex: number): number {
+  const a = points[segmentIndex];
+  const b = points[(segmentIndex + 1) % points.length];
+  if (a === undefined || b === undefined) throw new Error('Sparse closed line');
+  if (a.e === b.e && a.n === b.n) throw new Error('Closed line contains a zero-length segment');
+  return Math.atan2(b.n - a.n, b.e - a.e);
+}
+
+function absoluteTurningAngle(fromBearing: number, toBearing: number): number {
+  const difference = toBearing - fromBearing;
+  return Math.abs(Math.atan2(Math.sin(difference), Math.cos(difference)));
+}
+
+/**
+ * Mean absolute turning angle per metre inside a window extending equally
+ * before and after the requested centerline distance. Turns are derived from
+ * consecutive polyline-segment bearings, so S-bends cannot cancel out.
+ */
+export function centerlineCurvatureAtDistance(
+  points: LocalPoint[],
+  distanceM: number,
+  halfWindowM = TMR_CURVATURE_HALF_WINDOW_M,
+): number {
+  const totalLengthM = closedLength(points);
+  if (!(halfWindowM > 0 && halfWindowM * 2 < totalLengthM)) {
+    throw new Error('Curvature half-window must be positive and shorter than half the line');
+  }
+  const cumulative = cumulativeDistances(points);
+  const windowLengthM = halfWindowM * 2;
+  const windowStartM = modulo(distanceM - halfWindowM, totalLengthM);
+  let totalTurningAngle = 0;
+
+  for (let index = 0; index < points.length; index += 1) {
+    const vertexDistanceM = cumulative[index];
+    if (vertexDistanceM === undefined) throw new Error('Sparse cumulative distances');
+    const distanceFromWindowStartM = modulo(vertexDistanceM - windowStartM, totalLengthM);
+    if (distanceFromWindowStartM <= 0 || distanceFromWindowStartM >= windowLengthM) continue;
+    const previousSegmentIndex = modulo(index - 1, points.length);
+    totalTurningAngle += absoluteTurningAngle(
+      segmentBearing(points, previousSegmentIndex),
+      segmentBearing(points, index),
+    );
+  }
+
+  return totalTurningAngle / windowLengthM;
+}
+
+function centerlineVertexCurvatures(points: LocalPoint[]): VertexCurvature[] {
+  return cumulativeDistances(points).map((distanceM) => ({
+    curvatureRadPerM: centerlineCurvatureAtDistance(points, distanceM),
+    distanceM,
+  }));
+}
+
+function placeSectorGate(
+  centerline: LocalPoint[],
+  vertexCurvatures: VertexCurvature[],
+  targetFraction: number,
+  layoutVersion: TmrLayoutVersion,
+): SectorPlacement {
+  const totalLengthM = closedLength(centerline);
+  const targetDistanceM = targetFraction * totalLengthM;
+  if (layoutVersion === 1) {
+    return {
+      curvatureRadPerM: centerlineCurvatureAtDistance(centerline, targetDistanceM),
+      distanceM: targetDistanceM,
+      fellBack: false,
+      position: positionAtClosedDistance(centerline, targetDistanceM),
+    };
+  }
+
+  let best: { curvatureRadPerM: number; distanceM: number; offsetM: number } | undefined;
+  for (const vertex of vertexCurvatures) {
+    const offsetM = Math.abs(vertex.distanceM - targetDistanceM);
+    if (offsetM > SECTOR_SNAP_HALF_WINDOW_M) continue;
+    if (vertex.curvatureRadPerM >= TMR_STRAIGHT_CURVATURE_THRESHOLD_RAD_PER_M) continue;
+    // Strict comparison makes an exact tie resolve to the earlier source vertex.
+    if (best === undefined || offsetM < best.offsetM) {
+      best = {
+        curvatureRadPerM: vertex.curvatureRadPerM,
+        distanceM: vertex.distanceM,
+        offsetM,
+      };
+    }
+  }
+
+  if (best === undefined) {
+    return {
+      curvatureRadPerM: centerlineCurvatureAtDistance(centerline, targetDistanceM),
+      distanceM: targetDistanceM,
+      fellBack: true,
+      position: positionAtClosedDistance(centerline, targetDistanceM),
+    };
+  }
+  return {
+    curvatureRadPerM: best.curvatureRadPerM,
+    distanceM: best.distanceM,
+    fellBack: false,
+    position: positionAtClosedDistance(centerline, best.distanceM),
+  };
+}
+
 export interface TmrGeneratorInputs {
   geometryJson: string;
   tagsJson: string;
@@ -322,6 +440,7 @@ function readDefaultInputs(): TmrGeneratorInputs {
 }
 
 export function generateTmrProfile(
+  layoutVersion: TmrLayoutVersion = 2,
   inputs: TmrGeneratorInputs = readDefaultInputs(),
 ): CircuitProfile {
   const centerlineWay = requireWay(inputs.geometryJson, CENTERLINE_WAY_ID, 'OSM geometry input');
@@ -391,8 +510,17 @@ export function generateTmrProfile(
   }
 
   const startFinishPosition = positionAtClosedDistance(centerlineLocal, 0);
-  const sectorOnePosition = positionAtClosedDistance(centerlineLocal, totalLengthM / 3);
-  const sectorTwoPosition = positionAtClosedDistance(centerlineLocal, (2 * totalLengthM) / 3);
+  const vertexCurvatures = centerlineVertexCurvatures(centerlineLocal);
+  const startFinishCurvatureRadPerM = vertexCurvatures[0]?.curvatureRadPerM;
+  if (startFinishCurvatureRadPerM === undefined) throw new Error('Centerline has no vertices');
+  if (startFinishCurvatureRadPerM >= TMR_STRAIGHT_CURVATURE_THRESHOLD_RAD_PER_M) {
+    throw new Error(
+      `Start/finish curvature ${startFinishCurvatureRadPerM} rad/m is not below the ` +
+        `${TMR_STRAIGHT_CURVATURE_THRESHOLD_RAD_PER_M} rad/m straight threshold`,
+    );
+  }
+  const sectorOne = placeSectorGate(centerlineLocal, vertexCurvatures, 1 / 3, layoutVersion);
+  const sectorTwo = placeSectorGate(centerlineLocal, vertexCurvatures, 2 / 3, layoutVersion);
   const pitFirst = pitLaneLocal[0];
   const pitLast = pitLaneLocal[pitLaneLocal.length - 1];
   if (pitFirst === undefined || pitLast === undefined) throw new Error('Pit lane is empty');
@@ -423,7 +551,7 @@ export function generateTmrProfile(
     country: 'Romania',
     locality: 'Cerghid',
     layoutId: 'main',
-    layoutVersion: 1,
+    layoutVersion,
     source: {
       name: '© OpenStreetMap contributors',
       url: 'https://www.openstreetmap.org/way/488429454',
@@ -437,8 +565,8 @@ export function generateTmrProfile(
     totalLengthM,
     startFinishGate: makeGate('start-finish', 'startFinish', startFinishPosition, projection),
     sectorGates: [
-      makeGate('sector-1', 'sector', sectorOnePosition, projection, 1),
-      makeGate('sector-2', 'sector', sectorTwoPosition, projection, 2),
+      makeGate('sector-1', 'sector', sectorOne.position, projection, 1),
+      makeGate('sector-2', 'sector', sectorTwo.position, projection, 2),
     ],
     pitLane: {
       polyline: pitLane,
@@ -452,9 +580,25 @@ export function generateTmrProfile(
     createdAtUtc: '2026-08-06T00:00:00Z',
     updatedAtUtc: '2026-08-06T00:00:00Z',
     confidenceNotes:
-      'Start/finish, sector, and pit gates are app-defined from OSM geometry and have not ' +
-      'been validated on-site. corridorWidthM=15 combines the researched 11–14 m ' +
-      '[PLAUSIBLE] track width with GNSS margin.',
+      layoutVersion === 1
+        ? 'Start/finish, sector, and pit gates are app-defined from OSM geometry and have not ' +
+          'been validated on-site. corridorWidthM=15 combines the researched 11–14 m ' +
+          '[PLAUSIBLE] track width with GNSS margin.'
+        : 'Start/finish, sector, and pit gates are app-defined from OSM geometry and have not ' +
+          'been validated on-site. V2 sector rule: for each target fraction (1/3, 2/3), find ' +
+          'the nearest qualifying straight vertex within ±180 m of the target distance; place ' +
+          'the gate there (perpendicular, same width rules as v1). A vertex qualifies as ' +
+          'straight when its mean absolute turning angle over a ±40 m centerline window is ' +
+          '< 0.008 rad/m; this ~0.46°/m threshold rejects sustained corners while retaining ' +
+          'timing-stable straight stretches. If no qualifying vertex exists in the window, ' +
+          'fall back to the exact fraction and note it in confidenceNotes. ' +
+          (sectorOne.fellBack || sectorTwo.fellBack
+            ? `Fallback used for${sectorOne.fellBack ? ' sector 1' : ''}${
+                sectorTwo.fellBack ? ' sector 2' : ''
+              }.`
+            : 'No fallback was required.') +
+          ' corridorWidthM=15 combines the researched 11–14 m [PLAUSIBLE] track width with ' +
+          'GNSS margin.',
   };
 }
 
@@ -462,18 +606,41 @@ export function serializeTmrProfile(profile: CircuitProfile): string {
   return `${JSON.stringify(profile, null, 2)}\n`;
 }
 
-export function writeTmrProfile(): CircuitProfile {
-  const profile = generateTmrProfile();
+export function writeTmrProfile(layoutVersion: TmrLayoutVersion = 2): CircuitProfile {
+  const profile = generateTmrProfile(layoutVersion);
+  const outputUrl = new URL(
+    `../assets/circuits/transilvania-motor-ring.v${layoutVersion}.json`,
+    import.meta.url,
+  );
   mkdirSync(OUTPUT_DIRECTORY_URL, { recursive: true });
-  writeFileSync(OUTPUT_URL, serializeTmrProfile(profile), 'utf8');
+  writeFileSync(outputUrl, serializeTmrProfile(profile), 'utf8');
   return profile;
+}
+
+function parseLayoutVersion(arguments_: string[]): TmrLayoutVersion {
+  if (arguments_.length === 0) return 2;
+  if (arguments_.length === 1 && /^--layout-version=[12]$/.test(arguments_[0] ?? '')) {
+    return arguments_[0]?.endsWith('1') === true ? 1 : 2;
+  }
+  if (
+    arguments_.length === 2 &&
+    arguments_[0] === '--layout-version' &&
+    /^[12]$/.test(arguments_[1] ?? '')
+  ) {
+    return arguments_[1] === '1' ? 1 : 2;
+  }
+  throw new Error('Usage: generate-tmr-profile.ts [--layout-version=1|2]');
 }
 
 const invokedPath = process.argv[1];
 if (invokedPath !== undefined && pathToFileURL(resolve(invokedPath)).href === import.meta.url) {
-  const profile = writeTmrProfile();
+  // `npm run generate:tmr` defaults to v2. Reproduce v1 without changing it via
+  // `npm run generate:tmr -- --layout-version=1`.
+  const layoutVersion = parseLayoutVersion(process.argv.slice(2));
+  const profile = writeTmrProfile(layoutVersion);
   process.stdout.write(
-    `Generated transilvania-motor-ring.v1.json (${profile.centerline.length} vertices, ` +
+    `Generated transilvania-motor-ring.v${layoutVersion}.json (` +
+      `${profile.centerline.length} vertices, ` +
       `${profile.totalLengthM.toFixed(3)} m)\n`,
   );
 }
