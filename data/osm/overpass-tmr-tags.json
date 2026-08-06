@@ -1,0 +1,37 @@
+{
+  "version": 0.6,
+  "generator": "Overpass API 0.7.62.11 87bfad18",
+  "osm3s": {
+    "timestamp_osm_base": "2026-08-06T12:20:21Z",
+    "copyright": "The data included in this document is from www.openstreetmap.org. The data is made available under ODbL."
+  },
+  "elements": [
+
+{
+  "type": "way",
+  "id": 488429454,
+  "tags": {
+    "access": "private",
+    "highway": "raceway",
+    "lit": "no",
+    "motor_vehicle": "designated",
+    "name": "Transilvania Motor Ring",
+    "oneway": "yes",
+    "sport": "motor",
+    "surface": "asphalt"
+  }
+},
+{
+  "type": "way",
+  "id": 488429716,
+  "tags": {
+    "highway": "raceway",
+    "name": "Pit Lane",
+    "oneway": "yes",
+    "sport": "motor",
+    "surface": "asphalt"
+  }
+}
+
+  ]
+}
