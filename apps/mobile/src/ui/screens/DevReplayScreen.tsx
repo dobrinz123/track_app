@@ -1,22 +1,77 @@
-import React from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import React, { useState } from 'react';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import type { NativeStackScreenProps } from '@react-navigation/native-stack';
+import type { CircuitProfile, TelemetryFixture } from '@circuit/core';
+import {
+  cleanRecognitionLap,
+  multiLapSession,
+  noisyGpsLap,
+  pbImprovementSession,
+  pitLaneTransitLap,
+  reverseTravelLap,
+  signalLossLap,
+} from '@circuit/core';
+import type { RootStackParamList } from '../navigation/types';
 import { colors, radii, spacing, typography } from '../theme';
+import { startDevReplaySession, useMockFacadeForDevReplay } from '../../session/composition';
+import { TMR_CIRCUIT_PROFILE } from '../../session/tmrProfile';
+
+type Props = NativeStackScreenProps<RootStackParamList, 'DevReplay'>;
+
+interface ScenarioDefinition {
+  id: string;
+  label: string;
+  build: (profile: CircuitProfile) => TelemetryFixture;
+}
 
 /**
- * Placeholder bundled-fixture names. Wiring these to an actual
- * `ReplayLocationProvider` + `ReplayHarness` run (docs/architecture/contracts.md)
- * is out of scope for this UI-only work package — listed here purely so the
- * dev entry point exists and its purpose is documented.
+ * Real bundled fixture scenarios from `@circuit/core/fixtures`
+ * (`packages/core/src/fixtures/scenarios.ts`) -- each one's
+ * `metadata.expectedOutcome` is shown as the row's description so this
+ * screen is self-documenting.
  */
-const PLACEHOLDER_FIXTURES = [
-  'tmr-clean-lap-01.jsonl',
-  'tmr-degraded-gnss-01.jsonl',
-  'tmr-pit-transit-01.jsonl',
+const SCENARIOS: ScenarioDefinition[] = [
+  { id: 'clean-recognition-lap', label: 'Clean recognition lap', build: (p) => cleanRecognitionLap(p, 901) },
+  { id: 'three-laps', label: 'Three timed laps', build: (p) => multiLapSession(p, 3, 902) },
+  { id: 'pb-improvement', label: 'PB improvement (3 laps, each faster)', build: (p) => pbImprovementSession(p, 903) },
+  { id: 'noisy-gps', label: 'Noisy GPS (8m Gaussian noise)', build: (p) => noisyGpsLap(p, 904) },
+  { id: 'signal-loss', label: 'Signal loss (15s gap)', build: (p) => signalLossLap(p, 905) },
+  { id: 'reverse-travel', label: 'Reverse travel', build: (p) => reverseTravelLap(p, 906) },
+  { id: 'pit-lane-transit', label: 'Pit lane transit', build: (p) => pitLaneTransitLap(p, 907) },
 ];
 
-/** S13 — dev-only (__DEV__ gated): placeholder fixture list; documents replay purpose. Wire-up is a later work package. */
-export function DevReplayScreen(): React.JSX.Element {
+/**
+ * S13 — dev-only (__DEV__ gated). Lists real bundled fixture scenarios; on
+ * selection, drives the ACTUAL production `SessionController` (via
+ * `RealSessionFacade`) with a `ReplayLocationProvider` at 10x pace over the
+ * fixture's samples, and navigates into the SAME real screens a live session
+ * uses (MUST DO #6) -- nothing is duplicated or faked here, this only swaps
+ * which `LocationProvider` feeds the one production pipeline. Results land
+ * in the real on-device SQLite history. A separate toggle swaps back to the
+ * scripted `MockSessionFacade` for pure UI/style iteration.
+ */
+export function DevReplayScreen({ navigation }: Props): React.JSX.Element {
+  const [runningId, setRunningId] = useState<string | null>(null);
+
+  const runScenario = async (scenario: ScenarioDefinition): Promise<void> => {
+    setRunningId(scenario.id);
+    try {
+      const samples = scenario.build(TMR_CIRCUIT_PROFILE);
+      await startDevReplaySession(samples);
+      navigation.navigate('CalibrationInstructions');
+    } catch (error) {
+      Alert.alert('Replay failed to start', error instanceof Error ? error.message : String(error));
+    } finally {
+      setRunningId(null);
+    }
+  };
+
+  const runMock = (): void => {
+    useMockFacadeForDevReplay();
+    navigation.navigate('CalibrationInstructions');
+  };
+
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
       <ScrollView contentContainerStyle={styles.container}>
@@ -24,25 +79,52 @@ export function DevReplayScreen(): React.JSX.Element {
           Dev: Replay Fixtures
         </Text>
         <Text style={styles.intro} maxFontSizeMultiplier={1.3}>
-          Replay streams a recorded fixture of `LocationSample`s through the production timing pipeline
-          (`ReplayHarness`, see docs/architecture/contracts.md) to exercise the app without driving. Not wired up
-          yet — this screen only lists what will eventually be selectable, and only ever renders in a __DEV__
-          build.
+          Runs a real bundled `@circuit/core` fixture through the ACTUAL production `SessionController`, driving the
+          real calibration and dashboard screens exactly as a live session would. Results are saved to the real
+          on-device SQLite history. __DEV__ only.
         </Text>
 
         <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
-          BUNDLED FIXTURES (PLACEHOLDER)
+          BUNDLED FIXTURES
         </Text>
-        {PLACEHOLDER_FIXTURES.map((name) => (
-          <View key={name} style={styles.fixtureRow}>
+        {SCENARIOS.map((scenario) => (
+          <Pressable
+            key={scenario.id}
+            style={styles.fixtureRow}
+            disabled={runningId !== null}
+            onPress={() => void runScenario(scenario)}
+            accessibilityRole="button"
+            accessibilityLabel={`Run replay fixture ${scenario.label}`}
+          >
             <Text style={styles.fixtureName} maxFontSizeMultiplier={1.3}>
-              {name}
+              {scenario.label}
             </Text>
-            <Text style={styles.fixtureStatus} maxFontSizeMultiplier={1.3}>
-              not wired
-            </Text>
-          </View>
+            {runningId === scenario.id ? (
+              <ActivityIndicator color={colors.accent} />
+            ) : (
+              <Text style={styles.fixtureStatus} maxFontSizeMultiplier={1.3}>
+                run
+              </Text>
+            )}
+          </Pressable>
         ))}
+
+        <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
+          UI-ONLY MODE
+        </Text>
+        <Pressable
+          style={styles.fixtureRow}
+          onPress={runMock}
+          accessibilityRole="button"
+          accessibilityLabel="Use scripted mock facade"
+        >
+          <Text style={styles.fixtureName} maxFontSizeMultiplier={1.3}>
+            Scripted mock (no real pipeline)
+          </Text>
+          <Text style={styles.fixtureStatus} maxFontSizeMultiplier={1.3}>
+            run
+          </Text>
+        </Pressable>
       </ScrollView>
     </SafeAreaView>
   );
@@ -57,12 +139,13 @@ const styles = StyleSheet.create({
   fixtureRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
+    alignItems: 'center',
     backgroundColor: colors.surface,
     borderRadius: radii.sm,
     borderWidth: 1,
     borderColor: colors.border,
     padding: spacing.sm,
   },
-  fixtureName: { ...typography.body, color: colors.textPrimary, fontFamily: 'monospace' },
-  fixtureStatus: { ...typography.caption, color: colors.warning },
+  fixtureName: { ...typography.body, color: colors.textPrimary, flexShrink: 1 },
+  fixtureStatus: { ...typography.caption, color: colors.accent },
 });

@@ -4,6 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import {
   LOCATION_PERMISSION_RATIONALE,
+  PRECISE_LOCATION_INSTRUCTIONS,
   requestForegroundLocationPermission,
   runPreflightChecks,
   type PreflightReport,
@@ -25,6 +26,12 @@ function reportToRows(report: PreflightReport): CheckRow[] {
   return [
     { label: 'Location services enabled', pass: report.locationServicesEnabled },
     { label: 'Location permission granted', pass: report.permissionGranted },
+    // Only meaningful once permission is granted -- see preflight.ts's
+    // evaluatePreflight (reduced-accuracy is a sub-state of a granted
+    // permission, not a substitute failure for it).
+    ...(report.permissionGranted
+      ? [{ label: 'Precise Location on', pass: !report.reducedAccuracy }]
+      : []),
     {
       label: 'GNSS fix acquired',
       pass: report.gnssFix.acquired,
@@ -37,6 +44,20 @@ function reportToRows(report: PreflightReport): CheckRow[] {
     },
     { label: 'Screen keep-awake available', pass: report.keepAwakeActivatable },
   ];
+}
+
+/** Machine-readable failure codes (`preflight.ts`'s `evaluatePreflight`) mapped to plain-language copy. */
+const FAILURE_COPY: Record<string, string> = {
+  LOCATION_SERVICES_DISABLED: 'Turn on Location Services for this device in system settings.',
+  LOCATION_PERMISSION_NOT_GRANTED: 'Grant Circuit Timer permission to use your location.',
+  PRECISE_LOCATION_OFF: PRECISE_LOCATION_INSTRUCTIONS,
+  GNSS_FIX_TIMEOUT: 'Could not get an accurate GPS fix. Move outdoors, away from tall buildings, and retry.',
+  BATTERY_CRITICALLY_LOW: 'Battery is critically low. Charge the device before starting a session.',
+  KEEP_AWAKE_UNAVAILABLE: 'This device cannot keep the screen awake during a session.',
+};
+
+function explainFailure(reason: string): string {
+  return FAILURE_COPY[reason] ?? reason.replace(/_/g, ' ').toLowerCase();
 }
 
 /** S3 — runs platform preflight collectors, shows pass/fail per check, retry; on pass → S4. */
@@ -116,7 +137,13 @@ export function PreflightScreen({ navigation }: Props): React.JSX.Element {
         ))}
 
         {report && !report.pass ? (
-          <StatusBanner variant="error" message={`${report.failures.length} check(s) failed. Fix and retry.`} />
+          <View style={styles.failuresCard}>
+            {report.failures.map((reason) => (
+              <Text key={reason} style={styles.failureText} maxFontSizeMultiplier={1.3}>
+                • {explainFailure(reason)}
+              </Text>
+            ))}
+          </View>
         ) : null}
         {report && report.pass ? <StatusBanner variant="success" message="All checks passed." /> : null}
 
@@ -171,6 +198,15 @@ const styles = StyleSheet.create({
   rowRight: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
   rowDetail: { ...typography.caption, color: colors.textMuted },
   rowBadge: { ...typography.label },
+  failuresCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: colors.danger,
+    padding: spacing.md,
+    gap: spacing.xs,
+  },
+  failureText: { ...typography.body, color: colors.textSecondary },
   button: { borderRadius: radii.lg, paddingVertical: spacing.md, alignItems: 'center' },
   primaryButton: { backgroundColor: colors.accent },
   primaryButtonText: { ...typography.subtitle, color: '#06101F' },

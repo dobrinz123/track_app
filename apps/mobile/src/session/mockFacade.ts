@@ -46,6 +46,7 @@ function initialState(): FacadeState {
     calibration: null,
     calibrationResult: null,
     laps: [],
+    speedKph: null,
   };
 }
 

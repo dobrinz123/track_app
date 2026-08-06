@@ -34,3 +34,21 @@ export async function createSqliteSessionRepository(dbName: string): Promise<Sql
   const db = await openDatabaseAsync(dbName);
   return SqlSessionRepository.create(wrapExpoSqliteDatabase(db));
 }
+
+/**
+ * Opens the on-device SQLite database once and returns BOTH the migrated
+ * `SqlSessionRepository` and the raw `SqlDatabase` handle it was built from,
+ * so a second store (`SqlSettingsStore`, the v2 `settings` key-value table)
+ * can share the exact same connection instead of opening `dbName` twice.
+ * `SqlSessionRepository.create` is what actually runs the migration
+ * (including the v2 `settings` table) -- this must be awaited before the raw
+ * `db` handle is used for anything settings-related.
+ */
+export async function openAppDatabase(
+  dbName: string,
+): Promise<{ db: SqlDatabase; repository: SqlSessionRepository }> {
+  const raw = await openDatabaseAsync(dbName);
+  const db = wrapExpoSqliteDatabase(raw);
+  const repository = await SqlSessionRepository.create(db);
+  return { db, repository };
+}

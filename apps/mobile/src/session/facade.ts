@@ -25,6 +25,8 @@ export interface FacadeState {
   calibration: { coverageFraction: number; onTrack: boolean } | null;
   calibrationResult: CalibrationResult | null;
   laps: LapRecord[];
+  /** Latest known speed in km/h, derived from the most recent sample's `speedMps`; `null` before any sample reports one. */
+  speedKph: number | null;
 }
 
 /**

@@ -4,29 +4,18 @@ import type {
   LocationSample,
   QualityAssessment,
   ReferenceLap,
-  SessionEvent,
-  SessionMachineSnapshot,
   SessionPipelineResult,
-  TrackMatch,
 } from '../contracts';
 import { CalibrationEngine, type CalibrationConfig } from '../calibration';
-import {
-  TelemetryQualityEvaluator,
-  TrackMatcher,
-  type TelemetryQualityConfig,
-  type TrackMatcherConfig,
-} from '../matching';
-import { polylineLength } from '../geometry';
+import { type TelemetryQualityConfig, type TrackMatcherConfig } from '../matching';
 import type { RuntimeProfile } from '../profile';
-import { LiveDeltaEngine, type LiveDeltaEngineConfig } from '../reference';
-import { createInitialSessionSnapshot, sessionReducer } from '../statemachine';
+import { type LiveDeltaEngineConfig } from '../reference';
 import {
-  CrossingDetector,
-  LapTimingEngine,
-  type CrossingDetectorConfig,
-  type LapTimingEngineConfig,
-  type ProjectedGate,
-} from '../timing';
+  SessionPipelineCore,
+  type MatchedTelemetrySample,
+  type RejectedTelemetrySample,
+} from '../controller/pipelineCore';
+import { type CrossingDetectorConfig, type LapTimingEngineConfig } from '../timing';
 
 export interface ReplayHarnessConfig {
   calibrateFirst?: readonly LocationSample[];
@@ -41,31 +30,10 @@ export interface ReplayHarnessConfig {
   endSession?: boolean;
 }
 
-export interface ReplayMatchedTelemetry {
-  sampleIndex: number;
-  tMono: number;
-  distanceM: number;
-  unwrappedProgressM: number;
-  quality: QualityAssessment;
-}
-
-export interface ReplayRejectedSample {
-  sampleIndex: number;
-  tMono: number;
-  level: QualityAssessment['level'];
-  reasons: string[];
-}
-
-const DEFAULT_PAUSE_GAP_MS = 30_000;
-const DEFAULT_LOW_QUALITY_GAP_MS = 10_000;
-
-function projectedGates(runtime: RuntimeProfile): ProjectedGate[] {
-  const gates = [runtime.startFinishGate, ...runtime.sectorGates];
-  if (runtime.pitLane !== undefined) {
-    gates.push(runtime.pitLane.entryGate, runtime.pitLane.exitGate);
-  }
-  return gates.map(({ gate, a, b }) => ({ gate, aLocal: a, bLocal: b }));
-}
+/** @deprecated kept as a name-compatible alias -- see `MatchedTelemetrySample` in `../controller/pipelineCore`. */
+export type ReplayMatchedTelemetry = MatchedTelemetrySample;
+/** @deprecated kept as a name-compatible alias -- see `RejectedTelemetrySample` in `../controller/pipelineCore`. */
+export type ReplayRejectedSample = RejectedTelemetrySample;
 
 function alreadyCalibratedResult(runtime: RuntimeProfile): CalibrationResult {
   return {
@@ -112,224 +80,75 @@ export function runCalibration(
 
 /**
  * Streams samples through the production quality, matching, crossing, state,
- * lap/sector timing, and live-delta modules in their application order.
+ * lap/sector timing, and live-delta modules in their application order, via
+ * the shared `SessionPipelineCore` (`../controller/pipelineCore`) -- the same
+ * per-sample processing `SessionController` drives live, so the two can never
+ * diverge on pipeline behavior.
  */
 export function runSessionPipeline(
   runtimeProfile: RuntimeProfile,
   samples: readonly LocationSample[],
   config: ReplayHarnessConfig = {},
 ): SessionPipelineResult {
-  const qualityEvaluator = new TelemetryQualityEvaluator(config.quality);
-  const matcher = new TrackMatcher(runtimeProfile, {
-    ...config.matcher,
-    quality: { ...config.matcher?.quality, ...config.quality },
+  const core = new SessionPipelineCore(runtimeProfile, {
+    quality: config.quality,
+    matcher: config.matcher,
+    crossings: config.crossings,
+    timing: config.timing,
+    delta: config.delta,
+    pauseGapMs: config.pauseGapMs,
+    lowQualityGapMs: config.lowQualityGapMs,
   });
-  const crossingDetector = new CrossingDetector(
-    projectedGates(runtimeProfile),
-    runtimeProfile.projection,
-    config.crossings,
-  );
-  const timingEngine = new LapTimingEngine(
-    {
-      totalLengthM: polylineLength(runtimeProfile.centerline),
-      startFinishGate: runtimeProfile.startFinishGate.gate,
-      sectorGates: runtimeProfile.sectorGates.map(({ gate }) => gate),
-    },
-    config.timing,
-  );
-  const deltaEngine = new LiveDeltaEngine(config.delta);
-  deltaEngine.setReference(config.referenceLap ?? null);
+  core.setReference(config.referenceLap ?? null);
 
-  const crossings: SessionPipelineResult['crossings'] = [];
-  const laps: SessionPipelineResult['laps'] = [];
   const deltas: DeltaUpdate[] = [];
-  const matches: ReplayMatchedTelemetry[] = [];
-  const rejectedSamples: ReplayRejectedSample[] = [];
   const qualityAssessments: Array<{ sampleIndex: number; assessment: QualityAssessment }> = [];
-  const stateHistory: SessionMachineSnapshot['state'][] = [];
-  const appliedInvalidReasons = new Set<string>();
-  const qualityCounts: Record<QualityAssessment['level'], number> = {
-    good: 0,
-    degraded: 0,
-    unreliable: 0,
-    invalid: 0,
-  };
-  let snapshot: SessionMachineSnapshot = createInitialSessionSnapshot();
-  let previousQualitySample: LocationSample | undefined;
-  let previousMatchedSample: LocationSample | null = null;
-  let previousMatch: TrackMatch | null = null;
-  let lowQualitySince: number | null = null;
-  let reverseTravelDetected = false;
-  let pendingPitEntryProgressM: number | null = null;
-  let pitEvidenceSamples = 0;
 
-  const invalidateActiveLap = (reason: string): void => {
-    if (timingEngine.currentLap() === null) return;
-    appliedInvalidReasons.add(reason);
-    timingEngine.markInvalid(reason);
-  };
-
-  const syncInvalidReasons = (): void => {
-    const reasons = snapshot.context.pendingInvalidReasons;
-    if (!Array.isArray(reasons)) return;
-    for (const reason of reasons) {
-      if (typeof reason === 'string') invalidateActiveLap(reason);
-    }
-  };
-  const dispatch = (event: SessionEvent): void => {
-    snapshot = sessionReducer(snapshot, event);
-    stateHistory.push(snapshot.state);
-    syncInvalidReasons();
-  };
-
-  dispatch({ type: 'START_PREFLIGHT' });
-  dispatch({ type: 'PREFLIGHT_PASSED' });
-  dispatch({ type: 'CALIBRATION_STARTED' });
+  core.dispatch({ type: 'START_PREFLIGHT' });
+  core.dispatch({ type: 'PREFLIGHT_PASSED' });
+  core.dispatch({ type: 'CALIBRATION_STARTED' });
   const calibration =
     config.calibrateFirst === undefined
       ? alreadyCalibratedResult(runtimeProfile)
       : runCalibration(runtimeProfile, config.calibrateFirst);
-  dispatch({ type: 'CALIBRATION_FINISHED', result: calibration });
-  dispatch({ type: calibration.accepted ? 'CALIBRATION_ACCEPTED' : 'CALIBRATION_REJECTED' });
+  core.dispatch({ type: 'CALIBRATION_FINISHED', result: calibration });
+  core.dispatch({ type: calibration.accepted ? 'CALIBRATION_ACCEPTED' : 'CALIBRATION_REJECTED' });
 
-  const pauseGapMs = config.pauseGapMs ?? DEFAULT_PAUSE_GAP_MS;
-  const lowQualityGapMs = config.lowQualityGapMs ?? DEFAULT_LOW_QUALITY_GAP_MS;
-
-  samples.forEach((sample, sampleIndex) => {
-    const assessment = qualityEvaluator.assess(sample, previousQualitySample);
-    qualityCounts[assessment.level] += 1;
+  for (const sample of samples) {
+    const result = core.ingest(sample);
     qualityAssessments.push({
-      sampleIndex,
-      assessment: { level: assessment.level, reasons: [...assessment.reasons] },
+      sampleIndex: result.sampleIndex,
+      assessment: { level: result.assessment.level, reasons: [...result.assessment.reasons] },
     });
-
-    const gapMs =
-      previousQualitySample === undefined ? 0 : sample.tMono - previousQualitySample.tMono;
-    if (gapMs > pauseGapMs) {
-      dispatch({ type: 'PAUSE' });
-      dispatch({ type: 'RESUME', gapMs });
-    }
-    if (gapMs > 3_000) {
-      dispatch({ type: 'GNSS_LOST' });
-      if (gapMs > lowQualityGapMs) invalidateActiveLap('LOW_QUALITY');
-      dispatch({ type: 'GNSS_RECOVERED' });
-    }
-
-    const lowQuality = assessment.level === 'unreliable' || assessment.level === 'invalid';
-    if (lowQuality) {
-      lowQualitySince ??= sample.tMono;
-      if (sample.tMono - lowQualitySince > lowQualityGapMs) invalidateActiveLap('LOW_QUALITY');
-    } else {
-      if (lowQualitySince !== null && sample.tMono - lowQualitySince > lowQualityGapMs) {
-        invalidateActiveLap('LOW_QUALITY');
-      }
-      lowQualitySince = null;
-    }
-
-    const match = matcher.match(sample);
-    if (match === null) {
-      rejectedSamples.push({
-        sampleIndex,
-        tMono: sample.tMono,
-        level: assessment.level,
-        reasons: [...assessment.reasons],
-      });
-      if (assessment.level !== 'invalid') previousQualitySample = sample;
-      return;
-    }
-
-    matches.push({
-      sampleIndex,
-      tMono: match.tMono,
-      distanceM: match.distanceM,
-      unwrappedProgressM: match.unwrappedProgressM,
-      quality: { level: match.quality.level, reasons: [...match.quality.reasons] },
-    });
-    if (pendingPitEntryProgressM !== null && snapshot.state !== 'inPit') {
-      if (match.onPitLane && Math.abs(match.lateralM) >= 5) {
-        pitEvidenceSamples += 1;
-        if (pitEvidenceSamples >= 2) {
-          dispatch({ type: 'PIT_ENTERED' });
-          invalidateActiveLap('PIT_TRANSIT');
-          pendingPitEntryProgressM = null;
-          pitEvidenceSamples = 0;
-        }
-      } else if (!match.onPitLane || Math.abs(match.lateralM) < 3) {
-        pitEvidenceSamples = 0;
-      }
-      if (
-        pendingPitEntryProgressM !== null &&
-        match.unwrappedProgressM - pendingPitEntryProgressM > 200
-      ) {
-        pendingPitEntryProgressM = null;
-        pitEvidenceSamples = 0;
-      }
-    }
     if (
-      previousMatch !== null &&
-      previousMatch.unwrappedProgressM - match.unwrappedProgressM > 30
+      result.match !== null &&
+      result.currentLapElapsedMs !== null &&
+      !result.completingStartFinish &&
+      config.referenceLap != null
     ) {
-      reverseTravelDetected = true;
-      invalidateActiveLap('REVERSE_TRAVEL');
+      deltas.push(core.computeDelta(result.match, result.currentLapElapsedMs));
     }
+  }
 
-    const detected = crossingDetector.update(previousMatch, match, previousMatchedSample, sample);
-    const completingStartFinish = detected.some(
-      (event) => event.kind === 'startFinish' && event.direction === 'forward',
-    );
-    const currentLap = timingEngine.currentLap();
-    if (currentLap !== null && !completingStartFinish && config.referenceLap != null) {
-      deltas.push(deltaEngine.onMatch(match, currentLap.elapsedMs(sample.tMono)));
-    }
+  if (config.endSession !== false) core.dispatch({ type: 'END_SESSION' });
 
-    for (const event of detected) {
-      crossings.push(event);
-      dispatch({ type: 'CROSSING', event });
-      if (event.kind === 'pitEntry' && event.direction === 'forward') {
-        pendingPitEntryProgressM = event.lapDistanceM;
-        pitEvidenceSamples = 0;
-      } else if (
-        event.kind === 'pitExit' &&
-        event.direction === 'forward' &&
-        snapshot.state === 'inPit'
-      ) {
-        dispatch({ type: 'PIT_EXITED' });
-        pendingPitEntryProgressM = null;
-        pitEvidenceSamples = 0;
-      }
-      const completed = timingEngine.onCrossing(
-        event,
-        match.quality.level,
-        snapshot.state === 'inPit',
-      );
-      if (completed !== null) laps.push(completed);
-      if (event.kind === 'startFinish' && event.direction === 'forward') deltaEngine.reset();
-      syncInvalidReasons();
-    }
-
-    previousQualitySample = sample;
-    previousMatchedSample = sample;
-    previousMatch = match;
-  });
-
-  if (config.endSession !== false) dispatch({ type: 'END_SESSION' });
   return {
-    laps,
-    finalState: snapshot.state,
-    crossings,
+    laps: core.laps,
+    finalState: core.state.state,
+    crossings: core.crossings,
     ...(config.calibrateFirst === undefined ? {} : { calibration }),
     deltas,
     diagnostics: {
       calibrationMode:
         config.calibrateFirst === undefined ? 'precalibrated-profile' : 'recognition-lap',
-      qualityCounts,
+      qualityCounts: core.qualityCounts,
       qualityAssessments,
-      rejectedSamples,
-      matches,
-      stateHistory,
-      reverseTravelDetected,
-      appliedInvalidReasons: [...appliedInvalidReasons],
-      activeLap: timingEngine.currentLap()?.lapNumber ?? null,
+      rejectedSamples: core.rejectedSamples,
+      matches: core.matches,
+      stateHistory: core.stateHistory,
+      reverseTravelDetected: core.reverseTravelDetected,
+      appliedInvalidReasons: [...core.appliedInvalidReasons],
+      activeLap: core.currentLap()?.lapNumber ?? null,
       samplesProcessed: samples.length,
     },
   };

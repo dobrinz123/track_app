@@ -2,7 +2,13 @@
 // `CHECKPOINT_SCHEMA_VERSION` (the wire envelope written into the checkpoints
 // table's payload column via `CheckpointCodec`) -- this number tracks the
 // *table* shapes, the other tracks the *checkpoint JSON* shape.
-export const SQL_SCHEMA_VERSION = 1;
+//
+// v2 (WP14 integration): adds the `settings` key-value table so app-side
+// settings persist through the same on-device SQLite database instead of an
+// in-memory stand-in. `SqlSessionRepository.migrate()` applies `SQL_DDL_V2`
+// and bumps an existing v1 database's `schema_migrations` row in place --
+// see that method for the actual upgrade path.
+export const SQL_SCHEMA_VERSION = 2;
 
 // Multi-statement DDL, applied via `SqlDatabase.execAsync`. Every statement is
 // `IF NOT EXISTS` so re-running it against an already-migrated database is a
@@ -52,5 +58,18 @@ CREATE TABLE IF NOT EXISTS reference_laps (
   layoutVersion INTEGER NOT NULL,
   payload TEXT NOT NULL,
   PRIMARY KEY (userId, circuitId, layoutId, layoutVersion)
+);
+`;
+
+// v2 addition: a simple app-settings key-value table. Not part of the
+// `LocalSessionRepository` contract (contracts.ts is out of this ticket's
+// write set) -- apps/mobile owns a small store on top of this table (see
+// apps/mobile/src/persistence/sqlSettingsStore.ts) built against the same
+// `SqlDatabase` a `SqlSessionRepository` was created from. `IF NOT EXISTS`
+// keeps this idempotent the same way `SQL_DDL` is.
+export const SQL_DDL_V2 = `
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 `;

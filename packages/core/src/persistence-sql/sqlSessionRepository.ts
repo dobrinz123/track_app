@@ -8,7 +8,7 @@ import type {
 } from '../contracts';
 import { CheckpointCodec, assertJsonSerializable, validateReferenceLap } from '../persistence';
 import type { SqlDatabase } from './sqlDatabase';
-import { SQL_DDL, SQL_SCHEMA_VERSION } from './schema';
+import { SQL_DDL, SQL_DDL_V2, SQL_SCHEMA_VERSION } from './schema';
 
 interface SessionRow {
   sessionId: string;
@@ -62,12 +62,24 @@ export class SqlSessionRepository implements LocalSessionRepository {
     }
 
     await this.db.execAsync(SQL_DDL);
+    // v2: the settings key-value table. `CREATE TABLE IF NOT EXISTS` makes
+    // this safe to run unconditionally, but the version bump below only
+    // fires on databases that actually need it (see the branches beneath).
+    await this.db.execAsync(SQL_DDL_V2);
 
     const versionRows = await this.db.getAllAsync<{ version: number }>(
       'SELECT version FROM schema_migrations LIMIT 1',
     );
-    if (versionRows.length === 0) {
+    const currentVersion = versionRows[0]?.version ?? 0;
+    if (currentVersion === 0) {
+      // Fresh database: record the current schema version outright.
       await this.db.runAsync('INSERT INTO schema_migrations (version) VALUES (?)', [SQL_SCHEMA_VERSION]);
+    } else if (currentVersion < SQL_SCHEMA_VERSION) {
+      // Upgrade path: a database created under an older `SqlSessionRepository`
+      // (e.g. v1, no `settings` table) is opened again -- `SQL_DDL_V2` above
+      // has already created the missing table; bump the recorded version to
+      // match. Existing rows in every other table are untouched.
+      await this.db.runAsync('UPDATE schema_migrations SET version = ?', [SQL_SCHEMA_VERSION]);
     }
   }
 

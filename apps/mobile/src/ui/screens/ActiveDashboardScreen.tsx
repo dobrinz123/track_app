@@ -97,10 +97,8 @@ export function ActiveDashboardScreen({ navigation }: Props): React.JSX.Element 
             <Text style={styles.bottomStatLabel} maxFontSizeMultiplier={1.2}>
               SPEED
             </Text>
-            {/* Not part of FacadeState (MUST DO #1) — wire up when the facade
-                gains a live speed field from the real pipeline. */}
             <Text style={styles.speedPlaceholder} maxFontSizeMultiplier={1.2}>
-              -- km/h
+              {state.speedKph === null ? '-- km/h' : `${Math.round(state.speedKph)} km/h`}
             </Text>
           </View>
         </View>
