@@ -1,0 +1,123 @@
+import React from 'react';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import type { NativeStackScreenProps } from '@react-navigation/native-stack';
+import type { RootStackParamList } from '../navigation/types';
+import { colors, radii, spacing, typography } from '../theme';
+import { TimeDisplay } from '../components/TimeDisplay';
+import { formatDateUtc } from '../format';
+import { sessionHistoryStore } from '../../session/composition';
+
+type Props = NativeStackScreenProps<RootStackParamList, 'SessionHistory'>;
+
+/** S9 — list of stored sessions (mock data via session store for now) with drill-down into lap detail. */
+export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
+  const sessions = sessionHistoryStore.listSessions();
+  const pb = sessionHistoryStore.getPersonalBest();
+
+  return (
+    <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
+      <ScrollView contentContainerStyle={styles.container}>
+        <Text style={styles.title} maxFontSizeMultiplier={1.3}>
+          Session History
+        </Text>
+
+        {pb ? (
+          <Pressable
+            style={styles.pbCard}
+            onPress={() => navigation.navigate('PersonalBest')}
+            accessibilityRole="button"
+            accessibilityLabel="View personal best details"
+          >
+            <Text style={styles.pbLabel} maxFontSizeMultiplier={1.3}>
+              PERSONAL BEST
+            </Text>
+            <TimeDisplay ms={pb.lap.durationMs} size="medium" color={colors.success} />
+          </Pressable>
+        ) : null}
+
+        {sessions.length === 0 ? (
+          <Text style={styles.emptyText} maxFontSizeMultiplier={1.3}>
+            No sessions recorded yet.
+          </Text>
+        ) : (
+          sessions.map((session) => {
+            const validLaps = session.laps.filter((l) => l.valid);
+            const bestMs = validLaps.length > 0 ? Math.min(...validLaps.map((l) => l.durationMs)) : null;
+            return (
+              <View key={session.sessionId} style={styles.sessionCard}>
+                <View style={styles.sessionHeader}>
+                  <Text style={styles.sessionDate} maxFontSizeMultiplier={1.3}>
+                    {formatDateUtc(session.displayDateUtc)}
+                  </Text>
+                  <Text style={styles.sessionMeta} maxFontSizeMultiplier={1.3}>
+                    {session.laps.length} laps · best <TimeDisplayInline ms={bestMs} />
+                  </Text>
+                </View>
+                <View style={styles.lapChipsRow}>
+                  {session.laps.map((lap) => (
+                    <Pressable
+                      key={lap.lapNumber}
+                      style={[styles.lapChip, !lap.valid && styles.lapChipInvalid]}
+                      onPress={() => navigation.navigate('LapDetail', { sessionId: session.sessionId, lapNumber: lap.lapNumber })}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Lap ${lap.lapNumber}, ${lap.valid ? 'valid' : 'invalid'}, view detail`}
+                    >
+                      <Text style={styles.lapChipText} maxFontSizeMultiplier={1.3}>
+                        L{lap.lapNumber}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </View>
+            );
+          })
+        )}
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+/** Inline plain-text time (no live region needed for a static list). */
+function TimeDisplayInline({ ms }: { ms: number | null }): React.JSX.Element {
+  return <TimeDisplay ms={ms} size="small" style={styles.inlineTime} maxFontSizeMultiplier={1.3} />;
+}
+
+const styles = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: colors.background },
+  container: { padding: spacing.lg, gap: spacing.md },
+  title: { ...typography.title, color: colors.textPrimary },
+  pbCard: {
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.success,
+    padding: spacing.md,
+    gap: spacing.xs,
+  },
+  pbLabel: { ...typography.label, color: colors.textMuted },
+  emptyText: { ...typography.body, color: colors.textMuted },
+  sessionCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.md,
+    gap: spacing.sm,
+  },
+  sessionHeader: { gap: 2 },
+  sessionDate: { ...typography.subtitle, color: colors.textPrimary },
+  sessionMeta: { ...typography.caption, color: colors.textSecondary },
+  lapChipsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs },
+  lapChip: {
+    backgroundColor: colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radii.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+  },
+  lapChipInvalid: { borderColor: colors.danger },
+  lapChipText: { ...typography.caption, color: colors.textPrimary },
+  inlineTime: { fontSize: 13 },
+});
