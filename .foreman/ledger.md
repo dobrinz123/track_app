@@ -48,6 +48,7 @@ NOTE: WP11b (SQLite adapter) intentionally held until WP4b collects — package-
 - WP11a | 1 | Sonnet | ticket-wp11a-persistence-core.md | DISPATCHED | — | — | 2026-08-06
 
 ## Decisions
+- 2026-08-06 USER CLARIFICATION: Expo Go = dev-only; on-track = standalone EAS-built offline iOS app installed from Windows (TestFlight paid path OR AltStore/Sideloadly free path w/ 7-day expiry). ADR-0004 amended; docs worker re-scoped mid-flight via SendMessage. WP14 MUST verify: TMR profile statically imported (inlined in Hermes bundle, never fetched) + zero network calls in session paths + eas.json with development/preview/production profiles.
 - 2026-08-06 USER PRODUCT DECISION: iOS is primary target (ADR-0003). WP12b dispatched (iOS hardening); docs/validation checklist to be iOS-first in WP14/15; ios export added to verification gates. Architecture stays cross-platform.
 - WP2 concerns dispositioned: (a) no public pit/SF/sector data → gates are app-defined + versioned per ADR-0002, never labeled official; (b) turn-count conflict (17 vs 10) → not modeled in MVP, documented; (c) OSM IDs missing → resolved by LEAD Overpass query: way 488429454 (circuit, closed, ~3706 m ≈ verified 3.708 km) + way 488429716 (pit lane); raw JSON archived in data/osm/, ODbL attribution mandated (ADR-0002). New task WP4b: deterministic TMR profile generator from OSM data.
 - Stack: Expo/RN + TS monorepo (ADR-0001) — local verifiability + worker proficiency.
