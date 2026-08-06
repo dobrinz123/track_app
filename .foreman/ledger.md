@@ -27,7 +27,9 @@ See docs/implementation-plan.md (WP0–WP16).
 | WP11a | REPORTED(DONE) + LEAD verified slice (35/35, lint ✓, commit b6241b6); group gate pending | packages/core/src/persistence/**, test/persistence/** | wave2-persist |
 | WP12 | REPORTED(DONE) + LEAD verified (mobile tsc ✓ eslint ✓ expo export 1.5MB hbc ✓, commit 73d0d9c) | apps/mobile/src/platform/**, app.json | wave2-platform |
 | WP4 | REPORTED(DONE_WITH_CONCERNS→resolved: tests relocated by LEAD) + gates green 366/366, commit c8de532 | packages/core/src/profile/**, test/profile/** | wave3-schema |
-| WP4b | DISPATCHED (Codex effort=high, background, log wp4b-codex-output.log) | packages/core/scripts/**, assets/**, root package.json | wave3-tmr |
+| WP4b | REPORTED(DONE_WITH_CONCERNS→resolved: test relocated) + gates 371/371, asset provenance verified by LEAD, commit 8eb9046 | packages/core/scripts/**, assets/** | wave3-tmr |
+| WP7 | DISPATCHED (Codex effort=high, background, log wp7-codex-output.log) | packages/core/src/matching/**, src/calibration/**, test/{matching,calibration}/** | bl0hsl1ru |
+| WP11b | DISPATCHED (Sonnet, background) | packages/core/src/persistence-sql/**, test/persistence*/**, core package.json, lockfile, apps/mobile/src/persistence/** | wave4-sqlite |
 | WP13a | REPORTED(DONE) + LEAD verified (tsc/lint/export 890-module 2MB hbc, commit b4c83bf) | apps/mobile/src/ui/**, src/session/**, App.tsx | wave3-ui |
 
 NOTE: WP11b (SQLite adapter) intentionally held until WP4b collects — package-lock.json write overlap (concurrent npm installs). Facade integration notes: add speedKph to FacadeState at WP14; SessionHistoryStore interface lives outside SessionFacade (accepted design call).
@@ -46,6 +48,7 @@ NOTE: WP11b (SQLite adapter) intentionally held until WP4b collects — package-
 - WP11a | 1 | Sonnet | ticket-wp11a-persistence-core.md | DISPATCHED | — | — | 2026-08-06
 
 ## Decisions
+- 2026-08-06 USER PRODUCT DECISION: iOS is primary target (ADR-0003). WP12b dispatched (iOS hardening); docs/validation checklist to be iOS-first in WP14/15; ios export added to verification gates. Architecture stays cross-platform.
 - WP2 concerns dispositioned: (a) no public pit/SF/sector data → gates are app-defined + versioned per ADR-0002, never labeled official; (b) turn-count conflict (17 vs 10) → not modeled in MVP, documented; (c) OSM IDs missing → resolved by LEAD Overpass query: way 488429454 (circuit, closed, ~3706 m ≈ verified 3.708 km) + way 488429716 (pit lane); raw JSON archived in data/osm/, ODbL attribution mandated (ADR-0002). New task WP4b: deterministic TMR profile generator from OSM data.
 - Stack: Expo/RN + TS monorepo (ADR-0001) — local verifiability + worker proficiency.
 - Codex consent: granted in mission spec ("Codex agents — algorithmic and verification work"); billing = ChatGPT subscription.
