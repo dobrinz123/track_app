@@ -26,6 +26,7 @@ export const CORE_PACKAGE_ID = '@circuit/core' as const;
 
 export * from './geometry';
 export * from './profile';
+export * from './catalog';
 
 export {
   DEFAULT_TELEMETRY_QUALITY_CONFIG,

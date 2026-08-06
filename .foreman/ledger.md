@@ -44,7 +44,13 @@ See docs/implementation-plan.md (WP0–WP16).
 | WP-oddfix | REPORTED(DONE) + LEAD gates 513/513 + export:ios, commit 12a6378 — corridor wiring, reason copy, diagnostics UI, background checkpoint, recovery lap numbering | see ticket | wave8-odd |
 | FINAL-VERIFY | COMPLETE. Claude blind verifier: PASS_WITH_NOTES (18/18 DoD rows, 1 LOW → fixed bf9397a). Codex cross-review: nominal FAIL from sandbox write-denials (no app defect; gates pass in real workspace, dual-reproduced) + 1 MEDIUM (sectorIndex assertions → fixed c3ca773) + procedural note (HEAD moved mid-verify — logged). PROJECT VERIFIED at c3ca773: 515/515 tests, all gates green. | — | done |
 
-FINAL STATE: delivered. See docs/verification/final-report.md.
+FINAL STATE v1: delivered (see docs/verification/final-report.md). — Post-delivery phase 2 opened 2026-08-06: user directives = premium UI redesign (kill generic blue/system font/centered text; dark stays), multi-circuit-ready selection UI, app naming (Haiku research → user picks), legal text relocated to About/CircuitDetail (ODbL compliance kept — LEAD decision, deletion refused as license-required). Bundle id FROZEN at app.circuittimer.tmr regardless of display-name choice (resign data preservation).
+
+| id | state | owned paths | job id |
+|----|-------|-------------|--------|
+| WP-name | ACCEPTED (DONE, 24 candidates, 6 verified finalists) → USER DECISION: app name = TRACE. Display name applied in app.json (CFBundleDisplayName); APP_NAME constant flips at UI-worker collection. Bundle id UNCHANGED (app.circuittimer.tmr). | scratch/naming-research.md | wave9-name |
+| WP-catalog | DISPATCHED (Codex effort=medium) | packages/core/src/catalog/**, test/catalog/**, index.ts (1 line) | bmbgre6tu |
+| WP-ui2 | DISPATCHED (Sonnet) | apps/mobile/src/ui/**, session/circuitCatalog.ts, App.tsx, fonts deps | wave9-ui |
 | WP-docs2 | DISPATCHED (Sonnet) | docs/algorithms/**, docs/*.md, README index | wave7-docs |
 | VERIFY-CORE | VERDICT: PASS_WITH_NOTES — all 8 tickets OK, 7/7 adversarial probes passed, purity guard fires. Finding 1 (MEDIUM, uncommitted generate:tmr script) fixed by LEAD commit. Notes 3 (matcher hint gives no compute savings — full search every call; spec requires local-first search) → queued for WP-perf pass. Note 4 accepted (stricter debounce consistent with contracts). Core group = VERIFIED. | — | wave5-verify |
 | WP13a | REPORTED(DONE) + LEAD verified (tsc/lint/export 890-module 2MB hbc, commit b4c83bf) | apps/mobile/src/ui/**, src/session/**, App.tsx | wave3-ui |
