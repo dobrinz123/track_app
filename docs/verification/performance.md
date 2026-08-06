@@ -12,9 +12,9 @@ time on this machine; headroom is `1,000 ms / measured per-update time`.
 
 | Component                             |                           Guard target |                 Measured | Time per update | 1 Hz headroom |
 | ------------------------------------- | -------------------------------------: | -----------------------: | --------------: | ------------: |
-| Track matcher, 150-vertex TMR profile | >=5,000 matches/s and >=3x forced-full | 388,047 matches/s, 3.86x |      0.00258 ms |      388,047x |
+| Track matcher, 150-vertex TMR profile | >=5,000 matches/s and >=3x forced-full | 390,089 matches/s, 3.67x |      0.00256 ms |      390,089x |
 | Full production pipeline              |                 Five laps in <1,000 ms |   459 samples in 2.35 ms |      0.00512 ms |      195,319x |
-| `LiveDeltaEngine.onMatch`             |                         >=20,000 ops/s |          2,022,433 ops/s |     0.000494 ms |    2,022,433x |
+| `LiveDeltaEngine.onMatch`             |                         >=20,000 ops/s |          1,937,519 ops/s |     0.000516 ms |    1,937,519x |
 
 The five-lap batch itself has approximately 426x headroom against its 1,000 ms regression
 limit. That guard remains in
@@ -22,10 +22,10 @@ limit. That guard remains in
 (`processes a roughly 400-sample five-lap session in under one second`); it is cross-referenced
 rather than duplicated in the performance test suite.
 
-| Resource guard                                  |                         Target |                                                          Measured |
-| ----------------------------------------------- | -----------------------------: | ----------------------------------------------------------------: |
-| Serialized 3,600-sample `SessionPipelineResult` |                         <5 MiB |                                                          0.72 MiB |
-| Matcher mutable state after 3,600 samples       | Constant-size; no sample array | 586 bytes (one-sample state was measured separately by the guard) |
+| Resource guard                                  |                         Target |                                          Measured |
+| ----------------------------------------------- | -----------------------------: | ------------------------------------------------: |
+| Serialized 3,600-sample `SessionPipelineResult` |                         <5 MiB |                                          0.72 MiB |
+| Matcher mutable state after 3,600 samples       | Constant-size; no sample array | 580 bytes after one sample; 586 bytes after 3,600 |
 
 ## Matcher before and after
 
@@ -36,9 +36,9 @@ production default is 25.
 
 | Mode                                   | Median wall time |        Throughput |
 | -------------------------------------- | ---------------: | ----------------: |
-| Forced global audit every sample       |         99.57 ms | 100,432 matches/s |
-| Periodic global audit every 25 samples |         25.77 ms | 388,047 matches/s |
-| Improvement                            |        **3.86x** |         **3.86x** |
+| Forced global audit every sample       |         94.20 ms | 106,156 matches/s |
+| Periodic global audit every 25 samples |         25.64 ms | 390,089 matches/s |
+| Improvement                            |        **3.67x** |         **3.67x** |
 
 Between global audits, matching uses only the hinted window and retains the most recently
 audited hint-disagreement value for confidence scoring. No-history and lost-mode updates still
@@ -49,7 +49,7 @@ outputs exactly with the canonical geometry projection helper.
 ## Methodology
 
 - Matcher: generate one deterministic TMR lap at 125 Hz, take 10,000 samples, warm each mode
-  with 1,000 samples, then alternate three timed runs per mode and report the median. A checksum
+  with 1,000 samples, then alternate five timed runs per mode and report the median. A checksum
   equality assertion ensures both modes process equivalent projection results.
 - Full pipeline: use the existing seed-118 five-lap replay fixture, warm it five times, then
   report the median of seven complete `runSessionPipeline` calls. The committed integration
