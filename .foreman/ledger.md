@@ -21,9 +21,11 @@ See docs/implementation-plan.md (WP0–WP16).
 |----|-------|-------------|--------|
 | WP0 | DONE (LEAD) | docs/**, .foreman/ledger.md | — |
 | WP1 | REPORTED(DONE) + LEAD deterministic checks passed (typecheck/test/lint green, commit 79e974b); blind verification batched into core-group gate | root configs, packages/core scaffold, apps/mobile | wave1-scaffold |
-| WP5 | DISPATCHED (Codex, effort=high, background job br3xpj3dd, log .foreman/scratch/wp5-codex-output.log) | packages/core/src/geometry/** | br3xpj3dd |
+| WP5 | REPORTED(DONE) + LEAD gates green (287/287, commit dabbdc6); blind verification batched into core-group gate | packages/core/src/geometry/**, test/geometry/** | br3xpj3dd |
+| WP6 | DISPATCHED (Codex, effort=high, background, log .foreman/scratch/wp6-codex-output.log) | packages/core/src/timing/** | wave2-timing |
 | WP8 | REPORTED(DONE_WITH_CONCERNS) — concerns triaged: test placement accepted (vitest convention); geometry failures belong to in-flight WP5, judged at WP5 collection | packages/core/src/statemachine/**, test/statemachine/** | wave2-sm |
-| WP11a | DISPATCHED (Sonnet, background) | packages/core/src/persistence/**, test/persistence/** | wave2-persist |
+| WP11a | REPORTED(DONE) + LEAD verified slice (35/35, lint ✓, commit b6241b6); group gate pending | packages/core/src/persistence/**, test/persistence/** | wave2-persist |
+| WP12 | DISPATCHED (Sonnet, background) | apps/mobile/src/platform/**, app.json, mobile package.json, lockfile | wave2-platform |
 | WP2 | ACCEPTED (DONE_WITH_CONCERNS; concerns dispositioned — see Decisions) | docs/research/**, data/osm/** | wave1-circuit |
 | WP3 | ACCEPTED (DONE; scout report consumed) | .foreman/scratch/platform-research.md | wave1-platform |
 | WP4–WP16 | PENDING | see plan | — |
