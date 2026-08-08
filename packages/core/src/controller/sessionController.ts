@@ -219,6 +219,15 @@ export class SessionController {
   private readonly listeners = new Set<(s: FacadeStateCore) => void>();
   /** Fire-and-forget async work (telemetry/checkpoint/PB persistence) started from the synchronous sample handler -- see `flush()`. */
   private pendingWork: Array<Promise<unknown>> = [];
+  /**
+   * Serializes completed-lap SQL work in crossing order. A burst of samples
+   * can complete several laps before the first async write resumes; without
+   * this chain, atomic PB replacements can open overlapping SQLite
+   * transactions on the same connection. Raw telemetry capture/trimming is
+   * deliberately performed before joining this chain so live memory remains
+   * bounded even during such a burst.
+   */
+  private lapPersistenceTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly deps: SessionControllerDeps) {
     this.core = new SessionPipelineCore(deps.runtimeProfile, {
@@ -241,7 +250,9 @@ export class SessionController {
   async flush(): Promise<void> {
     const pending = this.pendingWork;
     this.pendingWork = [];
-    await Promise.allSettled(pending);
+    // Persistence failures must reach the caller; silently settling them made
+    // a completed flush indistinguishable from lost telemetry/PB writes.
+    await Promise.all(pending);
   }
 
   // -------------------------------------------------------------------
@@ -537,7 +548,22 @@ export class SessionController {
     const result = this.core.ingest(sample);
     this.latestGnssQuality = result.assessment.level;
     if (sample.speedMps !== undefined) this.latestSpeedKph = sample.speedMps * 3.6;
-    if (result.match !== null && result.currentLapElapsedMs !== null && !result.completingStartFinish) {
+    if (result.completingStartFinish) {
+      // SessionPipelineCore resets its delta engine at this boundary. Clear
+      // the facade value in the same sample so the just-finished lap's delta
+      // is never displayed as though it belonged to the new lap.
+      this.latestDelta = null;
+    } else if (result.match === null) {
+      // A rejected fix must never leave a stale faster/slower indication on
+      // screen. The delta engine cannot observe rejected matches itself, so
+      // neutralize at the controller boundary until trustworthy matching
+      // resumes (track-day soak defect: invalid GNSS window retained delta).
+      this.latestDelta = {
+        deltaMs: this.latestDelta?.deltaMs ?? 0,
+        confidence: 0,
+        display: 'neutral',
+      };
+    } else if (result.currentLapElapsedMs !== null && !result.completingStartFinish) {
       this.latestDelta = this.core.computeDelta(result.match, result.currentLapElapsedMs);
     }
     for (const lap of result.completedLaps) {
@@ -546,26 +572,46 @@ export class SessionController {
     this.emit();
   }
 
-  private async onLapCompleted(lap: LapRecord): Promise<void> {
+  private onLapCompleted(lap: LapRecord): Promise<void> {
     this.lastLapMs = lap.durationMs;
     const sessionId = this.sessionId;
-    if (sessionId === null) return;
-    const telemetry = this.rawSamples.filter((sample) => sample.tMono >= lap.tStart && sample.tMono <= lap.tEnd);
+    if (sessionId === null) return Promise.resolve();
+    const telemetry = this.rawSamples.filter(
+      (sample) => sample.tMono >= lap.tStart && sample.tMono <= lap.tEnd,
+    );
     // Trim the buffer down to only the still in-flight tail (samples after
     // this lap's end) so it stays O(current lap), not O(whole session) --
     // M2 fix. Every sample up to and including this lap's end has now either
     // been persisted above or belonged to an earlier, already-saved lap.
     this.rawSamples = this.rawSamples.filter((sample) => sample.tMono > lap.tEnd);
-    await this.deps.repository.saveTelemetry(sessionId, lap.lapNumber, telemetry);
-    await this.checkpointNow();
-    await this.maybeReplacePb(lap);
-    this.emit();
+    // Build while this lap's matches are guaranteed to still be present in
+    // SessionPipelineCore's bounded rolling buffer. Deferring construction
+    // into the SQL queue can let a burst of later laps evict this telemetry
+    // before persistence resumes, silently skipping a legitimate PB.
+    const pbCandidate = this.buildPbCandidate(lap, sessionId);
+    // Capture the checkpoint at this boundary too. Reading `core.state` and
+    // `core.laps` later inside the queue can make an early checkpoint claim
+    // later laps whose telemetry has not been written yet.
+    const checkpointSnapshot = this.core.state;
+    const checkpointLaps = [...this.core.laps];
+    const persistence = this.lapPersistenceTail.then(async () => {
+      await this.deps.repository.saveTelemetry(sessionId, lap.lapNumber, telemetry);
+      await this.deps.repository.saveCheckpoint(
+        sessionId,
+        checkpointSnapshot,
+        checkpointLaps,
+      );
+      await this.maybeReplacePb(lap, pbCandidate);
+      this.emit();
+    });
+    // Keep later laps moving even if one write fails; `persistence` itself is
+    // still tracked by `flush()` so the original rejection reaches the caller.
+    this.lapPersistenceTail = persistence.catch(() => undefined);
+    return persistence;
   }
 
-  private async maybeReplacePb(lap: LapRecord): Promise<void> {
-    if (!lap.valid) return;
-    const sessionId = this.sessionId;
-    if (sessionId === null) return;
+  private buildPbCandidate(lap: LapRecord, sessionId: string): ReferenceLap | null {
+    if (!lap.valid) return null;
     const built = buildReferenceLap({
       profile: this.deps.circuitProfile,
       lap,
@@ -577,8 +623,11 @@ export class SessionController {
       algorithmVersion: this.deps.algorithmVersion,
       ...(this.deps.device === undefined ? {} : { device: this.deps.device }),
     });
-    if (!built.ok) return;
-    const candidate = built.reference;
+    return built.ok ? built.reference : null;
+  }
+
+  private async maybeReplacePb(lap: LapRecord, candidate: ReferenceLap | null): Promise<void> {
+    if (candidate === null) return;
     const expectedSectorCount = this.deps.runtimeProfile.sectorGates.length + 1;
     const replace = shouldReplacePb(this.currentReference, {
       reference: candidate,
