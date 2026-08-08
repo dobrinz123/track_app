@@ -13,3 +13,4 @@ dist-export/
 # listed here too for repo-root visibility.
 apps/mobile/ios/
 apps/mobile/android/
+builds/

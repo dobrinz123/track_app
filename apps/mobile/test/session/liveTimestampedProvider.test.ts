@@ -1,6 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import type { LocationProvider, LocationSample } from '@circuit/core';
-import { LiveTimestampedLocationProvider } from '../../src/session/liveTimestampedProvider';
+import {
+  DEFAULT_TELEMETRY_QUALITY_CONFIG,
+  InMemorySessionRepository,
+  SessionController,
+  TelemetryQualityEvaluator,
+  cleanRecognitionLap,
+} from '@circuit/core';
+import {
+  ReplayTimeSource,
+  ReplayTimestampedLocationProvider,
+  ScaledReplayClock,
+} from '../../src/session/liveTimestampedProvider';
+import { RealSessionFacade } from '../../src/session/realFacade';
+import type { FacadeState } from '../../src/session/facade';
+import { TMR_CIRCUIT_PROFILE, TMR_RUNTIME_PROFILE } from '../../src/session/tmrProfile';
 import { FakeClock } from '../support/coreTestDoubles';
 
 /**
@@ -39,36 +53,108 @@ function sample(tMono: number, extra: Partial<LocationSample> = {}): LocationSam
   return { tMono, lat: 46.435, lon: 25.06, source: 'replay', ...extra };
 }
 
-describe('LiveTimestampedLocationProvider', () => {
-  it('re-stamps tMono to the clock reading at delivery time, discarding the inner tMono, in delivery order', async () => {
+describe('ReplayTimeSource', () => {
+  it('virtualNow() = virtualStartMono + realElapsed * speedFactor', () => {
+    const realClock = new FakeClock(1_000_000);
+    const timeSource = new ReplayTimeSource(realClock, 10, 500);
+
+    expect(timeSource.virtualNow()).toBe(500); // no real time elapsed yet
+
+    realClock.advance(100); // 100ms of real time
+    expect(timeSource.virtualNow()).toBe(500 + 100 * 10);
+
+    realClock.advance(50);
+    expect(timeSource.virtualNow()).toBe(500 + 150 * 10);
+  });
+
+  it('defaults virtualStartMono to 0', () => {
+    const realClock = new FakeClock(0);
+    const timeSource = new ReplayTimeSource(realClock, 4);
+    expect(timeSource.virtualNow()).toBe(0);
+    realClock.advance(10);
+    expect(timeSource.virtualNow()).toBe(40);
+  });
+
+  it('toVirtual() offsets from the anchor without scaling, independent of real time', () => {
+    const realClock = new FakeClock(0);
+    const timeSource = new ReplayTimeSource(realClock, 10, 500);
+
+    // A fixture's own tMono values, anchored at its first sample (1_000).
+    expect(timeSource.toVirtual(1_000, 1_000)).toBe(500);
+    expect(timeSource.toVirtual(2_000, 1_000)).toBe(1_500); // +1000ms of ORIGINAL spacing, unscaled
+    expect(timeSource.toVirtual(1_500, 1_000)).toBe(1_000);
+
+    // Real-time elapsing has no effect on toVirtual -- it is a pure fixture-time offset.
+    realClock.advance(1_000_000);
+    expect(timeSource.toVirtual(2_000, 1_000)).toBe(1_500);
+  });
+});
+
+describe('ScaledReplayClock', () => {
+  it('now() reads the shared ReplayTimeSource', () => {
+    const realClock = new FakeClock(0);
+    const timeSource = new ReplayTimeSource(realClock, 5, 1_000);
+    const clock = new ScaledReplayClock(timeSource);
+
+    expect(clock.now()).toBe(1_000);
+    realClock.advance(20);
+    expect(clock.now()).toBe(1_000 + 20 * 5);
+  });
+});
+
+describe('ReplayTimestampedLocationProvider', () => {
+  it('preserves original inter-sample tMono spacing in the virtual domain, discarding the real clock reading at delivery', async () => {
     const inner = new ScriptedProvider();
-    const clock = new FakeClock(500_000);
-    const wrapper = new LiveTimestampedLocationProvider(inner, clock);
+    const realClock = new FakeClock(0);
+    const speedFactor = 10;
+    const timeSource = new ReplayTimeSource(realClock, speedFactor, 500_000);
+    const wrapper = new ReplayTimestampedLocationProvider(inner, timeSource);
     await wrapper.start();
 
     const received: LocationSample[] = [];
     wrapper.subscribe((s) => received.push(s));
 
-    // Inner tMono values (10, 20, 15) are small, fixture-relative, and even
-    // non-monotonic -- none of that may leak through; only the clock reading
-    // at delivery time matters.
-    clock.set(500_100);
-    inner.deliver(sample(10));
-    clock.set(500_250);
-    inner.deliver(sample(20));
-    clock.set(500_400);
-    inner.deliver(sample(15));
+    // Fixture-relative original tMono spacing: 0, 1000, 1000 (1Hz-style cadence).
+    // Real-clock advances used to simulate the ACCELERATED (speedFactor=10) real-time
+    // delivery pace -- 100ms real per 1000ms of original fixture spacing.
+    inner.deliver(sample(10_000));
+    realClock.advance(100);
+    inner.deliver(sample(11_000));
+    realClock.advance(100);
+    inner.deliver(sample(12_000));
 
-    expect(received.map((s) => s.tMono)).toEqual([500_100, 500_250, 500_400]);
-    for (let i = 1; i < received.length; i += 1) {
-      expect(received[i]!.tMono).toBeGreaterThan(received[i - 1]!.tMono);
-    }
+    // Anchored at the first sample's own tMono (10_000) -> virtualStartMono (500_000);
+    // every later sample offset by exactly its ORIGINAL fixture-relative delta, NOT by
+    // the real clock reading at delivery time.
+    expect(received.map((s) => s.tMono)).toEqual([500_000, 501_000, 502_000]);
+  });
+
+  it('re-anchors to the first sample observed after each start()', async () => {
+    const inner = new ScriptedProvider();
+    const realClock = new FakeClock(0);
+    const timeSource = new ReplayTimeSource(realClock, 10, 0);
+    const wrapper = new ReplayTimestampedLocationProvider(inner, timeSource);
+
+    await wrapper.start();
+    const firstRun: LocationSample[] = [];
+    wrapper.subscribe((s) => firstRun.push(s));
+    inner.deliver(sample(5_000));
+    inner.deliver(sample(6_000));
+    expect(firstRun.map((s) => s.tMono)).toEqual([0, 1_000]);
+
+    await wrapper.stop();
+    await wrapper.start(); // new run -- must re-anchor, not keep accumulating off the old anchor
+    const secondRun: LocationSample[] = [];
+    wrapper.subscribe((s) => secondRun.push(s));
+    inner.deliver(sample(9_000));
+    inner.deliver(sample(9_500));
+    expect(secondRun.map((s) => s.tMono)).toEqual([0, 500]);
   });
 
   it('preserves every other sample field unchanged', async () => {
     const inner = new ScriptedProvider();
-    const clock = new FakeClock(0);
-    const wrapper = new LiveTimestampedLocationProvider(inner, clock);
+    const timeSource = new ReplayTimeSource(new FakeClock(0), 10, 0);
+    const wrapper = new ReplayTimestampedLocationProvider(inner, timeSource);
     await wrapper.start();
 
     const received: LocationSample[] = [];
@@ -80,8 +166,8 @@ describe('LiveTimestampedLocationProvider', () => {
 
   it('stop() delegates to the inner provider and ceases emission', async () => {
     const inner = new ScriptedProvider();
-    const clock = new FakeClock(0);
-    const wrapper = new LiveTimestampedLocationProvider(inner, clock);
+    const timeSource = new ReplayTimeSource(new FakeClock(0), 10, 0);
+    const wrapper = new ReplayTimestampedLocationProvider(inner, timeSource);
     await wrapper.start();
     expect(inner.active).toBe(true);
 
@@ -99,8 +185,8 @@ describe('LiveTimestampedLocationProvider', () => {
 
   it("subscribe()'s unsubscribe stops only that listener", async () => {
     const inner = new ScriptedProvider();
-    const clock = new FakeClock(0);
-    const wrapper = new LiveTimestampedLocationProvider(inner, clock);
+    const timeSource = new ReplayTimeSource(new FakeClock(0), 10, 0);
+    const wrapper = new ReplayTimestampedLocationProvider(inner, timeSource);
     await wrapper.start();
 
     const a: LocationSample[] = [];
@@ -114,5 +200,139 @@ describe('LiveTimestampedLocationProvider', () => {
 
     expect(a).toHaveLength(1);
     expect(b).toHaveLength(2);
+  });
+
+  it('clock.now() and a sample delivered "now" share the same virtual domain (sample tMono <= clock.now(), small bound)', async () => {
+    const inner = new ScriptedProvider();
+    const realClock = new FakeClock(0);
+    const speedFactor = 10;
+    const timeSource = new ReplayTimeSource(realClock, speedFactor, 0);
+    const clock = new ScaledReplayClock(timeSource);
+    const wrapper = new ReplayTimestampedLocationProvider(inner, timeSource);
+    await wrapper.start();
+
+    // Records each sample alongside clock.now() read AT THE MOMENT OF DELIVERY
+    // (not the final clock reading) -- that pairing is what "a sample delivered
+    // now" means.
+    const pairs: Array<{ tMono: number; clockNow: number }> = [];
+    wrapper.subscribe((s) => pairs.push({ tMono: s.tMono, clockNow: clock.now() }));
+
+    // Simulate accelerated real-time delivery: 100ms real per 1000ms of original spacing.
+    inner.deliver(sample(0));
+    realClock.advance(100);
+    inner.deliver(sample(1_000));
+    realClock.advance(100);
+    inner.deliver(sample(2_000));
+
+    expect(pairs).toHaveLength(3);
+    for (const { tMono, clockNow } of pairs) {
+      expect(tMono).toBeLessThanOrEqual(clockNow);
+      expect(clockNow - tMono).toBeLessThanOrEqual(1); // small bound
+    }
+  });
+});
+
+describe('Dev-replay pacing regression (the fixed bug)', () => {
+  it('the clean recognition lap fixture at speedFactor 10 produces ZERO invalid/IMPOSSIBLE_JUMP verdicts through TelemetryQualityEvaluator', async () => {
+    const fixture = cleanRecognitionLap(TMR_CIRCUIT_PROFILE, 601);
+    const inner = new ScriptedProvider();
+    const realClock = new FakeClock(0);
+    const speedFactor = 10;
+    const timeSource = new ReplayTimeSource(realClock, speedFactor, 0);
+    const wrapper = new ReplayTimestampedLocationProvider(inner, timeSource);
+
+    const received: LocationSample[] = [];
+    wrapper.subscribe((s) => received.push(s));
+    await wrapper.start();
+
+    let previousOriginalTMono: number | null = null;
+    for (const original of fixture) {
+      // Simulate the accelerated (speedFactor=10) real-time delivery cadence
+      // ReplayLocationProvider actually schedules: real delay = original gap / speedFactor.
+      if (previousOriginalTMono !== null) {
+        realClock.advance(Math.max(0, original.tMono - previousOriginalTMono) / speedFactor);
+      }
+      previousOriginalTMono = original.tMono;
+      inner.deliver(original);
+    }
+
+    expect(received.length).toBe(fixture.length);
+
+    const evaluator = new TelemetryQualityEvaluator(DEFAULT_TELEMETRY_QUALITY_CONFIG);
+    let previous: LocationSample | undefined;
+    const invalidVerdicts: string[] = [];
+    for (const s of received) {
+      const assessment = evaluator.assess(s, previous);
+      if (assessment.level === 'invalid') invalidVerdicts.push(...assessment.reasons);
+      previous = s;
+    }
+
+    expect(invalidVerdicts).toEqual([]);
+    expect(invalidVerdicts.filter((r) => r === 'IMPOSSIBLE_JUMP')).toHaveLength(0);
+  });
+
+  it('sample tMono spacing in the virtual domain equals the original fixture spacing (±1ms)', async () => {
+    const fixture = cleanRecognitionLap(TMR_CIRCUIT_PROFILE, 602);
+    const inner = new ScriptedProvider();
+    const realClock = new FakeClock(0);
+    const speedFactor = 10;
+    const timeSource = new ReplayTimeSource(realClock, speedFactor, 0);
+    const wrapper = new ReplayTimestampedLocationProvider(inner, timeSource);
+
+    const received: LocationSample[] = [];
+    wrapper.subscribe((s) => received.push(s));
+    await wrapper.start();
+    for (const original of fixture) inner.deliver(original);
+
+    for (let i = 1; i < fixture.length; i += 1) {
+      const originalGap = fixture[i]!.tMono - fixture[i - 1]!.tMono;
+      const virtualGap = received[i]!.tMono - received[i - 1]!.tMono;
+      expect(Math.abs(virtualGap - originalGap)).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('regression: RealSessionFacade + ScaledReplayClock + ReplayTimestampedLocationProvider reaches calibration accepted (coverage >= 95%) on the clean recognition lap at speedFactor 10 -- this is the exact bug (calibration used to stall at ~8% coverage OFF TRACK)', async () => {
+    const repository = new InMemorySessionRepository();
+    const inner = new ScriptedProvider();
+    const realClock = new FakeClock(0);
+    const speedFactor = 10;
+    const timeSource = new ReplayTimeSource(realClock, speedFactor, 0);
+    const clock = new ScaledReplayClock(timeSource);
+    const provider = new ReplayTimestampedLocationProvider(inner, timeSource);
+
+    const controller = new SessionController({
+      runtimeProfile: TMR_RUNTIME_PROFILE,
+      circuitProfile: TMR_CIRCUIT_PROFILE,
+      locationProvider: provider,
+      clock,
+      repository,
+      userId: 'driver-1',
+      appVersion: 'apps-mobile-test',
+      algorithmVersion: 1,
+      restartProvider: () => {},
+    });
+
+    const events: FacadeState[] = [];
+    const facade = new RealSessionFacade(controller);
+    facade.subscribe((s) => events.push(s));
+
+    facade.beginCalibration();
+    await new Promise((resolve) => setTimeout(resolve, 0)); // flush beginCalibration()'s .then() / controller.start()'s provider.start()
+    expect(inner.active).toBe(true);
+
+    const fixture = cleanRecognitionLap(TMR_CIRCUIT_PROFILE, 603);
+    let previousOriginalTMono: number | null = null;
+    for (const original of fixture) {
+      if (previousOriginalTMono !== null) {
+        realClock.advance(Math.max(0, original.tMono - previousOriginalTMono) / speedFactor);
+      }
+      previousOriginalTMono = original.tMono;
+      inner.deliver(original);
+    }
+
+    const finalState = events.at(-1)!;
+    expect(finalState.sessionState).toBe('calibrationReview');
+    expect(finalState.calibrationResult?.accepted).toBe(true);
+    expect(finalState.calibration?.coverageFraction).toBeGreaterThanOrEqual(0.95);
   });
 });

@@ -25,7 +25,7 @@ import { SqlSessionHistoryStore } from './sqlSessionHistoryStore';
 import type { AppSettings, SettingsStore } from './settingsStore';
 import { InMemorySettingsStore } from './settingsStore';
 import { RealSessionFacade } from './realFacade';
-import { LiveTimestampedLocationProvider } from './liveTimestampedProvider';
+import { ReplayTimeSource, ReplayTimestampedLocationProvider, ScaledReplayClock } from './liveTimestampedProvider';
 import { TMR_CIRCUIT_PROFILE, TMR_RUNTIME_PROFILE } from './tmrProfile';
 
 const DB_NAME = 'circuit-timer.db';
@@ -408,20 +408,35 @@ export async function deleteAllStoredUserData(): Promise<DeleteUserDataResult> {
 
 /**
  * Builds a fresh `SessionController` driven by `ReplayLocationProvider` (10x
- * accelerated, re-timestamped to the live clock -- see
- * `liveTimestampedProvider.ts`) over the SAME real repository/profile/user
- * as the production controller, wraps it in a `RealSessionFacade`, and swaps
- * it in as the app's active `facade` -- so `CalibrationInstructionsScreen`,
+ * accelerated) over the SAME real repository/profile/user as the production
+ * controller, wraps it in a `RealSessionFacade`, and swaps it in as the
+ * app's active `facade` -- so `CalibrationInstructionsScreen`,
  * `ActiveCalibrationScreen`, `CalibrationResultScreen`, and
  * `ActiveDashboardScreen` (unmodified, real production screens) drive this
  * replay session exactly like a live one. Results land in the real SQLite
  * history. __DEV__-only; never referenced outside `DevReplayScreen`.
+ *
+ * Time domain: the controller is given a `ScaledReplayClock` reading a
+ * shared `ReplayTimeSource` (`virtualNow = virtualStart + realElapsed *
+ * speedFactor`), and samples are re-stamped into that SAME virtual domain by
+ * `ReplayTimestampedLocationProvider` -- both driven by `PerformanceNowClock`
+ * as the real-time reference. This preserves the fixture's own inter-sample
+ * spacing (so `TelemetryQualityEvaluator`'s implied-speed check reads the
+ * real recorded speeds, not the speeds compressed by the 10x delivery pace)
+ * while still delivering samples at the accelerated wall-clock pace. See
+ * `liveTimestampedProvider.ts`'s module doc comment for the full rationale,
+ * including watchdog-timing compatibility. The production GNSS path is
+ * unaffected -- it keeps `PerformanceNowClock` directly as `clock` and the
+ * raw, un-wrapped `GnssLocationProvider` (see the `bootstrapPromise` above).
  */
 export async function startDevReplaySession(samples: LocationSample[]): Promise<void> {
   const { repository: repo } = await ready();
-  const clock = new PerformanceNowClock();
-  const replayInner = new ReplayLocationProvider(samples, { speedFactor: 10 });
-  const replayProvider: LocationProvider = new LiveTimestampedLocationProvider(replayInner, clock);
+  const speedFactor = 10;
+  const realClock = new PerformanceNowClock();
+  const timeSource = new ReplayTimeSource(realClock, speedFactor);
+  const clock = new ScaledReplayClock(timeSource);
+  const replayInner = new ReplayLocationProvider(samples, { speedFactor });
+  const replayProvider: LocationProvider = new ReplayTimestampedLocationProvider(replayInner, timeSource);
 
   const devController = new SessionController({
     runtimeProfile: TMR_RUNTIME_PROFILE,
