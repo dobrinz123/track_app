@@ -1,4 +1,4 @@
-import type { LapRecord, ReferenceLap, SqlSessionRepository } from '@circuit/core';
+import type { LapRecord, LocalSessionRepository, ReferenceLap } from '@circuit/core';
 import type { PersonalBestEntry, SessionHistoryStore, StoredSession } from './mockHistory';
 
 function syntheticLapFromReference(ref: ReferenceLap): LapRecord {
@@ -30,7 +30,9 @@ export class SqlSessionHistoryStore implements SessionHistoryStore {
   private pb: PersonalBestEntry | null = null;
 
   constructor(
-    private readonly repository: SqlSessionRepository,
+    // Interface, not the concrete SQL class: the web dev preview substitutes
+    // the in-memory repository (expo-sqlite's wasm backend is unreliable there).
+    private readonly repository: LocalSessionRepository,
     private readonly userId: string,
     private readonly circuitId: string,
     private readonly layoutId: string,

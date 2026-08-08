@@ -4,10 +4,20 @@ import type {
   LocationSample,
   SessionControllerDiagnostics,
   SessionMachineSnapshot,
+  LocalSessionRepository,
   SqlDatabase,
-  SqlSessionRepository,
 } from '@circuit/core';
-import { SessionController, deleteAllUserData, type DeleteUserDataResult } from '@circuit/core';
+import {
+  InMemorySessionRepository,
+  SessionController,
+  deleteAllUserData,
+  type DeleteUserDataResult,
+} from '@circuit/core';
+// Web detection WITHOUT importing react-native: its Flow-typed source breaks
+// vitest's parser, and `typeof document` distinguishes the three real runtime
+// environments correctly (browser preview = web; Hermes on device and node
+// test runs have no DOM).
+const IS_WEB_RUNTIME = typeof document !== 'undefined';
 import {
   GnssLocationProvider,
   PerformanceNowClock,
@@ -214,7 +224,7 @@ export function subscribeRecovery(cb: (r: PendingRecovery | null) => void): () =
 // ---------------------------------------------------------------------------
 
 let db: SqlDatabase | null = null;
-let repository: SqlSessionRepository | null = null;
+let repository: LocalSessionRepository | null = null;
 let controller: SessionController | null = null;
 let gnssProvider: GnssLocationProvider | null = null;
 let historyStore: SqlSessionHistoryStore | null = null;
@@ -276,9 +286,19 @@ function midSessionState(snapshot: SessionMachineSnapshot): boolean {
 }
 
 const bootstrapPromise = (async (): Promise<void> => {
-  const opened = await openAppDatabase(DB_NAME);
-  db = opened.db;
-  repository = opened.repository;
+  if (IS_WEB_RUNTIME) {
+    // Web preview is a development surface only: expo-sqlite's wasm backend
+    // (wa-sqlite/OPFS) throws 'disk I/O error' in embedded browsers. Fall
+    // back to the in-memory repository -- no persistence across reloads,
+    // which is acceptable for the dev preview and keeps every session flow
+    // (timing, PB, history) fully functional. Native builds are unaffected.
+    console.warn('[composition] web preview: using in-memory storage (expo-sqlite web backend unavailable)');
+    repository = new InMemorySessionRepository();
+  } else {
+    const opened = await openAppDatabase(DB_NAME);
+    db = opened.db;
+    repository = opened.repository;
+  }
 
   gnssProvider = new GnssLocationProvider();
   const clock = new PerformanceNowClock();
@@ -311,37 +331,40 @@ const bootstrapPromise = (async (): Promise<void> => {
   historyWrapper.setInner(history);
   historyStore = history;
 
-  const settings = await SqlSettingsStore.create(db);
-  settingsWrapper.setInner(settings);
+  if (db !== null) {
+    const settings = await SqlSettingsStore.create(db);
+    settingsWrapper.setInner(settings);
+  }
 
   facadeWrapper.setInner(
     new RealSessionFacade(controller, {
       onSessionStarted: (sessionId) => {
-        void setActiveSessionId(db!, sessionId);
+        if (db !== null) void setActiveSessionId(db, sessionId);
       },
       onSessionEnded: () => {
-        void setActiveSessionId(db!, null).then(() => history.refresh());
+        const clearPointer = db !== null ? setActiveSessionId(db, null) : Promise.resolve();
+        void clearPointer.then(() => history.refresh());
       },
     }),
   );
 
-  const activeSessionId = await getActiveSessionId(db);
+  const activeSessionId = db !== null ? await getActiveSessionId(db) : null;
   if (activeSessionId !== null) {
     const checkpoint = await repository.loadCheckpoint(activeSessionId);
     if (checkpoint !== null && checkpoint.snapshot.state !== 'sessionComplete') {
       const recoveryLapCount = checkpoint.laps.length + (midSessionState(checkpoint.snapshot) ? 1 : 0);
       setPendingRecovery({ sessionId: activeSessionId, lapCount: recoveryLapCount });
-    } else {
+    } else if (db !== null) {
       await setActiveSessionId(db, null);
     }
   }
 })();
 
 /** Awaited by recovery/dev-replay actions below so they never race the async bootstrap. */
-async function ready(): Promise<{ db: SqlDatabase; repository: SqlSessionRepository; controller: SessionController }> {
+async function ready(): Promise<{ db: SqlDatabase | null; repository: LocalSessionRepository; controller: SessionController }> {
   await bootstrapPromise;
-  if (db === null || repository === null || controller === null) {
-    throw new Error('composition bootstrap failed to produce a database/repository/controller');
+  if (repository === null || controller === null) {
+    throw new Error('composition bootstrap failed to produce a repository/controller');
   }
   return { db, repository, controller };
 }
@@ -363,7 +386,7 @@ export async function resumeRecovery(): Promise<void> {
   }
   await ctrl.start('session');
   setPendingRecovery(null);
-  await setActiveSessionId(database, null);
+  if (database !== null) await setActiveSessionId(database, null);
 }
 
 /** Discards a recoverable checkpoint without resuming (ADR-0003 §3): marks it terminal so it is never offered again -- `LocalSessionRepository` has no delete method, so this overwrites the checkpoint's snapshot to `sessionComplete` instead. */
@@ -377,7 +400,7 @@ export async function discardRecovery(): Promise<void> {
     [],
   );
   setPendingRecovery(null);
-  await setActiveSessionId(database, null);
+  if (database !== null) await setActiveSessionId(database, null);
 }
 
 // ---------------------------------------------------------------------------
