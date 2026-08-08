@@ -489,7 +489,17 @@ export async function startDevReplaySession(samples: LocationSample[]): Promise<
   });
 
   activeController = devController;
-  facadeWrapper.setInner(new RealSessionFacade(devController));
+  facadeWrapper.setInner(
+    new RealSessionFacade(devController, {
+      // Same post-session cache refresh the production facade gets, so a
+      // finished replay session appears in Session History immediately. The
+      // active-session pointer is deliberately NOT set for replays — a dev
+      // replay must never trigger the recovery banner on next launch.
+      onSessionEnded: () => {
+        void historyStore?.refresh();
+      },
+    }),
+  );
 }
 
 /** Swaps the active `facade` back to a fresh `MockSessionFacade` -- DevReplayScreen's `__DEV__` mock toggle. */
