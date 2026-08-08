@@ -71,6 +71,15 @@ export interface PipelineCoreConfig {
    * test. Full counts survive capping via `matchedTotal`/`rejectedTotal`.
    */
   boundedTelemetry?: boolean;
+  /**
+   * Overrides the `matches` rolling-window cap (default {@link MAX_MATCHES},
+   * 2000) applied when `boundedTelemetry` is set. Production code never sets
+   * this -- it exists so a test can deterministically prove PB-candidate
+   * construction reads `matches` at crossing time (before later laps can
+   * evict a completed lap's own telemetry) without needing a real >2000-sample
+   * fixture (packages/core/test/soak/personalBestEviction.soak.test.ts).
+   */
+  maxMatches?: number;
 }
 
 export interface MatchedTelemetrySample {
@@ -171,6 +180,7 @@ export class SessionPipelineCore {
   private readonly pauseGapMs: number;
   private readonly lowQualityGapMs: number;
   private readonly boundedTelemetry: boolean;
+  private readonly maxMatches: number;
 
   private snapshot: SessionMachineSnapshot = createInitialSessionSnapshot();
   private previousQualitySample: LocationSample | undefined;
@@ -206,6 +216,7 @@ export class SessionPipelineCore {
     this.pauseGapMs = config.pauseGapMs ?? DEFAULT_PAUSE_GAP_MS;
     this.lowQualityGapMs = config.lowQualityGapMs ?? DEFAULT_LOW_QUALITY_GAP_MS;
     this.boundedTelemetry = config.boundedTelemetry ?? false;
+    this.maxMatches = config.maxMatches ?? MAX_MATCHES;
   }
 
   get state(): SessionMachineSnapshot {
@@ -310,7 +321,7 @@ export class SessionPipelineCore {
     };
     this.matches.push(matched);
     this.matchedTotal += 1;
-    if (this.boundedTelemetry && this.matches.length > MAX_MATCHES) this.matches.shift();
+    if (this.boundedTelemetry && this.matches.length > this.maxMatches) this.matches.shift();
 
     if (this.pendingPitEntryProgressM !== null && this.snapshot.state !== 'inPit') {
       if (match.onPitLane && Math.abs(match.lateralM) >= 5) {

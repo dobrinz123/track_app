@@ -152,46 +152,8 @@ export class GnssLocationProvider implements LocationProvider {
   private readonly intervalWindowMs: number[] = [];
   /** Rolling window (newest last, bounded to {@link DIAGNOSTICS_WINDOW_SIZE}) of `accuracyM` readings. */
   private readonly accuracyWindowM: number[] = [];
-  /**
-   * Serializes `start()`/`stop()` (C3 fix): every call appends its own work
-   * onto this chain instead of running immediately, so overlapping calls
-   * (e.g. a rapid watchdog restart racing a double calibration start, or a
-   * `stop()` arriving mid-`start()`) always execute in the order they were
-   * invoked, one at a time -- never two concurrent `watchPositionAsync`
-   * calls in flight, and a `stop()` that lands while a `start()` is still
-   * awaiting its native promise always waits for that `start()` to finish
-   * (and set `this.subscription`) before it runs, so the watcher it just
-   * created is the one actually removed.
-   */
-  private op: Promise<void> = Promise.resolve();
-
   async start(): Promise<void> {
-    const result = this.op.then(() => this.doStart());
-    // The chain must survive a failed op -- otherwise one rejected start()
-    // would permanently wedge every later start()/stop() behind a
-    // never-settling link. Each CALLER's own promise (`result`, returned
-    // below) still carries that call's own outcome.
-    this.op = result.catch(() => undefined);
-    return result;
-  }
-
-  async stop(): Promise<void> {
-    const result = this.op.then(() => this.doStop());
-    this.op = result.catch(() => undefined);
-    return result;
-  }
-
-  private async doStart(): Promise<void> {
-    // Start while already active is a no-op (C3 fix) -- with `op` serializing
-    // every call, this also correctly no-ops a second start() that was
-    // queued behind a first one still in flight, since by the time this
-    // runs the first start() has already set `this.subscription`.
     if (this.subscription) return;
-    // Snapshot iOS accuracy authorization once at session start (MUST DO #7's
-    // `reducedAccuracy` diagnostics flag). Not re-checked per sample: it's an
-    // OS-level toggle a driver isn't expected to flip mid-session, and
-    // `getForegroundPermissionsAsync` is async I/O that has no place in the
-    // per-fix hot path in `handleLocation`.
     const permission = await getPermissionState();
     this.reducedAccuracy = permission.iosAccuracy === 'reduced';
     this.subscription = await Location.watchPositionAsync(WATCH_OPTIONS, (location) =>
@@ -199,7 +161,7 @@ export class GnssLocationProvider implements LocationProvider {
     );
   }
 
-  private async doStop(): Promise<void> {
+  async stop(): Promise<void> {
     this.subscription?.remove();
     this.subscription = null;
   }

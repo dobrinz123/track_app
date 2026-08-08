@@ -27,6 +27,15 @@ export interface FacadeState {
   laps: LapRecord[];
   /** Latest known speed in km/h, derived from the most recent sample's `speedMps`; `null` before any sample reports one. */
   speedKph: number | null;
+  /**
+   * Human-readable message from the most recent async command that failed
+   * (C7 fix), or `null` if none has failed since the last successful command.
+   * `RealSessionFacade` is the only implementation that ever sets this
+   * (catching `beginCalibration`/`endSession` rejections); `MockSessionFacade`
+   * and the bootstrap-time `PendingFacade` always report `null`. Screens
+   * render it inline via the existing `StatusBanner` -- never a modal.
+   */
+  lastError: string | null;
 }
 
 /**

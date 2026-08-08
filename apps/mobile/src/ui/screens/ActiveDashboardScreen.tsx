@@ -46,14 +46,19 @@ export function ActiveDashboardScreen({ navigation }: Props): React.JSX.Element 
     }
   }, [navigation, state.sessionState]);
 
+  // C7 fix: a failed async command (e.g. endSession()'s persistence
+  // rejecting) takes priority over the other, more routine banner states --
+  // it's the one case that means the app did NOT do what the driver asked.
   const banner =
-    state.gnssQuality === 'unreliable' || state.gnssQuality === 'invalid'
-      ? { variant: 'error' as const, message: 'GNSS signal is unreliable — timing may be inaccurate.' }
-      : state.sessionState === 'paused'
-        ? { variant: 'warning' as const, message: 'Session paused.' }
-        : state.sessionState === 'outLap'
-          ? { variant: 'info' as const, message: 'Out lap — timing starts at the line.' }
-          : null;
+    state.lastError !== null
+      ? { variant: 'error' as const, message: state.lastError }
+      : state.gnssQuality === 'unreliable' || state.gnssQuality === 'invalid'
+        ? { variant: 'error' as const, message: 'GNSS signal is unreliable — timing may be inaccurate.' }
+        : state.sessionState === 'paused'
+          ? { variant: 'warning' as const, message: 'Session paused.' }
+          : state.sessionState === 'outLap'
+            ? { variant: 'info' as const, message: 'Out lap — timing starts at the line.' }
+            : null;
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right', 'bottom']}>

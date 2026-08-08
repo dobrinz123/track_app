@@ -1,6 +1,16 @@
 import { readFileSync } from 'node:fs';
 
-import type { CircuitProfile, LocationProvider, LocationSample, MonotonicClock } from '../../src/contracts';
+import type {
+  CircuitProfile,
+  LapRecord,
+  LocalSessionRepository,
+  LocationProvider,
+  LocationSample,
+  MonotonicClock,
+  ReferenceLap,
+  SessionMachineSnapshot,
+  SessionSummary,
+} from '../../src/contracts';
 import { loadProfileFromJson, type RuntimeProfile } from '../../src/profile';
 import type { WatchdogScheduler } from '../../src/controller';
 
@@ -84,5 +94,65 @@ export class FakeWatchdogScheduler implements WatchdogScheduler {
   /** Invokes every currently-registered interval callback once. */
   tick(): void {
     for (const fn of [...this.handles.values()]) fn();
+  }
+}
+
+/**
+ * Wraps a `LocalSessionRepository`, letting a test defer and/or fail
+ * `saveTelemetry` on demand to pin `endSession()`'s ordering and
+ * error-propagation contract (C4 fix / blind-verifier B2): every other
+ * method is a plain pass-through delegate.
+ */
+export class ControllableRepository implements LocalSessionRepository {
+  /** When set, every `saveTelemetry` call awaits this before proceeding -- lets a test observe that `endSession()`/`flush()` has NOT yet resolved while a write is still pending. */
+  saveTelemetryGate: Promise<void> | null = null;
+  /** When true, `saveTelemetry` rejects instead of delegating -- pins that `endSession()` propagates the failure (Promise.all, not allSettled). */
+  saveTelemetryShouldReject = false;
+  readonly saveTelemetryCalls: Array<{ sessionId: string; lapNumber: number }> = [];
+
+  constructor(private readonly delegate: LocalSessionRepository) {}
+
+  saveCheckpoint(sessionId: string, snapshot: SessionMachineSnapshot, laps: LapRecord[]): Promise<void> {
+    return this.delegate.saveCheckpoint(sessionId, snapshot, laps);
+  }
+
+  loadCheckpoint(sessionId: string): Promise<{ snapshot: SessionMachineSnapshot; laps: LapRecord[] } | null> {
+    return this.delegate.loadCheckpoint(sessionId);
+  }
+
+  saveSession(s: SessionSummary): Promise<void> {
+    return this.delegate.saveSession(s);
+  }
+
+  listSessions(userId: string, circuitId: string): Promise<SessionSummary[]> {
+    return this.delegate.listSessions(userId, circuitId);
+  }
+
+  async saveTelemetry(sessionId: string, lapNumber: number, samples: LocationSample[]): Promise<void> {
+    this.saveTelemetryCalls.push({ sessionId, lapNumber });
+    if (this.saveTelemetryGate !== null) await this.saveTelemetryGate;
+    if (this.saveTelemetryShouldReject) throw new Error('saveTelemetry failed (test double)');
+    return this.delegate.saveTelemetry(sessionId, lapNumber, samples);
+  }
+
+  loadTelemetry(sessionId: string, lapNumber: number): Promise<LocationSample[]> {
+    return this.delegate.loadTelemetry(sessionId, lapNumber);
+  }
+
+  getReferenceLap(
+    userId: string,
+    circuitId: string,
+    layoutId: string,
+    layoutVersion: number,
+  ): Promise<ReferenceLap | null> {
+    return this.delegate.getReferenceLap(userId, circuitId, layoutId, layoutVersion);
+  }
+
+  putReferenceLap(ref: ReferenceLap): Promise<void> {
+    return this.delegate.putReferenceLap(ref);
+  }
+
+  deleteUserData(userId: string): Promise<void> {
+    return this.delegate.deleteUserData(userId);
   }
 }

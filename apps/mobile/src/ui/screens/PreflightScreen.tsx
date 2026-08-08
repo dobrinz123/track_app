@@ -72,12 +72,17 @@ export function PreflightScreen({ navigation }: Props): React.JSX.Element {
 
   useEffect(() => {
     let cancelled = false;
+    // C11 fix: cancels the in-flight GNSS-fix collector's native location
+    // subscription on unmount/retry -- `cancelled` alone only suppressed the
+    // resulting React state update, it never stopped the native watcher
+    // underneath (see `preflight.ts`'s `collectGnssFix`).
+    const abortController = new AbortController();
     setStatus('running');
     setReport(null);
 
     (async () => {
       await requestForegroundLocationPermission();
-      const result = await runPreflightChecks();
+      const result = await runPreflightChecks(abortController.signal);
       if (!cancelled) {
         setReport(result);
         setStatus('done');
@@ -86,6 +91,7 @@ export function PreflightScreen({ navigation }: Props): React.JSX.Element {
 
     return () => {
       cancelled = true;
+      abortController.abort();
     };
   }, [runToken]);
 

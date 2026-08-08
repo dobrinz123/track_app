@@ -191,3 +191,111 @@ describe('composition.ts recovery decision logic (MUST DO #7)', () => {
     expect(recovery).toBeNull();
   });
 });
+
+describe('composition.ts resumeRecovery() (C5 fix -- active-session pointer)', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('resuming a recovered session keeps the active-session pointer, so a SECOND process death still offers recovery on the next launch', async () => {
+    const composition = await bootWithCheckpoint(
+      'driver-1--rec-c5',
+      { state: 'timing', lapNumber: 3, context: {} },
+      [lap(1, 90_000), lap(2, 88_000)],
+    );
+    let recoveryBeforeResume: unknown = 'unset';
+    composition.subscribeRecovery((r) => {
+      recoveryBeforeResume = r;
+    });
+    expect(recoveryBeforeResume).toEqual({ sessionId: 'driver-1--rec-c5', lapCount: 3 });
+
+    await composition.resumeRecovery();
+
+    let recoveryAfterResume: unknown = 'unset';
+    composition.subscribeRecovery((r) => {
+      recoveryAfterResume = r;
+    });
+    // The pending-recovery UI state clears immediately (the banner goes
+    // away) -- this is expected and separate from the on-disk pointer C5
+    // actually fixes, checked below.
+    expect(recoveryAfterResume).toBeNull();
+
+    // Simulate a second process death: re-boot composition FRESH (a brand
+    // new module instance, exactly like a real app relaunch) against the
+    // SAME underlying db/repository state -- `seeded.db`/`seeded.repository`
+    // are plain `vi.hoisted` object fields, not reset by `vi.resetModules()`,
+    // so they still hold whatever composition's first instance left on disk.
+    vi.resetModules();
+    const relaunched = await import('../../src/session/composition');
+    await flushBootstrap();
+
+    let recoveryAfterRelaunch: unknown = 'unset';
+    relaunched.subscribeRecovery((r) => {
+      recoveryAfterRelaunch = r;
+    });
+    // Before the C5 fix, resumeRecovery() cleared the active-session pointer
+    // immediately, so THIS assertion would see `null` instead -- the second
+    // death would silently lose the ability to ever recover this session
+    // again, despite it still being active in-memory when it died.
+    expect(recoveryAfterRelaunch).toEqual({ sessionId: 'driver-1--rec-c5', lapCount: 3 });
+  });
+});
+
+describe('composition.ts recovery operation lock (C10 fix)', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('two concurrent resumeRecovery() calls share a single in-flight execution -- the underlying checkpoint read happens exactly once', async () => {
+    const composition = await bootWithCheckpoint(
+      'driver-1--rec-c10',
+      { state: 'armed', lapNumber: 0, context: {} },
+      [lap(1, 90_000)],
+    );
+
+    const repo = seeded.repository as SqlSessionRepository;
+    let loadCheckpointCalls = 0;
+    const originalLoadCheckpoint = repo.loadCheckpoint.bind(repo);
+    repo.loadCheckpoint = (sessionId: string) => {
+      loadCheckpointCalls += 1;
+      return originalLoadCheckpoint(sessionId);
+    };
+
+    await Promise.all([composition.resumeRecovery(), composition.resumeRecovery()]);
+
+    // A revert to no lock would call this twice -- each `resumeRecovery()`
+    // independently reading (and potentially racing on) the same recovery
+    // record.
+    expect(loadCheckpointCalls).toBe(1);
+  });
+
+  it('a discardRecovery() issued while a resumeRecovery() is still in flight is a no-op that shares the SAME lock (not a separate, racing operation)', async () => {
+    const composition = await bootWithCheckpoint(
+      'driver-1--rec-c10-mixed',
+      { state: 'armed', lapNumber: 0, context: {} },
+      [lap(1, 90_000)],
+    );
+
+    const repo = seeded.repository as SqlSessionRepository;
+    let loadCheckpointCalls = 0;
+    let saveCheckpointCalls = 0;
+    const originalLoadCheckpoint = repo.loadCheckpoint.bind(repo);
+    const originalSaveCheckpoint = repo.saveCheckpoint.bind(repo);
+    repo.loadCheckpoint = (sessionId: string) => {
+      loadCheckpointCalls += 1;
+      return originalLoadCheckpoint(sessionId);
+    };
+    repo.saveCheckpoint = (sessionId: string, snapshot: SessionMachineSnapshot, laps: LapRecord[]) => {
+      saveCheckpointCalls += 1;
+      return originalSaveCheckpoint(sessionId, snapshot, laps);
+    };
+
+    await Promise.all([composition.resumeRecovery(), composition.discardRecovery()]);
+
+    // Exactly one of the two operations' own persistence call happened, not
+    // both -- the second call (whichever it was) returned the first's
+    // in-flight promise instead of independently racing its own write
+    // against the same captured recovery record.
+    expect(loadCheckpointCalls + saveCheckpointCalls).toBe(1);
+  });
+});

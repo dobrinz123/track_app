@@ -1,11 +1,13 @@
 import React, { useEffect, useRef } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useKeepAwake } from 'expo-keep-awake';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, radii, spacing, typography } from '../theme';
 import { ProgressRing } from '../components/ProgressRing';
 import { LongPressButton } from '../components/LongPressButton';
+import { StatusBanner } from '../components/StatusBanner';
 import { facade } from '../../session/composition';
 import { useFacadeState } from '../hooks/useFacadeState';
 
@@ -13,6 +15,10 @@ type Props = NativeStackScreenProps<RootStackParamList, 'ActiveCalibration'>;
 
 /** S5 — live coverage progress ring + on-track indicator; navigates to S6 once a calibration result arrives. */
 export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Element {
+  // C9 fix: the mandatory Learn lap happens here, before ActiveDashboardScreen's
+  // own useKeepAwake() ever mounts -- without this, a short iOS Auto-Lock can
+  // lock the screen mid-calibration and stall/invalidate the Learn lap.
+  useKeepAwake();
   const state = useFacadeState(facade);
   const navigatedRef = useRef(false);
 
@@ -36,6 +42,10 @@ export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Elemen
         <Text style={styles.subtitle} maxFontSizeMultiplier={1.3}>
           Drive one steady lap
         </Text>
+
+        {/* C7 fix: a failed async command (e.g. GNSS start failure) surfaces
+            here inline -- never a modal. */}
+        {state.lastError !== null ? <StatusBanner variant="error" message={state.lastError} /> : null}
 
         <View style={styles.ringWrap}>
           <ProgressRing

@@ -4,6 +4,7 @@ import type {
   LocationSample,
   SessionControllerDiagnostics,
   SessionMachineSnapshot,
+  SessionState,
   LocalSessionRepository,
   SqlDatabase,
 } from '@circuit/core';
@@ -34,7 +35,7 @@ import { MockSessionHistoryStore } from './mockHistory';
 import { SqlSessionHistoryStore } from './sqlSessionHistoryStore';
 import type { AppSettings, SettingsStore } from './settingsStore';
 import { InMemorySettingsStore } from './settingsStore';
-import { RealSessionFacade } from './realFacade';
+import { RealSessionFacade, type RealSessionFacadeCallbacks } from './realFacade';
 import { ReplayTimeSource, ReplayTimestampedLocationProvider, ScaledReplayClock } from './liveTimestampedProvider';
 import { TMR_CIRCUIT_PROFILE, TMR_RUNTIME_PROFILE } from './tmrProfile';
 
@@ -70,6 +71,14 @@ class SwappableFacade implements SessionFacade {
   private innerUnsubscribe: () => void;
   private current!: FacadeState;
   private readonly listeners = new Set<(s: FacadeState) => void>();
+  /**
+   * One-shot-controller gate (C1 fix). When set, every `startPreflight()`
+   * call runs this first and awaits it before forwarding the command to
+   * `inner` -- composition.ts uses it to dispose and swap in a fresh
+   * production controller/facade if the current one is terminal
+   * (`sessionComplete`/`error`) before a new session can begin.
+   */
+  private preflightGate: (() => Promise<void>) | null = null;
 
   constructor(initial: SessionFacade) {
     this.inner = initial;
@@ -88,6 +97,10 @@ class SwappableFacade implements SessionFacade {
     this.innerUnsubscribe = next.subscribe((s) => this.broadcast(s));
   }
 
+  setPreflightGate(gate: (() => Promise<void>) | null): void {
+    this.preflightGate = gate;
+  }
+
   subscribe(cb: (s: FacadeState) => void): () => void {
     this.listeners.add(cb);
     cb(this.current);
@@ -97,7 +110,12 @@ class SwappableFacade implements SessionFacade {
   }
 
   startPreflight(): void {
-    this.inner.startPreflight();
+    const gate = this.preflightGate;
+    if (gate === null) {
+      this.inner.startPreflight();
+      return;
+    }
+    void gate().then(() => this.inner.startPreflight());
   }
   beginCalibration(): void {
     this.inner.beginCalibration();
@@ -175,13 +193,62 @@ class SwappableSettingsStore implements SettingsStore {
   }
 }
 
+// ---------------------------------------------------------------------------
+// PendingFacade (C2 fix). Installed as `facade`'s initial inner implementation
+// -- replacing what used to be a live `MockSessionFacade` -- so nothing is
+// clickable/functional until bootstrap actually finishes. Every command is a
+// silent no-op and state never changes: unlike `MockSessionFacade` (which
+// stays reserved for the __DEV__ DevReplay "scripted mock" toggle), this
+// never fabricates laps, times, or any other session data. `CircuitDetailScreen`
+// separately disables its "Start Session" button until `bootstrapState==='ready'`,
+// so in normal use no command ever reaches this facade at all -- it exists as
+// a safe placeholder for the brief window it takes React to import
+// `composition.ts` and observe that state, and as a defensive fallback if a
+// caller invokes `facade` before/without checking it.
+// ---------------------------------------------------------------------------
+
+const PENDING_FACADE_STATE: FacadeState = {
+  sessionState: 'idle',
+  lapNumber: 0,
+  currentLapMs: 0,
+  lastLapMs: null,
+  pbMs: null,
+  delta: null,
+  sector: 0,
+  gnssQuality: 'good',
+  calibration: null,
+  calibrationResult: null,
+  laps: [],
+  speedKph: null,
+  lastError: null,
+};
+
+class PendingFacade implements SessionFacade {
+  private readonly listeners = new Set<(s: FacadeState) => void>();
+  subscribe(cb: (s: FacadeState) => void): () => void {
+    this.listeners.add(cb);
+    cb(PENDING_FACADE_STATE);
+    return () => {
+      this.listeners.delete(cb);
+    };
+  }
+  startPreflight(): void {}
+  beginCalibration(): void {}
+  acceptCalibration(): void {}
+  rejectCalibration(): void {}
+  arm(): void {}
+  endSession(): void {}
+  pause(): void {}
+  resume(): void {}
+}
+
 /**
  * Single composition root for session-layer singletons consumed by
  * `apps/mobile/src/ui/**`. Screens must always import `facade`,
  * `sessionHistoryStore`, and `settingsStore` from here — never `Mock*` or
  * `Sql*`/`Real*` implementations directly.
  */
-const facadeWrapper = new SwappableFacade(new MockSessionFacade());
+const facadeWrapper = new SwappableFacade(new PendingFacade());
 export const facade: SessionFacade = facadeWrapper;
 
 const historyWrapper = new SwappableSessionHistoryStore(new MockSessionHistoryStore());
@@ -189,6 +256,30 @@ export const sessionHistoryStore: SessionHistoryStore = historyWrapper;
 
 const settingsWrapper = new SwappableSettingsStore(new InMemorySettingsStore());
 export const settingsStore: SettingsStore = settingsWrapper;
+
+// ---------------------------------------------------------------------------
+// Bootstrap readiness (C2 fix). `CircuitDetailScreen` subscribes via
+// `subscribeBootstrapState` to disable "Start Session" (and show an inline
+// note/error banner) until bootstrap has actually finished.
+// ---------------------------------------------------------------------------
+
+export type BootstrapState = 'pending' | 'ready' | 'failed';
+
+let bootstrapState: BootstrapState = 'pending';
+const bootstrapStateListeners = new Set<(s: BootstrapState) => void>();
+
+function setBootstrapState(next: BootstrapState): void {
+  bootstrapState = next;
+  for (const listener of bootstrapStateListeners) listener(next);
+}
+
+export function subscribeBootstrapState(cb: (s: BootstrapState) => void): () => void {
+  bootstrapStateListeners.add(cb);
+  cb(bootstrapState);
+  return () => {
+    bootstrapStateListeners.delete(cb);
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Recovery (ADR-0003 §3, MUST DO #3). CircuitDetailScreen subscribes to
@@ -226,6 +317,8 @@ export function subscribeRecovery(cb: (r: PendingRecovery | null) => void): () =
 let db: SqlDatabase | null = null;
 let repository: LocalSessionRepository | null = null;
 let controller: SessionController | null = null;
+/** The `RealSessionFacade` currently wrapping the production `controller` -- kept alive (not recreated) across DevReplay swaps so `restoreProductionFacade()` (C6 fix) can just re-point `facadeWrapper` back to it instead of leaking a fresh subscription every time. Recreated together with `controller` by `installProductionController()` (C1 fix). */
+let productionFacade: RealSessionFacade | null = null;
 let gnssProvider: GnssLocationProvider | null = null;
 let historyStore: SqlSessionHistoryStore | null = null;
 /**
@@ -237,6 +330,8 @@ let historyStore: SqlSessionHistoryStore | null = null;
  * is actually live, not a stale production reference during dev replay.
  */
 let activeController: SessionController | null = null;
+/** The current `__DEV__` DevReplay controller, if any (C6 fix) -- tracked so a new replay (or a return to production) can `dispose()` it first instead of leaking its provider/watchdog. */
+let replayController: SessionController | null = null;
 
 // ---------------------------------------------------------------------------
 // App-lifecycle wiring (MUST DO #4). Registered once at module load --
@@ -253,10 +348,18 @@ let activeController: SessionController | null = null;
 // special on foreground return (the ADR-0003 §3 recovery flow already covers
 // process death; a mere background/foreground cycle without process death
 // needs no extra action beyond the checkpoint already taken going in).
+//
+// C8 fix: `.catch()` (not bare `void`) so a rejected checkpoint write is
+// logged instead of becoming an unhandled promise rejection; `checkpointNow()`
+// itself can never throw synchronously (it is an `async` method, so any
+// internal synchronous throw is already converted to a rejection by
+// language semantics) -- there was nothing further to change core-side.
 // ---------------------------------------------------------------------------
 startLifecycleListener({
   onBackground: () => {
-    void activeController?.checkpointNow();
+    activeController?.checkpointNow().catch((error: unknown) => {
+      console.warn('[composition] background checkpoint failed', error);
+    });
   },
 });
 
@@ -285,32 +388,41 @@ function midSessionState(snapshot: SessionMachineSnapshot): boolean {
   return snapshot.state === 'paused' && typeof priorState === 'string' && midStates.has(priorState);
 }
 
-const bootstrapPromise = (async (): Promise<void> => {
-  if (IS_WEB_RUNTIME) {
-    // Web preview is a development surface only: expo-sqlite's wasm backend
-    // (wa-sqlite/OPFS) throws 'disk I/O error' in embedded browsers. Fall
-    // back to the in-memory repository -- no persistence across reloads,
-    // which is acceptable for the dev preview and keeps every session flow
-    // (timing, PB, history) fully functional. Native builds are unaffected.
-    console.warn('[composition] web preview: using in-memory storage (expo-sqlite web backend unavailable)');
-    repository = new InMemorySessionRepository();
-  } else {
-    const opened = await openAppDatabase(DB_NAME);
-    db = opened.db;
-    repository = opened.repository;
-  }
+/** Reads a `SessionController`'s current `sessionState` -- `subscribe()` always calls back synchronously with the current state (see `SessionController.subscribe`'s own doc comment), so this never actually waits. */
+function currentControllerState(ctrl: SessionController): SessionState {
+  let state: SessionState = 'idle';
+  const unsubscribe = ctrl.subscribe((s) => {
+    state = s.sessionState;
+  });
+  unsubscribe();
+  return state;
+}
 
-  gnssProvider = new GnssLocationProvider();
+/**
+ * Builds the production `SessionController` (C1 fix's `createProductionController()`
+ * factory) -- the SAME deps `bootstrapPromise` used to construct it inline
+ * with, extracted so the initial bootstrap build and every later
+ * terminal-state rebuild (`installProductionController()` below) can never
+ * drift apart. Reuses the single, already-started `gnssProvider`/`repository`
+ * module singletons -- only `controller` itself (and its `clock`) are fresh.
+ */
+function createProductionController(): SessionController {
+  if (repository === null) {
+    throw new Error('composition: createProductionController() called before the repository is ready');
+  }
+  if (gnssProvider === null) {
+    throw new Error('composition: createProductionController() called before gnssProvider is ready');
+  }
+  const provider = gnssProvider;
   const clock = new PerformanceNowClock();
   const restartProvider = async (): Promise<void> => {
-    await gnssProvider!.stop();
-    await gnssProvider!.start();
+    await provider.stop();
+    await provider.start();
   };
-
-  controller = new SessionController({
+  return new SessionController({
     runtimeProfile: TMR_RUNTIME_PROFILE,
     circuitProfile: TMR_CIRCUIT_PROFILE,
-    locationProvider: gnssProvider,
+    locationProvider: provider,
     clock,
     repository,
     userId: LOCAL_USER_ID,
@@ -318,47 +430,114 @@ const bootstrapPromise = (async (): Promise<void> => {
     algorithmVersion: ALGORITHM_VERSION,
     restartProvider,
   });
-  activeController = controller;
+}
 
-  const history = new SqlSessionHistoryStore(
-    repository,
-    LOCAL_USER_ID,
-    TMR_CIRCUIT_PROFILE.circuitId,
-    TMR_CIRCUIT_PROFILE.layoutId,
-    TMR_CIRCUIT_PROFILE.layoutVersion,
-  );
-  await history.refresh();
-  historyWrapper.setInner(history);
-  historyStore = history;
+/** Callbacks shared by every production `RealSessionFacade` (initial bootstrap AND any later C1 terminal-state rebuild), so the active-session-pointer/history-refresh wiring can never drift between them. */
+function productionFacadeCallbacks(): RealSessionFacadeCallbacks {
+  return {
+    onSessionStarted: (sessionId) => {
+      if (db !== null) void setActiveSessionId(db, sessionId);
+    },
+    onSessionEnded: () => {
+      const clearPointer = db !== null ? setActiveSessionId(db, null) : Promise.resolve();
+      void clearPointer.then(() => historyStore?.refresh());
+    },
+  };
+}
 
-  if (db !== null) {
-    const settings = await SqlSettingsStore.create(db);
-    settingsWrapper.setInner(settings);
-  }
+/** Installs `freshController` as the production controller: assigns it to `controller`/`activeController`, wraps it in a fresh `RealSessionFacade` kept as `productionFacade`, and makes it the live `facade`. */
+function installProductionController(freshController: SessionController): void {
+  controller = freshController;
+  activeController = freshController;
+  productionFacade = new RealSessionFacade(freshController, productionFacadeCallbacks());
+  facadeWrapper.setInner(productionFacade);
+}
 
-  facadeWrapper.setInner(
-    new RealSessionFacade(controller, {
-      onSessionStarted: (sessionId) => {
-        if (db !== null) void setActiveSessionId(db, sessionId);
-      },
-      onSessionEnded: () => {
-        const clearPointer = db !== null ? setActiveSessionId(db, null) : Promise.resolve();
-        void clearPointer.then(() => history.refresh());
-      },
-    }),
-  );
-
-  const activeSessionId = db !== null ? await getActiveSessionId(db) : null;
-  if (activeSessionId !== null) {
-    const checkpoint = await repository.loadCheckpoint(activeSessionId);
-    if (checkpoint !== null && checkpoint.snapshot.state !== 'sessionComplete') {
-      const recoveryLapCount = checkpoint.laps.length + (midSessionState(checkpoint.snapshot) ? 1 : 0);
-      setPendingRecovery({ sessionId: activeSessionId, lapCount: recoveryLapCount });
-    } else if (db !== null) {
-      await setActiveSessionId(db, null);
+const bootstrapPromise = (async (): Promise<void> => {
+  try {
+    if (IS_WEB_RUNTIME) {
+      // Web preview is a development surface only: expo-sqlite's wasm backend
+      // (wa-sqlite/OPFS) throws 'disk I/O error' in embedded browsers. Fall
+      // back to the in-memory repository -- no persistence across reloads,
+      // which is acceptable for the dev preview and keeps every session flow
+      // (timing, PB, history) fully functional. Native builds are unaffected.
+      console.warn('[composition] web preview: using in-memory storage (expo-sqlite web backend unavailable)');
+      repository = new InMemorySessionRepository();
+    } else {
+      const opened = await openAppDatabase(DB_NAME);
+      db = opened.db;
+      repository = opened.repository;
     }
+
+    gnssProvider = new GnssLocationProvider();
+
+    installProductionController(createProductionController());
+
+    // One-shot-controller gate (C1 fix): every `startPreflight()` call checks
+    // whether the production controller is terminal (a prior session already
+    // completed, or ended in `error`) and, if so, disposes it and installs a
+    // fresh one BEFORE forwarding the command -- otherwise a second real
+    // session on the same app composition would be driven by a controller
+    // stuck in `sessionComplete`, which ignores START_PREFLIGHT/calibration
+    // transitions entirely. A no-op while a DevReplay controller is active
+    // (`activeController !== controller`) -- that swap is `restoreProductionFacade()`'s
+    // job, not this gate's.
+    facadeWrapper.setPreflightGate(async () => {
+      if (controller === null || activeController !== controller) return;
+      const state = currentControllerState(controller);
+      if (state !== 'sessionComplete' && state !== 'error') return;
+      const staleController = controller;
+      const staleFacade = productionFacade;
+      await staleController.dispose();
+      staleFacade?.dispose();
+      installProductionController(createProductionController());
+    });
+
+    const history = new SqlSessionHistoryStore(
+      repository,
+      LOCAL_USER_ID,
+      TMR_CIRCUIT_PROFILE.circuitId,
+      TMR_CIRCUIT_PROFILE.layoutId,
+      TMR_CIRCUIT_PROFILE.layoutVersion,
+    );
+    await history.refresh();
+    historyWrapper.setInner(history);
+    historyStore = history;
+
+    if (db !== null) {
+      const settings = await SqlSettingsStore.create(db);
+      settingsWrapper.setInner(settings);
+    }
+
+    const activeSessionId = db !== null ? await getActiveSessionId(db) : null;
+    if (activeSessionId !== null) {
+      const checkpoint = await repository.loadCheckpoint(activeSessionId);
+      if (checkpoint !== null && checkpoint.snapshot.state !== 'sessionComplete') {
+        const recoveryLapCount = checkpoint.laps.length + (midSessionState(checkpoint.snapshot) ? 1 : 0);
+        setPendingRecovery({ sessionId: activeSessionId, lapCount: recoveryLapCount });
+      } else if (db !== null) {
+        await setActiveSessionId(db, null);
+      }
+    }
+    setBootstrapState('ready');
+  } catch (error) {
+    // C2 fix: previously an uncaught bootstrap rejection left `facade` on a
+    // live, fully-functional `MockSessionFacade` -- calibration could start
+    // against a fake timer with no persistence and no user-visible error.
+    // `facade`'s inner stays the inert `PendingFacade` installed above (never
+    // swapped to `MockSessionFacade`/`RealSessionFacade` on this path), and
+    // `bootstrapState` flips to 'failed' so `CircuitDetailScreen` can show a
+    // non-modal error banner and keep "Start Session" disabled.
+    console.error('[composition] bootstrap failed', error);
+    setBootstrapState('failed');
+    throw error;
   }
 })();
+// Bootstrap failures are observable via `bootstrapState`/`subscribeBootstrapState`
+// and (for callers that specifically await it) `ready()`'s own rethrow below --
+// this no-op catch only prevents Node/Hermes from ever reporting the module-load
+// promise itself as an unhandled rejection when nothing else happens to consume it.
+bootstrapPromise.catch(() => undefined);
 
 /** Awaited by recovery/dev-replay actions below so they never race the async bootstrap. */
 async function ready(): Promise<{ db: SqlDatabase | null; repository: LocalSessionRepository; controller: SessionController }> {
@@ -369,6 +548,24 @@ async function ready(): Promise<{ db: SqlDatabase | null; repository: LocalSessi
   return { db, repository, controller };
 }
 
+// ---------------------------------------------------------------------------
+// Recovery operation lock (C10 fix). `resumeRecovery`/`discardRecovery` share
+// a single in-flight lock: a second call (of either) while one is already
+// running is a no-op that returns the SAME in-flight promise, instead of
+// racing a second read/write against the same captured recovery record.
+// ---------------------------------------------------------------------------
+
+let recoveryOperationInFlight: Promise<void> | null = null;
+
+function runRecoveryOperation(operation: () => Promise<void>): Promise<void> {
+  if (recoveryOperationInFlight !== null) return recoveryOperationInFlight;
+  const run = operation().finally(() => {
+    recoveryOperationInFlight = null;
+  });
+  recoveryOperationInFlight = run;
+  return run;
+}
+
 /**
  * Resumes a recovered session (ADR-0003 §3): restores historical laps into
  * the controller and arms it directly off the last-known stored reference
@@ -377,30 +574,40 @@ async function ready(): Promise<{ db: SqlDatabase | null; repository: LocalSessi
  * (CircuitDetailScreen) navigates to `ActiveDashboard` after this resolves.
  */
 export async function resumeRecovery(): Promise<void> {
-  const info = pendingRecovery;
-  if (info === null) return;
-  const { db: database, repository: repo, controller: ctrl } = await ready();
-  const checkpoint = await repo.loadCheckpoint(info.sessionId);
-  if (checkpoint !== null) {
-    ctrl.restoreFromCheckpoint(info.sessionId, checkpoint.snapshot, checkpoint.laps);
-  }
-  await ctrl.start('session');
-  setPendingRecovery(null);
-  if (database !== null) await setActiveSessionId(database, null);
+  return runRecoveryOperation(async () => {
+    const info = pendingRecovery;
+    if (info === null) return;
+    const { db: database, repository: repo, controller: ctrl } = await ready();
+    const checkpoint = await repo.loadCheckpoint(info.sessionId);
+    if (checkpoint !== null) {
+      ctrl.restoreFromCheckpoint(info.sessionId, checkpoint.snapshot, checkpoint.laps);
+    }
+    await ctrl.start('session');
+    setPendingRecovery(null);
+    // C5 fix: the recovered session is active again -- keep the active-session
+    // pointer (re-affirmed, in case it somehow drifted) rather than clearing
+    // it. It is cleared only by the existing `onSessionEnded` callback once
+    // this session actually finishes; clearing it here meant a SECOND process
+    // death mid-resume left no pointer for the next launch to discover, so
+    // recovery was silently never offered again.
+    if (database !== null) await setActiveSessionId(database, info.sessionId);
+  });
 }
 
 /** Discards a recoverable checkpoint without resuming (ADR-0003 §3): marks it terminal so it is never offered again -- `LocalSessionRepository` has no delete method, so this overwrites the checkpoint's snapshot to `sessionComplete` instead. */
 export async function discardRecovery(): Promise<void> {
-  const info = pendingRecovery;
-  if (info === null) return;
-  const { db: database, repository: repo } = await ready();
-  await repo.saveCheckpoint(
-    info.sessionId,
-    { state: 'sessionComplete', lapNumber: 0, context: {} },
-    [],
-  );
-  setPendingRecovery(null);
-  if (database !== null) await setActiveSessionId(database, null);
+  return runRecoveryOperation(async () => {
+    const info = pendingRecovery;
+    if (info === null) return;
+    const { db: database, repository: repo } = await ready();
+    await repo.saveCheckpoint(
+      info.sessionId,
+      { state: 'sessionComplete', lapNumber: 0, context: {} },
+      [],
+    );
+    setPendingRecovery(null);
+    if (database !== null) await setActiveSessionId(database, null);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -430,6 +637,28 @@ export async function deleteAllStoredUserData(): Promise<DeleteUserDataResult> {
 // ---------------------------------------------------------------------------
 
 /**
+ * Restores `facade` to the production controller (C6 fix): disposes any
+ * active DevReplay controller first (so its provider/watchdog cannot keep
+ * running after the swap), then re-points `facadeWrapper` back at the
+ * long-lived `productionFacade` -- no new `RealSessionFacade` is created, so
+ * this never leaks a fresh controller subscription. A no-op if there is no
+ * replay controller to dispose and the production controller is already
+ * active. Called by `DevReplayScreen` on unmount and before starting a new
+ * replay/mock session.
+ */
+export async function restoreProductionFacade(): Promise<void> {
+  if (replayController !== null) {
+    const stale = replayController;
+    replayController = null;
+    await stale.dispose();
+  }
+  if (controller !== null && productionFacade !== null) {
+    activeController = controller;
+    facadeWrapper.setInner(productionFacade);
+  }
+}
+
+/**
  * Builds a fresh `SessionController` driven by `ReplayLocationProvider` (10x
  * accelerated) over the SAME real repository/profile/user as the production
  * controller, wraps it in a `RealSessionFacade`, and swaps it in as the
@@ -438,6 +667,12 @@ export async function deleteAllStoredUserData(): Promise<DeleteUserDataResult> {
  * `ActiveDashboardScreen` (unmodified, real production screens) drive this
  * replay session exactly like a live one. Results land in the real SQLite
  * history. __DEV__-only; never referenced outside `DevReplayScreen`.
+ *
+ * C6 fix: disposes any PREVIOUS replay controller first (defense in depth --
+ * `DevReplayScreen` itself already calls `restoreProductionFacade()` before
+ * starting a new replay, but this guards any other call path too), so an
+ * unfinished earlier replay can never keep its provider/watchdog alive after
+ * this swap.
  *
  * Time domain: the controller is given a `ScaledReplayClock` reading a
  * shared `ReplayTimeSource` (`virtualNow = virtualStart + realElapsed *
@@ -451,7 +686,7 @@ export async function deleteAllStoredUserData(): Promise<DeleteUserDataResult> {
  * including watchdog-timing compatibility and cross-run monotonicity. The
  * production GNSS path is unaffected -- it keeps `PerformanceNowClock`
  * directly as `clock` and the raw, un-wrapped `GnssLocationProvider` (see
- * the `bootstrapPromise` above).
+ * `createProductionController()` above).
  *
  * `restartProvider` (invoked by the ADR-0003 §1 watchdog -- e.g. once a
  * short fixture drains and the app idles on Calibration Result/armed while
@@ -466,6 +701,11 @@ export async function deleteAllStoredUserData(): Promise<DeleteUserDataResult> {
  */
 export async function startDevReplaySession(samples: LocationSample[]): Promise<void> {
   const { repository: repo } = await ready();
+  if (replayController !== null) {
+    const stale = replayController;
+    replayController = null;
+    await stale.dispose();
+  }
   const speedFactor = 10;
   const realClock = new PerformanceNowClock();
   const timeSource = new ReplayTimeSource(realClock, speedFactor);
@@ -488,6 +728,7 @@ export async function startDevReplaySession(samples: LocationSample[]): Promise<
     },
   });
 
+  replayController = devController;
   activeController = devController;
   facadeWrapper.setInner(
     new RealSessionFacade(devController, {
@@ -502,8 +743,19 @@ export async function startDevReplaySession(samples: LocationSample[]): Promise<
   );
 }
 
-/** Swaps the active `facade` back to a fresh `MockSessionFacade` -- DevReplayScreen's `__DEV__` mock toggle. */
+/**
+ * Swaps the active `facade` back to a fresh `MockSessionFacade` --
+ * DevReplayScreen's `__DEV__` mock toggle. C6 fix: disposes any active replay
+ * controller first (defense in depth -- `DevReplayScreen` already calls
+ * `restoreProductionFacade()` before this), so switching to the scripted mock
+ * can never leave an unfinished replay's provider/watchdog running underneath.
+ */
 export function useMockFacadeForDevReplay(): void {
+  if (replayController !== null) {
+    const stale = replayController;
+    replayController = null;
+    void stale.dispose();
+  }
   activeController = null;
   facadeWrapper.setInner(new MockSessionFacade());
 }

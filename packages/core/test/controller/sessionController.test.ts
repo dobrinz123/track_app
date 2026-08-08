@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { LocationSample, ReferenceLap, SessionMachineSnapshot } from '../../src/contracts';
+import type { LocalSessionRepository, LocationSample, ReferenceLap, SessionMachineSnapshot } from '../../src/contracts';
 import { SessionController, type FacadeStateCore } from '../../src/controller';
 import {
   cleanRecognitionLap,
@@ -11,7 +11,7 @@ import {
 } from '../../src/fixtures';
 import { InMemorySessionRepository } from '../../src/persistence';
 
-import { FakeClock, FakeLocationProvider, FakeWatchdogScheduler, tmr } from './testSupport';
+import { ControllableRepository, FakeClock, FakeLocationProvider, FakeWatchdogScheduler, tmr } from './testSupport';
 
 function last<T>(items: readonly T[]): T {
   const value = items[items.length - 1];
@@ -20,7 +20,7 @@ function last<T>(items: readonly T[]): T {
 }
 
 /** Builds a fresh controller + its dependencies, all fakes under full test control. */
-function setup(existingRepository?: InMemorySessionRepository) {
+function setup(existingRepository?: LocalSessionRepository) {
   const { profile, runtime } = tmr();
   const repository = existingRepository ?? new InMemorySessionRepository();
   const provider = new FakeLocationProvider();
@@ -411,5 +411,153 @@ describe('SessionController', () => {
     expect(timingLapNumbers.length).toBeGreaterThan(0);
     expect(timingLapNumbers).toContain(3);
     expect(timingLapNumbers.every((n) => n >= 3)).toBe(true);
+  });
+
+  // -------------------------------------------------------------------
+  // C1 -- one-shot controller: dispose()
+  // -------------------------------------------------------------------
+
+  it('dispose() stops the watchdog and provider, detaches the sample listener, and is idempotent (C1 fix)', async () => {
+    const { profile, controller, provider, clock, scheduler, restartCalls, states, feed } = setup();
+    await controller.start('calibration');
+    feed(cleanRecognitionLap(profile, 901));
+    expect(last(states).sessionState).toBe('calibrationReview');
+    const emissionsBeforeDispose = states.length;
+    expect(provider.stopCount).toBe(0);
+
+    await controller.dispose();
+    expect(provider.stopCount).toBe(1);
+
+    // Idempotent: a second call must not throw, double-stop the provider, or
+    // do anything else observable.
+    await expect(controller.dispose()).resolves.toBeUndefined();
+    expect(provider.stopCount).toBe(1);
+
+    // No emissions after dispose: the controller's sample listener was
+    // detached from `provider` (`providerUnsubscribe`), so pushing a sample
+    // through it directly -- simulating a shared GnssLocationProvider handing
+    // samples to whichever controller is currently subscribed -- must not
+    // reach this (disposed) controller at all.
+    provider.push(sampleAtLapDistance(profile, 500, clock.now(), { lateralOffsetM: 0, accuracyM: 3 }));
+    expect(states.length).toBe(emissionsBeforeDispose);
+
+    // The watchdog is stopped too: advancing well past its timeout and
+    // ticking the scheduler must not restart the provider or emit again.
+    clock.advance(10_000);
+    scheduler.tick();
+    expect(restartCalls).toHaveLength(0);
+    expect(states.length).toBe(emissionsBeforeDispose);
+  });
+
+  // -------------------------------------------------------------------
+  // C4 (also pins blind-verifier B2) -- endSession() must await flush()
+  // BEFORE saveSession/checkpoint, using Promise.all (not allSettled) so a
+  // persistence failure propagates instead of being silently swallowed.
+  // -------------------------------------------------------------------
+
+  it('endSession() resolves only once a slow-resolving telemetry write has committed, with the repository fully consistent at resolution (C4 fix)', async () => {
+    const inner = new InMemorySessionRepository();
+    const controllable = new ControllableRepository(inner);
+    const { profile, controller, feed } = setup(controllable);
+
+    await controller.start('calibration');
+    feed(cleanRecognitionLap(profile, 950));
+    controller.acceptCalibration();
+    await controller.flush();
+    controller.arm();
+
+    // Gate saveTelemetry BEFORE driving the lap, so the write queued by
+    // onLapCompleted() is still pending when endSession() is called.
+    let releaseGate: () => void = () => undefined;
+    controllable.saveTelemetryGate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    feed(driveLap(profile, { seed: 951, speedMps: 40, noiseSigmaM: 1 }));
+
+    let ended = false;
+    const endPromise = controller.endSession().then(() => {
+      ended = true;
+    });
+
+    // Let pending microtasks progress (including the queued saveTelemetry
+    // call reaching the gate) without resolving it.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(controllable.saveTelemetryCalls.length).toBeGreaterThan(0);
+    expect(ended).toBe(false); // endSession() must NOT have resolved yet -- it is awaiting flush().
+
+    releaseGate();
+    await endPromise;
+    expect(ended).toBe(true);
+
+    // Repository contents are fully committed at resolution: telemetry,
+    // checkpoint, PB, and the session summary itself.
+    const sessionId = controller.diagnostics().sessionId!;
+    const telemetry = await inner.loadTelemetry(sessionId, 1);
+    expect(telemetry.length).toBeGreaterThan(0);
+    const checkpoint = await inner.loadCheckpoint(sessionId);
+    expect(checkpoint?.laps).toHaveLength(1);
+    const pb = await inner.getReferenceLap('driver-1', profile.circuitId, profile.layoutId, profile.layoutVersion);
+    expect(pb).not.toBeNull();
+    const sessions = await inner.listSessions('driver-1', profile.circuitId);
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]?.laps).toHaveLength(1);
+  });
+
+  it('endSession() rejects when a pending telemetry write fails, and never saves the session summary (C4 fix; pins B2 -- flush() must use Promise.all, not allSettled)', async () => {
+    const inner = new InMemorySessionRepository();
+    const controllable = new ControllableRepository(inner);
+    const { profile, controller, feed } = setup(controllable);
+
+    await controller.start('calibration');
+    feed(cleanRecognitionLap(profile, 960));
+    controller.acceptCalibration();
+    await controller.flush();
+    controller.arm();
+
+    controllable.saveTelemetryShouldReject = true;
+    feed(driveLap(profile, { seed: 961, speedMps: 40, noiseSigmaM: 1 }));
+
+    await expect(controller.endSession()).rejects.toThrow('saveTelemetry failed');
+
+    // A reverted flush() (Promise.allSettled instead of Promise.all) would
+    // swallow the rejection, let endSession() proceed past it, and save the
+    // session summary anyway -- this is exactly what this assertion catches.
+    const sessions = await inner.listSessions('driver-1', profile.circuitId);
+    expect(sessions).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------
+  // C8 -- background checkpointNow() must never throw synchronously and
+  // must reject cleanly (so composition.ts's onBackground handler can
+  // `.catch()` it without an unhandled rejection).
+  // -------------------------------------------------------------------
+
+  it('checkpointNow() propagates a repository failure as a real rejection -- never a synchronous throw, never silently swallowed (C8 fix)', async () => {
+    const inner = new InMemorySessionRepository();
+    const controllable = new ControllableRepository(inner);
+    controllable.saveCheckpoint = async () => {
+      throw new Error('disk full');
+    };
+    const { profile, controller, feed } = setup(controllable);
+    await controller.start('calibration');
+    feed(cleanRecognitionLap(profile, 970));
+
+    let threwSynchronously = false;
+    let promise: Promise<void> | undefined;
+    try {
+      promise = controller.checkpointNow();
+    } catch {
+      threwSynchronously = true;
+    }
+    // Calling it always yields a Promise (async-function semantics) -- this
+    // is what lets a caller safely attach `.catch()` instead of needing a
+    // try/catch around the call site itself.
+    expect(threwSynchronously).toBe(false);
+    // Rejects (not resolved, not hung): if this rejection were ever left
+    // unconsumed anywhere inside the controller instead of surfacing here,
+    // vitest's own unhandled-rejection detection would fail this suite.
+    await expect(promise!).rejects.toThrow('disk full');
   });
 });

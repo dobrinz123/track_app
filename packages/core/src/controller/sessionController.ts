@@ -228,6 +228,10 @@ export class SessionController {
    * bounded even during such a burst.
    */
   private lapPersistenceTail: Promise<void> = Promise.resolve();
+  /** Unsubscribes this controller's `handleSample` callback from `deps.locationProvider` -- captured so `dispose()` (C1 fix) can detach it, letting a shared provider (e.g. one `GnssLocationProvider` instance reused across successive production controllers) be handed to a fresh controller without both instances receiving samples. */
+  private providerUnsubscribe: (() => void) | null = null;
+  /** Set by `dispose()`; makes it idempotent (a second call is a no-op). */
+  private disposed = false;
 
   constructor(private readonly deps: SessionControllerDeps) {
     this.core = new SessionPipelineCore(deps.runtimeProfile, {
@@ -417,6 +421,17 @@ export class SessionController {
     this.emit();
   }
 
+  /**
+   * Ends the session. Order (C4 fix, binding): provider stop -> flush ->
+   * saveSession -> emit `sessionComplete`. `flush()` is awaited BEFORE the
+   * session summary is saved so every telemetry/checkpoint/PB write already
+   * queued from the last completed lap(s) is durably committed first --
+   * previously `saveSession`/the final checkpoint could race ahead of that
+   * work, so killing the app from the just-reached Results screen could lose
+   * it. `flush()` rejecting (a persistence failure) propagates out of this
+   * method instead of being swallowed, so it reaches the facade's error path
+   * (C7) rather than silently leaving `sessionComplete` un-emitted.
+   */
   async endSession(): Promise<void> {
     this.stopWatchdog();
     if (this.providerRunning) {
@@ -424,6 +439,7 @@ export class SessionController {
       this.providerRunning = false;
     }
     this.core.dispatch({ type: 'END_SESSION' });
+    await this.flush();
     const sessionId = this.sessionId;
     if (sessionId !== null) {
       const summary: SessionSummary = {
@@ -443,6 +459,31 @@ export class SessionController {
     this.mode = 'idle';
     this.latestDelta = null;
     this.emit();
+  }
+
+  /**
+   * Disposes this controller (C1 fix, one-shot-controller bug): stops the
+   * watchdog scheduler, stops the location provider and detaches this
+   * controller's sample listener from it (`providerUnsubscribe`), and clears
+   * every state listener -- so a disposed controller can never emit again
+   * and never double-handles samples if its (possibly shared) provider is
+   * handed to a freshly constructed replacement controller. Idempotent: a
+   * second call is a no-op. Does not touch persisted data -- `endSession()`
+   * already saved anything worth keeping before a caller would dispose.
+   */
+  async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.stopWatchdog();
+    if (this.providerRunning) {
+      await this.deps.locationProvider.stop();
+      this.providerRunning = false;
+    }
+    if (this.providerUnsubscribe !== null) {
+      this.providerUnsubscribe();
+      this.providerUnsubscribe = null;
+    }
+    this.listeners.clear();
   }
 
   /**
@@ -519,7 +560,7 @@ export class SessionController {
 
   private async ensureProviderRunning(): Promise<void> {
     if (!this.providerRunning) {
-      this.deps.locationProvider.subscribe((sample) => this.handleSample(sample));
+      this.providerUnsubscribe = this.deps.locationProvider.subscribe((sample) => this.handleSample(sample));
       await this.deps.locationProvider.start();
       this.providerRunning = true;
     }

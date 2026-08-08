@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
@@ -18,6 +18,7 @@ import { colors, radii, spacing, typography } from '../theme';
 import {
   estimateObservedRateHz,
   getLiveDiagnostics,
+  restoreProductionFacade,
   startDevReplaySession,
   useMockFacadeForDevReplay,
   type LiveDiagnosticsSnapshot,
@@ -69,9 +70,23 @@ export function DevReplayScreen({ navigation }: Props): React.JSX.Element {
     }, []),
   );
 
+  // C6 fix: restores the production facade/controller on unmount, so an
+  // unfinished replay never keeps its provider/watchdog running (or keeps
+  // driving `facade`) once this screen goes away.
+  useEffect(() => {
+    return () => {
+      void restoreProductionFacade();
+    };
+  }, []);
+
   const runScenario = async (scenario: ScenarioDefinition): Promise<void> => {
     setRunningId(scenario.id);
     try {
+      // C6 fix: restore production (disposing any still-active replay
+      // controller) before building a new one, every time -- not just on
+      // unmount -- so switching straight from one fixture to another never
+      // leaves the previous replay's provider/watchdog running.
+      await restoreProductionFacade();
       const samples = scenario.build(TMR_CIRCUIT_PROFILE);
       await startDevReplaySession(samples);
       navigation.navigate('CalibrationInstructions');
@@ -82,7 +97,8 @@ export function DevReplayScreen({ navigation }: Props): React.JSX.Element {
     }
   };
 
-  const runMock = (): void => {
+  const runMock = async (): Promise<void> => {
+    await restoreProductionFacade();
     useMockFacadeForDevReplay();
     navigation.navigate('CalibrationInstructions');
   };
@@ -129,7 +145,7 @@ export function DevReplayScreen({ navigation }: Props): React.JSX.Element {
         </Text>
         <Pressable
           style={styles.fixtureRow}
-          onPress={runMock}
+          onPress={() => void runMock()}
           accessibilityRole="button"
           accessibilityLabel="Use scripted mock facade"
         >

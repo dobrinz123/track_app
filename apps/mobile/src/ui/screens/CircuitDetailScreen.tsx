@@ -5,7 +5,15 @@ import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
 import { ADVISORY_NOTICE, TRANSILVANIA_MOTOR_RING } from '../data/circuit';
-import { discardRecovery, resumeRecovery, subscribeRecovery, type PendingRecovery } from '../../session/composition';
+import { StatusBanner } from '../components/StatusBanner';
+import {
+  discardRecovery,
+  resumeRecovery,
+  subscribeBootstrapState,
+  subscribeRecovery,
+  type BootstrapState,
+  type PendingRecovery,
+} from '../../session/composition';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'CircuitDetail'>;
 
@@ -27,8 +35,15 @@ export function CircuitDetailScreen({ navigation }: Props): React.JSX.Element {
   const circuit = TRANSILVANIA_MOTOR_RING;
   const [recovery, setRecovery] = useState<PendingRecovery | null>(null);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
+  // C2 fix: "Start Session" stays disabled (with an inline note, or an error
+  // banner on failure) until composition.ts's async bootstrap actually
+  // finishes -- previously nothing gated it, so starting a session during a
+  // slow/failed bootstrap could drive a live scripted mock with no
+  // persistence and no visible error.
+  const [bootstrapState, setBootstrapState] = useState<BootstrapState>('pending');
 
   useEffect(() => subscribeRecovery(setRecovery), []);
+  useEffect(() => subscribeBootstrapState(setBootstrapState), []);
 
   const handleResume = async (): Promise<void> => {
     setRecoveryBusy(true);
@@ -62,12 +77,22 @@ export function CircuitDetailScreen({ navigation }: Props): React.JSX.Element {
           {circuit.locality}, {circuit.county}, {circuit.country}
         </Text>
 
+        {/* Bootstrap failure (C2 fix): inline banner (never a modal) -- Start Session stays disabled below regardless. */}
+        {bootstrapState === 'failed' ? (
+          <StatusBanner
+            variant="error"
+            message="Couldn't prepare local session storage. Restart the app to try again."
+          />
+        ) : null}
+
         {/* ADR-0003 §3 recovery: inline banner (never a modal), only rendered when a checkpoint from an incomplete session is on disk. */}
         {recovery !== null ? (
           <View style={styles.recoveryBanner} accessibilityLiveRegion="polite">
             <Text style={styles.recoveryText} maxFontSizeMultiplier={1.3}>
+              {/* C10 fix: resume does NOT require a fresh calibration -- it arms
+                  directly off the stored reference lap (SessionController.start('session')). */}
               Recovered an interrupted session ({recovery.lapCount} lap{recovery.lapCount === 1 ? '' : 's'}). Resume
-              driving (a fresh calibration lap is required) or discard it.
+              continues the interrupted session; lap {recovery.lapCount} was invalidated. Or discard it.
             </Text>
             <View style={styles.recoveryActions}>
               <Pressable
@@ -108,15 +133,22 @@ export function CircuitDetailScreen({ navigation }: Props): React.JSX.Element {
         </View>
 
         <Pressable
-          style={[styles.button, styles.primaryButton]}
+          style={[styles.button, styles.primaryButton, bootstrapState !== 'ready' && styles.buttonDisabled]}
           onPress={() => navigation.navigate('Preflight')}
+          disabled={bootstrapState !== 'ready'}
           accessibilityRole="button"
           accessibilityLabel="Start session"
+          accessibilityState={{ disabled: bootstrapState !== 'ready' }}
         >
           <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.3}>
             Start Session
           </Text>
         </Pressable>
+        {bootstrapState === 'pending' ? (
+          <Text style={styles.footerText} maxFontSizeMultiplier={1.3}>
+            Preparing session data…
+          </Text>
+        ) : null}
 
         <Pressable
           style={[styles.button, styles.secondaryButton]}
@@ -218,6 +250,9 @@ const styles = StyleSheet.create({
   primaryButtonText: {
     ...typography.subtitle,
     color: colors.onAccent,
+  },
+  buttonDisabled: {
+    opacity: 0.5,
   },
   secondaryButton: {
     backgroundColor: colors.surface,

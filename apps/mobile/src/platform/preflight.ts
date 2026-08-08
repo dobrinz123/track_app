@@ -122,10 +122,21 @@ export async function collectThermalState(): Promise<ThermalStateResult> {
  * Subscribes to `watchPositionAsync` and resolves as soon as a sample with
  * `accuracyM <= GNSS_FIX_ACCURACY_THRESHOLD_M` arrives, or after
  * `timeoutMs` — whichever is first (MUST DO #6).
+ *
+ * `signal` (C11 fix) lets a caller cancel early -- e.g. `PreflightScreen`
+ * unmounting before either the timeout or a qualifying fix. Cancelling
+ * resolves the same way a timeout does (`acquired: false`) and removes the
+ * native location subscription: immediately if it has already been
+ * established by the time of cancellation, otherwise (a cancel that lands
+ * while `watchPositionAsync`'s own native/JS-bridge round trip is still in
+ * flight -- there is no way to cancel that promise itself) as soon as it
+ * resolves, via the same `if (settled) subscription.remove()` guard already
+ * used for the post-timeout case.
  */
 export function collectGnssFix(
   timeoutMs: number = GNSS_FIX_TIMEOUT_MS,
   accuracyThresholdM: number = GNSS_FIX_ACCURACY_THRESHOLD_M,
+  signal?: AbortSignal,
 ): Promise<GnssFixResult> {
   return new Promise<GnssFixResult>((resolve) => {
     let settled = false;
@@ -135,11 +146,24 @@ export function collectGnssFix(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       subscription?.remove();
       resolve(result);
     };
 
+    // Declared before any code path that can call `finish()` (including a
+    // synchronous already-aborted `signal` below) -- `finish()` references
+    // it via `clearTimeout(timer)`, so it must already be initialized.
     const timer = setTimeout(() => finish({ acquired: false, accuracyM: null }), timeoutMs);
+
+    const onAbort = (): void => finish({ acquired: false, accuracyM: null });
+    if (signal !== undefined) {
+      if (signal.aborted) {
+        finish({ acquired: false, accuracyM: null });
+      } else {
+        signal.addEventListener('abort', onAbort);
+      }
+    }
 
     Location.watchPositionAsync(
       { accuracy: Location.LocationAccuracy.BestForNavigation, timeInterval: 0, distanceInterval: 0 },
@@ -204,13 +228,19 @@ export async function collectKeepAwakeActivatable(): Promise<boolean> {
   }
 }
 
-/** Runs every async collector and folds the result through {@link evaluatePreflight}. */
-export async function runPreflightChecks(): Promise<PreflightReport> {
+/**
+ * Runs every async collector and folds the result through
+ * {@link evaluatePreflight}. `signal` (C11 fix) is forwarded only to
+ * {@link collectGnssFix} -- the only collector that holds a live native
+ * subscription worth cancelling; every other collector is a one-shot
+ * promise with nothing to cancel.
+ */
+export async function runPreflightChecks(signal?: AbortSignal): Promise<PreflightReport> {
   const [locationServicesEnabled, permissionGranted, gnssFix, battery, keepAwakeActivatable, reducedAccuracy, thermalState] =
     await Promise.all([
       collectLocationServicesEnabled(),
       collectPermissionGranted(),
-      collectGnssFix(),
+      collectGnssFix(GNSS_FIX_TIMEOUT_MS, GNSS_FIX_ACCURACY_THRESHOLD_M, signal),
       collectBatteryCheck(),
       collectKeepAwakeActivatable(),
       collectReducedAccuracy(),

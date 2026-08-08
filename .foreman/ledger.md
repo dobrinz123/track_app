@@ -81,3 +81,9 @@ NOTE: WP11b (SQLite adapter) intentionally held until WP4b collects — package-
 
 ## Scratch
 .foreman/scratch/
+
+## Pre-install gate (2026-08-09)
+- IPA forensics (LEAD): PASS — bundle id/plist/v2-gates-binary/fonts/icon/unsigned all verified in the actual artifact.
+- Blind verifier: FAIL (discipline) — binary behavior clean, but 2/4 controller fixes unpinned (B1 PB-capture, B2 flush-propagation) + DevReplay in release bundle (B4).
+- Codex cross-review: FAIL (lifecycle) — C1 one-shot controller (CRITICAL), C2 bootstrap gate, C3 GNSS races, C4 endSession no-flush, C5 recovery pointer, C6 replay swap leaks, C7 silent command errors, C8 unawaited checkpoint, C9 keep-awake gap on Learn, C10 recovery lock+copy, C11 preflight collector linger.
+- DECISION: DO NOT INSTALL current artifact; single batched fix wave WP-lifecycle (Sonnet) with pre-decided designs; install slots preserved. Re-verify + fresh build after.
