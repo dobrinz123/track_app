@@ -448,9 +448,21 @@ export async function deleteAllStoredUserData(): Promise<DeleteUserDataResult> {
  * real recorded speeds, not the speeds compressed by the 10x delivery pace)
  * while still delivering samples at the accelerated wall-clock pace. See
  * `liveTimestampedProvider.ts`'s module doc comment for the full rationale,
- * including watchdog-timing compatibility. The production GNSS path is
- * unaffected -- it keeps `PerformanceNowClock` directly as `clock` and the
- * raw, un-wrapped `GnssLocationProvider` (see the `bootstrapPromise` above).
+ * including watchdog-timing compatibility and cross-run monotonicity. The
+ * production GNSS path is unaffected -- it keeps `PerformanceNowClock`
+ * directly as `clock` and the raw, un-wrapped `GnssLocationProvider` (see
+ * the `bootstrapPromise` above).
+ *
+ * `restartProvider` (invoked by the ADR-0003 §1 watchdog -- e.g. once a
+ * short fixture drains and the app idles on Calibration Result/armed while
+ * the watchdog's real-time poll notices no further samples) MUST restart
+ * `replayProvider` (the wrapper), not `replayInner` directly: only the
+ * wrapper's own `start()` begins a new `ReplayTimeSource` run (re-anchoring
+ * at `virtualNow()`, per `liveTimestampedProvider.ts`'s `beginRun()`). A raw
+ * `replayInner` restart bypasses that and keeps re-emitting samples through
+ * the wrapper's ORIGINAL, by-then-stale anchor -- exactly the follow-up
+ * pacing bug (`currentLapMs` showing minutes within seconds of the first
+ * crossing after an idle calibration-review pause).
  */
 export async function startDevReplaySession(samples: LocationSample[]): Promise<void> {
   const { repository: repo } = await ready();
@@ -471,8 +483,8 @@ export async function startDevReplaySession(samples: LocationSample[]): Promise<
     appVersion: appVersion(),
     algorithmVersion: ALGORITHM_VERSION,
     restartProvider: async () => {
-      await replayInner.stop();
-      await replayInner.start();
+      await replayProvider.stop();
+      await replayProvider.start();
     },
   });
 

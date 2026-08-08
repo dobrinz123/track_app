@@ -7,8 +7,8 @@ import type { LocationProvider, LocationSample, MonotonicClock } from '@circuit/
  *
  * `realClock` is any real, wall-time `MonotonicClock` (the app passes
  * `PerformanceNowClock`) -- `ReplayTimeSource` reads it once at construction
- * to fix `realStartMono`, then every `virtualNow()`/`toVirtual()` call
- * measures elapsed real time off that anchor and scales it by `speedFactor`.
+ * to fix `realStartMono`, then every `virtualNow()` call measures elapsed
+ * real time off that anchor and scales it by `speedFactor`.
  *
  * This is the fix for the DevReplay pacing bug: previously
  * `LiveTimestampedLocationProvider` re-stamped every sample with the REAL
@@ -22,6 +22,23 @@ import type { LocationProvider, LocationSample, MonotonicClock } from '@circuit/
  * equal to the fixture's own recorded spacing, in a domain
  * `SessionController`'s `clock.now() - lap.tStart` arithmetic can still use
  * directly, while still delivering samples at wall-clock `speedFactor`x pace.
+ *
+ * Run boundaries (`beginRun()`/`toVirtual()` below) -- the follow-up fix for
+ * a second pacing bug: a naive design anchors every `LocationProvider.start()`
+ * ("run" -- calibration and, if the provider is ever restarted, the session
+ * phase) back to a FIXED epoch (`virtualStartMono`) instead of to "now" on
+ * this source. Real time keeps advancing `virtualNow()` continuously
+ * regardless of whether a run is actively delivering samples (e.g. while a
+ * human reviews the Calibration Result screen before tapping Accept) -- so a
+ * later run anchored back at the fixed epoch stamps its samples HUNDREDS of
+ * virtual seconds in the PAST relative to `ScaledReplayClock.now()`,
+ * producing `currentLapMs = clock.now() - lap.tStart` in the hundreds of
+ * seconds within moments of the first crossing, and can even make `tMono`
+ * run BACKWARD across the run boundary. `beginRun()` fixes this: each run's
+ * anchor is `virtualNow()` at the moment `start()` is called (not the fixed
+ * epoch), clamped forward to never fall before the last virtual `tMono` any
+ * PRIOR run on this source ever emitted -- so every run's samples land at or
+ * after "now" and are monotonic across the whole source's lifetime.
  *
  * Watchdog compatibility (ADR-0003 §1): `SessionController`'s watchdog
  * compares `deps.clock.now()` gaps against `watchdogTimeoutMs` (default
@@ -38,6 +55,8 @@ import type { LocationProvider, LocationSample, MonotonicClock } from '@circuit/
  */
 export class ReplayTimeSource {
   private readonly realStartMono: number;
+  /** The last virtual `tMono` this source has ever handed out (any run) -- the monotonic floor `beginRun()`/`toVirtual()` enforce for every run after the first. `null` until the first sample of the first run is mapped. */
+  private lastVirtualTMono: number | null = null;
 
   constructor(
     private readonly realClock: MonotonicClock,
@@ -54,16 +73,37 @@ export class ReplayTimeSource {
   }
 
   /**
-   * Maps an original fixture-relative `tMono` into this source's virtual
-   * domain, anchored so that `originalTMono === originAnchorMono` (the
-   * fixture's own first-sample `tMono`) lands exactly on `virtualStartMono`.
-   * Since this is a pure offset (no scaling), the spacing BETWEEN samples in
-   * the fixture's own recorded time is preserved exactly -- unlike stamping
-   * from `virtualNow()` at delivery, which would additionally carry any
-   * timer-scheduling jitter from the accelerated real-time delivery.
+   * Begins a new replay run (call once per `LocationProvider.start()`) and
+   * returns the virtual timestamp that run's FIRST sample should be anchored
+   * to: `virtualNow()` right now, or -- if a prior run on this source already
+   * emitted a later virtual `tMono` (e.g. this run is starting only a moment
+   * after the last one ended) -- that later value instead, so this run's
+   * samples never land before the previous run's. Callers pass the returned
+   * value into every `toVirtual()` call for this run.
    */
-  toVirtual(originalTMono: number, originAnchorMono: number): number {
-    return this.virtualStartMono + (originalTMono - originAnchorMono);
+  beginRun(): number {
+    const now = this.virtualNow();
+    return this.lastVirtualTMono === null ? now : Math.max(now, this.lastVirtualTMono);
+  }
+
+  /**
+   * Maps an original fixture-relative `tMono` into this run's virtual
+   * domain: `runAnchorVirtual` (from `beginRun()`, called once at this run's
+   * `start()`) plus the ORIGINAL fixture-relative delta from
+   * `originAnchorMono` (this run's own first sample's `tMono`) -- preserving
+   * the fixture's own inter-sample spacing exactly. Since this is a pure
+   * offset (no scaling), it carries none of the timer-scheduling jitter
+   * stamping from `virtualNow()` at delivery would. The result is also
+   * clamped to never fall below `lastVirtualTMono` (belt-and-suspenders
+   * alongside `beginRun()`'s own clamp -- fixture timestamps are expected
+   * non-decreasing within a run, but this keeps the guarantee absolute) and
+   * recorded as the new floor for any future run.
+   */
+  toVirtual(originalTMono: number, originAnchorMono: number, runAnchorVirtual: number): number {
+    const candidate = runAnchorVirtual + (originalTMono - originAnchorMono);
+    const virtual = this.lastVirtualTMono === null ? candidate : Math.max(candidate, this.lastVirtualTMono);
+    this.lastVirtualTMono = virtual;
+    return virtual;
   }
 }
 
@@ -85,13 +125,16 @@ export class ScaledReplayClock implements MonotonicClock {
  * `SessionController`'s watchdog and `currentLapMs` arithmetic meaningful
  * against a `ScaledReplayClock` reading the SAME `timeSource`.
  *
- * The first sample observed after each `start()` anchors the mapping (its
- * own `tMono` becomes `timeSource`'s `virtualStartMono`); every later
- * sample's `tMono` is offset from that anchor by exactly its original
- * fixture-relative delta.
+ * Each `start()` begins a new run: `timeSource.beginRun()` fixes this run's
+ * anchor virtual timestamp (see its doc comment for why this is `virtualNow()`
+ * at that moment, not a fixed epoch), and the first sample observed
+ * afterwards anchors the ORIGINAL-time side of the mapping (its own `tMono`
+ * maps exactly onto the run anchor); every later sample's `tMono` is offset
+ * from that anchor by exactly its original fixture-relative delta.
  */
 export class ReplayTimestampedLocationProvider implements LocationProvider {
   private anchorTMono: number | null = null;
+  private runAnchorVirtual = 0;
 
   constructor(
     private readonly inner: LocationProvider,
@@ -100,6 +143,7 @@ export class ReplayTimestampedLocationProvider implements LocationProvider {
 
   async start(): Promise<void> {
     this.anchorTMono = null;
+    this.runAnchorVirtual = this.timeSource.beginRun();
     await this.inner.start();
   }
 
@@ -110,7 +154,7 @@ export class ReplayTimestampedLocationProvider implements LocationProvider {
   subscribe(cb: (s: LocationSample) => void): () => void {
     return this.inner.subscribe((sample: LocationSample) => {
       if (this.anchorTMono === null) this.anchorTMono = sample.tMono;
-      const virtualTMono = this.timeSource.toVirtual(sample.tMono, this.anchorTMono);
+      const virtualTMono = this.timeSource.toVirtual(sample.tMono, this.anchorTMono, this.runAnchorVirtual);
       cb({ ...sample, tMono: virtualTMono });
     });
   }
