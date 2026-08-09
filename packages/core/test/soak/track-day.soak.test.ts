@@ -33,7 +33,7 @@ interface TmrV2 {
   runtime: RuntimeProfile;
 }
 
-function tmrV2(): TmrV2 {
+export function tmrV2(): TmrV2 {
   const json = readFileSync(
     new URL('../../assets/circuits/transilvania-motor-ring.v2.json', import.meta.url),
     'utf8',
@@ -43,7 +43,7 @@ function tmrV2(): TmrV2 {
   return { profile: loaded.profile, runtime: loaded.runtime };
 }
 
-function last<T>(items: readonly T[]): T {
+export function last<T>(items: readonly T[]): T {
   const value = items[items.length - 1];
   if (value === undefined) throw new Error('expected at least one item');
   return value;
@@ -189,7 +189,7 @@ interface ControllerRig {
   feedOne(sample: LocationSample): FacadeStateCore;
 }
 
-function controllerRig(
+export function controllerRig(
   tmr: TmrV2,
   repository: LocalSessionRepository,
   sessionId: string | null,
@@ -247,7 +247,7 @@ function controllerRig(
   };
 }
 
-class SampleTimeline {
+export class SampleTimeline {
   private nextTMono = 0;
 
   append(samples: readonly LocationSample[], gapBeforeMs = 0): LocationSample[] {
@@ -261,7 +261,7 @@ class SampleTimeline {
   }
 }
 
-function oneHzPitLap(profile: CircuitProfile, seed: number): LocationSample[] {
+export function oneHzPitLap(profile: CircuitProfile, seed: number): LocationSample[] {
   return pitLaneTransitLap(profile, seed).map((sample, index) => ({
     ...sample,
     tMono: index * 1_000,
