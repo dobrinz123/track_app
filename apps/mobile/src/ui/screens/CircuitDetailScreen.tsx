@@ -72,8 +72,10 @@ export function CircuitDetailScreen({ navigation }: Props): React.JSX.Element {
   const handleResume = async (): Promise<void> => {
     setRecoveryBusy(true);
     try {
-      await resumeRecovery();
-      navigation.navigate('ActiveDashboard');
+      // F5 nav fix: navigate only when a session actually resumed -- a
+      // vanished-checkpoint abort resolves false and shows its own notice.
+      const resumed = await resumeRecovery();
+      if (resumed) navigation.navigate('ActiveDashboard');
     } finally {
       setRecoveryBusy(false);
     }

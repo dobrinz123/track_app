@@ -710,10 +710,13 @@ async function ready(): Promise<{ db: SqlDatabase | null; repository: LocalSessi
 // racing a second read/write against the same captured recovery record.
 // ---------------------------------------------------------------------------
 
-let recoveryOperationInFlight: Promise<void> | null = null;
+let recoveryOperationInFlight: Promise<unknown> | null = null;
 
-function runRecoveryOperation(operation: () => Promise<void>): Promise<void> {
-  if (recoveryOperationInFlight !== null) return recoveryOperationInFlight;
+function runRecoveryOperation<T>(operation: () => Promise<T>): Promise<T> {
+  // Concurrent mixed-type callers (resume vs discard) share the in-flight
+  // promise; the cast is unsound in theory but safe in practice -- the only
+  // typed consumer treats a non-true result as 'do not navigate'.
+  if (recoveryOperationInFlight !== null) return recoveryOperationInFlight as Promise<T>;
   const run = operation().finally(() => {
     recoveryOperationInFlight = null;
   });
@@ -728,10 +731,10 @@ function runRecoveryOperation(operation: () => Promise<void>): Promise<void> {
  * comment for why this deliberately skips a live recalibration). Caller
  * (CircuitDetailScreen) navigates to `ActiveDashboard` after this resolves.
  */
-export async function resumeRecovery(): Promise<void> {
+export async function resumeRecovery(): Promise<boolean> {
   return runRecoveryOperation(async () => {
     const info = pendingRecovery;
-    if (info === null) return;
+    if (info === null) return false;
     setRecoveryNotice(null);
     const { db: database, repository: repo, controller: ctrl } = await ready();
     const checkpoint = await repo.loadCheckpoint(info.sessionId);
@@ -750,7 +753,7 @@ export async function resumeRecovery(): Promise<void> {
       setPendingRecovery(null);
       setRecoveryNotice('The recovered session could not be found and was discarded.');
       if (database !== null) await setActiveSessionId(database, null);
-      return;
+      return false;
     }
     ctrl.restoreFromCheckpoint(info.sessionId, checkpoint.snapshot, checkpoint.laps);
     await ctrl.start('session');
@@ -762,6 +765,7 @@ export async function resumeRecovery(): Promise<void> {
     // death mid-resume left no pointer for the next launch to discover, so
     // recovery was silently never offered again.
     if (database !== null) await setActiveSessionId(database, info.sessionId);
+    return true;
   });
 }
 

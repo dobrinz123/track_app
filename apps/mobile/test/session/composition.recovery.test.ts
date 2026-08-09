@@ -209,7 +209,9 @@ describe('composition.ts resumeRecovery() (C5 fix -- active-session pointer)', (
     });
     expect(recoveryBeforeResume).toEqual({ sessionId: 'driver-1--rec-c5', lapCount: 3 });
 
-    await composition.resumeRecovery();
+    // F5 navigation contract: a genuine resume resolves true (gates navigation).
+    const resumed = await composition.resumeRecovery();
+    expect(resumed).toBe(true);
 
     let recoveryAfterResume: unknown = 'unset';
     composition.subscribeRecovery((r) => {
@@ -329,7 +331,9 @@ describe('composition.ts resumeRecovery() vanished-checkpoint abort (F5 fix)', (
     });
     expect(notice).toBeNull();
 
-    await composition.resumeRecovery();
+    // F5 navigation contract: CircuitDetailScreen navigates only on true.
+    const resumed = await composition.resumeRecovery();
+    expect(resumed).toBe(false);
 
     // No session was started: the production controller is still untouched
     // ('idle'), not armed off a vanished checkpoint's now-orphaned pointer.
