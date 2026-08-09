@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 
-import type { LocationSample } from '../../src/contracts';
 import { cleanRecognitionLap, driveLap } from '../../src/fixtures';
 import { InMemorySessionRepository } from '../../src/persistence';
 

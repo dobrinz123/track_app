@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { LocationProvider, LocationSample } from '@circuit/core';
-import { InMemorySessionRepository, SessionController, cleanRecognitionLap, pbImprovementSession } from '@circuit/core';
+import { InMemorySessionRepository, SessionController, cleanRecognitionLap, driveLap, pbImprovementSession } from '@circuit/core';
 import { RealSessionFacade } from '../../src/session/realFacade';
 import type { FacadeState } from '../../src/session/facade';
-import { TMR_CIRCUIT_PROFILE, TMR_RUNTIME_PROFILE } from '../../src/session/tmrProfile';
+import { TMR_CIRCUIT_PROFILE, TMR_CORNERS, TMR_RUNTIME_PROFILE } from '../../src/session/tmrProfile';
 import { FakeClock, FakeLocationProvider, feedSamples } from '../support/coreTestDoubles';
 
 /** A `LocationProvider` whose `start()` rejects for its first `failCount` calls, then behaves like `FakeLocationProvider` -- lets a test drive both "command fails" and "a later command succeeds and clears the error" from the SAME facade/controller instance (C7 fix). */
@@ -127,6 +127,103 @@ describe('RealSessionFacade', () => {
     expect(sessions).toHaveLength(1);
     expect(sessions[0]!.sessionId).toBe(startedSessionIds[0]);
     expect(sessions[0]!.laps).toHaveLength(3);
+  });
+
+  // -------------------------------------------------------------------
+  // Phase 3 coaching addendum -- `FacadeState.coachCue` is a 1:1 map of
+  // `FacadeStateCore.coachCue` (`mapState` in realFacade.ts); this proves
+  // that mapping actually happens end-to-end against the real TMR corner set
+  // composition.ts builds (`TMR_CORNERS`), not just that the field exists.
+  // -------------------------------------------------------------------
+
+  it('maps coachCue through from the controller when coaching is enabled, and never surfaces one when it is disabled', async () => {
+    const repository = new InMemorySessionRepository();
+    const provider = new FakeLocationProvider();
+    const clock = new FakeClock(1_000_000);
+    const controller = new SessionController({
+      runtimeProfile: TMR_RUNTIME_PROFILE,
+      circuitProfile: TMR_CIRCUIT_PROFILE,
+      locationProvider: provider,
+      clock,
+      repository,
+      userId: 'driver-1',
+      appVersion: 'apps-mobile-test',
+      algorithmVersion: 1,
+      restartProvider: () => {},
+      coaching: { enabled: true, corners: TMR_CORNERS },
+    });
+    const facade = new RealSessionFacade(controller);
+    const events: FacadeState[] = [];
+    facade.subscribe((s) => events.push(s));
+
+    facade.beginCalibration();
+    await flush();
+    feedSamples(clock, provider, cleanRecognitionLap(TMR_CIRCUIT_PROFILE, 601));
+    facade.acceptCalibration();
+    await controller.flush();
+    facade.arm();
+
+    feedSamples(
+      clock,
+      provider,
+      driveLap(TMR_CIRCUIT_PROFILE, {
+        seed: 601,
+        lapCount: 1,
+        sampleRateHz: 2,
+        noiseSigmaM: 0,
+        accuracyM: 3,
+        speedMps: ({ progress }) => 32 + 10 * Math.sin(progress * Math.PI * 2) ** 2,
+      }),
+    );
+    await controller.flush();
+
+    const brakeCueEvents = events.filter((s) => s.coachCue?.kind === 'BRAKE');
+    expect(brakeCueEvents.length).toBeGreaterThan(0);
+    expect(brakeCueEvents[0]!.coachCue!.distanceToTargetM).toBeGreaterThanOrEqual(0);
+  });
+
+  it('never surfaces a coachCue through the facade when coaching is disabled', async () => {
+    const repository = new InMemorySessionRepository();
+    const provider = new FakeLocationProvider();
+    const clock = new FakeClock(1_000_000);
+    const controller = new SessionController({
+      runtimeProfile: TMR_RUNTIME_PROFILE,
+      circuitProfile: TMR_CIRCUIT_PROFILE,
+      locationProvider: provider,
+      clock,
+      repository,
+      userId: 'driver-1',
+      appVersion: 'apps-mobile-test',
+      algorithmVersion: 1,
+      restartProvider: () => {},
+      coaching: { enabled: false, corners: TMR_CORNERS },
+    });
+    const facade = new RealSessionFacade(controller);
+    const events: FacadeState[] = [];
+    facade.subscribe((s) => events.push(s));
+
+    facade.beginCalibration();
+    await flush();
+    feedSamples(clock, provider, cleanRecognitionLap(TMR_CIRCUIT_PROFILE, 602));
+    facade.acceptCalibration();
+    await controller.flush();
+    facade.arm();
+
+    feedSamples(
+      clock,
+      provider,
+      driveLap(TMR_CIRCUIT_PROFILE, {
+        seed: 602,
+        lapCount: 1,
+        sampleRateHz: 2,
+        noiseSigmaM: 0,
+        accuracyM: 3,
+        speedMps: ({ progress }) => 32 + 10 * Math.sin(progress * Math.PI * 2) ** 2,
+      }),
+    );
+    await controller.flush();
+
+    expect(events.every((s) => s.coachCue === null)).toBe(true);
   });
 
   it('subscribe() replays the latest state to a new listener and unsubscribe stops further delivery', async () => {

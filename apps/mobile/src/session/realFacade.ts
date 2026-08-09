@@ -15,6 +15,7 @@ function mapState(core: FacadeStateCore, lastError: string | null): FacadeState 
     calibrationResult: core.calibrationResult,
     laps: core.laps,
     speedKph: core.speedKph,
+    coachCue: core.coachCue,
     lastError,
   };
 }

@@ -37,7 +37,7 @@ import type { AppSettings, SettingsStore } from './settingsStore';
 import { InMemorySettingsStore } from './settingsStore';
 import { RealSessionFacade, type RealSessionFacadeCallbacks } from './realFacade';
 import { ReplayTimeSource, ReplayTimestampedLocationProvider, ScaledReplayClock } from './liveTimestampedProvider';
-import { TMR_CIRCUIT_PROFILE, TMR_RUNTIME_PROFILE } from './tmrProfile';
+import { TMR_CIRCUIT_PROFILE, TMR_CORNERS, TMR_RUNTIME_PROFILE } from './tmrProfile';
 
 const DB_NAME = 'circuit-timer.db';
 /** Single-user local app -- no auth/account system exists (MVP scope, ADR-0001/0004). Stable so `sessionId` (`${userId}--<random>`) and stored data survive across launches. */
@@ -267,6 +267,7 @@ const PENDING_FACADE_STATE: FacadeState = {
   calibrationResult: null,
   laps: [],
   speedKph: null,
+  coachCue: null,
   lastError: null,
 };
 
@@ -470,6 +471,19 @@ function currentControllerState(ctrl: SessionController): SessionState {
 }
 
 /**
+ * Phase 3 coaching addendum config shared by every `SessionController` this
+ * module builds (production AND DevReplay, MUST DO #2) -- `TMR_CORNERS` is
+ * the single, once-computed corner set (`tmrProfile.ts`); `enabled` is read
+ * fresh from `settingsStore` at EACH controller-build call site so a toggle
+ * flip is honored by the next controller built (a running controller's
+ * coaching config is fixed for its own lifetime -- see
+ * `SessionControllerDeps.coaching`'s own doc comment in `@circuit/core`).
+ */
+function coachingConfig(): { enabled: boolean; corners: typeof TMR_CORNERS } {
+  return { enabled: settingsStore.getSettings().coachingEnabled, corners: TMR_CORNERS };
+}
+
+/**
  * Builds the production `SessionController` (C1 fix's `createProductionController()`
  * factory) -- the SAME deps `bootstrapPromise` used to construct it inline
  * with, extracted so the initial bootstrap build and every later
@@ -500,6 +514,7 @@ function createProductionController(): SessionController {
     appVersion: appVersion(),
     algorithmVersion: ALGORITHM_VERSION,
     restartProvider,
+    coaching: coachingConfig(),
   });
 }
 
@@ -586,6 +601,20 @@ async function runBootstrap(): Promise<void> {
 
     gnssProvider = new GnssLocationProvider();
 
+    // Settings are hydrated BEFORE the production controller is built
+    // (reordered ahead of its historical position further down) so
+    // `createProductionController()`'s read of `settingsStore.getSettings()
+    // .coachingEnabled` (Phase 3 coaching addendum) reflects the user's
+    // actually-persisted preference on the very first controller this
+    // process builds -- not the in-memory placeholder's default. `facade`
+    // itself still stays on the inert `PendingFacade` regardless (that gate
+    // is `activateProductionFacade()` below), so this reorder changes
+    // nothing about when commands become live.
+    if (db !== null) {
+      const settings = await SqlSettingsStore.create(db);
+      settingsWrapper.setInner(settings);
+    }
+
     // F3 fix: build the production controller/facade now (so `controller`
     // exists for the preflight gate registered just below), but do NOT
     // activate it yet -- `facade` stays on the inert placeholder until
@@ -623,11 +652,6 @@ async function runBootstrap(): Promise<void> {
     await history.refresh();
     historyWrapper.setInner(history);
     historyStore = history;
-
-    if (db !== null) {
-      const settings = await SqlSettingsStore.create(db);
-      settingsWrapper.setInner(settings);
-    }
 
     const activeSessionId = db !== null ? await getActiveSessionId(db) : null;
     if (activeSessionId !== null) {
@@ -937,6 +961,7 @@ export async function startDevReplaySession(samples: LocationSample[]): Promise<
         await replayProvider.stop();
         await replayProvider.start();
       },
+      coaching: coachingConfig(),
     });
 
     replayController = devController;

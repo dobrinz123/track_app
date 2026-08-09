@@ -1,6 +1,9 @@
 import type {
+  BrakingZone,
   CalibrationResult,
   CircuitProfile,
+  CoachCue,
+  Corner,
   DeltaUpdate,
   LapRecord,
   LocalSessionRepository,
@@ -14,6 +17,7 @@ import type {
   SessionSummary,
 } from '../contracts';
 import { CalibrationEngine, type CalibrationConfig } from '../calibration';
+import { CoachEngine, deriveBrakingZones } from '../coach';
 import type { RuntimeProfile } from '../profile';
 import { buildReferenceLap, shouldReplacePb } from '../reference';
 import { SessionPipelineCore, type PipelineCoreConfig } from './pipelineCore';
@@ -39,6 +43,15 @@ export interface FacadeStateCore {
   laps: LapRecord[];
   /** Latest known speed in km/h, derived from the most recent sample's `speedMps`; `null` before any sample reports one. */
   speedKph: number | null;
+  /**
+   * Latest advisory coaching cue (Phase 3 coaching addendum), or `null` when
+   * coaching is disabled (`SessionControllerDeps.coaching` unset/`enabled:
+   * false`), no corner is currently in lead-distance range, or the last cue
+   * has gone stale -- see `handleSample`'s `COACH_CUE_STALE_MS` handling and
+   * `restoreFromCheckpoint`'s reset. Cleared on lap rollover (S/F crossing)
+   * too, so a cue never bleeds into the next lap's display.
+   */
+  coachCue: CoachCue | null;
 }
 
 export interface SessionControllerDiagnostics {
@@ -51,6 +64,8 @@ export interface SessionControllerDiagnostics {
   appliedInvalidReasons: string[];
   /** Current size of the in-flight raw-sample buffer (M2 fix) -- trimmed to the current lap on every lap completion, not the whole session's sample count. */
   rawSampleBufferSize: number;
+  /** Number of times braking zones have been regenerated from a NEW personal-best reference lap landing mid-session (Phase 3 coaching addendum) -- 0 when coaching is disabled or no PB has been replaced yet this controller's lifetime. */
+  coachZoneRefreshes: number;
 }
 
 /** Minimal timer abstraction the watchdog polls through -- see MUST DO #2 (ADR-0003 §1). Defaults to the platform's global `setInterval`/`clearInterval`; tests inject a fake to drive the poll deterministically with a fake clock. */
@@ -84,6 +99,8 @@ const CALIBRATION_COMPLETE_COVERAGE_FRACTION = 0.98;
 
 const PAUSABLE_STATES = new Set<SessionState>(['calibrating', 'armed', 'outLap', 'timing', 'inPit']);
 const MID_SESSION_STATES = new Set<SessionState>(['outLap', 'timing', 'inPit']);
+/** A displayed `currentCue` with no confirming match update for longer than this is cleared (MUST DO #1) -- covers both a genuinely stale cue (the corner has been driven past with no fresh candidate to replace it) and a quality/match gap. */
+const COACH_CUE_STALE_MS = 5_000;
 
 export interface SessionControllerConfig {
   pipeline?: PipelineCoreConfig;
@@ -118,6 +135,24 @@ export interface SessionControllerDeps {
   device?: string;
   /** Restarts the location provider (stop then start) -- the app passes `GnssLocationProvider`'s own stop/start (ADR-0003 §1). Invoked by the watchdog. */
   restartProvider: () => Promise<void> | void;
+  /**
+   * Phase 3 coaching addendum, optional (undefined/`enabled: false` -> no
+   * `CoachEngine` is ever instantiated and `FacadeStateCore.coachCue` stays
+   * `null` for the controller's whole lifetime).
+   *
+   * Design choice: the caller supplies only the deterministic, profile-derived
+   * `corners` (e.g. `analyzeCorners(runtimeProfile)` optionally passed through
+   * `applyObservedSpeeds`) computed ONCE by composition -- not braking zones.
+   * `BrakingZone[]` depends on the CURRENT reference lap (`deriveBrakingZones`'s
+   * `reference` argument), which only this controller tracks the lifecycle of
+   * (loaded at session start, replaced atomically on a new PB). Accepting
+   * precomputed zones here would require the caller to duplicate that
+   * lifecycle just to keep them in sync; instead the controller itself calls
+   * `deriveBrakingZones` -- once when the reference lap is (re)loaded for a
+   * session (`loadReferenceForSession`) and again whenever `maybeReplacePb`
+   * atomically swaps in a new PB (incrementing `coachZoneRefreshes`).
+   */
+  coaching?: { enabled: boolean; corners: Corner[] };
   config?: SessionControllerConfig;
 }
 
@@ -197,6 +232,12 @@ export class SessionController {
   private pbMs: number | null = null;
   private currentReference: ReferenceLap | null = null;
   private rawSamples: LocationSample[] = [];
+  /** Phase 3 coaching addendum. `null` whenever coaching is disabled (`deps.coaching` unset/`enabled: false`) or the supplied corner set is empty -- every coaching code path below is a no-op in that case. */
+  private readonly coachEngine: CoachEngine | null;
+  private readonly coachCorners: Corner[];
+  private currentCue: CoachCue | null = null;
+  private coachCueSetAtMono: number | null = null;
+  private coachZoneRefreshes = 0;
   /**
    * Sync mechanism for MUST DO #5 (lap-number collision after recovery
    * resume). `SessionMachineSnapshot.lapNumber` (the reducer's own counter,
@@ -239,6 +280,12 @@ export class SessionController {
       ...deps.config?.pipeline,
       boundedTelemetry: true,
     });
+    const coaching = deps.coaching;
+    this.coachCorners = coaching?.enabled === true ? coaching.corners : [];
+    this.coachEngine =
+      coaching?.enabled === true && coaching.corners.length > 0
+        ? new CoachEngine({ totalLengthM: deps.circuitProfile.totalLengthM })
+        : null;
   }
 
   private trackAsync(work: Promise<unknown>): void {
@@ -296,6 +343,7 @@ export class SessionController {
       calibrationResult: this.calibrationResult,
       laps: [...this.core.laps],
       speedKph: this.latestSpeedKph,
+      coachCue: this.currentCue,
     };
   }
 
@@ -309,6 +357,7 @@ export class SessionController {
       reverseTravelDetected: this.core.reverseTravelDetected,
       appliedInvalidReasons: [...this.core.appliedInvalidReasons],
       rawSampleBufferSize: this.rawSamples.length,
+      coachZoneRefreshes: this.coachZoneRefreshes,
     };
   }
 
@@ -486,6 +535,8 @@ export class SessionController {
     }
     this.mode = 'idle';
     this.latestDelta = null;
+    this.currentCue = null;
+    this.coachCueSetAtMono = null;
     this.emit();
   }
 
@@ -571,6 +622,13 @@ export class SessionController {
     this.calibrationSnapshot = null;
     this.calibrationResult = null;
     this.paused = false;
+    // A restored checkpoint carries no live coaching state to resume (the
+    // engine's per-lap rearm bookkeeping is meaningless across a process
+    // restart) -- clear the displayed cue and rearm the engine itself so a
+    // stale cue from the prior process can never resurface.
+    this.currentCue = null;
+    this.coachCueSetAtMono = null;
+    this.coachEngine?.reset();
 
     for (const lap of laps) this.core.laps.push(lap);
     if (midSession) {
@@ -651,6 +709,11 @@ export class SessionController {
       // the facade value in the same sample so the just-finished lap's delta
       // is never displayed as though it belonged to the new lap.
       this.latestDelta = null;
+      // Coaching addendum: lap rollover always clears the displayed cue too
+      // (MUST DO #1) -- a cue from the lap that just ended must never bleed
+      // into the new lap's first samples, even if it hasn't gone stale yet.
+      this.currentCue = null;
+      this.coachCueSetAtMono = null;
     } else if (result.match === null) {
       // A rejected fix must never leave a stale faster/slower indication on
       // screen. The delta engine cannot observe rejected matches itself, so
@@ -663,6 +726,28 @@ export class SessionController {
       };
     } else if (result.currentLapElapsedMs !== null && !result.completingStartFinish) {
       this.latestDelta = this.core.computeDelta(result.match, result.currentLapElapsedMs);
+    }
+    // Coaching addendum (MUST DO #1): fed only from an ACCEPTED match --
+    // `result.match` is already `null` for a sample the pipeline rejected on
+    // quality grounds (the SAME gate `computeDelta` above relies on), so no
+    // separate quality check is needed here. A fresh cue replaces the
+    // displayed one immediately; otherwise the displayed cue (if any) is
+    // cleared once it has gone `COACH_CUE_STALE_MS` without a replacement --
+    // covers both "driven past the corner with nothing new to show" and a
+    // genuine matching gap.
+    if (this.coachEngine !== null) {
+      const cue = result.match !== null ? this.coachEngine.onMatch(result.match, sample.speedMps) : null;
+      if (cue !== null) {
+        this.currentCue = cue;
+        this.coachCueSetAtMono = this.deps.clock.now();
+      } else if (
+        this.currentCue !== null &&
+        this.coachCueSetAtMono !== null &&
+        this.deps.clock.now() - this.coachCueSetAtMono > COACH_CUE_STALE_MS
+      ) {
+        this.currentCue = null;
+        this.coachCueSetAtMono = null;
+      }
     }
     for (const lap of result.completedLaps) {
       this.trackAsync(this.onLapCompleted(lap));
@@ -741,6 +826,24 @@ export class SessionController {
     this.currentReference = candidate;
     this.pbMs = candidate.durationMs;
     this.core.setReference(candidate);
+    // Coaching addendum (MUST DO #1): a NEW PB reference lap landing
+    // mid-session upgrades the braking-zone `source` from 'physics' to
+    // 'reference' (deriveBrakingZones prefers real telemetry over the decel
+    // model whenever a usable reference is supplied) -- regenerate zones from
+    // it and count the refresh, so diagnostics/tests can observe it happened.
+    if (this.coachEngine !== null) {
+      this.refreshCoachZones(candidate);
+      this.coachZoneRefreshes += 1;
+    }
+  }
+
+  /** Rebuilds this controller's braking zones from `this.coachCorners` + the given reference lap (or `null` for the physics-only fallback) and reconfigures `coachEngine` with them. A no-op when coaching is disabled. */
+  private refreshCoachZones(reference: ReferenceLap | null): void {
+    if (this.coachEngine === null) return;
+    const zones: BrakingZone[] = deriveBrakingZones(reference, this.coachCorners, {
+      totalLengthM: this.deps.circuitProfile.totalLengthM,
+    });
+    this.coachEngine.configure(this.coachCorners, zones);
   }
 
   private async loadReferenceForSession(): Promise<void> {
@@ -753,6 +856,7 @@ export class SessionController {
     this.currentReference = stored;
     this.pbMs = stored?.durationMs ?? null;
     this.core.setReference(stored);
+    this.refreshCoachZones(stored);
   }
 
   /**

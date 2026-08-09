@@ -64,6 +64,26 @@ describe('SqlSettingsStore (against sql.js)', () => {
     expect(store2.getSettings().coverageBins).toEqual(DEFAULT_SETTINGS.coverageBins);
   });
 
+  it('coachingEnabled (Phase 3 coaching addendum) defaults to true and round-trips through update()/persistence like every other setting', async () => {
+    const raw = await createRawSqlJsDatabase();
+    const db1 = wrapExistingSqlJsDatabase(raw);
+    await SqlSessionRepository.create(db1);
+    const store1 = await SqlSettingsStore.create(db1);
+
+    expect(store1.getSettings().coachingEnabled).toBe(true);
+    expect(DEFAULT_SETTINGS.coachingEnabled).toBe(true);
+
+    store1.update({ coachingEnabled: false });
+    expect(store1.getSettings().coachingEnabled).toBe(false);
+    // Untouched fields still preserved alongside the new field.
+    expect(store1.getSettings().units).toBe(DEFAULT_SETTINGS.units);
+    await flush(); // let the fire-and-forget persist() write land before "restarting"
+
+    const db2 = wrapExistingSqlJsDatabase(raw);
+    const store2 = await SqlSettingsStore.create(db2);
+    expect(store2.getSettings().coachingEnabled).toBe(false);
+  });
+
   it('a corrupt stored row falls back to DEFAULT_SETTINGS rather than throwing', async () => {
     const raw = await createRawSqlJsDatabase();
     const db = wrapExistingSqlJsDatabase(raw);

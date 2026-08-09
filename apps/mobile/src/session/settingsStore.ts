@@ -10,12 +10,24 @@ export interface AppSettings {
   /** Live delta magnitude (ms) below which the dashboard shows neutral/gray instead of faster/slower. */
   deltaDeadbandMs: number;
   coverageBins: CoverageBinsSetting;
+  /**
+   * Phase 3 coaching addendum toggle. When `false`, `composition.ts` builds
+   * every `SessionController` (production AND DevReplay) with coaching
+   * disabled -- no `CoachEngine` is instantiated and `FacadeState.coachCue`
+   * stays `null` for the whole session, regardless of the TMR corner data
+   * being available. Advisory-only either way (contracts.md's Coaching
+   * addendum); this only controls whether cues are computed/surfaced at all.
+   * Defaults to `true` -- UI rendering of the cue itself is a later work
+   * package, this ticket only plumbs the data.
+   */
+  coachingEnabled: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
   units: 'kmh',
   deltaDeadbandMs: 100,
   coverageBins: { thresholds: [0.25, 0.5, 0.75, 1] },
+  coachingEnabled: true,
 };
 
 /**

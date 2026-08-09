@@ -1,5 +1,6 @@
 import type {
   CalibrationResult,
+  CoachCue,
   DeltaUpdate,
   LapRecord,
   QualityLevel,
@@ -27,6 +28,16 @@ export interface FacadeState {
   laps: LapRecord[];
   /** Latest known speed in km/h, derived from the most recent sample's `speedMps`; `null` before any sample reports one. */
   speedKph: number | null;
+  /**
+   * Latest advisory coaching cue (Phase 3 coaching addendum), or `null` when
+   * coaching is disabled (`settingsStore`'s `coachingEnabled` toggle), no
+   * corner is currently in range, or the cue has gone stale/rolled over --
+   * `RealSessionFacade` maps this 1:1 from `FacadeStateCore.coachCue`;
+   * `MockSessionFacade` and `PendingFacade` always report `null`. UI
+   * rendering of this cue is a later work package -- this ticket only plumbs
+   * the data through.
+   */
+  coachCue: CoachCue | null;
   /**
    * Human-readable message from the most recent async command that failed
    * (C7 fix), or `null` if none has failed since the last successful command.

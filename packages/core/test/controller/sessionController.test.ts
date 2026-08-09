@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import type { LocalSessionRepository, LocationSample, ReferenceLap, SessionMachineSnapshot } from '../../src/contracts';
-import { SessionController, type FacadeStateCore } from '../../src/controller';
+import type {
+  Corner,
+  LocalSessionRepository,
+  LocationSample,
+  ReferenceLap,
+  SessionMachineSnapshot,
+} from '../../src/contracts';
+import { SessionController, type FacadeStateCore, type SessionControllerDeps } from '../../src/controller';
+import { analyzeCorners } from '../../src/corners';
 import {
   cleanRecognitionLap,
   driveLap,
@@ -19,8 +26,8 @@ function last<T>(items: readonly T[]): T {
   return value;
 }
 
-/** Builds a fresh controller + its dependencies, all fakes under full test control. */
-function setup(existingRepository?: LocalSessionRepository) {
+/** Builds a fresh controller + its dependencies, all fakes under full test control. Optional `coaching` forwards straight to `SessionControllerDeps.coaching` (Phase 3 addendum) -- omitted, coaching stays disabled exactly like every pre-existing test in this file. */
+function setup(existingRepository?: LocalSessionRepository, coaching?: SessionControllerDeps['coaching']) {
   const { profile, runtime } = tmr();
   const repository = existingRepository ?? new InMemorySessionRepository();
   const provider = new FakeLocationProvider();
@@ -42,6 +49,7 @@ function setup(existingRepository?: LocalSessionRepository) {
     algorithmVersion: 1,
     restartProvider,
     config: { scheduler, watchdogTimeoutMs: 5_000, watchdogPollMs: 1_000 },
+    ...(coaching === undefined ? {} : { coaching }),
   });
 
   const states: FacadeStateCore[] = [];
@@ -639,5 +647,119 @@ describe('SessionController', () => {
     // unconsumed anywhere inside the controller instead of surfacing here,
     // vitest's own unhandled-rejection detection would fail this suite.
     await expect(promise!).rejects.toThrow('disk full');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3 coaching addendum (docs/architecture/contracts.md's "Coaching
+// addendum"). `setup()`'s optional `coaching` argument wires `CoachEngine`
+// into the SAME controller instance every other test in this file already
+// exercises against the real TMR profile/matcher/timing pipeline -- these
+// tests only add the coaching-specific assertions on top.
+// ---------------------------------------------------------------------------
+
+describe('SessionController coaching (Phase 3 addendum)', () => {
+  function coachingCorners(): Corner[] {
+    const { runtime } = tmr();
+    return analyzeCorners(runtime);
+  }
+
+  it('emits at least one BRAKE cue with a plausible distanceToTargetM while driving, and the cue clears again after the corner (lap rollover)', async () => {
+    const { profile, controller, states, feed } = setup(undefined, {
+      enabled: true,
+      corners: coachingCorners(),
+    });
+
+    await controller.start('calibration');
+    feed(cleanRecognitionLap(profile, 801));
+    controller.acceptCalibration();
+    await controller.flush();
+    controller.arm();
+
+    // Same speed profile shape as the coaching replay integration test
+    // (test/coach/coach.replay.test.ts) -- proven to produce >=8 cues per
+    // lap on this exact TMR geometry.
+    feed(
+      driveLap(profile, {
+        seed: 801,
+        lapCount: 1,
+        sampleRateHz: 2,
+        noiseSigmaM: 0,
+        accuracyM: 3,
+        speedMps: ({ progress }) => 32 + 10 * Math.sin(progress * Math.PI * 2) ** 2,
+      }),
+    );
+    await controller.flush();
+
+    const brakeCueStates = states.filter((s) => s.coachCue?.kind === 'BRAKE');
+    expect(brakeCueStates.length).toBeGreaterThan(0);
+    for (const state of brakeCueStates) {
+      const cue = state.coachCue!;
+      expect(cue.distanceToTargetM).toBeGreaterThanOrEqual(0);
+      // leadM = max(80, leadSeconds*speed); speeds here stay well under 45
+      // m/s, so 300 m is a generous, still-meaningful upper bound -- proves
+      // the cue is a genuine near-term advisory, not an arbitrary value.
+      expect(cue.distanceToTargetM).toBeLessThan(300);
+      expect(cue.confidence).toBeGreaterThanOrEqual(0.4);
+      expect(['left', 'right']).toContain(cue.direction);
+    }
+
+    // The lap completes (forward S/F crossing) well before the fixture's
+    // trailing samples run out -- MUST DO #1's "lap rollover" clear must have
+    // fired by the very last observed state.
+    expect(states[states.length - 1]!.coachCue).toBeNull();
+  });
+
+  it('emits no coaching cues at all when coaching is disabled', async () => {
+    const { profile, controller, states, feed } = setup(undefined, {
+      enabled: false,
+      corners: coachingCorners(),
+    });
+
+    await controller.start('calibration');
+    feed(cleanRecognitionLap(profile, 802));
+    controller.acceptCalibration();
+    await controller.flush();
+    controller.arm();
+
+    feed(
+      driveLap(profile, {
+        seed: 802,
+        lapCount: 1,
+        sampleRateHz: 2,
+        noiseSigmaM: 0,
+        accuracyM: 3,
+        speedMps: ({ progress }) => 32 + 10 * Math.sin(progress * Math.PI * 2) ** 2,
+      }),
+    );
+    await controller.flush();
+
+    expect(states.every((s) => s.coachCue === null)).toBe(true);
+    expect(controller.diagnostics().coachZoneRefreshes).toBe(0);
+  });
+
+  it('regenerates braking zones from the new PB reference each time one lands mid-session, counted by diagnostics().coachZoneRefreshes', async () => {
+    const { profile, controller, feed } = setup(undefined, {
+      enabled: true,
+      corners: coachingCorners(),
+    });
+
+    await controller.start('calibration');
+    feed(cleanRecognitionLap(profile, 803));
+    controller.acceptCalibration();
+    await controller.flush();
+    // Configured once (physics-only fallback, no PB yet) when the reference
+    // is first loaded for this session -- that initial configure is not
+    // itself counted as a "refresh" (it happens before any PB has landed).
+    expect(controller.diagnostics().coachZoneRefreshes).toBe(0);
+
+    controller.arm();
+    // Three successively faster laps (36/41/48 m/s) -- every lap replaces the
+    // PB (matches this file's own top-of-suite assertion on the same
+    // fixture), so each one is a genuine mid-session zone refresh.
+    feed(pbImprovementSession(profile, 803));
+    await controller.flush();
+
+    expect(controller.diagnostics().coachZoneRefreshes).toBe(3);
   });
 });
