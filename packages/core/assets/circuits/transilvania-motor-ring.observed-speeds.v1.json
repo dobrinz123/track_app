@@ -1,0 +1,14 @@
+{
+  "provenance": {
+    "source": "user-supplied onboard observation, M2 Competition, 2026-08-10; advisory, unofficial"
+  },
+  "observations": [
+    { "cornerId": 2, "apexSpeedKph": 159, "source": "community-observed onboard estimate" },
+    { "cornerId": 3, "apexSpeedKph": 65, "source": "community-observed onboard estimate" },
+    { "cornerId": 5, "apexSpeedKph": 74, "source": "community-observed onboard estimate" },
+    { "cornerId": 6, "apexSpeedKph": 170, "source": "community-observed onboard estimate" },
+    { "cornerId": 7, "apexSpeedKph": 107, "source": "community-observed onboard estimate" },
+    { "cornerId": 8, "apexSpeedKph": 65, "source": "community-observed onboard estimate" },
+    { "cornerId": 9, "apexSpeedKph": 112, "source": "community-observed onboard estimate" }
+  ]
+}

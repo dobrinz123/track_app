@@ -30,6 +30,14 @@ export * from './catalog';
 export * from './corners';
 
 export {
+  CoachEngine,
+  DEFAULT_BRAKING_ZONE_CONFIG,
+  DEFAULT_COACH_ENGINE_CONFIG,
+  deriveBrakingZones,
+} from './coach';
+export type { BrakingZoneConfig, CoachEngineConfig } from './coach';
+
+export {
   DEFAULT_TELEMETRY_QUALITY_CONFIG,
   TelemetryQualityEvaluator,
   TrackMatcher,

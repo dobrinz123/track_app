@@ -228,6 +228,35 @@ export interface Corner {
   totalAngleDeg: number;
   direction: 'left' | 'right';
   severity: CornerSeverity;   // bucketed by minRadiusM (config table)
-  advisorySpeedKph: number;   // sqrt(latG*g*minRadius), config latG default 0.85 — ADVISORY
+  advisorySpeedKph: number;   // angle-aware sqrt(latG*g*minRadius) — ADVISORY
+  speedSource?: 'model' | 'observed';
 }
-export const CORNER_ANALYSIS_VERSION = 1; // bump on algorithm change
+export const CORNER_ANALYSIS_VERSION = 2; // bump on algorithm change
+
+// ---------- Braking zones ----------
+export interface BrakingZone {
+  cornerId: number;
+  brakeStartDistanceM: number; // lap distance where braking should begin
+  source: 'reference' | 'physics'; // PB-telemetry-derived vs decel-model fallback
+  entrySpeedKph: number;       // observed (reference) or estimated approach (physics)
+  apexSpeedKph: number;
+  /** False when the available straight was clamped to zero; emit corner-ahead instead. */
+  brakeCueAvailable?: boolean;
+}
+
+// ---------- Coach engine ----------
+export interface CoachCue {
+  kind: 'BRAKE' | 'CORNER_AHEAD';
+  cornerId: number;
+  severity: CornerSeverity;
+  direction: 'left' | 'right';
+  distanceToTargetM: number;   // to brakeStart (BRAKE) or entry (CORNER_AHEAD)
+  advisorySpeedKph: number;
+  confidence: number;          // min(match confidence, zone-source confidence)
+}
+
+export interface CoachEngine {
+  configure(corners: Corner[], zones: BrakingZone[]): void;
+  onMatch(match: TrackMatch, speedMps: number | undefined): CoachCue | null;
+  reset(): void;
+}

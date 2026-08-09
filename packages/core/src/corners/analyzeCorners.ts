@@ -12,13 +12,24 @@ export interface CornerSeverityBand {
   severity: CornerSeverity;
 }
 
+export interface CornerLatGBucket {
+  minimumAngleDeg: number;
+  latG: number;
+}
+
+export interface ObservedCornerSpeed {
+  cornerId: number;
+  apexSpeedKph: number;
+  source: string;
+}
+
 export interface CornerAnalysisConfig {
   cornerThreshold?: number;
   curvatureWindowM?: number;
   gapToleranceM?: number;
   mergeDistanceM?: number;
   severityBands?: readonly CornerSeverityBand[];
-  latG?: number;
+  latGBuckets?: readonly CornerLatGBucket[];
 }
 
 export const DEFAULT_CORNER_SEVERITY_BANDS: readonly CornerSeverityBand[] = Object.freeze([
@@ -30,13 +41,24 @@ export const DEFAULT_CORNER_SEVERITY_BANDS: readonly CornerSeverityBand[] = Obje
   { minimumRadiusM: 0, severity: 6 },
 ]);
 
+/**
+ * Racing-line straightening grows as corner angle shrinks, so shallow corners can
+ * sustain more effective lateral acceleration. These buckets are anchored to the
+ * user-supplied TMR M2 Competition onboard apex-speed observations.
+ */
+export const DEFAULT_CORNER_LAT_G_BUCKETS: readonly CornerLatGBucket[] = Object.freeze([
+  { minimumAngleDeg: 100, latG: 1.05 },
+  { minimumAngleDeg: 45, latG: 1.65 },
+  { minimumAngleDeg: 0, latG: 2.0 },
+]);
+
 export const DEFAULT_CORNER_ANALYSIS_CONFIG = Object.freeze({
   cornerThreshold: 0.008,
   curvatureWindowM: 40,
   gapToleranceM: 25,
   mergeDistanceM: 30,
   severityBands: DEFAULT_CORNER_SEVERITY_BANDS,
-  latG: 0.85,
+  latGBuckets: DEFAULT_CORNER_LAT_G_BUCKETS,
 });
 
 interface CurvatureSample {
@@ -166,14 +188,23 @@ function severityForRadius(
   throw new RangeError('severityBands must cover the clamped radius range');
 }
 
+function effectiveLatG(
+  totalAngleDeg: number,
+  latGBuckets: readonly CornerLatGBucket[],
+): number {
+  for (const bucket of latGBuckets) {
+    if (totalAngleDeg >= bucket.minimumAngleDeg) return bucket.latG;
+  }
+  throw new RangeError('latGBuckets must cover nonnegative corner angles');
+}
+
 function validateConfig(config: Required<CornerAnalysisConfig>): void {
   const positiveValues = [
     config.cornerThreshold,
     config.curvatureWindowM,
-    config.latG,
   ];
   if (positiveValues.some((value) => !Number.isFinite(value) || value <= 0)) {
-    throw new RangeError('cornerThreshold, curvatureWindowM, and latG must be positive and finite');
+    throw new RangeError('cornerThreshold and curvatureWindowM must be positive and finite');
   }
   if (
     !Number.isFinite(config.gapToleranceM) ||
@@ -199,6 +230,24 @@ function validateConfig(config: Required<CornerAnalysisConfig>): void {
     previousMinimum = band.minimumRadiusM;
   }
   severityForRadius(MIN_RADIUS_M, config.severityBands);
+
+  if (config.latGBuckets.length === 0) throw new RangeError('latGBuckets must not be empty');
+  let previousAngle = Number.POSITIVE_INFINITY;
+  for (const bucket of config.latGBuckets) {
+    if (
+      !Number.isFinite(bucket.minimumAngleDeg) ||
+      bucket.minimumAngleDeg < 0 ||
+      bucket.minimumAngleDeg > previousAngle ||
+      !Number.isFinite(bucket.latG) ||
+      bucket.latG <= 0
+    ) {
+      throw new RangeError(
+        'latGBuckets must have positive finite latG values and descending nonnegative angles',
+      );
+    }
+    previousAngle = bucket.minimumAngleDeg;
+  }
+  effectiveLatG(0, config.latGBuckets);
 }
 
 function rebaseSamples(runtime: RuntimeProfile, curvatures: number[], totalLengthM: number): CurvatureSample[] {
@@ -221,6 +270,7 @@ export function analyzeCorners(runtime: RuntimeProfile, config: CornerAnalysisCo
     ...DEFAULT_CORNER_ANALYSIS_CONFIG,
     ...config,
     severityBands: config.severityBands ?? DEFAULT_CORNER_SEVERITY_BANDS,
+    latGBuckets: config.latGBuckets ?? DEFAULT_CORNER_LAT_G_BUCKETS,
   };
   validateConfig(resolved);
 
@@ -265,7 +315,10 @@ export function analyzeCorners(runtime: RuntimeProfile, config: CornerAnalysisCo
 
     const maximumCurvature = Math.abs(apex.curvatureRadPerM);
     const minRadiusM = Math.max(MIN_RADIUS_M, Math.min(MAX_RADIUS_M, 1 / maximumCurvature));
-    const advisoryMps = Math.sqrt(resolved.latG * GRAVITY_MPS2 * minRadiusM);
+    const totalAngleDeg = totalAngleRad * RAD_TO_DEG;
+    const advisoryMps = Math.sqrt(
+      effectiveLatG(totalAngleDeg, resolved.latGBuckets) * GRAVITY_MPS2 * minRadiusM,
+    );
     return {
       id: index + 1,
       entryDistanceM: entry.distanceM,
@@ -273,10 +326,11 @@ export function analyzeCorners(runtime: RuntimeProfile, config: CornerAnalysisCo
       exitDistanceM: exit.distanceM,
       lengthM: forwardDistance(entry.distanceM, exit.distanceM, totalLengthM),
       minRadiusM,
-      totalAngleDeg: totalAngleRad * RAD_TO_DEG,
+      totalAngleDeg,
       direction: apex.curvatureRadPerM > 0 ? 'left' : 'right',
       severity: severityForRadius(minRadiusM, resolved.severityBands),
       advisorySpeedKph: Math.round((advisoryMps * 3.6) / 5) * 5,
+      speedSource: 'model',
     };
   });
 }
