@@ -14,7 +14,10 @@ import { SessionHistoryScreen } from '../screens/SessionHistoryScreen';
 import { LapDetailScreen } from '../screens/LapDetailScreen';
 import { PersonalBestScreen } from '../screens/PersonalBestScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
-import { DevReplayScreen } from '../screens/DevReplayScreen';
+// F6 fix (B4 residue): NO top-level import of `DevReplayScreen` -- see the
+// inline `require` below for why. `typeof import(...)` (used at that call
+// site) gives full type-checking on the resolved component with zero
+// runtime footprint, so nothing here needs a type-only import either.
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
@@ -61,9 +64,28 @@ export function RootNavigator(): React.JSX.Element {
         // B4 fix: DevReplay must not ship in a release build -- SettingsScreen's
         // entry point to it is already __DEV__-gated; this gates the route
         // registration itself too.
+        //
+        // F6 fix (B4 residue): gating the <Stack.Screen> registration alone
+        // was not enough -- a top-level `import { DevReplayScreen } from
+        // '../screens/DevReplayScreen'` reaches the module unconditionally
+        // at bundle time regardless of what runtime branch it's used in, so
+        // it (and its `@circuit/core` fixture-scenario dependencies) still
+        // entered a release bundle's dependency graph. Metro constant-folds
+        // `__DEV__` (a literal boolean substituted at bundle time) and drops
+        // statically-unreachable code, but only when the module boundary
+        // itself is inside the folded branch -- an inline `require()` here,
+        // not a top-level `import`, is what actually keeps the module (and
+        // its deps) out of a release build's graph.
         // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
         __DEV__ ? (
-          <Stack.Screen name="DevReplay" component={DevReplayScreen} options={{ title: 'Dev Replay' }} />
+          <Stack.Screen
+            name="DevReplay"
+            component={
+              // eslint-disable-next-line @typescript-eslint/no-require-imports -- see the F6 comment above: this MUST be a runtime require(), not a top-level import, for Metro to drop the module from a release bundle.
+              (require('../screens/DevReplayScreen') as typeof import('../screens/DevReplayScreen')).DevReplayScreen
+            }
+            options={{ title: 'Dev Replay' }}
+          />
         ) : null
       }
     </Stack.Navigator>

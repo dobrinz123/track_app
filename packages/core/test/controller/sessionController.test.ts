@@ -534,6 +534,86 @@ describe('SessionController', () => {
   // `.catch()` it without an unhandled rejection).
   // -------------------------------------------------------------------
 
+  // -------------------------------------------------------------------
+  // F1 -- C7 regression: a failed start() must leave state/subscriptions
+  // untouched, and a subsequent successful retry must yield EXACTLY ONE
+  // provider subscription (not two, which double-ingests every sample).
+  // -------------------------------------------------------------------
+
+  it('a failed start() leaves sessionState/mode unchanged and installs zero provider subscriptions (F1 fix)', async () => {
+    const { controller, provider, states } = setup();
+    provider.startFailuresRemaining = 1;
+
+    const emissionsBefore = states.length;
+    await expect(controller.start('calibration')).rejects.toThrow('start failed');
+
+    // No dispatch/mode mutation happened -- nothing was ever emitted for
+    // this failed attempt, and the controller's own diagnostics/state stay
+    // exactly as they were before the call (still idle).
+    expect(states.length).toBe(emissionsBefore);
+    expect(last(states).sessionState).toBe('idle');
+    expect(provider.listenerCount).toBe(0);
+    expect(provider.startCount).toBe(1);
+  });
+
+  it('after a failed start(), a retry succeeds with exactly ONE provider subscription that ingests every sample exactly once -- not twice (F1 fix, C7 regression)', async () => {
+    const { profile, controller, provider, feed } = setup();
+    provider.startFailuresRemaining = 1;
+
+    await expect(controller.start('calibration')).rejects.toThrow('start failed');
+    expect(provider.listenerCount).toBe(0);
+
+    // Retry: this time the provider succeeds.
+    await controller.start('calibration');
+    expect(provider.listenerCount).toBe(1);
+
+    // Drive a full calibration + one timed lap. If the F1 bug were present,
+    // the leaked first (never-unsubscribed) subscription would receive
+    // every sample a SECOND time, doubling matched+rejected sample counts
+    // relative to what was actually fed.
+    const calibrationSamples = cleanRecognitionLap(profile, 990);
+    feed(calibrationSamples);
+    controller.acceptCalibration();
+    await controller.flush();
+    controller.arm();
+
+    const drivingSamples = driveLap(profile, { seed: 991, speedMps: 40, noiseSigmaM: 1 });
+    feed(drivingSamples);
+    await controller.flush();
+
+    expect(provider.listenerCount).toBe(1);
+    const diag = controller.diagnostics();
+    // Exactly the fed sample count, not double it -- a duplicate listener
+    // would push this to 2x the driving-sample count (calibration samples
+    // don't reach `core.ingest`, only live-mode ones do).
+    expect(diag.matchedSampleCount + diag.rejectedSampleCount).toBe(drivingSamples.length);
+  });
+
+  // -------------------------------------------------------------------
+  // F2 residue -- dispose() must detach the sample listener/watchdog even
+  // when the provider's stop() rejects.
+  // -------------------------------------------------------------------
+
+  it('dispose() detaches the sample listener and clears watchdog/listeners even when locationProvider.stop() rejects (F2 fix)', async () => {
+    const { profile, controller, provider, clock, scheduler, restartCalls, states, feed } = setup();
+    await controller.start('calibration');
+    feed(cleanRecognitionLap(profile, 992));
+    const emissionsBeforeDispose = states.length;
+
+    provider.stopShouldReject = true;
+    await expect(controller.dispose()).rejects.toThrow('stop failed');
+
+    // Detachment happened anyway: no further emissions reach this
+    // (disposed) controller, even though stop() rejected.
+    provider.push(sampleAtLapDistance(profile, 500, clock.now(), { lateralOffsetM: 0, accuracyM: 3 }));
+    expect(states.length).toBe(emissionsBeforeDispose);
+
+    clock.advance(10_000);
+    scheduler.tick();
+    expect(restartCalls).toHaveLength(0);
+    expect(states.length).toBe(emissionsBeforeDispose);
+  });
+
   it('checkpointNow() propagates a repository failure as a real rejection -- never a synchronous throw, never silently swallowed (C8 fix)', async () => {
     const inner = new InMemorySessionRepository();
     const controllable = new ControllableRepository(inner);

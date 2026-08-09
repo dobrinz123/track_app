@@ -9,8 +9,10 @@ import { StatusBanner } from '../components/StatusBanner';
 import {
   discardRecovery,
   resumeRecovery,
+  retryBootstrap,
   subscribeBootstrapState,
   subscribeRecovery,
+  subscribeRecoveryNotice,
   type BootstrapState,
   type PendingRecovery,
 } from '../../session/composition';
@@ -41,9 +43,31 @@ export function CircuitDetailScreen({ navigation }: Props): React.JSX.Element {
   // slow/failed bootstrap could drive a live scripted mock with no
   // persistence and no visible error.
   const [bootstrapState, setBootstrapState] = useState<BootstrapState>('pending');
+  const [retryBusy, setRetryBusy] = useState(false);
+  // F5 fix: a lastError-style notice for a recovery that turned out to be
+  // unresumable (its checkpoint vanished between bootstrap's read and the
+  // resume attempt) -- distinct from the `recovery` banner above, which only
+  // ever reflects a checkpoint bootstrap can currently see.
+  const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
 
   useEffect(() => subscribeRecovery(setRecovery), []);
   useEffect(() => subscribeBootstrapState(setBootstrapState), []);
+  useEffect(() => subscribeRecoveryNotice(setRecoveryNotice), []);
+
+  // F3 fix: retries the async bootstrap sequence from a clean slate without
+  // requiring a full app restart -- `retryBootstrap()` itself flips
+  // `bootstrapState` back to 'pending' for the duration of the attempt.
+  const handleRetryBootstrap = async (): Promise<void> => {
+    setRetryBusy(true);
+    try {
+      await retryBootstrap();
+    } catch {
+      // `bootstrapState` already reflects 'failed' via its own subscription;
+      // nothing further to do here.
+    } finally {
+      setRetryBusy(false);
+    }
+  };
 
   const handleResume = async (): Promise<void> => {
     setRecoveryBusy(true);
@@ -77,13 +101,32 @@ export function CircuitDetailScreen({ navigation }: Props): React.JSX.Element {
           {circuit.locality}, {circuit.county}, {circuit.country}
         </Text>
 
-        {/* Bootstrap failure (C2 fix): inline banner (never a modal) -- Start Session stays disabled below regardless. */}
+        {/* Bootstrap failure (C2 fix): inline banner (never a modal) -- Start Session stays disabled below regardless. F3 fix: gains an inline Retry button (retryBootstrap()) so a transient failure doesn't require a full app restart. */}
         {bootstrapState === 'failed' ? (
-          <StatusBanner
-            variant="error"
-            message="Couldn't prepare local session storage. Restart the app to try again."
-          />
+          <View style={styles.recoveryBanner} accessibilityLiveRegion="polite">
+            <Text style={styles.recoveryText} maxFontSizeMultiplier={1.3}>
+              Couldn't prepare local session storage.
+            </Text>
+            <Pressable
+              style={[styles.button, styles.primaryButton, styles.recoveryButton]}
+              onPress={() => void handleRetryBootstrap()}
+              disabled={retryBusy}
+              accessibilityRole="button"
+              accessibilityLabel="Retry preparing session storage"
+            >
+              {retryBusy ? (
+                <ActivityIndicator color={colors.onAccent} />
+              ) : (
+                <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.3}>
+                  Retry
+                </Text>
+              )}
+            </Pressable>
+          </View>
         ) : null}
+
+        {/* F5 fix: a recovery that turned out to be unresumable (its checkpoint vanished on disk). */}
+        {recoveryNotice !== null ? <StatusBanner variant="error" message={recoveryNotice} /> : null}
 
         {/* ADR-0003 §3 recovery: inline banner (never a modal), only rendered when a checkpoint from an incomplete session is on disk. */}
         {recovery !== null ? (

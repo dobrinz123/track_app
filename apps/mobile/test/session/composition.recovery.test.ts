@@ -299,3 +299,64 @@ describe('composition.ts recovery operation lock (C10 fix)', () => {
     expect(loadCheckpointCalls + saveCheckpointCalls).toBe(1);
   });
 });
+
+describe('composition.ts resumeRecovery() vanished-checkpoint abort (F5 fix)', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('a checkpoint that disappears between bootstrap and resume aborts cleanly: no session is started, and the active-session pointer is cleared', async () => {
+    const composition = await bootWithCheckpoint(
+      'driver-1--rec-vanished',
+      { state: 'armed', lapNumber: 0, context: {} },
+      [lap(1, 90_000)],
+    );
+
+    let recoveryBefore: unknown = 'unset';
+    composition.subscribeRecovery((r) => {
+      recoveryBefore = r;
+    });
+    expect(recoveryBefore).toEqual({ sessionId: 'driver-1--rec-vanished', lapCount: 1 });
+
+    // Simulate the checkpoint vanishing out-of-band (e.g. a data-deletion
+    // action ran) between bootstrap's initial read and the resume attempt.
+    const repo = seeded.repository as SqlSessionRepository;
+    repo.loadCheckpoint = async () => null;
+
+    let notice: string | null = 'unset';
+    composition.subscribeRecoveryNotice((n) => {
+      notice = n;
+    });
+    expect(notice).toBeNull();
+
+    await composition.resumeRecovery();
+
+    // No session was started: the production controller is still untouched
+    // ('idle'), not armed off a vanished checkpoint's now-orphaned pointer.
+    let latest: unknown;
+    const unsubscribe = composition.facade.subscribe((s) => {
+      latest = s;
+    });
+    unsubscribe();
+    expect((latest as { sessionState: string }).sessionState).toBe('idle');
+
+    // The banner is gone, and a lastError-style notice explains why.
+    let recoveryAfter: unknown = 'unset';
+    composition.subscribeRecovery((r) => {
+      recoveryAfter = r;
+    });
+    expect(recoveryAfter).toBeNull();
+    expect(notice).not.toBeNull();
+
+    // The pointer was cleared, not left pointing at the vanished session --
+    // a fresh relaunch must not re-offer an unresumable recovery forever.
+    vi.resetModules();
+    const relaunched = await import('../../src/session/composition');
+    await flushBootstrap();
+    let recoveryAfterRelaunch: unknown = 'unset';
+    relaunched.subscribeRecovery((r) => {
+      recoveryAfterRelaunch = r;
+    });
+    expect(recoveryAfterRelaunch).toBeNull();
+  });
+});

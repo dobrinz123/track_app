@@ -99,7 +99,7 @@ export function DevReplayScreen({ navigation }: Props): React.JSX.Element {
 
   const runMock = async (): Promise<void> => {
     await restoreProductionFacade();
-    useMockFacadeForDevReplay();
+    await useMockFacadeForDevReplay();
     navigation.navigate('CalibrationInstructions');
   };
 

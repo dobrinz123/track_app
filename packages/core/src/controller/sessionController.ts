@@ -322,12 +322,42 @@ export class SessionController {
    * reference lap and is used only by the recovery flow after
    * `restoreFromCheckpoint` (see that method's doc comment for why recovery
    * never resumes a live calibration).
+   *
+   * F1 fix (C7 regression, HIGH -- duplicate sample listener after a
+   * failed-then-retried start): every state-machine dispatch AND the mode
+   * transition below run ONLY AFTER `ensureProviderRunning()` has confirmed
+   * `deps.locationProvider.start()` actually succeeded. Previously those
+   * dispatches ran FIRST, so a `start()` whose provider then failed left the
+   * controller mutated into `'calibrating'` with no way back -- AND
+   * `ensureProviderRunning` had already installed a sample-listener
+   * subscription before awaiting `provider.start()`, so a caller's retry
+   * (another `start()` call after the failure) installed a SECOND
+   * subscription while the first -- never unsubscribed, since the failed
+   * attempt threw before it could be -- kept receiving every sample too,
+   * double-ingesting each fix. Ordering the provider confirmation first
+   * means a failed `start()` leaves `core.state`, `mode`, and every
+   * calibration field completely untouched (nothing to snapshot/roll back:
+   * there is nothing here left to undo), and `ensureProviderRunning` itself
+   * only ever subscribes once it has proof `provider.start()` already
+   * resolved -- see that method's own doc comment for the retry-safety
+   * guard.
    */
   async start(phase: 'calibration' | 'session'): Promise<void> {
     if (this.sessionId === null) {
       this.sessionId = `${this.deps.userId}--${randomToken()}`;
       this.sessionStartedAtUtc = new Date().toISOString();
     }
+
+    if (phase === 'session') {
+      // Pure repository I/O -- doesn't touch `core.state`/`mode`, so its
+      // position relative to `ensureProviderRunning()` below is immaterial;
+      // done here so `this.currentReference`/`this.pbMs` are ready by the
+      // time the CALIBRATION_ACCEPTED dispatch below runs.
+      await this.loadReferenceForSession();
+    }
+
+    await this.ensureProviderRunning();
+
     this.core.dispatch({ type: 'START_PREFLIGHT' });
     this.core.dispatch({ type: 'PREFLIGHT_PASSED' });
 
@@ -341,7 +371,6 @@ export class SessionController {
       this.core.dispatch({ type: 'CALIBRATION_STARTED' });
       this.mode = 'calibrating';
     } else {
-      await this.loadReferenceForSession();
       this.core.dispatch({ type: 'CALIBRATION_STARTED' });
       this.core.dispatch({ type: 'CALIBRATION_FINISHED', result: recoverySkippedCalibrationResult() });
       this.core.dispatch({ type: 'CALIBRATION_ACCEPTED' });
@@ -349,7 +378,6 @@ export class SessionController {
       this.mode = 'idle';
     }
 
-    await this.ensureProviderRunning();
     this.startWatchdog();
     this.emit();
   }
@@ -475,15 +503,27 @@ export class SessionController {
     if (this.disposed) return;
     this.disposed = true;
     this.stopWatchdog();
-    if (this.providerRunning) {
-      await this.deps.locationProvider.stop();
+    try {
+      if (this.providerRunning) {
+        await this.deps.locationProvider.stop();
+      }
+    } finally {
+      // F2 residue fix: detachment (the sample-listener unsubscribe and
+      // clearing every state listener) must happen even when `stop()`
+      // rejects -- previously a rejecting `stop()` threw out of this method
+      // before reaching either, leaving the listener attached to a
+      // (possibly shared) provider that a freshly constructed replacement
+      // controller is about to subscribe to as well. The rejection itself
+      // still propagates to this method's own caller after detachment
+      // completes (a genuine provider failure shouldn't be silently
+      // swallowed), it just no longer skips cleanup on the way out.
       this.providerRunning = false;
+      if (this.providerUnsubscribe !== null) {
+        this.providerUnsubscribe();
+        this.providerUnsubscribe = null;
+      }
+      this.listeners.clear();
     }
-    if (this.providerUnsubscribe !== null) {
-      this.providerUnsubscribe();
-      this.providerUnsubscribe = null;
-    }
-    this.listeners.clear();
   }
 
   /**
@@ -558,10 +598,27 @@ export class SessionController {
   // Location provider plumbing
   // -------------------------------------------------------------------
 
+  /**
+   * F1 fix: confirms `deps.locationProvider.start()` has actually resolved
+   * BEFORE installing this controller's sample-listener subscription (not
+   * before, as previously) -- see `start()`'s doc comment for the double-
+   * ingestion bug this closes. `providerUnsubscribe` is defensively cleared
+   * first too: `providerRunning` only flips to `true` once this method has
+   * both started the provider AND subscribed, so under normal single-
+   * threaded control flow it should already be `null` here on every call
+   * that reaches the subscribe line -- but a retry after a failed attempt is
+   * exactly the scenario this bug lived in, so the guard stays as a
+   * defense-in-depth invariant: a retry must always end up with exactly ONE
+   * live subscription, never two.
+   */
   private async ensureProviderRunning(): Promise<void> {
     if (!this.providerRunning) {
-      this.providerUnsubscribe = this.deps.locationProvider.subscribe((sample) => this.handleSample(sample));
       await this.deps.locationProvider.start();
+      if (this.providerUnsubscribe !== null) {
+        this.providerUnsubscribe();
+        this.providerUnsubscribe = null;
+      }
+      this.providerUnsubscribe = this.deps.locationProvider.subscribe((sample) => this.handleSample(sample));
       this.providerRunning = true;
     }
     // Seed the watchdog baseline at (re)start so a slow first fix isn't

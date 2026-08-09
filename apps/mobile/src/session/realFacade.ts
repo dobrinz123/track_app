@@ -63,6 +63,19 @@ export class RealSessionFacade implements SessionFacade {
       null,
     );
     this.controllerUnsubscribe = controller.subscribe((s) => {
+      // F1(d) fix: `lastError` clears on the controller's NEXT SUCCESSFUL
+      // state change, not merely because another guarded command was
+      // invoked. `SessionController` only ever calls its listeners after a
+      // mutation actually completed (see e.g. `start()`'s F1 fix -- a
+      // failed attempt never reaches `emit()` at all), so reaching this
+      // callback is itself proof of genuine forward progress. Previously
+      // `guard()` cleared `lastError` up front, before attempting the next
+      // command -- a retry that ALSO failed briefly flashed the old error
+      // away and then immediately reinstated it, and a command that threw
+      // before the controller ever changed state (e.g. a synchronous
+      // precondition failure) cleared a real, still-accurate error for no
+      // reason.
+      this.lastError = null;
       this.latest = mapState(s, this.lastError);
       for (const listener of this.listeners) listener(this.latest);
     });
@@ -87,17 +100,15 @@ export class RealSessionFacade implements SessionFacade {
   }
 
   /**
-   * Runs an async command body (C7 fix): clears any previous `lastError`
-   * before attempting it (so a retry that succeeds visibly clears the old
-   * message), and catches a rejection into `lastError` instead of leaving it
-   * as an unhandled promise rejection with no user-visible signal.
+   * Runs an async command body (C7 fix): catches a rejection into
+   * `lastError` instead of leaving it as an unhandled promise rejection with
+   * no user-visible signal. Does NOT preemptively clear a previous
+   * `lastError` before attempting the work (F1(d) fix, binding spec) -- that
+   * happens only in the controller-subscription callback above, on the next
+   * genuine successful state change, so a retry that also fails never
+   * flashes the old message away first.
    */
   private guard(name: string, work: () => Promise<void>): void {
-    if (this.lastError !== null) {
-      this.lastError = null;
-      this.latest = { ...this.latest, lastError: null };
-      this.emitLatest();
-    }
     work().catch((error: unknown) => {
       this.lastError = errorMessage(name, error);
       this.latest = { ...this.latest, lastError: this.lastError };

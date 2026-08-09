@@ -52,15 +52,26 @@ export class FakeLocationProvider implements LocationProvider {
   running = false;
   startCount = 0;
   stopCount = 0;
+  /** F1 fix sensitivity: when > 0, that many upcoming `start()` calls reject (decrementing this counter) before any later call succeeds normally -- drives the "failing-then-succeeding provider" retry scenario. */
+  startFailuresRemaining = 0;
+  /** F2 fix sensitivity: when true, every `stop()` call rejects instead of succeeding -- drives `dispose()`'s "detach even when stop() rejects" path. */
+  stopShouldReject = false;
 
   async start(): Promise<void> {
-    this.running = true;
     this.startCount += 1;
+    if (this.startFailuresRemaining > 0) {
+      this.startFailuresRemaining -= 1;
+      throw new Error('start failed (test double)');
+    }
+    this.running = true;
   }
 
   async stop(): Promise<void> {
-    this.running = false;
     this.stopCount += 1;
+    if (this.stopShouldReject) {
+      throw new Error('stop failed (test double)');
+    }
+    this.running = false;
   }
 
   subscribe(cb: (s: LocationSample) => void): () => void {
@@ -68,6 +79,11 @@ export class FakeLocationProvider implements LocationProvider {
     return () => {
       this.listeners.delete(cb);
     };
+  }
+
+  /** Number of currently-attached sample-listener subscriptions (F1 fix sensitivity: proves a retry after a failed start() ends up with exactly one). */
+  get listenerCount(): number {
+    return this.listeners.size;
   }
 
   push(sample: LocationSample): void {
