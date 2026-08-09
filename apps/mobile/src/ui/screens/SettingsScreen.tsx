@@ -1,5 +1,5 @@
 import React from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -197,6 +197,53 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
           <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
             Delta shows neutral (gray) when the live gap is within this many milliseconds of the reference.
           </Text>
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
+            COACHING
+          </Text>
+          <View style={styles.toggleRow}>
+            <View style={styles.toggleTextGroup}>
+              <Text style={styles.toggleTitle} maxFontSizeMultiplier={1.3}>
+                Corner coaching
+              </Text>
+              <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                Advisory brake and corner cues on the driving dashboard and circuit screen. Not an official or
+                safety-critical source.
+              </Text>
+            </View>
+            <Switch
+              value={settings.coachingEnabled}
+              onValueChange={(value) => settingsStore.update({ coachingEnabled: value })}
+              trackColor={{ false: colors.border, true: colors.accentDim }}
+              thumbColor={settings.coachingEnabled ? colors.accent : colors.textMuted}
+              accessibilityRole="switch"
+              accessibilityLabel="Corner coaching"
+              accessibilityState={{ checked: settings.coachingEnabled }}
+            />
+          </View>
+          {settings.coachingEnabled ? (
+            <View style={styles.toggleRow}>
+              <View style={styles.toggleTextGroup}>
+                <Text style={styles.toggleTitle} maxFontSizeMultiplier={1.3}>
+                  Voice cues
+                </Text>
+                <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                  Speaks brake and corner cues aloud.
+                </Text>
+              </View>
+              <Switch
+                value={settings.voiceCoachEnabled}
+                onValueChange={(value) => settingsStore.update({ voiceCoachEnabled: value })}
+                trackColor={{ false: colors.border, true: colors.accentDim }}
+                thumbColor={settings.voiceCoachEnabled ? colors.accent : colors.textMuted}
+                accessibilityRole="switch"
+                accessibilityLabel="Voice coaching cues"
+                accessibilityState={{ checked: settings.voiceCoachEnabled }}
+              />
+            </View>
+          ) : null}
         </View>
 
         <View style={styles.section}>
@@ -406,6 +453,9 @@ const styles = StyleSheet.create({
   stepperButtonText: { ...typography.title, color: colors.textPrimary },
   stepperValue: { ...typography.timeSmall, color: colors.textPrimary, minWidth: 90, textAlign: 'center' },
   helperText: { ...typography.caption, color: colors.textMuted },
+  toggleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.md },
+  toggleTextGroup: { flex: 1, gap: 2 },
+  toggleTitle: { ...typography.body, color: colors.textPrimary, fontFamily: fontFamily.bodySemibold },
   aboutCard: {
     backgroundColor: colors.surface,
     borderRadius: radii.md,

@@ -6,6 +6,8 @@ import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
 import { ADVISORY_NOTICE, TRANSILVANIA_MOTOR_RING } from '../data/circuit';
 import { StatusBanner } from '../components/StatusBanner';
+import { CornersList } from '../components/CornersList';
+import { TMR_CORNERS } from '../../session/tmrProfile';
 import {
   discardRecovery,
   resumeRecovery,
@@ -177,6 +179,11 @@ export function CircuitDetailScreen({ navigation }: Props): React.JSX.Element {
           <MetaRow label="Opened" value={String(circuit.openedYear)} />
         </View>
 
+        <Text style={styles.sectionKicker} maxFontSizeMultiplier={1.3}>
+          CORNERS
+        </Text>
+        <CornersList corners={TMR_CORNERS} />
+
         <Pressable
           style={[styles.button, styles.primaryButton, bootstrapState !== 'ready' && styles.buttonDisabled]}
           onPress={() => navigation.navigate('Preflight')}
@@ -249,6 +256,11 @@ const styles = StyleSheet.create({
   subtitle: {
     ...typography.body,
     color: colors.textSecondary,
+  },
+  sectionKicker: {
+    ...typography.kicker,
+    color: colors.textMuted,
+    marginTop: spacing.sm,
   },
   recoveryBanner: {
     backgroundColor: colors.surfaceRaised,

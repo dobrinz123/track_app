@@ -11,8 +11,10 @@ import { QualityPill } from '../components/QualityPill';
 import { SectorBar } from '../components/SectorBar';
 import { LongPressButton } from '../components/LongPressButton';
 import { StatusBanner } from '../components/StatusBanner';
-import { facade } from '../../session/composition';
+import { CoachStrip, COACH_STRIP_HEIGHT } from '../components/CoachStrip';
+import { facade, settingsStore } from '../../session/composition';
 import { useFacadeState } from '../hooks/useFacadeState';
+import { useSettings } from '../hooks/useSettings';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'ActiveDashboard'>;
 
@@ -28,6 +30,7 @@ const SECTOR_COUNT = 3; // Transilvania Motor Ring: 3 app-defined sectors (ADR-0
 export function ActiveDashboardScreen({ navigation }: Props): React.JSX.Element {
   useKeepAwake();
   const state = useFacadeState(facade);
+  const settings = useSettings(settingsStore);
   const armedRef = useRef(false);
   const navigatedRef = useRef(false);
 
@@ -71,6 +74,16 @@ export function ActiveDashboardScreen({ navigation }: Props): React.JSX.Element 
         </View>
 
         <View style={styles.bannerSlot}>{banner ? <StatusBanner variant={banner.variant} message={banner.message} /> : null}</View>
+
+        {/* Fixed-height slot (Phase 3 coaching addendum, S7): reserved ONLY while
+            coaching is on, so the strip's own cue appearing/disappearing never
+            shifts anything below it -- but toggling the SETTING itself does
+            change layout, same as the banner slot above already does. */}
+        {settings.coachingEnabled ? (
+          <View style={styles.coachSlot}>
+            <CoachStrip cue={state.coachCue} />
+          </View>
+        ) : null}
 
         <View style={styles.deltaZone}>
           <DeltaDisplay delta={state.delta} fontSize={100} />
@@ -128,6 +141,7 @@ const styles = StyleSheet.create({
   topRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   lapCounter: { ...typography.subtitle, color: colors.textSecondary, letterSpacing: 1 },
   bannerSlot: { minHeight: 0 },
+  coachSlot: { height: COACH_STRIP_HEIGHT },
   deltaZone: { flexGrow: 3, alignItems: 'center', justifyContent: 'center' },
   lapTimeZone: { alignItems: 'center', justifyContent: 'center' },
   lapTimeCaption: { ...typography.label, color: colors.textMuted, marginTop: spacing.xs, letterSpacing: 1 },

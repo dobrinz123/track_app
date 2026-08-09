@@ -84,6 +84,26 @@ describe('SqlSettingsStore (against sql.js)', () => {
     expect(store2.getSettings().coachingEnabled).toBe(false);
   });
 
+  it('voiceCoachEnabled (Phase 3 coaching addendum) defaults to false and round-trips through update()/persistence like every other setting', async () => {
+    const raw = await createRawSqlJsDatabase();
+    const db1 = wrapExistingSqlJsDatabase(raw);
+    await SqlSessionRepository.create(db1);
+    const store1 = await SqlSettingsStore.create(db1);
+
+    expect(store1.getSettings().voiceCoachEnabled).toBe(false);
+    expect(DEFAULT_SETTINGS.voiceCoachEnabled).toBe(false);
+
+    store1.update({ voiceCoachEnabled: true });
+    expect(store1.getSettings().voiceCoachEnabled).toBe(true);
+    // Untouched fields (including the OTHER coaching field) still preserved.
+    expect(store1.getSettings().coachingEnabled).toBe(DEFAULT_SETTINGS.coachingEnabled);
+    await flush(); // let the fire-and-forget persist() write land before "restarting"
+
+    const db2 = wrapExistingSqlJsDatabase(raw);
+    const store2 = await SqlSettingsStore.create(db2);
+    expect(store2.getSettings().voiceCoachEnabled).toBe(true);
+  });
+
   it('a corrupt stored row falls back to DEFAULT_SETTINGS rather than throwing', async () => {
     const raw = await createRawSqlJsDatabase();
     const db = wrapExistingSqlJsDatabase(raw);

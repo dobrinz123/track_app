@@ -38,6 +38,7 @@ import { InMemorySettingsStore } from './settingsStore';
 import { RealSessionFacade, type RealSessionFacadeCallbacks } from './realFacade';
 import { ReplayTimeSource, ReplayTimestampedLocationProvider, ScaledReplayClock } from './liveTimestampedProvider';
 import { TMR_CIRCUIT_PROFILE, TMR_CORNERS, TMR_RUNTIME_PROFILE } from './tmrProfile';
+import { startVoiceCoach } from './voiceCoach';
 
 const DB_NAME = 'circuit-timer.db';
 /** Single-user local app -- no auth/account system exists (MVP scope, ADR-0001/0004). Stable so `sessionId` (`${userId}--<random>`) and stored data survive across launches. */
@@ -304,6 +305,17 @@ export const sessionHistoryStore: SessionHistoryStore = historyWrapper;
 
 const settingsWrapper = new SwappableSettingsStore(new InMemorySettingsStore());
 export const settingsStore: SettingsStore = settingsWrapper;
+
+// ---------------------------------------------------------------------------
+// Voice coaching (Phase 3 coaching addendum). Wired against the SAME stable
+// `facade`/`settingsStore` bindings above -- survives every inner swap
+// (bootstrap activation, DevReplay start/restore) because it subscribes to
+// the wrapper, not whatever it currently delegates to. `voiceCoach.ts` only
+// ever reaches `expo-speech` via a lazy dynamic import gated on
+// `voiceCoachEnabled` (default `false`), so this call is safe at module load
+// even in tests that never mock `expo-speech`.
+// ---------------------------------------------------------------------------
+startVoiceCoach(facade, settingsStore);
 
 // ---------------------------------------------------------------------------
 // Bootstrap readiness (C2 fix). `CircuitDetailScreen` subscribes via
