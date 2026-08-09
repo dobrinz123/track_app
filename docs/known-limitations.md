@@ -118,3 +118,21 @@ decision it links to the ADR that made it, and where it's a code-level gap it ci
   `*Config` interfaces (`TelemetryQualityConfig`, `TrackMatcherConfig`, `CalibrationConfig`,
   `LapTimingEngineConfig`, `LiveDeltaEngineConfig`) rather than baked into a single on-site
   validation session's readings.
+
+## Residual edge cases accepted after the pre-install verification campaign (2026-08-09)
+
+Two narrow residues from the dual-review campaign are accepted as documented
+limitations rather than blockers (full evidence: `.foreman/scratch/final-codex-verify-output.log`):
+
+1. **Stale facade after a failed controller replacement (F2 residue).** If the
+   fresh-controller swap itself fails (its `dispose()`/rebuild throws — a
+   double-failure path), the previous terminal facade stays installed and only
+   `startPreflight` is gated. Practical impact is minimal: a terminal
+   `SessionController` ignores all session commands by design (illegal events
+   return identity), and the failure surfaces via `lastError`. Recovery: app
+   restart.
+2. **Dev-replay transition races under adversarial storming (F4 residue).** A
+   replay start that entered before an unmount-restore can interleave
+   out-of-order, and work enqueued during a flush window may miss persistence
+   before disposal. Affects only the `__DEV__` replay tool (excluded from
+   release builds entirely); the production GNSS path has no such path.
