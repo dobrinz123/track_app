@@ -235,3 +235,53 @@ A candidate lap replaces the stored reference lap only if **all** hold: same `ci
 ## Gate crossing semantics (binding)
 
 A crossing exists when the segment `prevPos -> currPos` (local ENU) strictly intersects gate segment `a->b`, computed by segment–segment intersection; `tCross` is linearly interpolated between `prev.tMono` and `curr.tMono` by intersection parameter. Direction is the sign of the cross product of the gate vector and the motion vector; only `forward` crossings count for timing. Debounce: after a counted crossing of a gate, ignore further crossings of the same gate until `minRearmDistanceM` (default 50 m) of additional unwrapped progress.
+
+## Coaching addendum (2026-08-10, binding — Phase 3)
+
+All advisory. Severity/speeds are derived estimates, never presented as official or as safety guidance; UI copy must say "advisory".
+
+```ts
+// ---------- Corner analysis (deterministic, derived from RuntimeProfile) ----------
+export type CornerSeverity = 1 | 2 | 3 | 4 | 5 | 6; // 1=kink … 6=hairpin
+export interface Corner {
+  id: number;                 // 1-based, travel order from S/F
+  entryDistanceM: number;     // lap distance where sustained curvature begins
+  apexDistanceM: number;      // max-curvature point
+  exitDistanceM: number;
+  lengthM: number;
+  minRadiusM: number;
+  totalAngleDeg: number;
+  direction: 'left' | 'right';
+  severity: CornerSeverity;   // bucketed by minRadiusM (config table)
+  advisorySpeedKph: number;   // sqrt(latG*g*minRadius), config latG default 0.85 — ADVISORY
+}
+export const CORNER_ANALYSIS_VERSION = 1; // bump on algorithm change
+
+// ---------- Braking zones ----------
+export interface BrakingZone {
+  cornerId: number;
+  brakeStartDistanceM: number; // lap distance where braking should begin
+  source: 'reference' | 'physics'; // PB-telemetry-derived vs decel-model fallback
+  entrySpeedKph: number;       // observed (reference) or advisory (physics)
+  apexSpeedKph: number;
+}
+
+// ---------- Coach engine ----------
+export interface CoachCue {
+  kind: 'BRAKE' | 'CORNER_AHEAD';
+  cornerId: number;
+  severity: CornerSeverity;
+  direction: 'left' | 'right';
+  distanceToTargetM: number;   // to brakeStart (BRAKE) or entry (CORNER_AHEAD)
+  advisorySpeedKph: number;
+  confidence: number;          // min(match confidence, zone-source confidence)
+}
+export interface CoachEngine {
+  configure(corners: Corner[], zones: BrakingZone[]): void;
+  onMatch(match: TrackMatch, speedMps: number | undefined): CoachCue | null;
+  reset(): void;               // per-lap rearm at S/F crossing
+}
+// Semantics: look-ahead = max(minLeadM, leadSeconds*speed) (defaults 80 m, 3.0 s);
+// one BRAKE + one CORNER_AHEAD max per corner per lap (debounced, rearm on S/F);
+// null when match quality worse than 'degraded' or confidence < 0.4 — never guess.
+```
