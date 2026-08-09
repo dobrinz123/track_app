@@ -215,3 +215,19 @@ export interface SessionPipelineResult {
 }
 // ReplayHarness streams a fixture's LocationSamples through the PRODUCTION pipeline
 // (quality -> matcher -> crossings -> state machine -> timing -> delta) and returns SessionPipelineResult.
+
+// ---------- Corner analysis (deterministic, derived from RuntimeProfile) ----------
+export type CornerSeverity = 1 | 2 | 3 | 4 | 5 | 6; // 1=kink … 6=hairpin
+export interface Corner {
+  id: number;                 // 1-based, travel order from S/F
+  entryDistanceM: number;     // lap distance where sustained curvature begins
+  apexDistanceM: number;      // max-curvature point
+  exitDistanceM: number;
+  lengthM: number;
+  minRadiusM: number;
+  totalAngleDeg: number;
+  direction: 'left' | 'right';
+  severity: CornerSeverity;   // bucketed by minRadiusM (config table)
+  advisorySpeedKph: number;   // sqrt(latG*g*minRadius), config latG default 0.85 — ADVISORY
+}
+export const CORNER_ANALYSIS_VERSION = 1; // bump on algorithm change

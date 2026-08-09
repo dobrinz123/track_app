@@ -4,6 +4,11 @@ import { pathToFileURL } from 'node:url';
 
 import type { CircuitProfile, Gate, LatLon, LocalPoint } from '../src/contracts';
 
+const curvatureModule = (await import(
+  new URL('../src/geometry/curvature.ts', import.meta.url).href
+)) as typeof import('../src/geometry/curvature');
+const { curvatureAtDistance, curvatureProfile } = curvatureModule;
+
 const CENTERLINE_WAY_ID = 488429454;
 const PIT_LANE_WAY_ID = 488429716;
 const RESEARCH_LENGTH_M = 3_708;
@@ -325,19 +330,6 @@ function modulo(value: number, modulus: number): number {
   return ((value % modulus) + modulus) % modulus;
 }
 
-function segmentBearing(points: LocalPoint[], segmentIndex: number): number {
-  const a = points[segmentIndex];
-  const b = points[(segmentIndex + 1) % points.length];
-  if (a === undefined || b === undefined) throw new Error('Sparse closed line');
-  if (a.e === b.e && a.n === b.n) throw new Error('Closed line contains a zero-length segment');
-  return Math.atan2(b.n - a.n, b.e - a.e);
-}
-
-function absoluteTurningAngle(fromBearing: number, toBearing: number): number {
-  const difference = toBearing - fromBearing;
-  return Math.abs(Math.atan2(Math.sin(difference), Math.cos(difference)));
-}
-
 /**
  * Mean absolute turning angle per metre inside a window extending equally
  * before and after the requested centerline distance. Turns are derived from
@@ -348,33 +340,15 @@ export function centerlineCurvatureAtDistance(
   distanceM: number,
   halfWindowM = TMR_CURVATURE_HALF_WINDOW_M,
 ): number {
-  const totalLengthM = closedLength(points);
-  if (!(halfWindowM > 0 && halfWindowM * 2 < totalLengthM)) {
-    throw new Error('Curvature half-window must be positive and shorter than half the line');
-  }
   const cumulative = cumulativeDistances(points);
-  const windowLengthM = halfWindowM * 2;
-  const windowStartM = modulo(distanceM - halfWindowM, totalLengthM);
-  let totalTurningAngle = 0;
-
-  for (let index = 0; index < points.length; index += 1) {
-    const vertexDistanceM = cumulative[index];
-    if (vertexDistanceM === undefined) throw new Error('Sparse cumulative distances');
-    const distanceFromWindowStartM = modulo(vertexDistanceM - windowStartM, totalLengthM);
-    if (distanceFromWindowStartM <= 0 || distanceFromWindowStartM >= windowLengthM) continue;
-    const previousSegmentIndex = modulo(index - 1, points.length);
-    totalTurningAngle += absoluteTurningAngle(
-      segmentBearing(points, previousSegmentIndex),
-      segmentBearing(points, index),
-    );
-  }
-
-  return totalTurningAngle / windowLengthM;
+  return Math.abs(curvatureAtDistance(points, cumulative, true, distanceM, halfWindowM));
 }
 
 function centerlineVertexCurvatures(points: LocalPoint[]): VertexCurvature[] {
-  return cumulativeDistances(points).map((distanceM) => ({
-    curvatureRadPerM: centerlineCurvatureAtDistance(points, distanceM),
+  const cumulative = cumulativeDistances(points);
+  const curvatures = curvatureProfile(points, cumulative, true, TMR_CURVATURE_HALF_WINDOW_M);
+  return cumulative.map((distanceM, index) => ({
+    curvatureRadPerM: Math.abs(curvatures[index] ?? 0),
     distanceM,
   }));
 }
