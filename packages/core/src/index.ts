@@ -81,3 +81,4 @@ export type {
 export * from './fixtures';
 export * from './replay';
 export * from './controller';
+export * from './telemetry';

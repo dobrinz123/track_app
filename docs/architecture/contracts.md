@@ -285,3 +285,74 @@ export interface CoachEngine {
 // one BRAKE + one CORNER_AHEAD max per corner per lap (debounced, rearm on S/F);
 // null when match quality worse than 'degraded' or confidence < 0.4 — never guess.
 ```
+
+## Telemetry addendum (2026-08-10, binding — Phase 4 / P4a)
+
+Vehicle telemetry over a LOCAL socket only (adapter is a WiFi AP; zero internet at runtime).
+STRICTLY READ-ONLY on the vehicle bus: OBD mode 01 (live data) requests only — never mode 04
+(clear DTCs), never mode 08 (actuation), never raw CAN writes. Advisory-only labeling applies.
+
+```ts
+// ---------- Channels ----------
+export type TelemetryChannelId =
+  | 'rpm'          // engine RPM            (PID 0x0C, (256A+B)/4)
+  | 'speedKph'     // vehicle speed         (PID 0x0D, A)
+  | 'throttlePct'  // throttle position     (PID 0x11, A*100/255)
+  | 'coolantC'     // coolant temperature   (PID 0x05, A-40)
+  | 'intakeC'      // intake air temp       (PID 0x0F, A-40)
+  | 'engineLoadPct'; // calculated load     (PID 0x04, A*100/255)
+
+export interface TelemetrySample {
+  channel: TelemetryChannelId;
+  value: number;               // decoded, in the channel's unit above
+  tMonoMs: number;             // SAME monotonic clock as LocationSample — injected, never Date.now()
+}
+
+// ---------- Transport (pure interface; mobile provides TCP impl) ----------
+export interface ObdTransport {
+  connect(): Promise<void>;    // rejects on failure; no auto-retry inside
+  send(line: string): void;    // one command, no trailing CR (session adds it)
+  onData(cb: (chunk: string) => void): () => void; // raw chunks, may split/merge arbitrarily
+  onClose(cb: (err?: Error) => void): () => void;
+  close(): Promise<void>;
+}
+
+// ---------- ELM327 session (pure TS, @circuit/core) ----------
+export type Elm327State = 'idle' | 'connecting' | 'initializing' | 'polling' | 'stopped' | 'failed';
+export interface Elm327Config {
+  pollPlan: Array<{ channel: TelemetryChannelId; hz: number }>; // target rates; scheduler degrades gracefully
+  initTimeoutMs: number;       // default 5000
+  commandTimeoutMs: number;    // default 1500 per request
+  maxConsecutiveErrors: number;// default 5 -> 'failed'
+}
+export interface Elm327Session {
+  start(): void;               // runs init handshake then the polling loop
+  stop(): Promise<void>;       // graceful: finishes in-flight command, closes transport
+  onSample(cb: (s: TelemetrySample) => void): () => void;
+  onStateChange(cb: (st: Elm327State, detail?: string) => void): () => void;
+  getDiagnostics(): { observedHzByChannel: Record<string, number>; errorCount: number; lastError?: string };
+}
+// Semantics (binding):
+// - Init sequence: ATZ, ATE0, ATL0, ATS0, ATSP0 (auto protocol) — each awaited to '>' prompt.
+// - Exactly ONE in-flight command at a time; responses are '>'-terminated; parser must tolerate
+//   chunk splits at ANY byte boundary and echo-on adapters (strip echo defensively even after ATE0).
+// - 'NO DATA' / 'STOPPED' / '?' / 'CAN ERROR' count as channel errors, not fatal until
+//   maxConsecutiveErrors; 'UNABLE TO CONNECT' during init -> 'failed'.
+// - Scheduler: weighted round-robin honoring pollPlan hz ratios; never busy-waits; a slow adapter
+//   lowers all rates proportionally (observed rates exposed via getDiagnostics).
+// - Timestamps: tMonoMs stamped at RESPONSE arrival using the injected monotonic clock.
+
+// ---------- Simulated adapter (dev/test — packages/core, deterministic) ----------
+// SimulatedElm327Transport implements ObdTransport over a scripted vehicle model
+// (rpm/speed/throttle as functions of scenario time). Deterministic given (scenario, seed);
+// supports fault injection: chunk fragmentation, NO DATA, disconnect mid-command, garbage bytes.
+
+// ---------- Recording (mobile, SQLite) ----------
+// Table telemetry_samples(session_id, lap_number NULLABLE, t_mono_ms, channel, value)
+// - Batched inserts (>=25 samples or 1s, whichever first); flushed on lap crossing and endSession
+//   through the SAME flush path as lap persistence (Promise.all discipline).
+// - RETENTION CAP (binding, M2 lineage): at most 200_000 telemetry rows per session; when hit,
+//   recording stops with a diagnostics flag (never crashes, never evicts older rows mid-session).
+// - Telemetry NEVER gates lap timing: a dead adapter must not delay or invalidate any lap.
+export const TELEMETRY_SCHEMA_VERSION = 1;
+```
