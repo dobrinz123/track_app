@@ -377,3 +377,34 @@ export const TELEMETRY_SCHEMA_VERSION = 1;
   >= 98 C, red >= 105 C) while visible. It must never occlude or reflow
   timing elements, and when hidden the dashboard layout is byte-identical to
   before this addendum.
+
+### Telemetry addendum — channel revision (2026-08-11, binding)
+
+User-driven revision: oil temperatures outrank coolant for display; RPM stays
+recorded but leaves the strip (it is on the car's own dash); G-forces recorded
+for analysis, not displayed live.
+
+```ts
+export type TelemetryChannelId =
+  | 'rpm' | 'speedKph' | 'throttlePct' | 'coolantC' | 'intakeC' | 'engineLoadPct'
+  | 'engineOilC'   // engine oil temp, STANDARD PID 0x5C, A-40
+  | 'transOilC'    // transmission oil temp — NO standard mode-01 PID exists.
+                   // Implemented as a user-configurable CUSTOM PID (settings:
+                   // hex request string, vehicle-specific, e.g. a mode-22 DID;
+                   // decode = last data byte - 40). Unset -> channel absent.
+                   // The P4c ESP32 CAN device will provide this natively.
+  | 'latG' | 'longG'; // device accelerometer (expo-sensors), NOT OBD:
+                   // gravity isolated via low-pass (alpha 0.8), linear accel
+                   // projected off the gravity vector; portrait mount assumed
+                   // (documented limitation until P4c IMU). Unit: g. ~25 Hz,
+                   // recorded through the SAME TelemetrySample/recorder path.
+
+// Poll plan defaults (revised): rpm 5 Hz (record-only), speedKph 5, throttlePct 5,
+// engineOilC 0.5, transOilC 0.5 (only when configured), coolantC 0.2.
+// Strip display (revised): THR | ENG OIL | TRANS OIL — third slot falls back to
+// COOLANT when transOilC is not configured. RPM and G never on the strip.
+// Tint thresholds (named constants): engineOilC amber >= 120, red >= 130;
+// transOilC amber >= 110, red >= 125; coolantC keeps 98/105.
+// Lap-detail charts (revised order): speedKph, rpm, throttlePct, latG, longG,
+// engineOilC, transOilC — each renders only when rows exist (unchanged rule).
+```
