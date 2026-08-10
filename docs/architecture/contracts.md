@@ -356,3 +356,17 @@ export interface Elm327Session {
 // - Telemetry NEVER gates lap timing: a dead adapter must not delay or invalidate any lap.
 export const TELEMETRY_SCHEMA_VERSION = 1;
 ```
+
+### Telemetry addendum — P4b amendments (binding)
+
+- Session-complete barrier (mobile): the facade layer holds the `sessionComplete`
+  state emission until the telemetry shutdown/final-flush promise settles, capped
+  at 2000 ms (a hung adapter socket must never delay Results by more than that).
+  Telemetry rejection never blocks or fails the emission — barrier is allSettled.
+- Recorded-telemetry read API (mobile): readLapTelemetry(db, sessionId, lapNumber)
+  returns rows ordered by t_mono_ms; UI aggregates into fixed-count buckets
+  (default 80) by averaging per bucket. Charts render ONLY when rows exist; their
+  absence changes nothing else on the screen.
+- Dashboard telemetry strip: visible ONLY while telemetryEnabled AND the provider
+  state is 'polling'; shows at most rpm, throttlePct, coolantC (coolant tinted
+  amber >= 98 C, red >= 105 C). It must never occlude or reflow timing elements.
