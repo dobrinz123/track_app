@@ -580,11 +580,29 @@ function startTelemetryRecording(sessionId: string): void {
     recorder.flushOnLapCrossing();
   });
 
-  telemetryProvider.start();
+  // F2 fix (MED, binding): EACH provider's `start()` is isolated in its own
+  // try/catch -- `telemetryProvider.start()` already catches its own
+  // synchronous construction failures internally (see its own doc comment)
+  // and reports them through `onStateChange('failed', ...)`, but this stays
+  // as composition's own defense-in-depth backstop: a synchronous throw from
+  // EITHER provider's `start()` must never prevent the OTHER from being
+  // called, and must never propagate up through `startTelemetryRecording()`
+  // (which runs synchronously inside `onSessionStarted` -- an uncaught throw
+  // here would otherwise escape into `RealSessionFacade`'s own session-start
+  // path, nowhere near a place that should ever fail lap timing).
+  try {
+    telemetryProvider.start();
+  } catch (error) {
+    console.warn('[composition] telemetryProvider.start() threw synchronously', error);
+  }
   // Channel revision: started alongside the OBD provider but independently --
   // neither `start()` call is gated on the other, and neither's own state
   // (running/failed) affects whether the other is called.
-  gForceProvider.start();
+  try {
+    gForceProvider.start();
+  } catch (error) {
+    console.warn('[composition] gForceProvider.start() threw synchronously', error);
+  }
 }
 
 // F2 fix (WPT3, binding): registered once at module load (independent of

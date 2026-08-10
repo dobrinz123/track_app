@@ -8,33 +8,43 @@ import { colors, radii, spacing, typography } from '../theme';
 import { TimeDisplay } from '../components/TimeDisplay';
 import { QualityPill } from '../components/QualityPill';
 import { sessionHistoryStore, getTelemetryReadDb } from '../../session/composition';
-import { loadLapTelemetry, bucketTelemetry, type TelemetrySampleRow } from '../../persistence/telemetryRead';
+import {
+  loadLapTelemetry,
+  bucketTelemetry,
+  TELEMETRY_CHART_CHANNELS,
+  type TelemetrySampleRow,
+} from '../../persistence/telemetryRead';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'LapDetail'>;
 
 /**
  * Telemetry addendum — channel revision (2026-08-11, binding): the channels a
- * lap's TELEMETRY section may chart, in display order: speedKph, rpm,
- * throttlePct, latG, longG, engineOilC, transOilC. Charts render only for
- * whichever of these are actually present in `readLapTelemetry`'s rows for
- * this lap -- a channel with zero samples never shows an empty chart (so
- * `latG`/`longG` simply don't appear for a session recorded without motion
- * data, and `transOilC` simply doesn't appear unless it was configured).
- * Kept in sync with `apps/mobile/test/persistence/lapDetailChartChannels.test.ts`'s
- * byte-for-byte mirror -- this file itself imports `react-native`, which
- * breaks vitest's parser (same constraint as `SettingsScreen.tsx`'s
- * `parsePortDraft`/`parseHexPidDraft`), so the exact channel-id order is
- * pinned there instead.
+ * lap's TELEMETRY section may chart, in display order -- the id/order itself
+ * is `telemetryRead.ts`'s exported `TELEMETRY_CHART_CHANNELS` (F5 fix,
+ * binding: a pure module `apps/mobile/test/persistence/lapDetailChartChannels.test.ts`
+ * imports directly, no copied mirror). Charts render only for whichever of
+ * these are actually present in `readLapTelemetry`'s rows for this lap -- a
+ * channel with zero samples never shows an empty chart (so `latG`/`longG`
+ * simply don't appear for a session recorded without motion data, and
+ * `transOilC` simply doesn't appear unless it was configured). Display
+ * label/unit/color stay HERE (theme-dependent, UI-only) -- only the id/order
+ * moved, since `telemetryRead.ts` (unlike this file) must stay
+ * `react-native`-free to remain directly importable by vitest.
  */
-const TELEMETRY_CHART_CHANNELS: readonly { id: TelemetryChannelId; label: string; unit: string; color: string }[] = [
-  { id: 'speedKph', label: 'Speed', unit: 'km/h', color: colors.accent },
-  { id: 'rpm', label: 'RPM', unit: 'rpm', color: colors.textSecondary },
-  { id: 'throttlePct', label: 'Throttle', unit: '%', color: colors.textMuted },
-  { id: 'latG', label: 'Lateral G', unit: 'g', color: colors.accent },
-  { id: 'longG', label: 'Longitudinal G', unit: 'g', color: colors.textSecondary },
-  { id: 'engineOilC', label: 'Engine oil', unit: '°C', color: colors.warning },
-  { id: 'transOilC', label: 'Trans oil', unit: '°C', color: colors.danger },
-];
+const TELEMETRY_CHART_DISPLAY: Readonly<Record<TelemetryChannelId, { label: string; unit: string; color: string }>> =
+  {
+    speedKph: { label: 'Speed', unit: 'km/h', color: colors.accent },
+    rpm: { label: 'RPM', unit: 'rpm', color: colors.textSecondary },
+    throttlePct: { label: 'Throttle', unit: '%', color: colors.textMuted },
+    latG: { label: 'Lateral G', unit: 'g', color: colors.accent },
+    longG: { label: 'Longitudinal G', unit: 'g', color: colors.textSecondary },
+    engineOilC: { label: 'Engine oil', unit: '°C', color: colors.warning },
+    transOilC: { label: 'Trans oil', unit: '°C', color: colors.danger },
+    // Non-chartable channels (never appear in `TELEMETRY_CHART_CHANNELS`, kept only so this Record's type stays exhaustive over the full `TelemetryChannelId` union).
+    coolantC: { label: 'Coolant', unit: '°C', color: colors.textMuted },
+    intakeC: { label: 'Intake air', unit: '°C', color: colors.textMuted },
+    engineLoadPct: { label: 'Engine load', unit: '%', color: colors.textMuted },
+  };
 
 /** Thin-bar sparkline for one channel's bucketed lap telemetry. Pure View/Text -- no svg, no new deps (ticket constraint). */
 function TelemetrySparkline({
@@ -182,14 +192,15 @@ export function LapDetailScreen({ route }: Props): React.JSX.Element {
             <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
               TELEMETRY
             </Text>
-            {TELEMETRY_CHART_CHANNELS.filter((c) => telemetryRows.some((r) => r.channel === c.id)).map((c) => {
-              const { buckets, min, max } = bucketTelemetry(telemetryRows, c.id);
+            {TELEMETRY_CHART_CHANNELS.filter((id) => telemetryRows.some((r) => r.channel === id)).map((id) => {
+              const { buckets, min, max } = bucketTelemetry(telemetryRows, id);
+              const display = TELEMETRY_CHART_DISPLAY[id];
               return (
                 <TelemetrySparkline
-                  key={c.id}
-                  label={c.label}
-                  unit={c.unit}
-                  color={c.color}
+                  key={id}
+                  label={display.label}
+                  unit={display.unit}
+                  color={display.color}
                   buckets={buckets}
                   min={min}
                   max={max}

@@ -94,8 +94,22 @@ class Elm327SessionEngine implements Elm327Session {
     private readonly monotonicNow: () => number,
   ) {
     validateConfig(config);
+    // F1 HIGH fix (L3, binding, defense layer 3 of 3): a customPid entry that
+    // fails the read-only-service whitelist is DROPPED with one
+    // `console.warn` each -- never thrown. This is the core-side
+    // independent re-implementation of the SAME rule the mobile app's L1
+    // (`SettingsScreen.tsx`) and L2 (`telemetryProvider.ts`'s
+    // `buildCustomPids`) already enforce via `customPidValidation.ts` --
+    // duplicated deliberately (this package cannot import mobile app code)
+    // so a bug in either mobile layer can never let a non-read request
+    // reach the adapter. F2 fix (MED, binding): also why this is a warning,
+    // not a throw -- a bad customPids entry must never make session
+    // CONSTRUCTION (called synchronously from `telemetryProvider.ts`'s
+    // `start()`) throw synchronously.
+    const { valid: validCustomPids, warnings: customPidWarnings } = filterCustomPids(config.customPids);
+    for (const warning of customPidWarnings) console.warn(`[elm327Session] ${warning}`);
     const customRequests = new Map(
-      (config.customPids ?? []).map(({ channel, request }) => [channel, request] as const),
+      validCustomPids.map(({ channel, request }) => [channel, request] as const),
     );
     const entries = new Map<TelemetryChannelId, PollEntry>();
     let ignoredUnconfiguredTransOil = false;
@@ -449,26 +463,82 @@ function validateConfig(config: Elm327Config): void {
       throw new RangeError(`Telemetry poll rate must be positive for ${item.channel}`);
     }
   }
-  for (const customPid of config.customPids ?? []) {
-    const compactRequest = customPid.request.replace(/\s+/g, '');
-    if (
-      compactRequest.length === 0 ||
-      compactRequest.length % 2 !== 0 ||
-      !/^[0-9A-F]+$/i.test(compactRequest) ||
-      /[\r\n]/.test(customPid.request)
-    ) {
-      throw new RangeError(`Custom PID request must be raw hex bytes for ${customPid.channel}`);
-    }
-  }
+  // NOTE: `config.customPids` is deliberately NOT validated here -- F1/F2
+  // fix (binding): a bad customPids entry is filtered out with a warning by
+  // `filterCustomPids` below (called from the constructor), never thrown.
 }
 
-/** Binding custom-PID rule: decode the response's final data byte as A - 40. */
-function decodeCustomResponse(response: string, channel: TelemetryChannelId): number {
-  const match = /([0-9A-F]{2})$/i.exec(response.trim());
-  if (match === null || match[1] === undefined) {
-    throw new Error(`Missing custom PID data byte response for ${channel}`);
+const CUSTOM_PID_ALLOWED_SERVICES = new Set(['21', '22']);
+/** Accelerometer channels (Telemetry addendum — channel revision): never a valid OBD custom-PID target -- core verifier note (a). */
+const ACCELEROMETER_CHANNELS: ReadonlySet<TelemetryChannelId> = new Set(['latG', 'longG']);
+
+interface CustomPidFilterResult {
+  valid: Array<{ channel: TelemetryChannelId; request: string }>;
+  warnings: string[];
+}
+
+/**
+ * F1 HIGH fix (L3, binding): filters `config.customPids` down to entries
+ * safe to send as a raw OBD request -- never throws. Rejects an entry whose
+ * channel is `latG`/`longG` (accelerometer channels are never OBD targets),
+ * whose compact (whitespace-stripped) hex has an odd length, is empty, or
+ * contains a non-hex character, OR whose service byte (first two hex
+ * characters) is not `21`/`22` -- exactly one `console.warn` per rejected
+ * entry (see the constructor's own doc comment for why this list exists
+ * independently of the mobile app's `customPidValidation.ts`).
+ */
+function filterCustomPids(customPids: Elm327Config['customPids']): CustomPidFilterResult {
+  const valid: Array<{ channel: TelemetryChannelId; request: string }> = [];
+  const warnings: string[] = [];
+  for (const customPid of customPids ?? []) {
+    const reason = customPidRejectionReason(customPid);
+    if (reason !== null) {
+      warnings.push(`Ignoring custom PID for ${customPid.channel}: ${reason}`);
+      continue;
+    }
+    valid.push(customPid);
   }
-  return Number.parseInt(match[1], 16) - 40;
+  return { valid, warnings };
+}
+
+function customPidRejectionReason(customPid: { channel: TelemetryChannelId; request: string }): string | null {
+  if (ACCELEROMETER_CHANNELS.has(customPid.channel)) {
+    return `channel ${customPid.channel} is an accelerometer channel, not a valid OBD custom PID target`;
+  }
+  const compact = customPid.request.replace(/\s+/g, '');
+  if (compact.length === 0 || !/^[0-9A-F]+$/i.test(compact) || /[\r\n]/.test(customPid.request)) {
+    return 'request must be non-empty hex bytes';
+  }
+  if (compact.length % 2 !== 0) {
+    return `request has an odd compact hex length (${compact.length})`;
+  }
+  const servicePrefix = compact.slice(0, 2).toUpperCase();
+  if (!CUSTOM_PID_ALLOWED_SERVICES.has(servicePrefix)) {
+    return `service byte ${servicePrefix} is not an allowed read service (21/22 only)`;
+  }
+  return null;
+}
+
+/**
+ * Binding custom-PID rule: decode the response's final data byte as A - 40.
+ * CORE-b fix: an odd-length hex tail (e.g. `621E1C8`) is a MALFORMED/
+ * misaligned frame, treated as a channel error exactly like NO DATA -- never
+ * decoded by grabbing whichever two hex characters happen to be last. The
+ * previous `/([0-9A-F]{2})$/` regex matched the trailing 2 hex characters of
+ * ANY length string (even, or odd like this 7-character example), silently
+ * decoding a misaligned byte instead of failing. Compacting first (stripping
+ * every non-hex character, not just trailing whitespace) and checking parity
+ * up front means an odd-length response throws here and is caught by the
+ * poll loop's existing `recordChannelError` path, same as any other channel
+ * error.
+ */
+function decodeCustomResponse(response: string, channel: TelemetryChannelId): number {
+  const compact = response.replace(/[^0-9A-Fa-f]/g, '');
+  if (compact.length === 0 || compact.length % 2 !== 0) {
+    throw new Error(`Malformed custom PID response for ${channel} (odd-length hex)`);
+  }
+  const lastByte = compact.slice(-2);
+  return Number.parseInt(lastByte, 16) - 40;
 }
 
 function stripEcho(response: string, command: string): string {

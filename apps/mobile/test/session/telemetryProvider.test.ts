@@ -3,6 +3,20 @@ import type { Elm327State, TelemetrySample } from '@circuit/core';
 import { InMemorySettingsStore } from '../../src/session/settingsStore';
 import { buildCustomPids, buildPollPlan, createTelemetryProvider } from '../../src/session/telemetryProvider';
 
+/**
+ * F2 MED fix test seam (binding): wraps the REAL `createElm327Session` so a
+ * single test can force it to throw synchronously (simulating a session
+ * CONSTRUCTION failure -- e.g. a future config-validation change, or a
+ * transport-build failure) without affecting any other test in this file,
+ * which all keep exercising the real implementation via
+ * `importOriginal()`.
+ */
+vi.mock('@circuit/core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@circuit/core')>();
+  return { ...actual, createElm327Session: vi.fn(actual.createElm327Session) };
+});
+import { createElm327Session } from '@circuit/core';
+
 describe('buildPollPlan (Telemetry addendum — channel revision, binding)', () => {
   it('the default (transOilC unconfigured) plan omits transOilC entirely, in binding order', () => {
     expect(buildPollPlan('')).toEqual([
@@ -30,7 +44,7 @@ describe('buildPollPlan (Telemetry addendum — channel revision, binding)', () 
   });
 });
 
-describe('buildCustomPids (Telemetry addendum — channel revision, binding: "raw hex sent verbatim")', () => {
+describe('buildCustomPids (Telemetry addendum — channel revision, binding: "normalized then sent verbatim")', () => {
   it('unconfigured (empty) transOilPidHex returns undefined, not an empty array', () => {
     expect(buildCustomPids('')).toBeUndefined();
   });
@@ -39,12 +53,55 @@ describe('buildCustomPids (Telemetry addendum — channel revision, binding: "ra
     expect(buildCustomPids('   ')).toBeUndefined();
   });
 
-  it('a configured transOilPidHex is passed through verbatim (trimmed) as the transOilC custom request', () => {
+  it('a configured transOilPidHex is normalized (outer whitespace trimmed) then sent verbatim as the transOilC custom request', () => {
     expect(buildCustomPids('221E0C')).toEqual([{ channel: 'transOilC', request: '221E0C' }]);
   });
 
   it('leading/trailing whitespace is trimmed, internal spacing preserved', () => {
     expect(buildCustomPids('  22 1E 0C  ')).toEqual([{ channel: 'transOilC', request: '22 1E 0C' }]);
+  });
+
+  /**
+   * F1 HIGH fix (L2, binding): re-validated against the SAME read-service
+   * whitelist L1 enforces (`customPidValidation.ts`) -- a persisted value
+   * that fails it (saved before this rule existed, or written by any future
+   * non-UI caller of `settingsStore.update`) is dropped, not forwarded, with
+   * exactly one `console.warn`.
+   */
+  it('drops a persisted value whose service byte is not 21/22, with a console.warn', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect(buildCustomPids('04')).toBeUndefined();
+      expect(buildCustomPids('0101')).toBeUndefined();
+      expect(buildCustomPids('015C')).toBeUndefined(); // F3: mode-01 collision with the standard engineOilC PID.
+      expect(warnSpy).toHaveBeenCalledTimes(3);
+      for (const call of warnSpy.mock.calls) {
+        expect(String(call[0])).toContain('Only read services 21/22 allowed');
+      }
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('drops a persisted value with an odd compact hex length, with a console.warn', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect(buildCustomPids('221E0')).toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('still forwards a valid mode-21/22 request without warning', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect(buildCustomPids('221E1C')).toEqual([{ channel: 'transOilC', request: '221E1C' }]);
+      expect(buildCustomPids('21AB')).toEqual([{ channel: 'transOilC', request: '21AB' }]);
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
 
@@ -358,5 +415,49 @@ describe('telemetryProvider: telemetrySimulate is gated on isDev (F8 fix)', () =
 
     expect(tracker.connectCalls).toBe(1);
     expect(provider.getDiagnostics().state).toBe('failed');
+  });
+});
+
+describe('telemetryProvider: start() isolates a synchronous session-construction throw (F2 MED fix)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a synchronous throw from createElm327Session resets running=false and reports failed, without wedging the provider', async () => {
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: true });
+    vi.mocked(createElm327Session).mockImplementationOnce(() => {
+      throw new Error('boom: synchronous session construction failure (test double)');
+    });
+
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
+    const states: Elm327State[] = [];
+    const details: Array<string | undefined> = [];
+    provider.onStateChange((s, d) => {
+      states.push(s);
+      details.push(d);
+    });
+
+    // Must not throw OUT of start() -- the whole point of the fix.
+    expect(() => provider.start()).not.toThrow();
+    await flushMicrotasks();
+
+    expect(provider.getDiagnostics().state).toBe('failed');
+    expect(states.at(-1)).toBe('failed');
+    expect(details.at(-1)).toContain('boom: synchronous session construction failure');
+
+    // Not wedged: running was reset to false, so a second start() (now
+    // reaching the real, non-throwing implementation) proceeds normally
+    // instead of being swallowed by the stale `if (running) return;` guard.
+    provider.start();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushMicrotasks();
+    expect(provider.getDiagnostics().state).toBe('polling');
+
+    await provider.stop();
   });
 });

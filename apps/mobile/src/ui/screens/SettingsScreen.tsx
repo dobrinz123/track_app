@@ -17,6 +17,7 @@ import {
 import { useFacadeState } from '../hooks/useFacadeState';
 import { useSettings } from '../hooks/useSettings';
 import type { SpeedUnits } from '../../session/settingsStore';
+import { validateCustomPidHex } from '../../session/customPidValidation';
 
 /** Session states that mean "there is an active session in progress" -- the delete-my-data control is hidden/disabled during all of these so it can never race a live write (M3 fix). */
 const ACTIVE_SESSION_STATES = new Set([
@@ -53,17 +54,18 @@ export function parsePortDraft(text: string): number | null {
  * Telemetry addendum — channel revision (2026-08-11, binding): validates a
  * FULL `transOilPidHex` draft string on blur, same "validate the whole
  * string, not keystroke-by-keystroke" pattern as `parsePortDraft` above.
- * Hex characters (0-9, A-F/a-f) and spaces only -- any other character
- * anywhere in the string rejects the whole draft (`null`). An empty or
- * whitespace-only string is valid and means "disabled" (returns `''`);
- * otherwise returns the string with leading/trailing whitespace trimmed
- * (internal spacing, if any, is preserved -- the raw hex is sent verbatim).
- * Exported (pure, no React/RN import) so its exact behavior can be pinned by
- * a test, same reasoning as `parsePortDraft`'s own doc comment.
+ * F1 HIGH fix (L1, binding): delegates to `customPidValidation.ts`'s
+ * `validateCustomPidHex` -- the SAME whitelist L2 (`buildCustomPids`)
+ * re-checks against whatever ends up persisted, so this screen and the
+ * provider can never disagree about which requests are safe to send. Kept as
+ * a thin wrapper (not re-implemented here) rather than removed, since
+ * `commitTransOilPidDraft` below needs the full `{ value, error }` result to
+ * show the F1 inline error string -- callers that only need the
+ * accept/reject boolean can keep using this.
  */
 export function parseHexPidDraft(text: string): string | null {
-  if (!/^[0-9A-Fa-f ]*$/.test(text)) return null;
-  return text.trim();
+  const result = validateCustomPidHex(text);
+  return result.ok ? result.value : null;
 }
 
 const DEADBAND_STEP_MS = 25;
@@ -164,6 +166,12 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
   // blur/submit via `parseHexPidDraft`.
   const [transOilPidDraft, setTransOilPidDraft] = React.useState(settings.transOilPidHex);
   const lastCommittedTransOilPid = React.useRef(settings.transOilPidHex);
+  // F1 HIGH fix (L1, binding): non-null exactly while the current draft was
+  // last rejected -- shown inline below the field as
+  // `CUSTOM_PID_VALIDATION_ERROR` ("Only read services 21/22 allowed").
+  // Cleared as soon as the user edits the field again (`onChangeText` below)
+  // or the next commit succeeds.
+  const [transOilPidError, setTransOilPidError] = React.useState<string | null>(null);
   React.useEffect(() => {
     if (settings.transOilPidHex !== lastCommittedTransOilPid.current) {
       lastCommittedTransOilPid.current = settings.transOilPidHex;
@@ -172,13 +180,17 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
   }, [settings.transOilPidHex]);
 
   function commitTransOilPidDraft(): void {
-    const parsed = parseHexPidDraft(transOilPidDraft);
-    if (parsed !== null) {
-      lastCommittedTransOilPid.current = parsed;
-      settingsStore.update({ transOilPidHex: parsed });
-      setTransOilPidDraft(parsed);
+    const result = validateCustomPidHex(transOilPidDraft);
+    if (result.ok) {
+      lastCommittedTransOilPid.current = result.value;
+      settingsStore.update({ transOilPidHex: result.value });
+      setTransOilPidDraft(result.value);
+      setTransOilPidError(null);
     } else {
-      setTransOilPidDraft(lastCommittedTransOilPid.current);
+      // F1 fix: unlike the port field, the invalid text is left in place
+      // (not snapped back) so the user can see and correct exactly what they
+      // typed, alongside the inline error below the field.
+      setTransOilPidError(result.error);
     }
   }
 
@@ -398,7 +410,10 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
                 <TextInput
                   style={styles.fieldInput}
                   value={transOilPidDraft}
-                  onChangeText={setTransOilPidDraft}
+                  onChangeText={(text) => {
+                    setTransOilPidDraft(text);
+                    if (transOilPidError !== null) setTransOilPidError(null);
+                  }}
                   onBlur={commitTransOilPidDraft}
                   onSubmitEditing={commitTransOilPidDraft}
                   placeholder="disabled"
@@ -409,10 +424,19 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
                   accessibilityLabel="Transmission oil temperature PID, hex"
                 />
               </View>
+              {transOilPidError === null ? null : (
+                <Text
+                  style={styles.errorBanner}
+                  maxFontSizeMultiplier={1.3}
+                  accessibilityLiveRegion="polite"
+                >
+                  {transOilPidError}
+                </Text>
+              )}
               <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
-                Advanced, vehicle-specific: no standard PID exists for transmission oil temperature. Enter your
-                vehicle's raw hex request to enable the reading, or leave blank to disable it. Advisory only --
-                consult your vehicle's documentation.
+                Advanced, vehicle-specific: read-only requests only (services 21/22). No standard PID exists for
+                transmission oil temperature -- enter your vehicle's raw hex request to enable the reading, or
+                leave blank to disable it. Advisory only -- consult your vehicle's documentation.
               </Text>
               {
                 // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.

@@ -285,6 +285,160 @@ describe('ELM327 session', () => {
     expect(transport.closeCount).toBe(1);
   });
 
+  /**
+   * F1 HIGH fix (L3, binding, defense layer 3 of 3): `elm327Session.ts`'s own
+   * independent re-implementation of the read-only-service whitelist (it
+   * cannot import the mobile app's `customPidValidation.ts` -- this package
+   * must stay free of any mobile-app dependency). F2 MED fix: NEVER throws
+   * synchronously for a bad `customPids` entry -- filtered out with one
+   * `console.warn` each instead.
+   */
+  it('L3 fix: drops a customPids entry whose service byte is not 21/22, with one console.warn, never throws', async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const transport = new ScriptedTransport(normalReply);
+      const session = createElm327Session(
+        transport,
+        config({
+          pollPlan: [{ channel: 'transOilC', hz: 2 }],
+          customPids: [{ channel: 'transOilC', request: '0401' }], // service byte '04' -- clear-DTC, not read-only.
+        }),
+        () => 0,
+      );
+
+      await startUntil(session, 'polling');
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      // The rejected request must NEVER reach the adapter.
+      expect(transport.sent.filter((line) => line === '0401\r')).toHaveLength(0);
+      expect(
+        warnSpy.mock.calls.some((call) => String(call[0]).includes('not an allowed read service (21/22 only)')),
+      ).toBe(true);
+
+      await session.stop();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('L3 fix: drops a customPids entry targeting an accelerometer channel (latG/longG), with a console.warn', async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const transport = new ScriptedTransport(normalReply);
+      const session = createElm327Session(
+        transport,
+        config({
+          pollPlan: [{ channel: 'rpm', hz: 5 }],
+          customPids: [{ channel: 'latG', request: '221E1C' }],
+        }),
+        () => 0,
+      );
+
+      await startUntil(session, 'polling');
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(transport.sent.filter((line) => line === '221E1C\r')).toHaveLength(0);
+      expect(
+        warnSpy.mock.calls.some((call) => String(call[0]).includes('accelerometer channel')),
+      ).toBe(true);
+
+      await session.stop();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('L3 fix: drops a customPids entry with an odd compact hex length, with a console.warn', async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const transport = new ScriptedTransport(normalReply);
+      const session = createElm327Session(
+        transport,
+        config({
+          pollPlan: [{ channel: 'transOilC', hz: 2 }],
+          customPids: [{ channel: 'transOilC', request: '221E0' }], // odd compact length (5).
+        }),
+        () => 0,
+      );
+
+      await startUntil(session, 'polling');
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(transport.sent.filter((line) => line === '221E0\r')).toHaveLength(0);
+      expect(warnSpy.mock.calls.some((call) => String(call[0]).includes('odd compact hex length'))).toBe(true);
+
+      await session.stop();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('L3 fix: a valid mode-21/22 customPids entry is still sent normally (whitelist does not over-reject)', async () => {
+    vi.useFakeTimers();
+    const clock = new FakeClock();
+    const transport = new ScriptedTransport((command) => {
+      if (command.startsWith('AT')) return normalReply(command);
+      if (command === '21AB') return `${command}\r61 AB 87\r`;
+      return 'NO DATA\r';
+    });
+    const session = createElm327Session(
+      transport,
+      config({
+        pollPlan: [{ channel: 'transOilC', hz: 2 }],
+        customPids: [{ channel: 'transOilC', request: '21AB' }],
+      }),
+      () => clock.now(),
+    );
+    const samples: TelemetrySample[] = [];
+    session.onSample((sample) => samples.push(sample));
+
+    await startUntil(session, 'polling');
+    await vi.advanceTimersByTimeAsync(0);
+    await session.stop();
+
+    expect(transport.sent).toContain('21AB\r');
+    expect(samples[0]).toEqual({ channel: 'transOilC', value: 95, tMonoMs: 0 });
+  });
+
+  /**
+   * CORE-b fix (binding): an odd-length hex tail in a custom PID response
+   * (e.g. `621E1C8`, 7 hex characters) is a malformed/misaligned frame,
+   * treated as a channel error exactly like NO DATA -- NEVER decoded by
+   * grabbing whichever two hex characters happen to be last (which would
+   * silently misalign every subsequent nibble and report a plausible-looking
+   * but wrong value).
+   */
+  it('CORE-b fix: an odd-length hex tail in a custom PID response is a channel error, never a misaligned decode', async () => {
+    vi.useFakeTimers();
+    const clock = new FakeClock();
+    const transport = new ScriptedTransport((command) => {
+      if (command.startsWith('AT')) return normalReply(command);
+      if (command === '221E1C') return `${command}\r62 1E 1C 8\r`; // 7 hex chars after the echo strip -- odd.
+      return 'NO DATA\r';
+    });
+    const session = createElm327Session(
+      transport,
+      config({
+        pollPlan: [{ channel: 'transOilC', hz: 2 }],
+        customPids: [{ channel: 'transOilC', request: '221E1C' }],
+      }),
+      () => clock.now(),
+    );
+    const samples: TelemetrySample[] = [];
+    session.onSample((sample) => samples.push(sample));
+
+    await startUntil(session, 'polling');
+    await vi.advanceTimersByTimeAsync(0);
+    await session.stop();
+
+    expect(samples).toHaveLength(0); // never decoded/emitted.
+    expect(session.getDiagnostics().errorCount).toBe(1);
+    expect(session.getDiagnostics().lastError).toContain('odd-length hex');
+  });
+
   it('stop during polling finishes the in-flight command, then closes', async () => {
     vi.useFakeTimers();
     const transport = new ScriptedTransport((command, commandNumber) =>

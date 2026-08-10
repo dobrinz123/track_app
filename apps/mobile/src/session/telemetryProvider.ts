@@ -10,6 +10,7 @@ import {
 } from '@circuit/core';
 import type { SettingsStore } from './settingsStore';
 import { TcpObdTransport } from './tcpObdTransport';
+import { CUSTOM_PID_VALIDATION_ERROR, isAllowedCustomPidRequest } from './customPidValidation';
 
 /**
  * Telemetry addendum — channel revision (2026-08-11, binding) poll plan:
@@ -38,17 +39,43 @@ export function buildPollPlan(transOilPidHex: string): Array<{ channel: Telemetr
 
 /**
  * Telemetry addendum — channel revision: `transOilC` has no standard mode-01
- * PID, so it's sent as a raw custom request (verbatim hex, decoded as the
- * last data byte minus 40 by `@circuit/core`) built from the user's
+ * PID, so it's normalized (outer whitespace trimmed) then sent as a raw
+ * custom request verbatim -- internal spacing/casing untouched, decoded as
+ * the last data byte minus 40 by `@circuit/core` -- built from the user's
  * vehicle-specific `settings.transOilPidHex`. `undefined` (not an empty
  * array) when unconfigured, matching `Elm327Config.customPids`'s own optional
  * shape.
+ *
+ * F1 HIGH fix (L2, binding): re-validates the trimmed value against the SAME
+ * read-service whitelist L1 (`SettingsScreen.tsx`'s `parseHexPidDraft`)
+ * already enforced on entry, via the shared `customPidValidation.ts`
+ * module -- a value that fails (e.g. persisted from before this rule
+ * existed, or written by any future non-UI caller of
+ * `settingsStore.update`) is dropped with a `console.warn` and `undefined`
+ * is returned, exactly like "unconfigured". `buildPollPlan` above still adds
+ * the `transOilC` poll entry whenever the raw text is merely non-empty
+ * (unchanged) -- `@circuit/core` already handles a poll entry with no
+ * matching custom request as a harmless, once-warned no-op (see
+ * `elm327Session.ts`'s own "ignored unconfigured transOilC" path), so this
+ * dropped-but-non-empty case degrades the same way.
  */
 export function buildCustomPids(
   transOilPidHex: string,
 ): Array<{ channel: TelemetryChannelId; request: string }> | undefined {
   const trimmed = transOilPidHex.trim();
-  return trimmed === '' ? undefined : [{ channel: 'transOilC', request: trimmed }];
+  if (trimmed === '') return undefined;
+  if (!isAllowedCustomPidRequest(trimmed)) {
+    console.warn(
+      `[telemetryProvider] Dropping persisted transOilPidHex "${trimmed}": ${CUSTOM_PID_VALIDATION_ERROR}`,
+    );
+    return undefined;
+  }
+  return [{ channel: 'transOilC', request: trimmed }];
+}
+
+/** `error instanceof Error ? error.message : String(error)` -- F2 fix's `start()` catch uses this to report a synchronous construction failure through the same `failed(detail)` channel a runtime session failure already uses. */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 const INIT_TIMEOUT_MS = 5_000;
@@ -283,7 +310,24 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       if (!settingsStore.getSettings().telemetryEnabled) return;
       running = true;
       retriesUsed = 0;
-      launchSession();
+      try {
+        launchSession();
+      } catch (error) {
+        // F2 fix (MED, binding): a synchronous throw while BUILDING the
+        // session (transport construction, `createElm327Session`'s config
+        // validation) must never leave this provider wedged `running=true`
+        // with no active generation -- L3 (`elm327Session.ts`) now handles
+        // customPids config problems as warnings, never throws, but this
+        // catch stays as the provider's own defense-in-depth backstop
+        // regardless of what a future config-validation change does. Resets
+        // fully (mirrors `stop()`'s own cleanup) and reports through the
+        // SAME `failed` state channel a runtime session failure already
+        // uses, so callers observing `onStateChange`/`getDiagnostics` see
+        // one consistent failure path either way.
+        running = false;
+        current = null;
+        emitState('failed', errorMessage(error));
+      }
     },
 
     async stop(): Promise<void> {

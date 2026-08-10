@@ -14,6 +14,35 @@ export interface TelemetrySampleRow {
   value: number;
 }
 
+/**
+ * F5 LOW fix (binding): the single production source of truth for
+ * `LapDetailScreen.tsx`'s TELEMETRY chart channel list/order -- previously
+ * duplicated as a byte-for-byte mirror in
+ * `apps/mobile/test/persistence/lapDetailChartChannels.test.ts` (a copy that
+ * could silently drift from production and the test would stay green). Moved
+ * here (a pure module `LapDetailScreen.tsx` already imports for
+ * `bucketTelemetry`/`loadLapTelemetry`, with no `react-native` import of its
+ * own) specifically so the test can import THIS, the real constant, instead
+ * of re-declaring it -- `LapDetailScreen.tsx` itself still can't be imported
+ * by vitest (its `react-native` import breaks the parser, same constraint as
+ * `SettingsScreen.tsx`'s `parsePortDraft`/`parseHexPidDraft`).
+ *
+ * Telemetry addendum — channel revision (2026-08-11, binding): the channels a
+ * lap's TELEMETRY section may chart, in display order: speedKph, rpm,
+ * throttlePct, latG, longG, engineOilC, transOilC. Charts render only for
+ * whichever of these are actually present in a lap's rows -- a channel with
+ * zero samples never shows an empty chart.
+ */
+export const TELEMETRY_CHART_CHANNELS: readonly TelemetryChannelId[] = [
+  'speedKph',
+  'rpm',
+  'throttlePct',
+  'latG',
+  'longG',
+  'engineOilC',
+  'transOilC',
+];
+
 interface TelemetrySampleDbRow {
   t_mono_ms: number;
   channel: TelemetryChannelId;
