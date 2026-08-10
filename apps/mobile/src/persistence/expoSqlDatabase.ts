@@ -1,6 +1,7 @@
 import { openDatabaseAsync, type SQLiteDatabase } from 'expo-sqlite';
 import type { SqlBindValue, SqlDatabase } from '@circuit/core/src/persistence-sql';
 import { SqlSessionRepository } from '@circuit/core/src/persistence-sql';
+import { migrateTelemetrySchema } from './telemetrySchema';
 
 // Thin adapter from expo-sqlite's `SQLiteDatabase` to the `SqlDatabase`
 // interface `SqlSessionRepository` (packages/core/src/persistence-sql) is
@@ -43,6 +44,11 @@ export async function createSqliteSessionRepository(dbName: string): Promise<Sql
  * `SqlSessionRepository.create` is what actually runs the migration
  * (including the v2 `settings` table) -- this must be awaited before the raw
  * `db` handle is used for anything settings-related.
+ *
+ * Also applies `migrateTelemetrySchema` (Telemetry addendum) over the SAME
+ * connection -- a mobile-owned additive migration entirely independent of
+ * `SqlSessionRepository`'s own (packages/core is out of the ticket that added
+ * this call's write set); see `./telemetrySchema.ts`'s doc comment.
  */
 export async function openAppDatabase(
   dbName: string,
@@ -50,5 +56,6 @@ export async function openAppDatabase(
   const raw = await openDatabaseAsync(dbName);
   const db = wrapExpoSqliteDatabase(raw);
   const repository = await SqlSessionRepository.create(db);
+  await migrateTelemetrySchema(db);
   return { db, repository };
 }

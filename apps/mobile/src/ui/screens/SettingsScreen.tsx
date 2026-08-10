@@ -1,5 +1,5 @@
 import React from 'react';
-import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -252,6 +252,105 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
 
         <View style={styles.section}>
           <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
+            TELEMETRY (OBD)
+          </Text>
+          <View style={styles.toggleRow}>
+            <View style={styles.toggleTextGroup}>
+              <Text style={styles.toggleTitle} maxFontSizeMultiplier={1.3}>
+                Vehicle telemetry
+              </Text>
+              <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                Advisory, experimental: reads engine RPM, speed, throttle, and coolant temperature from a
+                WiFi OBD-II adapter on your local network. Strictly read-only -- never used for lap timing or
+                safety decisions.
+              </Text>
+            </View>
+            <Switch
+              value={settings.telemetryEnabled}
+              onValueChange={(value) => settingsStore.update({ telemetryEnabled: value })}
+              trackColor={{ false: colors.border, true: colors.accentDim }}
+              thumbColor={settings.telemetryEnabled ? colors.accent : colors.textMuted}
+              accessibilityRole="switch"
+              accessibilityLabel="Vehicle telemetry"
+              accessibilityState={{ checked: settings.telemetryEnabled }}
+            />
+          </View>
+          {settings.telemetryEnabled ? (
+            <>
+              <View style={styles.fieldRow}>
+                <Text style={styles.fieldLabel} maxFontSizeMultiplier={1.3}>
+                  Adapter host
+                </Text>
+                <TextInput
+                  style={styles.fieldInput}
+                  value={settings.adapterHost}
+                  onChangeText={(text) => settingsStore.update({ adapterHost: text })}
+                  placeholder="192.168.0.10"
+                  placeholderTextColor={colors.textMuted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  keyboardType="numbers-and-punctuation"
+                  accessibilityLabel="Telemetry adapter host"
+                />
+              </View>
+              <View style={styles.fieldRow}>
+                <Text style={styles.fieldLabel} maxFontSizeMultiplier={1.3}>
+                  Adapter port
+                </Text>
+                <TextInput
+                  style={styles.fieldInput}
+                  value={String(settings.adapterPort)}
+                  onChangeText={(text) => {
+                    const parsed = Number.parseInt(text, 10);
+                    if (Number.isFinite(parsed) && parsed > 0 && parsed <= 65_535) {
+                      settingsStore.update({ adapterPort: parsed });
+                    }
+                  }}
+                  placeholder="35000"
+                  placeholderTextColor={colors.textMuted}
+                  keyboardType="number-pad"
+                  accessibilityLabel="Telemetry adapter port"
+                />
+              </View>
+              {
+                // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
+                __DEV__ ? (
+                <View style={styles.toggleRow}>
+                  <View style={styles.toggleTextGroup}>
+                    <Text style={styles.toggleTitle} maxFontSizeMultiplier={1.3}>
+                      Simulate adapter (dev)
+                    </Text>
+                    <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                      Uses a scripted in-app vehicle model instead of a real adapter -- development only.
+                    </Text>
+                  </View>
+                  <Switch
+                    value={settings.telemetrySimulate}
+                    onValueChange={(value) => settingsStore.update({ telemetrySimulate: value })}
+                    trackColor={{ false: colors.border, true: colors.accentDim }}
+                    thumbColor={settings.telemetrySimulate ? colors.accent : colors.textMuted}
+                    accessibilityRole="switch"
+                    accessibilityLabel="Simulate telemetry adapter"
+                    accessibilityState={{ checked: settings.telemetrySimulate }}
+                  />
+                </View>
+              ) : null}
+              <Pressable
+                style={styles.telemetryLinkRow}
+                onPress={() => navigation.navigate('Telemetry')}
+                accessibilityRole="button"
+                accessibilityLabel="Open telemetry monitor"
+              >
+                <Text style={styles.telemetryLinkText} maxFontSizeMultiplier={1.3}>
+                  Open telemetry monitor
+                </Text>
+              </Pressable>
+            </>
+          ) : null}
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
             COVERAGE BINS
           </Text>
           <SegmentedControl<string>
@@ -460,6 +559,28 @@ const styles = StyleSheet.create({
   toggleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.md },
   toggleTextGroup: { flex: 1, gap: 2 },
   toggleTitle: { ...typography.body, color: colors.textPrimary, fontFamily: fontFamily.bodySemibold },
+  fieldRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.md },
+  fieldLabel: { ...typography.body, color: colors.textSecondary },
+  fieldInput: {
+    ...typography.body,
+    color: colors.textPrimary,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radii.sm,
+    backgroundColor: colors.surface,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 6,
+    minWidth: 140,
+    textAlign: 'right',
+  },
+  telemetryLinkRow: {
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: colors.accent,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+  },
+  telemetryLinkText: { ...typography.body, color: colors.accent, fontFamily: fontFamily.bodySemibold },
   aboutCard: {
     backgroundColor: colors.surface,
     borderRadius: radii.md,

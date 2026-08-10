@@ -14,6 +14,7 @@ import { SessionHistoryScreen } from '../screens/SessionHistoryScreen';
 import { LapDetailScreen } from '../screens/LapDetailScreen';
 import { PersonalBestScreen } from '../screens/PersonalBestScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
+import { TelemetryScreen } from '../screens/TelemetryScreen';
 // F6 fix (B4 residue): NO top-level import of `DevReplayScreen` -- see the
 // inline `require` below for why. `typeof import(...)` (used at that call
 // site) gives full type-checking on the resolved component with zero
@@ -60,6 +61,7 @@ export function RootNavigator(): React.JSX.Element {
       <Stack.Screen name="LapDetail" component={LapDetailScreen} options={{ title: 'Lap Detail' }} />
       <Stack.Screen name="PersonalBest" component={PersonalBestScreen} options={{ title: 'Personal Best' }} />
       <Stack.Screen name="Settings" component={SettingsScreen} options={{ title: 'Settings' }} />
+      <Stack.Screen name="Telemetry" component={TelemetryScreen} options={{ title: 'Telemetry' }} />
       {
         // B4 fix: DevReplay must not ship in a release build -- SettingsScreen's
         // entry point to it is already __DEV__-gated; this gates the route

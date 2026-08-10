@@ -30,6 +30,28 @@ export interface AppSettings {
    * unlike the on-screen coach cues themselves.
    */
   voiceCoachEnabled: boolean;
+  /**
+   * Telemetry addendum (Phase 4 / P4a, docs/architecture/contracts.md).
+   * Advisory/experimental: reads vehicle telemetry (RPM, speed, throttle,
+   * coolant temperature) from a local WiFi OBD-II adapter, strictly
+   * read-only on the vehicle bus. Defaults to `false` -- opt-in, and never
+   * required for lap timing (`composition.ts`'s session integration MUST
+   * leave every session 100% functional with this on and the adapter
+   * dead/absent).
+   */
+  telemetryEnabled: boolean;
+  /**
+   * Dev-only: when `true` (and `telemetryEnabled`), `telemetryProvider.ts`
+   * builds a `SimulatedElm327Transport` (`@circuit/core`) instead of the real
+   * `TcpObdTransport`, so telemetry can be exercised without a physical
+   * adapter. `SettingsScreen` only shows this toggle in `__DEV__`. Defaults
+   * to `false`.
+   */
+  telemetrySimulate: boolean;
+  /** WiFi OBD-II adapter host (Telemetry addendum: adapter is a local WiFi AP). */
+  adapterHost: string;
+  /** WiFi OBD-II adapter TCP port. */
+  adapterPort: number;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -38,6 +60,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   coverageBins: { thresholds: [0.25, 0.5, 0.75, 1] },
   coachingEnabled: true,
   voiceCoachEnabled: false,
+  telemetryEnabled: false,
+  telemetrySimulate: false,
+  adapterHost: '192.168.0.10',
+  adapterPort: 35_000,
 };
 
 /**

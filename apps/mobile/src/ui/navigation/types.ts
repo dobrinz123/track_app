@@ -11,5 +11,6 @@ export type RootStackParamList = {
   LapDetail: { sessionId: string; lapNumber: number };
   PersonalBest: undefined;
   Settings: undefined;
+  Telemetry: undefined;
   DevReplay: undefined;
 };

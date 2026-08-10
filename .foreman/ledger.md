@@ -109,3 +109,7 @@ Constraints carried forward: 100% offline at runtime (local socket only), READ-O
 | WPT2 mobile wiring | sonnet | PENDING |
 - WPT0 contracts: DONE (LEAD) — Telemetry addendum appended to contracts.md (channels/transport/session/simulator/recording semantics, retention cap 200k, read-only mode-01 rule).
 - WPT1 DISPATCHED: codex gpt-5.6-sol high, workspace-write, bg job b5bkvgho6, ticket .foreman/scratch/ticket-wpt1-elm327.md, out /tmp/wpt1-out.log.
+- WPT1 COLLECTED: Codex DONE_WITH_CONCERNS (sandbox could not spawn vitest/tsc; in-process claims). LEAD ran authoritative gates: typecheck 0, tests 720 green (26 new), lint 0. Checkpoint commit 4fceb7b.
+- WPT1 VERIFIED: blind foreman-verifier PASS_WITH_NOTES — formulas re-derived w/ independent vectors, 2 mutations caught by tests, tree clean/HEAD unchanged. Notes: sim-transport knobs untested, UNABLE TO CONNECT untested, no session-level split E2E -> batched into WPT-cov ticket.
+- WPT2 DISPATCHED (sonnet, bg): mobile wiring per ticket-wpt2-mobile.md. WPT-cov DISPATCHED (sonnet, bg): ticket-wptcov-simtests.md. Parallel OK: disjoint write sets (apps/mobile+lockfile vs packages/core/test/telemetry/simulatedTransport.test.ts).
+- WPT-cov COLLECTED: sonnet DONE — 1 new test file, 6 tests (32/32 telemetry green, exit 0 claimed; LEAD will re-gate with WPT2). Write set respected.

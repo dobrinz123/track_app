@@ -39,6 +39,8 @@ import { RealSessionFacade, type RealSessionFacadeCallbacks } from './realFacade
 import { ReplayTimeSource, ReplayTimestampedLocationProvider, ScaledReplayClock } from './liveTimestampedProvider';
 import { TMR_CIRCUIT_PROFILE, TMR_CORNERS, TMR_RUNTIME_PROFILE } from './tmrProfile';
 import { startVoiceCoach } from './voiceCoach';
+import { createTelemetryProvider, type TelemetryProvider } from './telemetryProvider';
+import { TelemetryRecorder } from '../persistence/telemetryRecorder';
 
 const DB_NAME = 'circuit-timer.db';
 /** Single-user local app -- no auth/account system exists (MVP scope, ADR-0001/0004). Stable so `sessionId` (`${userId}--<random>`) and stored data survive across launches. */
@@ -318,6 +320,70 @@ export const settingsStore: SettingsStore = settingsWrapper;
 startVoiceCoach(facade, settingsStore);
 
 // ---------------------------------------------------------------------------
+// Telemetry (Phase 4 / P4a, Telemetry addendum). `telemetryProvider` is a
+// single long-lived singleton (its own clock, independent of any particular
+// `SessionController` build) exported for `TelemetryScreen`'s manual
+// start/stop monitor. Session-scoped RECORDING -- batching samples into
+// `telemetry_samples` and tagging them with the currently-known lap number --
+// is wired separately below, into `productionFacadeCallbacks()`'s
+// `onSessionStarted`/`onSessionEnded` hooks (MUST DO (g): "provider
+// starts/stops with the session lifecycle"). MUST NOT interact with lap
+// timing in any way: nothing here ever calls into `facade`'s commands or
+// `SessionController` -- only the one-way sample subscription below.
+// ---------------------------------------------------------------------------
+const telemetryClock = new PerformanceNowClock();
+export const telemetryProvider: TelemetryProvider = createTelemetryProvider({
+  settingsStore,
+  monotonicNow: () => telemetryClock.now(),
+});
+
+let telemetryRecorder: TelemetryRecorder | null = null;
+let telemetryCurrentLapNumber: number | null = null;
+let unsubscribeTelemetrySample: (() => void) | null = null;
+let unsubscribeTelemetryLapWatch: (() => void) | null = null;
+
+/** Tears down the active recording (if any) and stops `telemetryProvider` -- `onSessionEnded`, and defensively before a fresh production controller is installed (`rebuildProductionController`). Idempotent. */
+function stopTelemetryRecording(): void {
+  unsubscribeTelemetrySample?.();
+  unsubscribeTelemetrySample = null;
+  unsubscribeTelemetryLapWatch?.();
+  unsubscribeTelemetryLapWatch = null;
+  telemetryCurrentLapNumber = null;
+  const recorder = telemetryRecorder;
+  telemetryRecorder = null;
+  void telemetryProvider.stop();
+  if (recorder !== null) {
+    void recorder
+      .endSession()
+      .catch((error: unknown) => {
+        console.warn('[composition] telemetry recorder endSession failed', error);
+      })
+      .finally(() => recorder.dispose());
+  }
+}
+
+/** Starts recording for `sessionId` (no-op if telemetry is disabled or there is no on-device database, e.g. web preview) and starts `telemetryProvider`. Samples are tagged with `telemetryCurrentLapNumber`, updated whenever `facade`'s `lapNumber` changes -- a lap-crossing flush is also queued at that point (Telemetry addendum: "flushed on lap crossing"). */
+function startTelemetryRecording(sessionId: string): void {
+  if (db === null) return;
+  if (!settingsStore.getSettings().telemetryEnabled) return;
+
+  const recorder = new TelemetryRecorder(db, sessionId);
+  telemetryRecorder = recorder;
+  telemetryCurrentLapNumber = null;
+
+  unsubscribeTelemetrySample = telemetryProvider.onSample((sample) => {
+    recorder.record(sample, telemetryCurrentLapNumber);
+  });
+  unsubscribeTelemetryLapWatch = facade.subscribe((state) => {
+    if (telemetryCurrentLapNumber === state.lapNumber) return;
+    telemetryCurrentLapNumber = state.lapNumber;
+    recorder.flushOnLapCrossing();
+  });
+
+  telemetryProvider.start();
+}
+
+// ---------------------------------------------------------------------------
 // Bootstrap readiness (C2 fix). `CircuitDetailScreen` subscribes via
 // `subscribeBootstrapState` to disable "Start Session" (and show an inline
 // note/error banner) until bootstrap has actually finished.
@@ -535,10 +601,12 @@ function productionFacadeCallbacks(): RealSessionFacadeCallbacks {
   return {
     onSessionStarted: (sessionId) => {
       if (db !== null) void setActiveSessionId(db, sessionId);
+      startTelemetryRecording(sessionId);
     },
     onSessionEnded: () => {
       const clearPointer = db !== null ? setActiveSessionId(db, null) : Promise.resolve();
       void clearPointer.then(() => historyStore?.refresh());
+      stopTelemetryRecording();
     },
   };
 }
@@ -596,6 +664,11 @@ function rebuildProductionController(): Promise<void> {
     if (controller === null || activeController !== controller) return;
     const staleController = controller;
     const staleFacade = productionFacade;
+    // Telemetry addendum (g): defensively stop any still-active recording
+    // before the controller it was recording alongside is disposed -- in the
+    // normal flow `onSessionEnded` (above) already did this; this guards the
+    // 'error' terminal-state path, which does not run through `endSession()`.
+    stopTelemetryRecording();
     await staleController.dispose();
     staleFacade?.dispose();
     installProductionController();

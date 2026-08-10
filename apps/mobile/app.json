@@ -15,7 +15,8 @@
         "NSLocationWhenInUseUsageDescription": "TRACE records your position on track during an active session to time your laps and sectors. Location is only used while a session is running and never in the background.",
         "NSLocationTemporaryUsageDescriptionDictionary": {
           "TrackSession": "TRACE needs precise location during this track session to time your laps and sectors accurately; approximate location isn't accurate enough for lap timing."
-        }
+        },
+        "NSLocalNetworkUsageDescription": "TRACE can optionally connect to a WiFi OBD-II adapter on your local network to show advisory vehicle telemetry (RPM, speed, throttle, coolant temperature). This is read-only and never used for lap timing."
       }
     },
     "android": {
