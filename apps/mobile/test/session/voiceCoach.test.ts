@@ -505,3 +505,38 @@ describe('startVoiceCoach (default speaker, mocked expo-speech)', () => {
     expect(speechMock.speak).not.toHaveBeenCalled();
   });
 });
+
+describe('voice gated for the whole backgrounded interval (Codex re-verify MEDIUM fix)', () => {
+  it('cues arriving WHILE backgrounded are silent; speech resumes after onActive', async () => {
+    const facade = new FakeFacade();
+    const settingsStore = new FakeSettingsStore({
+      ...DEFAULT_SETTINGS,
+      coachingEnabled: true,
+      voiceCoachEnabled: true,
+    });
+    const { speaker, calls } = recordingSpeaker();
+
+    startVoiceCoach(facade, settingsStore, speaker);
+    const lifecycle = lifecycleMock.registrations[lifecycleMock.registrations.length - 1] as {
+      onBackground?: () => void;
+      onActive?: () => void;
+    };
+
+    facade.emit(baseState({ lapNumber: 1, coachCue: brakeCue({ cornerId: 1 }) }));
+    await flush();
+    expect(calls.filter((c) => c.startsWith('speak:'))).toHaveLength(1);
+
+    lifecycle.onBackground?.();
+    await flush();
+    facade.emit(baseState({ lapNumber: 1, coachCue: brakeCue({ cornerId: 2 }) }));
+    await flush();
+    // Nothing new spoken while pocketed — the whole interval is gated, not
+    // just the utterance in flight at the transition.
+    expect(calls.filter((c) => c.startsWith('speak:'))).toHaveLength(1);
+
+    lifecycle.onActive?.();
+    facade.emit(baseState({ lapNumber: 1, coachCue: brakeCue({ cornerId: 3 }) }));
+    await flush();
+    expect(calls.filter((c) => c.startsWith('speak:'))).toHaveLength(2);
+  });
+});

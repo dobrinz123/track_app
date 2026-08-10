@@ -150,12 +150,19 @@ export function startVoiceCoach(
     voiceChain = voiceChain.then(() => speaker.stop()).catch(() => undefined);
   }
 
+  // Codex re-verify MEDIUM fix: backgrounding must gate speech for the WHOLE
+  // backgrounded interval, not just stop the utterance in flight at the
+  // transition — the session keeps running in background by design, so new
+  // cues keep arriving and would otherwise speak from a pocketed phone.
+  let backgrounded = false;
+
   const unsubscribeFacade = facade.subscribe((state: FacadeState) => {
     if (trackedLap !== state.lapNumber) {
       trackedLap = state.lapNumber;
       spokenThisLap.clear();
     }
 
+    if (backgrounded) return;
     const settings = settingsStore.getSettings();
     if (!settings.coachingEnabled || !settings.voiceCoachEnabled) return;
 
@@ -176,7 +183,13 @@ export function startVoiceCoach(
   });
 
   const lifecycle = startLifecycleListener({
-    onBackground: () => enqueueStop(),
+    onBackground: () => {
+      backgrounded = true;
+      enqueueStop();
+    },
+    onActive: () => {
+      backgrounded = false;
+    },
   });
 
   return {

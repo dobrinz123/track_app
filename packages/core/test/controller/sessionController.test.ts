@@ -834,3 +834,57 @@ describe('SessionController coaching (Phase 3 addendum)', () => {
     expect(states[states.length - 1]?.coachCue).toBeNull();
   });
 });
+
+describe('SessionController coaching — accepted-match immediate invalidation (Codex re-verify HIGH)', () => {
+  it('clears the cue on the SAME accepted sample that reports no active cue — no flicker-hold on ground truth', async () => {
+    const { runtime } = tmr();
+    const { profile, controller, states, feed } = setup(undefined, {
+      enabled: true,
+      corners: analyzeCorners(runtime),
+    });
+
+    await controller.start('calibration');
+    feed(cleanRecognitionLap(profile, 901));
+    controller.acceptCalibration();
+    await controller.flush();
+    controller.arm();
+
+    feed(
+      driveLap(profile, {
+        seed: 901,
+        lapCount: 1,
+        sampleRateHz: 2,
+        noiseSigmaM: 0,
+        accuracyM: 3,
+        speedMps: 34,
+      }),
+    );
+    await controller.flush();
+
+    // For EVERY accepted-sample transition where a cue disappears, it must
+    // vanish on that exact emission — never linger while accepted samples
+    // keep arriving. (Rejected-sample flicker-hold is tested elsewhere.)
+    let lingering = 0;
+    for (let i = 1; i < states.length; i += 1) {
+      const prev = states[i - 1]!;
+      const curr = states[i]!;
+      if (prev.coachCue !== null && curr.coachCue !== null) {
+        const prevCue = prev.coachCue;
+        const currCue = curr.coachCue;
+        // Same corner+kind still showing with a GROWN distance means the car
+        // passed the target and the cue is stale ground truth.
+        if (
+          currCue.cornerId === prevCue.cornerId &&
+          currCue.kind === prevCue.kind &&
+          currCue.distanceToTargetM > prevCue.distanceToTargetM + 40
+        ) {
+          lingering += 1;
+        }
+      }
+    }
+    expect(lingering).toBe(0);
+    // Sanity: cues did occur and did clear during the lap.
+    expect(states.some((s) => s.coachCue !== null)).toBe(true);
+    expect(states.some((s) => s.coachCue === null)).toBe(true);
+  });
+});

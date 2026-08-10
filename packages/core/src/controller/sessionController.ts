@@ -765,6 +765,13 @@ export class SessionController {
         if (cue !== null) {
           this.currentCue = cue;
           this.coachCueSetAtMono = this.deps.clock.now();
+        } else if (result.match !== null) {
+          // An ACCEPTED match returning no cue is ground truth (target passed
+          // or corner exited): clear immediately. The flicker-hold below is
+          // reserved for rejected/unmatched samples only — holding here left
+          // a stale "BRAKE IN" visible ~80 m past the corner at speed.
+          this.currentCue = null;
+          this.coachCueSetAtMono = null;
         } else if (
           this.currentCue !== null &&
           this.coachCueSetAtMono !== null &&
