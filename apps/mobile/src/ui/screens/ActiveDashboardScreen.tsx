@@ -12,6 +12,7 @@ import { SectorBar } from '../components/SectorBar';
 import { LongPressButton } from '../components/LongPressButton';
 import { StatusBanner } from '../components/StatusBanner';
 import { CoachStrip, COACH_STRIP_HEIGHT } from '../components/CoachStrip';
+import { TelemetryStrip, TELEMETRY_STRIP_HEIGHT } from '../components/TelemetryStrip';
 import { facade, settingsStore } from '../../session/composition';
 import { useFacadeState } from '../hooks/useFacadeState';
 import { useSettings } from '../hooks/useSettings';
@@ -85,6 +86,19 @@ export function ActiveDashboardScreen({ navigation }: Props): React.JSX.Element 
           </View>
         ) : null}
 
+        {/* Fixed-height slot (Telemetry addendum — P4b amendment, S7): reserved
+            ONLY while telemetry is enabled -- WITHIN it, `TelemetryStrip` shows
+            its three values only while the provider is actually 'polling', so
+            a connecting/failed adapter mid-session never reflows anything
+            below it (same pattern as `coachSlot` above). Placed here, in the
+            same dead space above the delta zone, so it never occludes the
+            timer/delta/sector elements below. */}
+        {settings.telemetryEnabled ? (
+          <View style={styles.telemetrySlot}>
+            <TelemetryStrip />
+          </View>
+        ) : null}
+
         <View style={styles.deltaZone}>
           <DeltaDisplay delta={state.delta} fontSize={100} />
         </View>
@@ -142,6 +156,7 @@ const styles = StyleSheet.create({
   lapCounter: { ...typography.subtitle, color: colors.textSecondary, letterSpacing: 1 },
   bannerSlot: { minHeight: 0 },
   coachSlot: { height: COACH_STRIP_HEIGHT },
+  telemetrySlot: { height: TELEMETRY_STRIP_HEIGHT },
   deltaZone: { flexGrow: 3, alignItems: 'center', justifyContent: 'center' },
   lapTimeZone: { alignItems: 'center', justifyContent: 'center' },
   lapTimeCaption: { ...typography.label, color: colors.textMuted, marginTop: spacing.xs, letterSpacing: 1 },

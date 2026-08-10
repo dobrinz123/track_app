@@ -76,11 +76,78 @@ function gateErrorMessage(error: unknown): string {
   return `startPreflight failed: ${detail}`;
 }
 
+/** Telemetry addendum — P4b amendment (binding): cap on how long the `sessionComplete` facade-state relay may be held for telemetry shutdown to settle. */
+const SESSION_COMPLETE_BARRIER_CAP_MS = 2_000;
+
+/**
+ * Telemetry addendum — P4b amendment (binding): generic settle-or-cap relay
+ * for facade-state broadcasts. Every state EXCEPT `'sessionComplete'` passes
+ * through to `emit` immediately, unchanged. `'sessionComplete'` is held
+ * until `getBarrier()`'s promise settles OR `capMs` elapses, whichever is
+ * first -- allSettled semantics: a REJECTED or hung barrier promise never
+ * blocks past the cap and never rejects/throws through this relay.
+ * `getBarrier()` returning `null` means there is nothing to wait for -- the
+ * state passes straight through synchronously, with NO timer ever created
+ * (zero added latency when telemetry never ran this session). Any state that
+ * arrives while a hold is in progress is queued and relayed, IN ORDER, only
+ * after the held state itself has been relayed -- so nothing emitted after
+ * `sessionComplete` can ever overtake it.
+ *
+ * A free function (not a `SwappableFacade` method) deliberately: it has no
+ * dependency on SQLite/GNSS/React wiring, so this exact algorithm is
+ * directly unit-testable (MUST DO #1) by calling it with hand-built
+ * promises/fake timers, independent of composition.ts's own bootstrap.
+ */
+export function relaySessionCompleteBarrier<S extends { sessionState: string }>(
+  getBarrier: () => Promise<void> | null,
+  capMs: number,
+  emit: (s: S) => void,
+): (s: S) => void {
+  let holding = false;
+  let queue: S[] = [];
+
+  function relay(s: S): void {
+    if (holding) {
+      queue.push(s);
+      return;
+    }
+    if (s.sessionState !== 'sessionComplete') {
+      emit(s);
+      return;
+    }
+    const barrier = getBarrier();
+    if (barrier === null) {
+      emit(s);
+      return;
+    }
+    holding = true;
+    let settled = false;
+    const timer = setTimeout(() => finish(), capMs);
+    barrier.then(finish, finish);
+    function finish(): void {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      holding = false;
+      emit(s);
+      const queued = queue;
+      queue = [];
+      for (const queuedState of queued) relay(queuedState);
+    }
+  }
+
+  return relay;
+}
+
 class SwappableFacade implements SessionFacade {
   private inner: SessionFacade;
   private innerUnsubscribe: () => void;
   private current!: FacadeState;
   private readonly listeners = new Set<(s: FacadeState) => void>();
+  /** Telemetry addendum — P4b amendment: supplies the in-flight/settled telemetry-shutdown promise (or `null` when nothing is/was recording) for `relay` below to gate the `sessionComplete` broadcast on. Set once by composition.ts's bootstrap wiring (`setSessionCompleteBarrier`), read fresh on every `'sessionComplete'` state that arrives. */
+  private sessionCompleteBarrier: (() => Promise<void> | null) | null = null;
+  /** The single relay every inner-facade state passes through on its way to `this.listeners` -- see `relaySessionCompleteBarrier` above. Built once in the constructor so its hold/queue state persists across `setInner` swaps (a queued state from a just-replaced inner must still be relayed, in order, relative to states from the NEW inner). */
+  private readonly relay: (s: FacadeState) => void;
   /**
    * One-shot-controller gate (C1 fix). When set, every `startPreflight()`
    * call runs this first and awaits it before forwarding the command to
@@ -113,11 +180,16 @@ class SwappableFacade implements SessionFacade {
   private endSessionSideEffect: (() => void) | null = null;
 
   constructor(initial: SessionFacade) {
+    this.relay = relaySessionCompleteBarrier<FacadeState>(
+      () => this.sessionCompleteBarrier?.() ?? null,
+      SESSION_COMPLETE_BARRIER_CAP_MS,
+      (s) => this.commit(s),
+    );
     this.inner = initial;
-    this.innerUnsubscribe = initial.subscribe((s) => this.broadcast(s));
+    this.innerUnsubscribe = initial.subscribe((s) => this.relay(s));
   }
 
-  private broadcast(s: FacadeState): void {
+  private commit(s: FacadeState): void {
     this.current = s;
     for (const listener of this.listeners) listener(s);
   }
@@ -126,7 +198,7 @@ class SwappableFacade implements SessionFacade {
   setInner(next: SessionFacade): void {
     this.innerUnsubscribe();
     this.inner = next;
-    this.innerUnsubscribe = next.subscribe((s) => this.broadcast(s));
+    this.innerUnsubscribe = next.subscribe((s) => this.relay(s));
   }
 
   setPreflightGate(gate: (() => Promise<void>) | null): void {
@@ -135,6 +207,11 @@ class SwappableFacade implements SessionFacade {
 
   setEndSessionSideEffect(fn: (() => void) | null): void {
     this.endSessionSideEffect = fn;
+  }
+
+  /** Telemetry addendum — P4b amendment: installs the getter `relay` (via the constructor's `relaySessionCompleteBarrier`) consults every time a `'sessionComplete'` state arrives. `null` clears it back to "nothing to wait for". */
+  setSessionCompleteBarrier(fn: (() => Promise<void> | null) | null): void {
+    this.sessionCompleteBarrier = fn;
   }
 
   subscribe(cb: (s: FacadeState) => void): () => void {
@@ -406,19 +483,30 @@ function stopTelemetryRecording(): Promise<void> {
   unsubscribeTelemetryLapWatch?.();
   unsubscribeTelemetryLapWatch = null;
   telemetryCurrentLapNumber = null;
+  if (recorder === null) {
+    // P4b amendment: nothing was ever recording for the session that just
+    // ended -- there is no real shutdown work to await. Fire `provider.stop()`
+    // defensively (a harmless no-op if it never started) without awaiting it,
+    // and leave `telemetryShutdown` at `null` (already the case here --
+    // `startTelemetryRecording()` unconditionally clears it up front, see
+    // there -- this assignment is just defense in depth against any other
+    // call path) so the sessionComplete barrier's getter below reads
+    // "nothing to wait for" and relays with genuinely zero added latency: no
+    // timer is ever created for this path (binding spec).
+    telemetryShutdown = null;
+    void telemetryProvider.stop();
+    return Promise.resolve();
+  }
   telemetryShutdown = (async () => {
     try {
-      const results = await Promise.allSettled([
-        telemetryProvider.stop(),
-        recorder !== null ? recorder.endSession() : Promise.resolve(),
-      ]);
+      const results = await Promise.allSettled([telemetryProvider.stop(), recorder.endSession()]);
       for (const result of results) {
         if (result.status === 'rejected') {
           console.warn('[composition] telemetry shutdown step failed', result.reason);
         }
       }
     } finally {
-      recorder?.dispose();
+      recorder.dispose();
     }
   })();
   return telemetryShutdown;
@@ -426,12 +514,20 @@ function stopTelemetryRecording(): Promise<void> {
 
 /** Starts recording for `sessionId` (no-op if telemetry is disabled or there is no on-device database, e.g. web preview) and starts `telemetryProvider`. Samples are tagged with `telemetryCurrentLapNumber`, updated whenever `facade`'s `lapNumber` changes -- a lap-crossing flush is also queued at that point (Telemetry addendum: "flushed on lap crossing"). */
 function startTelemetryRecording(sessionId: string): void {
+  // P4b amendment: cleared unconditionally, up front -- even on the
+  // early-return (disabled/no on-device db) paths below -- so a session that
+  // ends up NOT recording never lets the sessionComplete barrier mistake an
+  // already-settled `telemetryShutdown` promise LEFT OVER from an earlier,
+  // unrelated session for "this session's shutdown is still in flight" (which
+  // would otherwise still create -- and immediately clear -- a barrier timer,
+  // violating the binding "zero added latency, no timer" requirement for the
+  // never-ran case).
+  telemetryShutdown = null;
   if (db === null) return;
   if (!settingsStore.getSettings().telemetryEnabled) return;
 
   const recorder = new TelemetryRecorder(db, sessionId, undefined, dbWriteGate ?? undefined);
   telemetryRecorder = recorder;
-  telemetryShutdown = null;
   telemetryCurrentLapNumber = null;
 
   unsubscribeTelemetrySample = telemetryProvider.onSample((sample) => {
@@ -463,6 +559,17 @@ function startTelemetryRecording(sessionId: string): void {
 facadeWrapper.setEndSessionSideEffect(() => {
   void stopTelemetryRecording();
 });
+
+// Telemetry addendum — P4b amendment (binding): the `sessionComplete` facade
+// state is held until `telemetryShutdown` settles (capped, allSettled) --
+// see `relaySessionCompleteBarrier`/`SwappableFacade` above. Read fresh
+// every time a `'sessionComplete'` state arrives: by then,
+// `endSessionSideEffect` above has ALREADY run synchronously inside
+// `SwappableFacade.endSession()` (before `inner.endSession()` was even
+// forwarded), so `telemetryShutdown` already reflects the shutdown this
+// specific session's teardown kicked off -- or stays `null` when nothing
+// was ever recording (disabled/web), giving that path zero added latency.
+facadeWrapper.setSessionCompleteBarrier(() => telemetryShutdown);
 
 // ---------------------------------------------------------------------------
 // Bootstrap readiness (C2 fix). `CircuitDetailScreen` subscribes via
@@ -1338,4 +1445,17 @@ export function estimateObservedRateHz(histogram: GnssDiagnostics['sampleInterva
   }, 0);
   const meanIntervalMs = weightedMs / totalCount;
   return meanIntervalMs > 0 ? 1_000 / meanIntervalMs : null;
+}
+
+/**
+ * Telemetry addendum — P4b amendment (binding): minimal read-only accessor
+ * exposing the shared on-device database so `LapDetailScreen`'s TELEMETRY
+ * section can call `telemetryRead.ts`'s `readLapTelemetry()` — mirrors
+ * `getLiveDiagnostics()`'s read-on-demand shape just above rather than a
+ * subscription. `null` before bootstrap resolves `db`, or permanently on the
+ * web/in-memory preview path (no on-device SQLite there, see `runBootstrap()`'s
+ * `IS_WEB_RUNTIME` branch) — callers must treat that the same as "no rows".
+ */
+export function getTelemetryReadDb(): SqlDatabase | null {
+  return db;
 }

@@ -41,6 +41,34 @@ export interface TelemetryProviderDeps {
   isDev?: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Dashboard telemetry strip (Telemetry addendum — P4b amendment, binding):
+// "visible ONLY while telemetryEnabled AND the provider state is 'polling';
+// shows at most rpm, throttlePct, coolantC (coolant tinted amber >= 98 C, red
+// >= 105 C)." Kept here (a plain-TS module with no react-native import, so it
+// stays cheaply unit-testable, house rule) rather than in `TelemetryStrip.tsx`
+// itself, which stays thin/untested.
+// ---------------------------------------------------------------------------
+
+/** Coolant tint thresholds (named constants, binding: "coolant tinted amber >= 98 C, red >= 105 C"). */
+export const TELEMETRY_STRIP_COOLANT_AMBER_C = 98;
+export const TELEMETRY_STRIP_COOLANT_RED_C = 105;
+
+export type TelemetryStripCoolantTint = 'normal' | 'amber' | 'red';
+
+/** `null` (no coolant sample yet) reads as `'normal'` -- the strip's own placeholder dash, not an alarm color. */
+export function telemetryStripCoolantTint(coolantC: number | null): TelemetryStripCoolantTint {
+  if (coolantC === null) return 'normal';
+  if (coolantC >= TELEMETRY_STRIP_COOLANT_RED_C) return 'red';
+  if (coolantC >= TELEMETRY_STRIP_COOLANT_AMBER_C) return 'amber';
+  return 'normal';
+}
+
+/** Binding visibility rule: "visible ONLY while telemetryEnabled AND the provider state is 'polling'". */
+export function isTelemetryStripVisible(telemetryEnabled: boolean, providerState: Elm327State): boolean {
+  return telemetryEnabled && providerState === 'polling';
+}
+
 export interface TelemetryProviderDiagnostics {
   state: Elm327State;
   observedHzByChannel: Record<string, number>;
