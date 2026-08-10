@@ -1,9 +1,15 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CoachCue } from '@circuit/core';
 import type { FacadeState, SessionFacade } from '../../src/session/facade';
 import type { AppSettings, SettingsStore } from '../../src/session/settingsStore';
 import { DEFAULT_SETTINGS } from '../../src/session/settingsStore';
-import { phraseForCue, startVoiceCoach, type VoiceCoachSpeaker } from '../../src/session/voiceCoach';
+import {
+  createClipSpeaker,
+  phraseForCue,
+  startVoiceCoach,
+  voiceUtteranceIdForCue,
+  type VoiceCoachSpeaker,
+} from '../../src/session/voiceCoach';
 
 // Hoisted so `vi.mock` below (itself hoisted above every import by Vitest)
 // can reference it. `startVoiceCoach`'s DEFAULT speaker only ever reaches
@@ -16,6 +22,74 @@ const speechMock = vi.hoisted(() => ({
 }));
 
 vi.mock('expo-speech', () => speechMock);
+
+/**
+ * Fake `expo-audio` player, used by the `createClipSpeaker` tests below.
+ * `startVoiceCoach`'s DEFAULT speaker only ever reaches `expo-audio`
+ * through `createClipSpeaker`'s lazy `import('expo-audio')`, mirroring how
+ * `speechMock` above intercepts the `expo-speech` dynamic import.
+ */
+interface FakeAudioPlayer {
+  moduleId: number;
+  playing: boolean;
+  paused: boolean;
+  removed: boolean;
+  pause: () => void;
+  remove: () => void;
+  play: () => void;
+  listeners: Array<(status: { didJustFinish: boolean; error?: string | null }) => void>;
+  addListener: (
+    event: string,
+    listener: (status: { didJustFinish: boolean; error?: string | null }) => void,
+  ) => { remove: () => void };
+  emit: (status: { didJustFinish: boolean; error?: string | null }) => void;
+}
+
+const audioMock = vi.hoisted(() => ({
+  players: [] as FakeAudioPlayer[],
+  createAudioPlayer: vi.fn(),
+}));
+
+vi.mock('expo-audio', () => ({
+  createAudioPlayer: audioMock.createAudioPlayer,
+}));
+
+function installFakeAudioPlayerFactory(): void {
+  audioMock.players.length = 0;
+  audioMock.createAudioPlayer.mockReset();
+  audioMock.createAudioPlayer.mockImplementation((moduleId: number) => {
+    const player: FakeAudioPlayer = {
+      moduleId,
+      playing: false,
+      paused: false,
+      removed: false,
+      listeners: [],
+      pause: () => {
+        player.paused = true;
+        player.playing = false;
+      },
+      remove: () => {
+        player.removed = true;
+      },
+      play: () => {
+        player.playing = true;
+      },
+      addListener: (_event, listener) => {
+        player.listeners.push(listener);
+        return {
+          remove: () => {
+            player.listeners = player.listeners.filter((candidate) => candidate !== listener);
+          },
+        };
+      },
+      emit: (status) => {
+        for (const listener of [...player.listeners]) listener(status);
+      },
+    };
+    audioMock.players.push(player);
+    return player;
+  });
+}
 
 // `../platform`'s `startLifecycleListener` wraps React Native's `AppState`,
 // which vitest cannot parse unmocked (mirrors `composition.ts`'s own
@@ -39,6 +113,10 @@ vi.mock('../../src/platform', () => ({
     };
   },
 }));
+
+beforeEach(() => {
+  installFakeAudioPlayerFactory();
+});
 
 function baseState(overrides: Partial<FacadeState> = {}): FacadeState {
   return {
@@ -156,6 +234,21 @@ function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/**
+ * Flushes repeatedly until `predicate()` is true (or `maxAttempts` is
+ * reached). `createClipSpeaker`'s `playClip` resolves a dynamic
+ * `import('expo-audio')` before touching `createAudioPlayer` -- vite-node's
+ * FIRST resolution of a newly-touched dynamic import in a test run can take
+ * more ticks than a single `flush()` macrotask, so a fixed flush count is
+ * flaky. Polling avoids over/under-waiting regardless of environment.
+ */
+async function flushUntil(predicate: () => boolean, maxAttempts = 50): Promise<void> {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    if (predicate()) return;
+    await flush();
+  }
+}
+
 describe('phraseForCue', () => {
   it('BRAKE phrase always includes the live distance -- "Brake in {distance} meters. Corner {id}, {severity word}."', () => {
     expect(phraseForCue(brakeCue({ severity: 1, distanceToTargetM: 120.4 }))).toBe(
@@ -186,6 +279,34 @@ describe('phraseForCue', () => {
   it('F5: km/h default is unchanged whether passed explicitly or omitted', () => {
     const cue = cornerAheadCue({ advisorySpeedKph: 90 });
     expect(phraseForCue(cue)).toBe(phraseForCue(cue, 'kmh'));
+  });
+});
+
+describe('voiceUtteranceIdForCue (scope amendment: beginner-first 3-word vocabulary)', () => {
+  it('severity 6 (hairpin) -> "brake-hard"', () => {
+    expect(voiceUtteranceIdForCue(brakeCue({ severity: 6 }))).toBe('brake-hard');
+  });
+
+  it('severity 5 (hard) -> "brake"', () => {
+    expect(voiceUtteranceIdForCue(brakeCue({ severity: 5 }))).toBe('brake');
+  });
+
+  it('severity 1-4 (medium/easy/kink) -> "lift", including a T3-style fast-kink corner (small observed speed drop)', () => {
+    expect(voiceUtteranceIdForCue(brakeCue({ cornerId: 3, severity: 1 }))).toBe('lift');
+    expect(voiceUtteranceIdForCue(brakeCue({ cornerId: 3, severity: 2 }))).toBe('lift');
+    expect(voiceUtteranceIdForCue(brakeCue({ severity: 3 }))).toBe('lift');
+    expect(voiceUtteranceIdForCue(brakeCue({ severity: 4 }))).toBe('lift');
+  });
+
+  it('is corner-id-independent -- the SAME severity maps to the SAME utterance regardless of which corner', () => {
+    expect(voiceUtteranceIdForCue(brakeCue({ cornerId: 1, severity: 6 }))).toBe(
+      voiceUtteranceIdForCue(brakeCue({ cornerId: 11, severity: 6 })),
+    );
+  });
+
+  it('CORNER_AHEAD never speaks -- returns null regardless of severity', () => {
+    expect(voiceUtteranceIdForCue(cornerAheadCue({ severity: 6 }))).toBeNull();
+    expect(voiceUtteranceIdForCue(cornerAheadCue({ severity: 1 }))).toBeNull();
   });
 });
 
@@ -220,7 +341,9 @@ describe('startVoiceCoach (dedupe + gating, custom speaker double)', () => {
     const { speaker, calls } = recordingSpeaker();
 
     startVoiceCoach(facade, settingsStore, speaker);
-    facade.emit(baseState({ lapNumber: 1, coachCue: cornerAheadCue() }));
+    // A BRAKE cue (not CORNER_AHEAD -- which never speaks regardless of this
+    // gate, so it would trivially pass even if the gate were broken).
+    facade.emit(baseState({ lapNumber: 1, coachCue: brakeCue() }));
     await flush();
 
     expect(calls).toHaveLength(0);
@@ -276,7 +399,7 @@ describe('startVoiceCoach (dedupe + gating, custom speaker double)', () => {
     expect(calls.filter((c) => c.startsWith('speak:'))).toHaveLength(2);
   });
 
-  it('a different kind for the SAME corner on the SAME lap (CORNER_AHEAD then BRAKE) speaks twice -- distinct dedupe keys', async () => {
+  it('CORNER_AHEAD cues never speak (visual strip only, scope amendment) -- a later BRAKE cue for the SAME corner and lap still speaks (distinct dedupe keys, and CORNER_AHEAD never touches the chain)', async () => {
     const facade = new FakeFacade();
     const settingsStore = new FakeSettingsStore({ ...DEFAULT_SETTINGS, coachingEnabled: true, voiceCoachEnabled: true });
     const { speaker, calls } = recordingSpeaker();
@@ -284,10 +407,12 @@ describe('startVoiceCoach (dedupe + gating, custom speaker double)', () => {
     startVoiceCoach(facade, settingsStore, speaker);
     facade.emit(baseState({ lapNumber: 1, coachCue: cornerAheadCue({ cornerId: 5 }) }));
     await flush();
-    facade.emit(baseState({ lapNumber: 1, coachCue: brakeCue({ cornerId: 5 }) }));
+    expect(calls).toHaveLength(0); // CORNER_AHEAD: no stop, no speak
+
+    facade.emit(baseState({ lapNumber: 1, coachCue: brakeCue({ cornerId: 5, severity: 5 }) }));
     await flush();
 
-    expect(calls.filter((c) => c.startsWith('speak:'))).toHaveLength(2);
+    expect(calls).toEqual(['stop', 'speak:Brake.']);
   });
 
   it('always calls stop() BEFORE speak() for every new cue (never queue-stack)', async () => {
@@ -380,9 +505,10 @@ describe('startVoiceCoach (dedupe + gating, custom speaker double)', () => {
     };
 
     startVoiceCoach(facade, settingsStore, speaker);
-    // C8 then C9 in immediate succession -- BEFORE the first stop() resolves.
-    facade.emit(baseState({ lapNumber: 1, coachCue: brakeCue({ cornerId: 8 }) }));
-    facade.emit(baseState({ lapNumber: 1, coachCue: cornerAheadCue({ cornerId: 9 }) }));
+    // C8 (hairpin -- "Brake hard.") then C9 (hard -- "Brake.") in immediate
+    // succession -- BEFORE the first stop() resolves.
+    facade.emit(baseState({ lapNumber: 1, coachCue: brakeCue({ cornerId: 8, severity: 6 }) }));
+    facade.emit(baseState({ lapNumber: 1, coachCue: brakeCue({ cornerId: 9, severity: 5 }) }));
     await flush();
 
     // Only C8's stop() has been called so far -- C9's stop() must NOT have
@@ -397,9 +523,9 @@ describe('startVoiceCoach (dedupe + gating, custom speaker double)', () => {
     expect(calls).toEqual([
       'stop:start:1',
       'stop:resolve:1',
-      expect.stringContaining('speak:Brake in'),
+      'speak:Brake hard.',
       'stop:2',
-      expect.stringContaining('speak:Corner 9 ahead'),
+      'speak:Brake.',
     ]);
   });
 
@@ -477,16 +603,21 @@ describe('startVoiceCoach (default speaker, mocked expo-speech)', () => {
     const facade = new FakeFacade();
     const settingsStore = new FakeSettingsStore({ ...DEFAULT_SETTINGS, coachingEnabled: true, voiceCoachEnabled: true });
 
-    startVoiceCoach(facade, settingsStore); // no speaker override -- exercises the real `defaultSpeaker`
-    facade.emit(baseState({ lapNumber: 1, coachCue: brakeCue() }));
-    // Two flushes: one for the chain's `await speaker.stop()`, one for the
-    // dynamic `import('expo-speech')` inside the default speaker's `speak()`.
-    await flush();
-    await flush();
+    startVoiceCoach(facade, settingsStore); // no speaker override -- exercises the real `createClipSpeaker()` default, backed by the checked-in EMPTY voiceClips.gen.ts
+    facade.emit(baseState({ lapNumber: 1, coachCue: brakeCue({ severity: 5 }) }));
+    // Polls rather than a fixed flush count: the chain's `await speaker.stop()`
+    // (itself now an extra hop through `ClipSpeaker.stop()`) plus the dynamic
+    // `import('expo-speech')` inside the fallback's `speak()` can take a
+    // variable number of ticks depending on the surrounding test run. Waiting
+    // for the actual call (rather than guessing a tick count) also prevents
+    // this test's in-flight promise chain from leaking into the NEXT test.
+    await flushUntil(() => speechMock.speak.mock.calls.length > 0);
 
     expect(speechMock.stop).toHaveBeenCalledTimes(1);
     expect(speechMock.speak).toHaveBeenCalledTimes(1);
-    expect(speechMock.speak.mock.calls[0]![0]).toBe('Brake in 40 meters. Corner 3, hard.');
+    expect(speechMock.speak.mock.calls[0]![0]).toBe('Brake.');
+    // Empty clip pack -- every lookup misses, so `expo-audio` is never touched.
+    expect(audioMock.createAudioPlayer).not.toHaveBeenCalled();
   });
 
   it('zero expo-speech calls when disabled, using the default speaker too', async () => {
@@ -498,8 +629,10 @@ describe('startVoiceCoach (default speaker, mocked expo-speech)', () => {
 
     startVoiceCoach(facade, settingsStore);
     facade.emit(baseState({ lapNumber: 1, coachCue: brakeCue() }));
-    await flush();
-    await flush();
+    // voiceCoachEnabled is false, so `enqueueSpeak` is never even called --
+    // there is nothing to positively wait for, only a generous margin to be
+    // confident nothing fires late.
+    for (let attempt = 0; attempt < 5; attempt += 1) await flush();
 
     expect(speechMock.stop).not.toHaveBeenCalled();
     expect(speechMock.speak).not.toHaveBeenCalled();
@@ -538,5 +671,129 @@ describe('voice gated for the whole backgrounded interval (Codex re-verify MEDIU
     facade.emit(baseState({ lapNumber: 1, coachCue: brakeCue({ cornerId: 3 }) }));
     await flush();
     expect(calls.filter((c) => c.startsWith('speak:'))).toHaveLength(2);
+  });
+});
+
+describe('createClipSpeaker (MUST DO #3: clip present vs missing -> fallback, stop-halts-clip, mixed serialization)', () => {
+  beforeEach(() => {
+    speechMock.speak.mockClear();
+    speechMock.stop.mockClear();
+  });
+
+  it('plays the bundled clip when one exists for the utterance id, never touching expo-speech', async () => {
+    const speaker = createClipSpeaker({ clips: { brake: 42 } });
+
+    speaker.speak('Brake.', 'brake');
+    await flushUntil(() => audioMock.players.length > 0);
+
+    expect(audioMock.createAudioPlayer).toHaveBeenCalledWith(42);
+    const player = audioMock.players[0]!;
+    expect(player.playing).toBe(true);
+    expect(speechMock.speak).not.toHaveBeenCalled();
+  });
+
+  it('falls back to expo-speech transparently when the clip map has no entry for the utterance id', async () => {
+    const speaker = createClipSpeaker({ clips: {} });
+
+    speaker.speak('Lift.', 'lift');
+    await flushUntil(() => speechMock.speak.mock.calls.length > 0);
+
+    expect(audioMock.createAudioPlayer).not.toHaveBeenCalled();
+    expect(speechMock.speak).toHaveBeenCalledTimes(1);
+    expect(speechMock.speak.mock.calls[0]![0]).toBe('Lift.');
+  });
+
+  it('falls back to expo-speech when `speak()` is called with no utteranceId at all (e.g. a plain-text caller)', async () => {
+    const speaker = createClipSpeaker({ clips: { brake: 42 } });
+
+    speaker.speak('Some text');
+    await flushUntil(() => speechMock.speak.mock.calls.length > 0);
+
+    expect(audioMock.createAudioPlayer).not.toHaveBeenCalled();
+    expect(speechMock.speak).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to expo-speech transparently the instant clip playback errors, and releases the failed player', async () => {
+    const speaker = createClipSpeaker({ clips: { 'brake-hard': 7 } });
+
+    speaker.speak('Brake hard.', 'brake-hard');
+    await flushUntil(() => audioMock.players.length > 0);
+    const player = audioMock.players[0]!;
+    player.emit({ didJustFinish: false, error: 'decode failed' });
+    await flushUntil(() => speechMock.speak.mock.calls.length > 0);
+
+    expect(speechMock.speak).toHaveBeenCalledTimes(1);
+    expect(speechMock.speak.mock.calls[0]![0]).toBe('Brake hard.');
+    expect(player.removed).toBe(true);
+  });
+
+  it('a clip that finishes normally (didJustFinish) never falls back to expo-speech', async () => {
+    const speaker = createClipSpeaker({ clips: { lift: 3 } });
+
+    speaker.speak('Lift.', 'lift');
+    await flushUntil(() => audioMock.players.length > 0);
+    const player = audioMock.players[0]!;
+    player.emit({ didJustFinish: true });
+    await flush();
+
+    expect(speechMock.speak).not.toHaveBeenCalled();
+    expect(player.removed).toBe(true);
+  });
+
+  it('stop() halts an in-flight clip -- pauses and releases the player', async () => {
+    const speaker = createClipSpeaker({ clips: { brake: 42 } });
+
+    speaker.speak('Brake.', 'brake');
+    await flushUntil(() => audioMock.players.length > 0);
+    const player = audioMock.players[0]!;
+    expect(player.playing).toBe(true);
+
+    await speaker.stop();
+
+    expect(player.paused).toBe(true);
+    expect(player.removed).toBe(true);
+  });
+
+  it('stop() never throws even if the underlying player throws on pause/remove (voice failure must never affect the session)', async () => {
+    const speaker = createClipSpeaker({ clips: { brake: 42 } });
+
+    speaker.speak('Brake.', 'brake');
+    await flushUntil(() => audioMock.players.length > 0);
+    const player = audioMock.players[0]!;
+    player.pause = () => {
+      throw new Error('native pause failed (test double)');
+    };
+
+    await expect(speaker.stop()).resolves.toBeUndefined();
+  });
+
+  it('mixed clip/TTS serialization: stopping a clip utterance, then speaking a missing-clip utterance, halts the clip before the TTS fallback speaks', async () => {
+    const speaker = createClipSpeaker({ clips: { 'brake-hard': 1 } }); // 'brake' has no bundled clip
+
+    speaker.speak('Brake hard.', 'brake-hard');
+    await flushUntil(() => audioMock.players.length > 0);
+    const clipPlayer = audioMock.players[0]!;
+    expect(clipPlayer.playing).toBe(true);
+
+    await speaker.stop(); // mirrors voiceCoach's chain: always stop() before the next speak()
+    speaker.speak('Brake.', 'brake');
+    await flushUntil(() => speechMock.speak.mock.calls.length > 0);
+
+    expect(clipPlayer.paused).toBe(true);
+    expect(clipPlayer.removed).toBe(true);
+    expect(speechMock.speak).toHaveBeenCalledTimes(1);
+    expect(speechMock.speak.mock.calls[0]![0]).toBe('Brake.');
+    // The missing-clip utterance never touched expo-audio.
+    expect(audioMock.createAudioPlayer).toHaveBeenCalledTimes(1);
+  });
+
+  it('defaults to the checked-in voiceClips.gen.ts VOICE_CLIPS map (currently EMPTY) when no `clips` option is given -- behaves exactly like plain expo-speech', async () => {
+    const speaker = createClipSpeaker();
+
+    speaker.speak('Brake.', 'brake');
+    await flushUntil(() => speechMock.speak.mock.calls.length > 0);
+
+    expect(audioMock.createAudioPlayer).not.toHaveBeenCalled();
+    expect(speechMock.speak).toHaveBeenCalledTimes(1);
   });
 });

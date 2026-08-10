@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "generatedAtUtc": "2026-08-10T10:59:03.005Z",
+  "voice": {
+    "model": "eleven_turbo_v2_5",
+    "outputFormat": "mp3_44100_64"
+  },
+  "entries": [
+    {
+      "id": "brake-hard",
+      "phrase": "Brake hard.",
+      "filename": "brake-hard.mp3",
+      "hash": "ebdc0852519ca8d8"
+    },
+    {
+      "id": "brake",
+      "phrase": "Brake.",
+      "filename": "brake.mp3",
+      "hash": "4f0f578126abcde0"
+    },
+    {
+      "id": "lift",
+      "phrase": "Lift.",
+      "filename": "lift.mp3",
+      "hash": "008878673537a2c4"
+    }
+  ]
+}

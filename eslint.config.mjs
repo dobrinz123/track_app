@@ -69,5 +69,16 @@ export default [
       },
     },
   },
+  {
+    // WP-C6: apps/mobile/scripts/generate-voice-pack.mjs is a plain Node
+    // ESM CLI script (not TypeScript, so the `**/*.ts` block above doesn't
+    // cover it) -- needs Node globals (process, console, fetch, Buffer, ...)
+    // the same way packages/core/scripts's `.ts` generator gets them via
+    // the block above.
+    files: ['apps/mobile/scripts/**/*.mjs'],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
   prettierConfig,
 ];

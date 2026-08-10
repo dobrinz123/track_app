@@ -3,19 +3,38 @@ import type { FacadeState, SessionFacade } from './facade';
 import type { SettingsStore } from './settingsStore';
 import { formatSpeedSpoken } from '../ui/format';
 import { startLifecycleListener } from '../platform';
+import { VOICE_CLIPS } from './voiceClips.gen';
+// Type-only -- erased at compile time, so this never actually loads
+// `expo-audio`'s native-module entry point (mirrors `motionCapture.ts`'s
+// `import type { EventSubscription } from 'expo-modules-core'`). The real
+// module is only ever reached through `loadAudioModule`'s lazy dynamic
+// `import()` below, same reasoning as `loadSpeechModule` for `expo-speech`.
+import type { AudioPlayer, AudioStatus } from 'expo-audio';
 
 /**
- * Phase 3 coaching addendum: optional voice cues over `expo-speech`. Advisory
- * only, like every other coaching surface (contracts.md's Coaching addendum)
- * -- a failed/unavailable speech engine must never affect the session, so
- * every real `expo-speech` call is wrapped in try/catch here and nothing in
- * this module ever throws out to its caller.
+ * Phase 3 coaching addendum: voice cues, primarily a premium pre-generated
+ * ElevenLabs clip pack (WP-C6) played through `expo-audio`, falling back
+ * transparently to on-device `expo-speech` whenever a clip is missing or
+ * fails to play (e.g. before the pack has been generated -- the checked-in
+ * `voiceClips.gen.ts` ships EMPTY). Advisory only, like every other coaching
+ * surface (contracts.md's Coaching addendum) -- a failed/unavailable speech
+ * engine must never affect the session, so every real playback/speech call
+ * is wrapped in try/catch here and nothing in this module ever throws out to
+ * its caller.
  */
 
-/** Minimal surface this module needs from `expo-speech` -- lets tests substitute a plain mock instead of the real native module. */
+/**
+ * Minimal surface this module needs from a speaker -- lets tests substitute
+ * a plain mock instead of the real native modules. `utteranceId`, when
+ * given, is the fixed vocabulary id (see `BrakeUtteranceId` below) the
+ * caller is asking to be spoken; a `ClipSpeaker` uses it to pick a bundled
+ * clip, and ignores it when absent. Existing implementations that only take
+ * `text` (e.g. every test double in voiceCoach.test.ts) remain valid: JS
+ * ignores an extra argument a callee never declared.
+ */
 export interface VoiceCoachSpeaker {
-  speak(text: string): void;
-  /** Interrupts any in-progress utterance and clears the queue (never queue-stack). */
+  speak(text: string, utteranceId?: BrakeUtteranceId): void;
+  /** Interrupts any in-progress utterance/clip and clears the queue (never queue-stack). */
   stop(): Promise<void>;
 }
 
@@ -46,6 +65,104 @@ const defaultSpeaker: VoiceCoachSpeaker = {
   },
 };
 
+/**
+ * `expo-audio` is a native module (same reasoning as `loadSpeechModule`
+ * above for `expo-speech`) -- loading it lazily, only inside `playClip`
+ * below, keeps this module's own static imports (and every existing test
+ * that imports `voiceCoach.ts` without mocking `expo-audio`) safe. Tests
+ * substitute a fake module wholesale via `vi.mock('expo-audio', ...)`,
+ * mirroring the existing `vi.mock('expo-speech', ...)`.
+ */
+async function loadAudioModule(): Promise<typeof import('expo-audio')> {
+  return import('expo-audio');
+}
+
+export interface ClipSpeakerOptions {
+  /** Static require-map of bundled clips; defaults to the generated `voiceClips.gen.ts` (EMPTY until the generator has produced audio -- MUST DO #3). */
+  clips?: Partial<Record<BrakeUtteranceId, number>>;
+  /** Speaker to fall back to when a clip is missing or playback fails; defaults to the plain `expo-speech` `defaultSpeaker`. */
+  fallback?: VoiceCoachSpeaker;
+}
+
+/**
+ * Premium pre-generated voice pack (MUST DO #3): plays a bundled mp3 clip
+ * for the cue's fixed utterance id when one exists in `clips`; falls back
+ * to `expo-speech` (via `fallback`, given the SAME fixed-vocabulary text as
+ * the clip would have spoken -- see the deliberate-asymmetry note on
+ * `phraseForCue` vs. `voiceUtteranceIdForCue`) the instant a clip is
+ * missing OR playback errors. This is `startVoiceCoach`'s default speaker --
+ * with the checked-in EMPTY `voiceClips.gen.ts`, every clip lookup misses,
+ * so it behaves EXACTLY like plain `defaultSpeaker` until clips exist.
+ */
+export function createClipSpeaker(options: ClipSpeakerOptions = {}): VoiceCoachSpeaker {
+  const clips = options.clips ?? VOICE_CLIPS;
+  const fallback = options.fallback ?? defaultSpeaker;
+  let currentPlayer: AudioPlayer | null = null;
+
+  async function stopCurrentClip(): Promise<void> {
+    const player = currentPlayer;
+    currentPlayer = null;
+    if (player === null) return;
+    try {
+      player.pause();
+      player.remove();
+    } catch {
+      // Voice failure must never affect the session.
+    }
+  }
+
+  async function playClip(moduleId: number, fallbackText: string): Promise<void> {
+    try {
+      const Audio = await loadAudioModule();
+      const player = Audio.createAudioPlayer(moduleId);
+      currentPlayer = player;
+      const subscription = player.addListener('playbackStatusUpdate', (status: AudioStatus) => {
+        if (status.error) {
+          subscription.remove();
+          if (currentPlayer === player) currentPlayer = null;
+          try {
+            player.remove();
+          } catch {
+            // Voice failure must never affect the session.
+          }
+          fallback.speak(fallbackText);
+        } else if (status.didJustFinish) {
+          subscription.remove();
+          if (currentPlayer === player) currentPlayer = null;
+          try {
+            player.remove();
+          } catch {
+            // Voice failure must never affect the session.
+          }
+        }
+      });
+      player.play();
+    } catch {
+      // Clip failed to load/create/play -- transparent fallback (MUST DO #3).
+      currentPlayer = null;
+      fallback.speak(fallbackText);
+    }
+  }
+
+  return {
+    speak(text, utteranceId) {
+      const moduleId = utteranceId === undefined ? undefined : clips[utteranceId];
+      if (moduleId === undefined) {
+        fallback.speak(text);
+        return;
+      }
+      void playClip(moduleId, text);
+    },
+    async stop() {
+      // stop() must halt an in-flight clip (MUST DO #3) -- background
+      // gating, dedupe, and the toggle-off stop all route through here
+      // identically for clip and TTS utterances.
+      await stopCurrentClip();
+      await fallback.stop();
+    },
+  };
+}
+
 const SEVERITY_WORDS: Record<CoachCue['severity'], string> = {
   1: 'easy',
   2: 'easy',
@@ -60,10 +177,12 @@ function severityWord(severity: CoachCue['severity']): string {
 }
 
 /**
- * Short English phrase for a cue, per the binding ticket spec (F1/F2/F5
- * fixes). Exported for direct unit testing. `units` defaults to `'kmh'` so
- * every existing call site that doesn't yet care about the setting keeps
- * behaving exactly as before.
+ * Long-form English phrase for a cue (F1/F2/F5 fixes' original design).
+ * Exported for direct unit testing and kept as a pure utility (e.g. for a
+ * future visual/accessibility transcript) -- but per the scope amendment
+ * below, this is NO LONGER what gets spoken; see `voiceUtteranceIdForCue`.
+ * `units` defaults to `'kmh'` so every existing call site that doesn't yet
+ * care about the setting keeps behaving exactly as before.
  *
  * - BRAKE always includes the live distance-to-brake-point IN METERS (never
  *   a bare "Brake." command with no distance -- a driver hearing this must
@@ -79,6 +198,45 @@ export function phraseForCue(cue: CoachCue, units: 'kmh' | 'mph' = 'kmh'): strin
   const direction = cue.direction === 'left' ? 'left' : 'right';
   return `Corner ${cue.cornerId} ahead, ${direction}, ${formatSpeedSpoken(cue.advisorySpeedKph, units)}.`;
 }
+
+/**
+ * Fixed vocabulary id for the premium clip pack's THREE bundled mp3s --
+ * see `generate-voice-pack.mjs`'s `VOCABULARY` (kept in sync by hand).
+ */
+export type BrakeUtteranceId = 'brake-hard' | 'brake' | 'lift';
+
+/**
+ * Beginner-first voice vocabulary (GT-style callouts) -- SCOPE AMENDMENT
+ * (binding product decision, 2026-08-10): the target users are beginners,
+ * for whom `phraseForCue`'s long descriptive sentences are unprocessable at
+ * speed. The SPOKEN vocabulary is deliberately tiny, calm, and imperative --
+ * exactly THREE fixed, corner- and unit-independent callouts, mapped from
+ * BRAKE severity:
+ *
+ * - severity 6 (hairpin)                -> "Brake hard."
+ * - severity 5 (hard)                   -> "Brake."
+ * - severity 1-4 (medium/easy/kink, e.g. TMR's T3/T7-style fast kinks where
+ *   the observed speed drop is small)   -> "Lift."
+ *
+ * CORNER_AHEAD never speaks (returns `null`) -- the visual strip (corner #,
+ * severity, advisory speed, live countdown) is unchanged and remains the
+ * only surface for that cue. The units setting no longer affects voice at
+ * all (nothing numeric is spoken); it still governs the visual strip and
+ * corners list, untouched by this module.
+ */
+export function voiceUtteranceIdForCue(cue: CoachCue): BrakeUtteranceId | null {
+  if (cue.kind !== 'BRAKE') return null;
+  if (cue.severity === 6) return 'brake-hard';
+  if (cue.severity === 5) return 'brake';
+  return 'lift';
+}
+
+/** The three spoken words, keyed by `BrakeUtteranceId` -- kept in sync with `generate-voice-pack.mjs`'s `VOCABULARY` by hand. */
+const BRAKE_UTTERANCES: Record<BrakeUtteranceId, string> = {
+  'brake-hard': 'Brake hard.',
+  brake: 'Brake.',
+  lift: 'Lift.',
+};
 
 /** Dedupe key: cornerId + kind (lap-scoped separately via `spokenThisLap`'s per-lap clear below). */
 function cueKey(cue: CoachCue): string {
@@ -108,7 +266,7 @@ export interface VoiceCoachController {
 export function startVoiceCoach(
   facade: SessionFacade,
   settingsStore: SettingsStore,
-  speaker: VoiceCoachSpeaker = defaultSpeaker,
+  speaker: VoiceCoachSpeaker = createClipSpeaker(),
 ): VoiceCoachController {
   const spokenThisLap = new Set<string>();
   let trackedLap: number | null = null;
@@ -126,8 +284,19 @@ export function startVoiceCoach(
    */
   let voiceChain: Promise<void> = Promise.resolve();
 
-  /** Enqueues one cue's stop-then-speak pair onto the chain; never lets a rejection propagate out (voice failure must never affect the session or stall future cues). */
-  function enqueueSpeak(cue: CoachCue, units: 'kmh' | 'mph'): void {
+  /**
+   * Enqueues one cue's stop-then-speak pair onto the chain; never lets a
+   * rejection propagate out (voice failure must never affect the session or
+   * stall future cues). CORNER_AHEAD cues resolve to `null`
+   * (`voiceUtteranceIdForCue`) and are dropped here WITHOUT touching the
+   * chain at all -- the scope amendment's "no voice at all" for
+   * CORNER_AHEAD means there is nothing to stop-then-speak, not even a bare
+   * stop.
+   */
+  function enqueueSpeak(cue: CoachCue): void {
+    const utteranceId = voiceUtteranceIdForCue(cue);
+    if (utteranceId === null) return;
+    const text = BRAKE_UTTERANCES[utteranceId];
     voiceChain = voiceChain
       .then(() => speaker.stop())
       .catch(() => {
@@ -138,7 +307,7 @@ export function startVoiceCoach(
       })
       .then(() => {
         try {
-          speaker.speak(phraseForCue(cue, units));
+          speaker.speak(text, utteranceId);
         } catch {
           // Voice failure must never affect the session.
         }
@@ -173,7 +342,7 @@ export function startVoiceCoach(
     if (spokenThisLap.has(key)) return;
     spokenThisLap.add(key);
 
-    enqueueSpeak(cue, settings.units);
+    enqueueSpeak(cue);
   });
 
   const unsubscribeSettings = settingsStore.subscribe((settings) => {

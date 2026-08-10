@@ -233,7 +233,8 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
                   Voice cues
                 </Text>
                 <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
-                  Speaks brake and corner cues aloud.
+                  Short "Brake" / "Brake hard" / "Lift" callouts before a corner -- clear and quick even at speed.
+                  Uses a premium voice pack when installed, your device's voice otherwise.
                 </Text>
               </View>
               <Switch
