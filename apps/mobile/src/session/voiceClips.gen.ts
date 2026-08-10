@@ -8,7 +8,28 @@
  * correctly with an empty map, falling back to expo-speech for every cue
  * (MUST DO #3, ADR-0004's offline mandate: no clip here is ever fetched at
  * runtime, only bundled).
+ *
+ * `safeRequire` exists for vitest/vite-node, which has no mp3 asset pipeline:
+ * there the require throws at load and the entry resolves to `undefined`,
+ * reproducing the pre-generation (empty-map) behavior tests were written
+ * against. Metro still statically collects the literal require inside the
+ * thunk, so device bundling is unaffected.
  */
 import type { BrakeUtteranceId } from './voiceCoach';
 
-export const VOICE_CLIPS: Partial<Record<BrakeUtteranceId, number>> = {};
+function safeRequire(load: () => number): number | undefined {
+  try {
+    return load();
+  } catch {
+    return undefined;
+  }
+}
+
+export const VOICE_CLIPS: Partial<Record<BrakeUtteranceId, number>> = {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  'brake-hard': safeRequire(() => require('../../assets/voice/brake-hard.mp3')),
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  'brake': safeRequire(() => require('../../assets/voice/brake.mp3')),
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  'lift': safeRequire(() => require('../../assets/voice/lift.mp3')),
+};

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAtUtc": "2026-08-10T10:59:03.005Z",
+  "generatedAtUtc": "2026-08-10T11:25:34.708Z",
   "voice": {
     "model": "eleven_turbo_v2_5",
     "outputFormat": "mp3_44100_64"
