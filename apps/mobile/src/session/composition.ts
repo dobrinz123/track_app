@@ -41,6 +41,7 @@ import { TMR_CIRCUIT_PROFILE, TMR_CORNERS, TMR_RUNTIME_PROFILE } from './tmrProf
 import { startVoiceCoach } from './voiceCoach';
 import { createTelemetryProvider, type TelemetryProvider } from './telemetryProvider';
 import { TelemetryRecorder } from '../persistence/telemetryRecorder';
+import type { SqlWriteGate } from '../persistence/sqlWriteGate';
 
 const DB_NAME = 'circuit-timer.db';
 /** Single-user local app -- no auth/account system exists (MVP scope, ADR-0001/0004). Stable so `sessionId` (`${userId}--<random>`) and stored data survive across launches. */
@@ -364,6 +365,8 @@ export const telemetryProvider: TelemetryProvider = createTelemetryProvider({
 });
 
 let telemetryRecorder: TelemetryRecorder | null = null;
+/** In-flight telemetry shutdown (F2 residue fix) -- repeated `stopTelemetryRecording()` calls return this same promise so `onSessionEnded`'s barrier awaits the REAL final flush. Cleared on the next `startTelemetryRecording()`. */
+let telemetryShutdown: Promise<void> | null = null;
 let telemetryCurrentLapNumber: number | null = null;
 let unsubscribeTelemetrySample: (() => void) | null = null;
 let unsubscribeTelemetryLapWatch: (() => void) | null = null;
@@ -387,27 +390,38 @@ let unsubscribeTelemetryLapWatch: (() => void) | null = null;
  * a session-end/lap-persistence failure (binding: "telemetry NEVER gates
  * lap timing").
  */
-async function stopTelemetryRecording(): Promise<void> {
+function stopTelemetryRecording(): Promise<void> {
+  // F2 residue fix (LEAD takeover): the endSession command hook fires this
+  // first (fire-early, promise intentionally not awaited there), then
+  // `onSessionEnded` calls it AGAIN inside its `Promise.allSettled` barrier.
+  // Returning the SAME in-flight promise on that second call is what makes
+  // the barrier actually await the real final flush -- previously the second
+  // call saw `telemetryRecorder === null` and resolved after a bare
+  // `provider.stop()`, leaving the true flush unawaited.
+  if (telemetryRecorder === null && telemetryShutdown !== null) return telemetryShutdown;
+  const recorder = telemetryRecorder;
+  telemetryRecorder = null;
   unsubscribeTelemetrySample?.();
   unsubscribeTelemetrySample = null;
   unsubscribeTelemetryLapWatch?.();
   unsubscribeTelemetryLapWatch = null;
   telemetryCurrentLapNumber = null;
-  const recorder = telemetryRecorder;
-  telemetryRecorder = null;
-  try {
-    const results = await Promise.allSettled([
-      telemetryProvider.stop(),
-      recorder !== null ? recorder.endSession() : Promise.resolve(),
-    ]);
-    for (const result of results) {
-      if (result.status === 'rejected') {
-        console.warn('[composition] telemetry shutdown step failed', result.reason);
+  telemetryShutdown = (async () => {
+    try {
+      const results = await Promise.allSettled([
+        telemetryProvider.stop(),
+        recorder !== null ? recorder.endSession() : Promise.resolve(),
+      ]);
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          console.warn('[composition] telemetry shutdown step failed', result.reason);
+        }
       }
+    } finally {
+      recorder?.dispose();
     }
-  } finally {
-    recorder?.dispose();
-  }
+  })();
+  return telemetryShutdown;
 }
 
 /** Starts recording for `sessionId` (no-op if telemetry is disabled or there is no on-device database, e.g. web preview) and starts `telemetryProvider`. Samples are tagged with `telemetryCurrentLapNumber`, updated whenever `facade`'s `lapNumber` changes -- a lap-crossing flush is also queued at that point (Telemetry addendum: "flushed on lap crossing"). */
@@ -415,8 +429,9 @@ function startTelemetryRecording(sessionId: string): void {
   if (db === null) return;
   if (!settingsStore.getSettings().telemetryEnabled) return;
 
-  const recorder = new TelemetryRecorder(db, sessionId);
+  const recorder = new TelemetryRecorder(db, sessionId, undefined, dbWriteGate ?? undefined);
   telemetryRecorder = recorder;
+  telemetryShutdown = null;
   telemetryCurrentLapNumber = null;
 
   unsubscribeTelemetrySample = telemetryProvider.onSample((sample) => {
@@ -531,6 +546,8 @@ export function subscribeRecoveryNotice(cb: (n: string | null) => void): () => v
 // ---------------------------------------------------------------------------
 
 let db: SqlDatabase | null = null;
+/** Shared transaction/telemetry write gate from `openAppDatabase()` (N1 fix) -- null on the in-memory/web path, where there is no shared connection to protect. */
+let dbWriteGate: SqlWriteGate | null = null;
 let repository: LocalSessionRepository | null = null;
 let controller: SessionController | null = null;
 /** The `RealSessionFacade` currently wrapping the production `controller` -- kept alive (not recreated) across DevReplay swaps so `restoreProductionFacade()` (C6 fix) can just re-point `facadeWrapper` back to it instead of leaking a fresh subscription every time. Recreated together with `controller` by `installProductionController()` (C1 fix). */
@@ -835,6 +852,7 @@ async function runBootstrap(): Promise<void> {
     } else {
       const opened = await openAppDatabase(DB_NAME);
       db = opened.db;
+      dbWriteGate = opened.writeGate;
       repository = opened.repository;
     }
 

@@ -1,4 +1,5 @@
 import type { SqlBindValue, SqlDatabase, TelemetryChannelId, TelemetrySample } from '@circuit/core';
+import { PASSTHROUGH_WRITE_GATE, type SqlWriteGate } from './sqlWriteGate';
 
 const BATCH_SIZE = 25;
 const BATCH_INTERVAL_MS = 1_000;
@@ -39,19 +40,15 @@ interface BufferedRow {
  * a transaction" and breaking lap/PB persistence. Each flush is now exactly
  * ONE parameterized multi-row `INSERT` statement (`writeBatch` below) --
  * already atomic in SQLite without an explicit transaction wrapper, so this
- * recorder issues zero `BEGIN`s ever. The actual "never interleaves with an
- * open controller transaction" guarantee comes from the `SqlDatabase` this
- * recorder is constructed with: `expoSqlDatabase.ts`'s `openAppDatabase()`
- * wraps the single on-device connection in `serializeSqlDatabase()` BEFORE
- * handing it to both `SqlSessionRepository` (the controller's own writes)
- * and this recorder, so every call -- the controller's transactions AND this
- * recorder's inserts -- funnels through ONE shared queue and can never run
- * concurrently, regardless of which one started first. (`SessionController`'s
- * own tail field is private with no public hook to append onto directly --
- * packages/core is out of this ticket's write set -- so the shared on-device
- * connection itself, the one surface both sides genuinely go through, is
- * where this ticket's binding "telemetry write can never interleave with an
- * open controller transaction" requirement is actually enforced.)
+ * recorder issues zero `BEGIN`s ever. The "never interleaves with an open
+ * controller transaction" guarantee (N1 fix, LEAD takeover) comes from the
+ * shared `SqlWriteGate`: `openAppDatabase()` gates every repository
+ * transaction for its whole BEGIN..COMMIT span, and `writeBatch` acquires
+ * the SAME gate around its single INSERT -- so the INSERT can never execute
+ * inside a controller transaction's open window, and (unlike the removed
+ * every-call `serializeSqlDatabase` FIFO, which self-deadlocked every
+ * transaction) the transaction callback's own inner statements pass through
+ * freely. See sqlWriteGate.ts's module doc comment.
  *
  * Telemetry NEVER gates lap timing (binding): every method here is either
  * synchronous/fire-and-forget (`record`, `flushOnLapCrossing`) or awaited
@@ -75,6 +72,8 @@ export class TelemetryRecorder {
     private readonly sessionId: string,
     /** Row cap override -- test-only seam; production callers always use the binding default (`TELEMETRY_ROW_CAP`, 200,000/session). */
     private readonly rowCap: number = TELEMETRY_ROW_CAP,
+    /** Shared write gate (N1 fix): production passes `openAppDatabase()`'s gate so batch INSERTs mutually exclude with repository transactions. */
+    private readonly writeGate: SqlWriteGate = PASSTHROUGH_WRITE_GATE,
   ) {}
 
   /** Buffers one sample tagged with the caller's currently-known lap number (`null` before the first lap starts). No-op once disposed or once the 200k row cap has been reached. */
@@ -167,9 +166,11 @@ export class TelemetryRecorder {
     for (const row of toWrite) {
       params.push(this.sessionId, row.lapNumber, row.tMonoMs, row.channel, row.value);
     }
-    await this.db.runAsync(
-      `INSERT INTO telemetry_samples (session_id, lap_number, t_mono_ms, channel, value) VALUES ${placeholders}`,
-      params,
+    await this.writeGate.exclusive(() =>
+      this.db.runAsync(
+        `INSERT INTO telemetry_samples (session_id, lap_number, t_mono_ms, channel, value) VALUES ${placeholders}`,
+        params,
+      ),
     );
     this.rowsWritten += toWrite.length;
     if (this.rowsWritten >= this.rowCap) this.capReached = true;

@@ -1,37 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { SqlBindValue, SqlDatabase, SqlRunResult, TelemetrySample } from '@circuit/core';
+import type { SqlDatabase, SqlRunResult, TelemetrySample } from '@circuit/core';
 import { createSqlJsDatabase } from '../support/sqlJsDatabase';
 import { migrateTelemetrySchema } from '../../src/persistence/telemetrySchema';
 import { TelemetryRecorder } from '../../src/persistence/telemetryRecorder';
 
-/**
- * Byte-for-byte mirror of `apps/mobile/src/persistence/expoSqlDatabase.ts`'s
- * `serializeSqlDatabase()` (F1 fix) -- that module's OWN top-level `import
- * ... from 'expo-sqlite'` breaks vitest's parser the same way importing
- * `react-native` directly does (confirmed: `composition.ts`'s own
- * `IS_WEB_RUNTIME` doc comment; every composition test mocks
- * `../../src/persistence/expoSqlDatabase` entirely rather than importing it
- * for real), so it cannot be imported here even to reach this one pure,
- * expo-independent helper. Keep the two in sync on any future change to
- * either.
- */
-function serializeSqlDatabase(inner: SqlDatabase): SqlDatabase {
-  let tail: Promise<unknown> = Promise.resolve();
-  function enqueue<T>(op: () => Promise<T>): Promise<T> {
-    const result = tail.then(op, op);
-    tail = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
-  }
-  return {
-    execAsync: (sql: string) => enqueue(() => inner.execAsync(sql)),
-    runAsync: (sql: string, params?: readonly SqlBindValue[]) => enqueue(() => inner.runAsync(sql, params)),
-    getAllAsync: <T>(sql: string, params?: readonly SqlBindValue[]) => enqueue(() => inner.getAllAsync<T>(sql, params)),
-    withTransactionAsync: (fn: () => Promise<void>) => enqueue(() => inner.withTransactionAsync(fn)),
-  };
-}
+// N1 fix: the gate lives in its own expo-free module, so the REAL production
+// implementation is importable here directly -- no hand-kept mirror needed
+// (the previous mirror of `serializeSqlDatabase` faithfully reproduced a
+// design that self-deadlocked every repository transaction).
+import { createSqlWriteGate, gateSqlTransactions } from '../../src/persistence/sqlWriteGate';
 
 interface TelemetryRow {
   session_id: string;
@@ -218,7 +195,7 @@ describe('TelemetryRecorder 200k row cap', () => {
 });
 
 describe('TelemetryRecorder never opens its own transaction (F1 fix)', () => {
-  it('issues zero BEGINs, and (over a `serializeSqlDatabase`-wrapped connection, matching production wiring) its insert never lands between another caller\'s BEGIN and COMMIT on the SAME connection', async () => {
+  it('issues zero BEGINs, and (over the shared write gate, matching production wiring) its insert never lands between another caller\'s BEGIN and COMMIT on the SAME connection', async () => {
     const log: string[] = [];
     let openTransactionDepth = 0;
     let sawInsertDuringOpenTransaction = false;
@@ -250,22 +227,25 @@ describe('TelemetryRecorder never opens its own transaction (F1 fix)', () => {
         }
       },
     };
-    // Production wiring (`expoSqlDatabase.ts`'s `openAppDatabase()`): the
-    // SAME wrapped connection is handed to BOTH the controller's own
-    // repository (its transactions) and `TelemetryRecorder` (see
-    // `telemetryRecorder.ts`'s own doc comment) -- reproduced here.
-    const db = serializeSqlDatabase(fakeInner);
+    // Production wiring (`expoSqlDatabase.ts`'s `openAppDatabase()`): ONE
+    // shared gate -- repository transactions hold it for their whole span,
+    // the recorder holds it per batch INSERT.
+    const gate = createSqlWriteGate();
+    const db = gateSqlTransactions(fakeInner, gate);
 
     // Simulates the controller's own lap-persistence transaction, held open
     // for a tick, WHILE a telemetry flush is queued concurrently -- exactly
     // the race the binding "a telemetry write can never interleave with an
-    // open controller transaction" guards against.
+    // open controller transaction" guards against. The callback ALSO issues
+    // an inner statement through the gated db -- the exact shape that
+    // self-deadlocked under the removed every-call FIFO design (N1).
     const controllerTx = db.withTransactionAsync(async () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 5));
+      await db.runAsync('UPDATE sessions SET x = 1', []);
       log.push('controller-write');
     });
 
-    const recorder = new TelemetryRecorder(db, 'sess-tx-race');
+    const recorder = new TelemetryRecorder(db, 'sess-tx-race', undefined, gate);
     recorder.record(sample('rpm', 1, 1), null);
     recorder.flushOnLapCrossing();
 
@@ -273,6 +253,53 @@ describe('TelemetryRecorder never opens its own transaction (F1 fix)', () => {
 
     expect(sawInsertDuringOpenTransaction).toBe(false);
     expect(log.filter((entry) => entry === 'BEGIN')).toHaveLength(1); // ONLY the controller's -- the recorder issued zero.
-    expect(log).toEqual(['BEGIN', 'controller-write', 'COMMIT', 'telemetry-insert']);
+    expect(log).toEqual(['BEGIN', 'run:UPDATE sessions SET x = 1', 'controller-write', 'COMMIT', 'telemetry-insert']);
+  });
+
+  it('N1 pin: a transaction callback that awaits inner statements on the gated connection COMPLETES (the removed every-call FIFO self-deadlocked here), and a gated telemetry INSERT queued mid-transaction waits for COMMIT', async () => {
+    const log: string[] = [];
+    const inner: SqlDatabase = {
+      execAsync: async () => {},
+      runAsync: async (sql: string): Promise<SqlRunResult> => {
+        log.push(sql.startsWith('INSERT INTO telemetry_samples') ? 'telemetry-insert' : `run:${sql}`);
+        return { changes: 1 };
+      },
+      getAllAsync: async () => [],
+      withTransactionAsync: async (fn: () => Promise<void>): Promise<void> => {
+        log.push('BEGIN');
+        try {
+          await fn();
+        } finally {
+          log.push('COMMIT');
+        }
+      },
+    };
+    const gate = createSqlWriteGate();
+    const db = gateSqlTransactions(inner, gate);
+
+    let releaseTx: () => void = () => {};
+    const txHeldOpen = new Promise<void>((resolve) => {
+      releaseTx = resolve;
+    });
+    const tx = db.withTransactionAsync(async () => {
+      // Two awaited inner statements while the transaction holds the gate --
+      // under the N1-buggy design each of these enqueued behind the
+      // transaction itself and never ran (this test then times out).
+      await db.runAsync('r1', []);
+      await txHeldOpen;
+      await db.runAsync('r2', []);
+    });
+
+    // Telemetry flush queued while the transaction is still open: must wait.
+    const flush = gate.exclusive(() =>
+      db.runAsync('INSERT INTO telemetry_samples (x) VALUES (1)', []),
+    );
+    await Promise.resolve();
+    expect(log).toContain('run:r1');
+    expect(log).not.toContain('telemetry-insert');
+
+    releaseTx();
+    await Promise.all([tx, flush]);
+    expect(log).toEqual(['BEGIN', 'run:r1', 'run:r2', 'COMMIT', 'telemetry-insert']);
   });
 });
