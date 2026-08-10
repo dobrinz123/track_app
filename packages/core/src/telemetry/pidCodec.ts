@@ -1,12 +1,22 @@
 import type { TelemetryChannelId } from './contracts';
 
+/** Channels with binding standard mode-01 PID definitions. */
+export type Mode01TelemetryChannelId =
+  | 'rpm'
+  | 'speedKph'
+  | 'throttlePct'
+  | 'coolantC'
+  | 'intakeC'
+  | 'engineLoadPct'
+  | 'engineOilC';
+
 interface PidDefinition {
   pid: string;
   byteCount: number;
   decode(bytes: readonly number[]): number;
 }
 
-const PID_BY_CHANNEL: Record<TelemetryChannelId, PidDefinition> = {
+const PID_BY_CHANNEL: Record<Mode01TelemetryChannelId, PidDefinition> = {
   rpm: {
     pid: '0C',
     byteCount: 2,
@@ -37,23 +47,36 @@ const PID_BY_CHANNEL: Record<TelemetryChannelId, PidDefinition> = {
     byteCount: 1,
     decode: ([a = 0]) => (a * 100) / 255,
   },
+  engineOilC: {
+    pid: '5C',
+    byteCount: 1,
+    decode: ([a = 0]) => a - 40,
+  },
 };
 
-const CHANNEL_BY_REQUEST = new Map<string, TelemetryChannelId>(
+const CHANNEL_BY_REQUEST = new Map<string, Mode01TelemetryChannelId>(
   Object.entries(PID_BY_CHANNEL).map(([channel, definition]) => [
     `01${definition.pid}`,
-    channel as TelemetryChannelId,
+    channel as Mode01TelemetryChannelId,
   ]),
 );
 
 /** Encodes the binding mode-01 live-data request for a telemetry channel. */
-export function encodeMode01Request(channel: TelemetryChannelId): string {
-  return `01${PID_BY_CHANNEL[channel].pid}`;
+export function encodeMode01Request(channel: Mode01TelemetryChannelId): string {
+  const definition = PID_BY_CHANNEL[channel];
+  if (definition === undefined) throw new Error(`No standard mode 01 PID for ${channel}`);
+  return `01${definition.pid}`;
 }
 
-/** Resolves a mode-01 command to one of the six supported channels. */
-export function channelForMode01Request(request: string): TelemetryChannelId | undefined {
+/** Resolves a mode-01 command to one of the supported standard-PID channels. */
+export function channelForMode01Request(request: string): Mode01TelemetryChannelId | undefined {
   return CHANNEL_BY_REQUEST.get(request.trim().replace(/\s+/g, '').toUpperCase());
+}
+
+export function isMode01TelemetryChannel(
+  channel: TelemetryChannelId,
+): channel is Mode01TelemetryChannelId {
+  return Object.prototype.hasOwnProperty.call(PID_BY_CHANNEL, channel);
 }
 
 /**
@@ -61,8 +84,12 @@ export function channelForMode01Request(request: string): TelemetryChannelId | u
  * both compact (`410C1AF8`) and whitespace-delimited (`41 0C 1A F8`) hex are
  * accepted, including a target frame surrounded by adapter chatter.
  */
-export function decodeMode01Response(channel: TelemetryChannelId, response: string): number {
+export function decodeMode01Response(
+  channel: Mode01TelemetryChannelId,
+  response: string,
+): number {
   const definition = PID_BY_CHANNEL[channel];
+  if (definition === undefined) throw new Error(`No standard mode 01 PID for ${channel}`);
   const separator = '(?:\\s|:)*';
   const dataCaptures = Array.from({ length: definition.byteCount }, () =>
     `(${separator}[0-9A-F]{2})`,

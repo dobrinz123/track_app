@@ -6,6 +6,7 @@ import {
   type Elm327Session,
   type Elm327State,
   type ObdTransport,
+  type TelemetrySample,
 } from '../../src/telemetry';
 import { FakeClock } from '../controller/testSupport';
 
@@ -183,6 +184,85 @@ describe('ELM327 session', () => {
     await failed;
     expect(failing.getDiagnostics().errorCount).toBe(3);
     expect(failing.getDiagnostics().lastError).toContain('Maximum consecutive telemetry errors');
+  });
+
+  it('polls a custom PID verbatim and decodes the last byte of a multi-byte response', async () => {
+    vi.useFakeTimers();
+    const clock = new FakeClock();
+    const transport = new ScriptedTransport((command) => {
+      if (command.startsWith('AT')) return normalReply(command);
+      if (command === '221E1C') return `${command}\r62 1E 1C 87\r`;
+      return 'NO DATA\r';
+    });
+    const session = createElm327Session(
+      transport,
+      config({
+        pollPlan: [{ channel: 'transOilC', hz: 2 }],
+        customPids: [{ channel: 'transOilC', request: '221E1C' }],
+      }),
+      () => clock.now(),
+    );
+    const samples: TelemetrySample[] = [];
+    session.onSample((sample) => samples.push(sample));
+
+    await startUntil(session, 'polling');
+    await vi.advanceTimersByTimeAsync(0);
+    await session.stop();
+
+    expect(transport.sent[5]).toBe('221E1C\r');
+    expect(samples[0]).toEqual({ channel: 'transOilC', value: 95, tMonoMs: 0 });
+    expect(session.getDiagnostics().errorCount).toBe(0);
+  });
+
+  it('escalates custom PID channel errors through the shared error budget', async () => {
+    vi.useFakeTimers();
+    const clock = new FakeClock();
+    const transport = new ScriptedTransport((command) =>
+      command.startsWith('AT') ? normalReply(command) : 'NO DATA\r',
+    );
+    const session = createElm327Session(
+      transport,
+      config({
+        pollPlan: [{ channel: 'transOilC', hz: 10 }],
+        customPids: [{ channel: 'transOilC', request: '221E1C' }],
+        maxConsecutiveErrors: 3,
+      }),
+      () => clock.now(),
+    );
+    const failed = nextState(session, 'failed');
+
+    session.start();
+    clock.advance(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await failed;
+
+    expect(session.getDiagnostics().errorCount).toBe(3);
+    expect(session.getDiagnostics().lastError).toContain('Maximum consecutive telemetry errors');
+    expect(transport.sent.filter((line) => line === '221E1C\r')).toHaveLength(3);
+  });
+
+  it('ignores transOilC without custom configuration and warns exactly once', async () => {
+    vi.useFakeTimers();
+    const transport = new ScriptedTransport(normalReply);
+    const session = createElm327Session(
+      transport,
+      config({ pollPlan: [{ channel: 'transOilC', hz: 2 }] }),
+      () => 0,
+    );
+    const warningDetails: string[] = [];
+    session.onStateChange((state, detail) => {
+      if (state === 'polling' && detail !== undefined) warningDetails.push(detail);
+    });
+
+    await startUntil(session, 'polling');
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(transport.sent).toEqual(INIT_COMMANDS_WITH_CR);
+    expect(warningDetails).toEqual([
+      'Ignoring transOilC poll entry: no matching custom PID is configured',
+    ]);
+
+    await session.stop();
+    expect(transport.sent).toEqual(INIT_COMMANDS_WITH_CR);
   });
 
   it('turns a mid-command disconnect into failed without an escaping rejection', async () => {

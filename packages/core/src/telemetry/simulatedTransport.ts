@@ -1,6 +1,6 @@
 import { SeededPrng } from '../fixtures/prng';
 import type { ObdTransport, TelemetryChannelId } from './contracts';
-import { channelForMode01Request } from './pidCodec';
+import { channelForMode01Request, type Mode01TelemetryChannelId } from './pidCodec';
 
 export interface SimulatedVehicleScenario {
   rpm(scenarioTimeMs: number): number;
@@ -9,6 +9,7 @@ export interface SimulatedVehicleScenario {
   coolantC(scenarioTimeMs: number): number;
   intakeC(scenarioTimeMs: number): number;
   engineLoadPct(scenarioTimeMs: number): number;
+  engineOilC?(scenarioTimeMs: number): number;
 }
 
 export interface SimulatedElm327TransportConfig {
@@ -31,6 +32,7 @@ export const DEFAULT_SIMULATED_VEHICLE_SCENARIO: SimulatedVehicleScenario = {
   coolantC: (timeMs) => 70 + 25 * Math.min(1, timeMs / 180_000),
   intakeC: (timeMs) => 24 + 7 * wave(timeMs, 30_000),
   engineLoadPct: (timeMs) => 15 + 70 * wave(timeMs + 250, 3_500),
+  engineOilC: defaultEngineOilC,
 };
 
 /**
@@ -134,7 +136,10 @@ export class SimulatedElm327Transport implements ObdTransport {
     if (this.noDataOnChannels.has(channel)) return 'NO DATA';
 
     const scenarioTimeMs = Math.max(0, this.config.monotonicNow() - this.connectedAtMonoMs);
-    const value = this.scenario[channel](scenarioTimeMs);
+    const value =
+      channel === 'engineOilC'
+        ? (this.scenario.engineOilC ?? defaultEngineOilC)(scenarioTimeMs)
+        : this.scenario[channel](scenarioTimeMs);
     const jittered = value + jitterScale(channel) * (this.prng.next() * 2 - 1);
     return encodeResponse(channel, jittered);
   }
@@ -172,13 +177,18 @@ function wave(timeMs: number, periodMs: number): number {
   return (Math.sin((timeMs / periodMs) * Math.PI * 2 - Math.PI / 2) + 1) / 2;
 }
 
-function jitterScale(channel: TelemetryChannelId): number {
+function defaultEngineOilC(timeMs: number): number {
+  return 75 + 35 * Math.min(1, timeMs / 240_000);
+}
+
+function jitterScale(channel: Mode01TelemetryChannelId): number {
   switch (channel) {
     case 'rpm':
       return 2;
     case 'speedKph':
     case 'coolantC':
     case 'intakeC':
+    case 'engineOilC':
       return 0.1;
     case 'throttlePct':
     case 'engineLoadPct':
@@ -186,7 +196,7 @@ function jitterScale(channel: TelemetryChannelId): number {
   }
 }
 
-function encodeResponse(channel: TelemetryChannelId, value: number): string {
+function encodeResponse(channel: Mode01TelemetryChannelId, value: number): string {
   switch (channel) {
     case 'rpm': {
       const raw = Math.max(0, Math.min(65_535, Math.round(value * 4)));
@@ -202,6 +212,8 @@ function encodeResponse(channel: TelemetryChannelId, value: number): string {
       return `41 0F ${hexByte(value + 40)}`;
     case 'engineLoadPct':
       return `41 04 ${hexByte((value * 255) / 100)}`;
+    case 'engineOilC':
+      return `41 5C ${hexByte(value + 40)}`;
   }
 }
 

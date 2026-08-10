@@ -6,7 +6,11 @@ import type {
   TelemetryChannelId,
   TelemetrySample,
 } from './contracts';
-import { decodeMode01Response, encodeMode01Request } from './pidCodec';
+import {
+  decodeMode01Response,
+  encodeMode01Request,
+  isMode01TelemetryChannel,
+} from './pidCodec';
 
 const INIT_COMMANDS = ['ATZ', 'ATE0', 'ATL0', 'ATS0', 'ATSP0'] as const;
 const CHANNEL_ERROR_PATTERN = /(?:NO DATA|STOPPED|CAN ERROR|(?:^|[\r\n])\s*\?\s*(?:$|[\r\n]))/i;
@@ -53,6 +57,8 @@ interface PendingCommand {
 
 interface PollEntry {
   channel: TelemetryChannelId;
+  command: string;
+  custom: boolean;
   weight: number;
   currentWeight: number;
 }
@@ -80,6 +86,7 @@ class Elm327SessionEngine implements Elm327Session {
   private consecutiveErrors = 0;
   private errorCount = 0;
   private lastError: string | undefined;
+  private readonly pollingWarning: string | undefined;
 
   constructor(
     private readonly transport: ObdTransport,
@@ -87,17 +94,45 @@ class Elm327SessionEngine implements Elm327Session {
     private readonly monotonicNow: () => number,
   ) {
     validateConfig(config);
-    const weights = new Map<TelemetryChannelId, number>();
+    const customRequests = new Map(
+      (config.customPids ?? []).map(({ channel, request }) => [channel, request] as const),
+    );
+    const entries = new Map<TelemetryChannelId, PollEntry>();
+    let ignoredUnconfiguredTransOil = false;
     for (const item of config.pollPlan) {
-      weights.set(item.channel, (weights.get(item.channel) ?? 0) + item.hz);
+      const customRequest = customRequests.get(item.channel);
+      let command: string;
+      let custom: boolean;
+      if (customRequest !== undefined) {
+        command = customRequest;
+        custom = true;
+      } else if (isMode01TelemetryChannel(item.channel)) {
+        command = encodeMode01Request(item.channel);
+        custom = false;
+      } else {
+        if (item.channel === 'transOilC') ignoredUnconfiguredTransOil = true;
+        continue;
+      }
+
+      const existing = entries.get(item.channel);
+      if (existing === undefined) {
+        entries.set(item.channel, {
+          channel: item.channel,
+          command,
+          custom,
+          weight: item.hz,
+          currentWeight: 0,
+        });
+      } else {
+        existing.weight += item.hz;
+      }
       this.sampleCounts.set(item.channel, 0);
     }
-    this.pollEntries = [...weights].map(([channel, weight]) => ({
-      channel,
-      weight,
-      currentWeight: 0,
-    }));
+    this.pollEntries = [...entries.values()];
     this.totalHz = this.pollEntries.reduce((sum, entry) => sum + entry.weight, 0);
+    this.pollingWarning = ignoredUnconfiguredTransOil
+      ? 'Ignoring transOilC poll entry: no matching custom PID is configured'
+      : undefined;
   }
 
   start(): void {
@@ -169,7 +204,7 @@ class Elm327SessionEngine implements Elm327Session {
         if (this.stopRequested) return;
       }
 
-      this.transition('polling');
+      this.transition('polling', this.pollingWarning);
       this.pollingStartedAtMonoMs = this.monotonicNow();
       if (this.pollEntries.length === 0) {
         await this.waitForStopOrClose();
@@ -204,7 +239,7 @@ class Elm327SessionEngine implements Elm327Session {
 
       const entry = this.selectNextChannel();
       nextPollAtMonoMs += tickIntervalMs;
-      const command = encodeMode01Request(entry.channel);
+      const command = entry.command;
       let result: CommandResult;
       try {
         result = await this.executeCommand(command, this.config.commandTimeoutMs);
@@ -224,7 +259,13 @@ class Elm327SessionEngine implements Elm327Session {
 
       let value: number;
       try {
-        value = decodeMode01Response(entry.channel, response);
+        if (entry.custom) {
+          value = decodeCustomResponse(response, entry.channel);
+        } else if (isMode01TelemetryChannel(entry.channel)) {
+          value = decodeMode01Response(entry.channel, response);
+        } else {
+          throw new Error(`No telemetry decoder for ${entry.channel}`);
+        }
       } catch (error) {
         this.recordChannelError(`${entry.channel}: ${errorMessage(error)}`);
         continue;
@@ -408,6 +449,26 @@ function validateConfig(config: Elm327Config): void {
       throw new RangeError(`Telemetry poll rate must be positive for ${item.channel}`);
     }
   }
+  for (const customPid of config.customPids ?? []) {
+    const compactRequest = customPid.request.replace(/\s+/g, '');
+    if (
+      compactRequest.length === 0 ||
+      compactRequest.length % 2 !== 0 ||
+      !/^[0-9A-F]+$/i.test(compactRequest) ||
+      /[\r\n]/.test(customPid.request)
+    ) {
+      throw new RangeError(`Custom PID request must be raw hex bytes for ${customPid.channel}`);
+    }
+  }
+}
+
+/** Binding custom-PID rule: decode the response's final data byte as A - 40. */
+function decodeCustomResponse(response: string, channel: TelemetryChannelId): number {
+  const match = /([0-9A-F]{2})$/i.exec(response.trim());
+  if (match === null || match[1] === undefined) {
+    throw new Error(`Missing custom PID data byte response for ${channel}`);
+  }
+  return Number.parseInt(match[1], 16) - 40;
 }
 
 function stripEcho(response: string, command: string): string {
