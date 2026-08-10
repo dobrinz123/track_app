@@ -16,6 +16,15 @@ import { migrateTelemetrySchema } from '../../src/persistence/telemetrySchema';
  * native module.
  */
 
+// F8 fix (WPT3): composition.ts wires the REAL `__DEV__` global into
+// `telemetryProvider`'s `isDev` gate. This test file's OWN scope is session
+// integration, not F8's dev/release gating itself (that has its own focused
+// coverage in telemetryProvider.test.ts) -- setting this here keeps this
+// file's `telemetrySimulate: true` tests exercising the simulated transport,
+// exactly as they did before the F8 fix, under an explicit "dev build"
+// assumption rather than an accidental one.
+(globalThis as { __DEV__?: boolean }).__DEV__ = true;
+
 const seeded = vi.hoisted(() => ({
   db: undefined as unknown,
   repository: undefined as unknown,
@@ -228,6 +237,54 @@ describe('composition.ts telemetry session integration (Telemetry addendum, MUST
     await flushBootstrap();
     await flushBootstrap();
 
+    expect(runningStates.has(composition.telemetryProvider.getDiagnostics().state)).toBe(false);
+  });
+
+  it('F2 fix: a REJECTED controller-persistence endSession() still stops telemetry (previously `onSessionEnded` -- the only place telemetry shutdown ran -- never fires on this path at all)', async () => {
+    const composition = await bootFresh();
+    composition.settingsStore.update({ telemetryEnabled: true, telemetrySimulate: true });
+    const gnss = tracked.gnssProviders[0]!;
+
+    composition.facade.startPreflight();
+    await flushBootstrap();
+    composition.facade.beginCalibration();
+    await flushBootstrap();
+    feed(gnss, cleanRecognitionLap(TMR_CIRCUIT_PROFILE, 730_001));
+    await flushBootstrap();
+    composition.facade.acceptCalibration();
+    await flushBootstrap();
+    composition.facade.arm();
+    feed(gnss, multiLapSession(TMR_CIRCUIT_PROFILE, 1, 730_002));
+    await flushBootstrap();
+
+    const runningStates = new Set(['connecting', 'initializing', 'polling']);
+    expect(runningStates.has(composition.telemetryProvider.getDiagnostics().state)).toBe(true);
+
+    // Force the controller's OWN session-end persistence to reject --
+    // `SessionController.endSession()` awaits `repository.saveSession()`
+    // before it ever reaches its own `emit()`; a rejection here means
+    // `RealSessionFacade.endSession()`'s guarded `work()` throws BEFORE
+    // reaching `this.callbacks.onSessionEnded?.()` at all (realFacade.ts,
+    // out of this ticket's write set) -- pre-fix, `stopTelemetryRecording()`
+    // was ONLY ever called from that callback, so telemetry recording never
+    // stopped in this scenario.
+    const repo = seeded.repository as SqlSessionRepository;
+    repo.saveSession = async () => {
+      throw new Error('simulated saveSession failure (F2 test)');
+    };
+
+    composition.facade.endSession();
+    await flushBootstrap();
+    await flushBootstrap();
+
+    // Session end itself genuinely failed (not the point of this test, but
+    // confirms the rejection actually happened): sessionState never reached
+    // 'sessionComplete'.
+    expect(latestFacadeState(composition).sessionState).not.toBe('sessionComplete');
+
+    // The binding fix: telemetry stopped anyway, via `SwappableFacade`'s
+    // `endSession()` command-level hook, independent of the controller
+    // persistence outcome above.
     expect(runningStates.has(composition.telemetryProvider.getDiagnostics().state)).toBe(false);
   });
 });

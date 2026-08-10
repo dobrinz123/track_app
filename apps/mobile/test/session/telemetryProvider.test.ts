@@ -12,12 +12,22 @@ import { createTelemetryProvider } from '../../src/session/telemetryProvider';
  * deterministically, without ever loading the native module, for the
  * reconnect-policy tests.
  */
-const tracker = vi.hoisted(() => ({ connectCalls: 0 }));
+const tracker = vi.hoisted(() => ({
+  connectCalls: 0,
+  /** F3 test seam: when true, `connect()` returns a promise this test controls instead of rejecting immediately -- lets a test hold a session in 'connecting' indefinitely to construct a stop()/start() race deterministically. */
+  holdConnect: false,
+  pendingConnects: [] as Array<{ resolve: () => void; reject: (error: Error) => void }>,
+}));
 
 vi.mock('../../src/session/tcpObdTransport', () => ({
   TcpObdTransport: class {
     async connect(): Promise<void> {
       tracker.connectCalls += 1;
+      if (tracker.holdConnect) {
+        return new Promise<void>((resolve, reject) => {
+          tracker.pendingConnects.push({ resolve, reject });
+        });
+      }
       throw new Error('adapter unreachable (test double)');
     }
     send(): void {}
@@ -56,7 +66,11 @@ describe('telemetryProvider: start() with simulated transport', () => {
     const store = new InMemorySettingsStore();
     store.update({ telemetryEnabled: true, telemetrySimulate: true });
 
-    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter() });
+    // F8 fix: `telemetrySimulate` is now gated on `isDev` -- explicit `true`
+    // here is what makes THIS test's simulated-transport happy path (still)
+    // exercise the simulated transport, not the (mocked, always-failing)
+    // real-adapter path.
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
     const samples: TelemetrySample[] = [];
     const states: Elm327State[] = [];
     provider.onSample((s) => samples.push(s));
@@ -154,5 +168,150 @@ describe('telemetryProvider: reconnect policy (real-adapter path, mocked TcpObdT
     await vi.advanceTimersByTimeAsync(3_000);
     await flushMicrotasks();
     expect(tracker.connectCalls).toBe(4); // fresh session's own retry fires too.
+  });
+});
+
+describe('telemetryProvider: stop()/start() race is generation-scoped (F3 fix)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    tracker.connectCalls = 0;
+    tracker.holdConnect = true;
+    tracker.pendingConnects = [];
+  });
+  afterEach(async () => {
+    tracker.holdConnect = false;
+    vi.useRealTimers();
+  });
+
+  it('a start() during a still-pending stop() gets a fresh generation the old stop() cannot detach -- the OLD session\'s late "stopped" is dropped, and the NEW session keeps forwarding state after', async () => {
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false });
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter() });
+    const states: Elm327State[] = [];
+    provider.onStateChange((s) => states.push(s));
+
+    // Generation 1: connect() held pending ('connecting').
+    provider.start();
+    await flushMicrotasks();
+    expect(tracker.pendingConnects).toHaveLength(1);
+    const gen1Connect = tracker.pendingConnects[0]!;
+
+    // stop() called while generation 1 is still connecting -- it awaits
+    // generation 1's own `session.stop()`, which itself awaits the SAME
+    // pending connect() (Elm327Session.stop() awaits its in-flight run()).
+    // Neither has settled yet, so this promise is still pending here.
+    const stopPromise = provider.stop();
+    await flushMicrotasks();
+
+    // A start() while that stop() is still in flight gets generation 2.
+    provider.start();
+    await flushMicrotasks();
+    expect(tracker.pendingConnects).toHaveLength(2);
+    const gen2Connect = tracker.pendingConnects[1]!;
+    // F10 fix: the leading 'idle' is `onStateChange`'s own immediate replay
+    // of the current state at subscribe time (subscribed above before
+    // either generation started).
+    expect(states).toEqual(['idle', 'connecting', 'connecting']); // both genuinely-live starts are forwarded.
+
+    // Let generation 1 fail its connect() -- its `run()` sees `stopRequested`
+    // and settles down to 'stopped' WITHOUT throwing, resolving the pending
+    // stop() from above.
+    gen1Connect.reject(new Error('gen1 connect aborted'));
+    await stopPromise;
+    await flushMicrotasks();
+
+    // Generation 1's late 'stopped' must be DROPPED (it is a stale
+    // generation once generation 2 exists) -- states must NOT have gained a
+    // 'stopped' entry that has nothing to do with generation 2, which is
+    // still the genuinely-live session.
+    expect(states).toEqual(['idle', 'connecting', 'connecting']);
+
+    // Generation 2 is still alive and must keep forwarding its OWN events --
+    // the pre-fix bug used generation 1's stop() to (wrongly) detach
+    // generation 2's listeners via shared fields, permanently freezing
+    // `states` at whatever generation 1 left it at.
+    gen2Connect.reject(new Error('gen2 connect also fails'));
+    await flushMicrotasks();
+
+    expect(states).toEqual(['idle', 'connecting', 'connecting', 'failed']);
+    expect(provider.getDiagnostics().state).toBe('failed');
+
+    await provider.stop(); // cleanup: cancels generation 2's own reconnect-retry timer.
+  });
+});
+
+describe('telemetryProvider: onStateChange replays the current state on subscribe (F10 fix)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    tracker.connectCalls = 0;
+    tracker.holdConnect = false;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a late subscriber sees the CURRENT state synchronously, not just future transitions', async () => {
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false });
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter() });
+
+    // No subscriber yet -- the provider still reaches 'failed' (the mocked
+    // TcpObdTransport always rejects immediately).
+    provider.start();
+    await flushMicrotasks();
+    expect(provider.getDiagnostics().state).toBe('failed');
+
+    // A screen mounting AFTER that point (TelemetryScreen's own bug,
+    // Codex's finding) must see 'failed' immediately on subscribe, not stay
+    // on whatever default it initialized to until the next transition.
+    const seen: Elm327State[] = [];
+    provider.onStateChange((s) => seen.push(s));
+    expect(seen).toEqual(['failed']);
+  });
+});
+
+describe('telemetryProvider: telemetrySimulate is gated on isDev (F8 fix)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    tracker.connectCalls = 0;
+    tracker.holdConnect = false;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a non-dev build (isDev: false) ignores telemetrySimulate=true and still builds the TCP transport path', async () => {
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: true });
+
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: monotonicCounter(),
+      isDev: false,
+    });
+    const states: Elm327State[] = [];
+    provider.onStateChange((s) => states.push(s));
+
+    provider.start();
+    await flushMicrotasks();
+
+    // The transport-factory spy: the (mocked) TcpObdTransport's connect()
+    // was actually reached, proving the REAL-adapter path was built, not
+    // `SimulatedElm327Transport` (which never touches `tcpObdTransport.ts`
+    // at all and would never reach 'failed' from a rejected connect()).
+    expect(tracker.connectCalls).toBe(1);
+    expect(states.at(-1)).toBe('failed');
+  });
+
+  it('omitting isDev falls back to the real `__DEV__` global, which is undefined under vitest -- same as isDev: false', async () => {
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: true });
+
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter() });
+    provider.start();
+    await flushMicrotasks();
+
+    expect(tracker.connectCalls).toBe(1);
+    expect(provider.getDiagnostics().state).toBe('failed');
   });
 });

@@ -23,6 +23,43 @@ export function wrapExpoSqliteDatabase(db: SQLiteDatabase): SqlDatabase {
 }
 
 /**
+ * F1 fix (WPT3, binding Telemetry addendum): wraps a `SqlDatabase` so every
+ * call -- `execAsync`/`runAsync`/`getAllAsync`/`withTransactionAsync` -- is
+ * queued onto ONE shared promise tail and runs strictly one at a time, in
+ * call order, never overlapping. `openAppDatabase()` below applies this to
+ * the single on-device connection BEFORE handing it to
+ * `SqlSessionRepository.create()` -- so the SAME queue serializes the
+ * production controller's own lap-persistence transactions (`SessionController`'s
+ * private `lapPersistenceTail`, packages/core, reaching this connection
+ * through `repository.saveSession()`/`saveCheckpoint()` etc.) against
+ * `TelemetryRecorder`'s batch inserts (composition.ts hands `TelemetryRecorder`
+ * this SAME wrapped `db`, returned from `openAppDatabase()`). `SessionController`'s
+ * own tail field is private and packages/core is out of this ticket's write
+ * set -- serializing at the one shared surface both sides actually go
+ * through (the single on-device SQLite connection) is what makes the binding
+ * "a telemetry write can never interleave with an open controller
+ * transaction" guarantee hold, without needing to touch or expose that
+ * private field.
+ */
+export function serializeSqlDatabase(inner: SqlDatabase): SqlDatabase {
+  let tail: Promise<unknown> = Promise.resolve();
+  function enqueue<T>(op: () => Promise<T>): Promise<T> {
+    const result = tail.then(op, op);
+    tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+  return {
+    execAsync: (sql: string) => enqueue(() => inner.execAsync(sql)),
+    runAsync: (sql: string, params?: readonly SqlBindValue[]) => enqueue(() => inner.runAsync(sql, params)),
+    getAllAsync: <T>(sql: string, params?: readonly SqlBindValue[]) => enqueue(() => inner.getAllAsync<T>(sql, params)),
+    withTransactionAsync: (fn: () => Promise<void>) => enqueue(() => inner.withTransactionAsync(fn)),
+  };
+}
+
+/**
  * Opens (creating and migrating if necessary) the on-device SQLite database
  * and returns a ready-to-use `SqlSessionRepository` over it.
  *
@@ -54,7 +91,11 @@ export async function openAppDatabase(
   dbName: string,
 ): Promise<{ db: SqlDatabase; repository: SqlSessionRepository }> {
   const raw = await openDatabaseAsync(dbName);
-  const db = wrapExpoSqliteDatabase(raw);
+  // F1 fix (WPT3): `serializeSqlDatabase()` wraps the connection BEFORE
+  // `SqlSessionRepository.create()` so the repository's own transactions and
+  // (later, composition.ts's) `TelemetryRecorder` inserts share ONE queue --
+  // see that function's doc comment.
+  const db = serializeSqlDatabase(wrapExpoSqliteDatabase(raw));
   const repository = await SqlSessionRepository.create(db);
   await migrateTelemetrySchema(db);
   return { db, repository };

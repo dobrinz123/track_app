@@ -97,6 +97,19 @@ class SwappableFacade implements SessionFacade {
    * the NEXT `startPreflight()` call starts a fresh gate run.
    */
   private gateInFlight: Promise<void> | null = null;
+  /**
+   * F2 fix (WPT3, binding): fired synchronously, INSIDE `endSession()`
+   * below, BEFORE forwarding the command to `inner` -- so telemetry shutdown
+   * starts at the earliest point this wrapper can act, independent of
+   * whether `inner.endSession()`'s own (fire-and-forget, per `SessionFacade`)
+   * async work later succeeds or rejects. `RealSessionFacadeCallbacks.onSessionEnded`
+   * (realFacade.ts, out of this ticket's write set) fires ONLY on the
+   * controller-persistence SUCCESS path -- a rejected `controller.endSession()`
+   * never reaches it at all, which previously left telemetry recording
+   * running forever whenever session-end persistence failed. This hook does
+   * not have that gap.
+   */
+  private endSessionSideEffect: (() => void) | null = null;
 
   constructor(initial: SessionFacade) {
     this.inner = initial;
@@ -117,6 +130,10 @@ class SwappableFacade implements SessionFacade {
 
   setPreflightGate(gate: (() => Promise<void>) | null): void {
     this.preflightGate = gate;
+  }
+
+  setEndSessionSideEffect(fn: (() => void) | null): void {
+    this.endSessionSideEffect = fn;
   }
 
   subscribe(cb: (s: FacadeState) => void): () => void {
@@ -180,6 +197,7 @@ class SwappableFacade implements SessionFacade {
     this.inner.arm();
   }
   endSession(): void {
+    this.endSessionSideEffect?.();
     this.inner.endSession();
   }
   pause(): void {
@@ -332,9 +350,17 @@ startVoiceCoach(facade, settingsStore);
 // `SessionController` -- only the one-way sample subscription below.
 // ---------------------------------------------------------------------------
 const telemetryClock = new PerformanceNowClock();
+// F8 fix (WPT3, binding): the REAL React Native `__DEV__` global, wired in
+// explicitly here (`typeof` guard so this module still loads under vitest,
+// which never defines it) -- `telemetryProvider.ts`'s own `isDev` gate
+// defaults to the same thing when omitted, but composition.ts is where
+// production actually wires it, per this ticket's binding design.
+// eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
+const telemetryIsDev = typeof __DEV__ !== 'undefined' ? __DEV__ : false;
 export const telemetryProvider: TelemetryProvider = createTelemetryProvider({
   settingsStore,
   monotonicNow: () => telemetryClock.now(),
+  isDev: telemetryIsDev,
 });
 
 let telemetryRecorder: TelemetryRecorder | null = null;
@@ -342,8 +368,26 @@ let telemetryCurrentLapNumber: number | null = null;
 let unsubscribeTelemetrySample: (() => void) | null = null;
 let unsubscribeTelemetryLapWatch: (() => void) | null = null;
 
-/** Tears down the active recording (if any) and stops `telemetryProvider` -- `onSessionEnded`, and defensively before a fresh production controller is installed (`rebuildProductionController`). Idempotent. */
-function stopTelemetryRecording(): void {
+/**
+ * Tears down the active recording (if any) and stops `telemetryProvider`.
+ * Idempotent (a second concurrent/later call while the first is still
+ * in-flight, or after everything is already torn down, is a harmless no-op)
+ * -- called from THREE places (F2 fix, WPT3, binding): `SwappableFacade`'s
+ * `endSession()` command hook (fires the INSTANT `facade.endSession()` is
+ * called, regardless of whether the underlying controller persistence
+ * later succeeds or rejects), `productionFacadeCallbacks().onSessionEnded`
+ * (the success-path callback, as a defensive second call), and
+ * `rebuildProductionController()` (the `'error'`-terminal-state path, which
+ * does not run through `endSession()` at all).
+ *
+ * Returns a promise so a caller CAN await full shutdown (the command hook
+ * and `onSessionEnded` both join it into a `Promise.allSettled`) -- never
+ * rejects (`Promise.allSettled` internally + `recorder.dispose()` in a
+ * `finally`), so a telemetry-side failure can never surface as, or block,
+ * a session-end/lap-persistence failure (binding: "telemetry NEVER gates
+ * lap timing").
+ */
+async function stopTelemetryRecording(): Promise<void> {
   unsubscribeTelemetrySample?.();
   unsubscribeTelemetrySample = null;
   unsubscribeTelemetryLapWatch?.();
@@ -351,14 +395,18 @@ function stopTelemetryRecording(): void {
   telemetryCurrentLapNumber = null;
   const recorder = telemetryRecorder;
   telemetryRecorder = null;
-  void telemetryProvider.stop();
-  if (recorder !== null) {
-    void recorder
-      .endSession()
-      .catch((error: unknown) => {
-        console.warn('[composition] telemetry recorder endSession failed', error);
-      })
-      .finally(() => recorder.dispose());
+  try {
+    const results = await Promise.allSettled([
+      telemetryProvider.stop(),
+      recorder !== null ? recorder.endSession() : Promise.resolve(),
+    ]);
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        console.warn('[composition] telemetry shutdown step failed', result.reason);
+      }
+    }
+  } finally {
+    recorder?.dispose();
   }
 }
 
@@ -375,13 +423,31 @@ function startTelemetryRecording(sessionId: string): void {
     recorder.record(sample, telemetryCurrentLapNumber);
   });
   unsubscribeTelemetryLapWatch = facade.subscribe((state) => {
-    if (telemetryCurrentLapNumber === state.lapNumber) return;
-    telemetryCurrentLapNumber = state.lapNumber;
+    // F4 fix (WPT3, binding): `facade.subscribe()` calls back synchronously
+    // with the CURRENT state on every subscribe, including lap 0
+    // (calibration/armed/out-lap -- no lap has started yet) -- `lapNumber`'s
+    // own binding meaning for "no lap in progress" is `0`, but
+    // `telemetry_samples.lap_number`'s binding meaning for the same thing is
+    // `NULL` (Telemetry addendum: "lap_number NULLABLE"). Map here so
+    // pre-lap samples are tagged `NULL`, not the numeral `0`.
+    const mappedLap = state.lapNumber === 0 ? null : state.lapNumber;
+    if (telemetryCurrentLapNumber === mappedLap) return;
+    telemetryCurrentLapNumber = mappedLap;
     recorder.flushOnLapCrossing();
   });
 
   telemetryProvider.start();
 }
+
+// F2 fix (WPT3, binding): registered once at module load (independent of
+// bootstrap, mirroring `startLifecycleListener`'s own registration just
+// below) -- `facade.endSession()` always triggers telemetry shutdown, no
+// matter which inner facade (production, DevReplay, mock) is currently
+// active or whether the controller's own persistence succeeds. Harmless when
+// nothing is currently recording (`stopTelemetryRecording()` is idempotent).
+facadeWrapper.setEndSessionSideEffect(() => {
+  void stopTelemetryRecording();
+});
 
 // ---------------------------------------------------------------------------
 // Bootstrap readiness (C2 fix). `CircuitDetailScreen` subscribes via
@@ -604,9 +670,29 @@ function productionFacadeCallbacks(): RealSessionFacadeCallbacks {
       startTelemetryRecording(sessionId);
     },
     onSessionEnded: () => {
-      const clearPointer = db !== null ? setActiveSessionId(db, null) : Promise.resolve();
-      void clearPointer.then(() => historyStore?.refresh());
-      stopTelemetryRecording();
+      // F2 fix (WPT3, binding): both kicked off independently (neither
+      // awaits/depends on the other), then joined via `Promise.allSettled`
+      // so an error in either is isolated -- a rejected `controllerPersistence`
+      // (the active-session-pointer clear + history refresh) can never
+      // suppress the telemetry flush, and vice versa. `telemetryFinalFlush`
+      // is ALSO already independently guaranteed to run by
+      // `SwappableFacade`'s `endSessionSideEffect` hook (fires the instant
+      // `facade.endSession()` was called, before this success-only callback
+      // even exists to be scheduled) -- calling `stopTelemetryRecording()`
+      // again here is a defensive, idempotent no-op in the common case, and
+      // matters only if that hook were ever bypassed.
+      const controllerPersistence = (async () => {
+        if (db !== null) await setActiveSessionId(db, null);
+        await historyStore?.refresh();
+      })();
+      const telemetryFinalFlush = stopTelemetryRecording();
+      void Promise.allSettled([controllerPersistence, telemetryFinalFlush]).then((results) => {
+        for (const result of results) {
+          if (result.status === 'rejected') {
+            console.warn('[composition] session-end persistence step failed', result.reason);
+          }
+        }
+      });
     },
   };
 }
@@ -668,7 +754,9 @@ function rebuildProductionController(): Promise<void> {
     // before the controller it was recording alongside is disposed -- in the
     // normal flow `onSessionEnded` (above) already did this; this guards the
     // 'error' terminal-state path, which does not run through `endSession()`.
-    stopTelemetryRecording();
+    // Awaited (F2 fix) so the final flush actually lands before disposal
+    // proceeds, instead of racing ahead of it.
+    await stopTelemetryRecording();
     await staleController.dispose();
     staleFacade?.dispose();
     installProductionController();
@@ -928,6 +1016,15 @@ export async function resumeRecovery(): Promise<boolean> {
     }
     ctrl.restoreFromCheckpoint(info.sessionId, checkpoint.snapshot, checkpoint.laps);
     await ctrl.start('session');
+    // F6 fix (WPT3, binding): normal session start reaches
+    // `startTelemetryRecording()` through `RealSessionFacadeCallbacks.onSessionStarted`
+    // (`productionFacadeCallbacks()` above) -- `resumeRecovery()` drives the
+    // SAME `ctrl` directly and never goes through that facade callback at
+    // all, so a recovered session previously recorded no OBD data even with
+    // telemetry enabled. Same hook, same gating (`telemetryEnabled`/no
+    // on-device db are both still checked inside `startTelemetryRecording()`
+    // itself) -- just called explicitly for the id already known here.
+    startTelemetryRecording(info.sessionId);
     setPendingRecovery(null);
     // C5 fix: the recovered session is active again -- keep the active-session
     // pointer (re-affirmed, in case it somehow drifted) rather than clearing
@@ -975,8 +1072,22 @@ export async function deleteAllStoredUserData(): Promise<DeleteUserDataResult> {
     TMR_CIRCUIT_PROFILE.layoutId,
     TMR_CIRCUIT_PROFILE.layoutVersion,
   );
-  if (result.ok && historyStore !== null) await historyStore.refresh();
-  return result;
+  // F7 fix (WPT3, binding): `telemetry_samples` (Telemetry addendum) is a
+  // mobile-owned table (`persistence/telemetrySchema.ts`) that
+  // `@circuit/core`'s `deleteAllUserData`/`LocalSessionRepository.deleteUserData`
+  // (packages/core, out of this ticket's write set) has no knowledge of at
+  // all -- delete it here, in the SAME flow, and verify it actually landed
+  // empty before ever reporting success, so the UI's "All stored data
+  // deleted" banner is never shown while up to 200,000 rows/session remain.
+  let telemetryOk = true;
+  if (result.ok && db !== null) {
+    await db.runAsync('DELETE FROM telemetry_samples');
+    const remaining = await db.getAllAsync<{ count: number }>('SELECT COUNT(*) AS count FROM telemetry_samples');
+    telemetryOk = (remaining[0]?.count ?? 0) === 0;
+  }
+  const finalResult: DeleteUserDataResult = { ...result, ok: result.ok && telemetryOk };
+  if (finalResult.ok && historyStore !== null) await historyStore.refresh();
+  return finalResult;
 }
 
 // ---------------------------------------------------------------------------

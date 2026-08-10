@@ -26,6 +26,8 @@ export interface TcpObdTransportConfig {
   port: number;
   /** `connect()` timeout in ms -- rejects and destroys the socket if exceeded. Default 5000 (Telemetry addendum). */
   connectTimeoutMs?: number;
+  /** Test-only seam (F9 fix, WPT3): overrides the lazy `react-native-tcp-socket` import so a test can control exactly when it resolves. Production callers never pass this -- defaults to the real dynamic `import()`. */
+  loadModule?: () => Promise<typeof import('react-native-tcp-socket')>;
 }
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 5_000;
@@ -48,11 +50,17 @@ export class TcpObdTransport implements ObdTransport {
   private readonly closeListeners = new Set<(err?: Error) => void>();
   /** Guards against `onClose` firing twice for one lifecycle (e.g. an 'error' event immediately followed by 'close'). */
   private closeEmitted = false;
+  /** F9 fix (WPT3): set by `close()`, re-checked by `connect()` AFTER the lazy module import resolves and BEFORE a socket is created -- a `close()` that lands while the import is still pending must leave `connect()` unable to open a socket at all. One-shot: this transport instance is never reused after `close()` (`telemetryProvider.ts` builds a fresh instance per session/retry). */
+  private closed = false;
 
   constructor(private readonly config: TcpObdTransportConfig) {}
 
   async connect(): Promise<void> {
-    const module = await loadTcpSocketModule();
+    const load = this.config.loadModule ?? loadTcpSocketModule;
+    const module = await load();
+    if (this.closed) {
+      throw new Error('TcpObdTransport: close() was called before connect() finished loading the transport module');
+    }
     const TcpSocket = module.default;
     const timeoutMs = this.config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
 
@@ -123,6 +131,7 @@ export class TcpObdTransport implements ObdTransport {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
     const stale = this.socket;
     this.socket = null;
     stale?.destroy();

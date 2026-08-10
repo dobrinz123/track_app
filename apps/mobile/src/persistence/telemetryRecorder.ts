@@ -1,4 +1,4 @@
-import type { SqlDatabase, TelemetryChannelId, TelemetrySample } from '@circuit/core';
+import type { SqlBindValue, SqlDatabase, TelemetryChannelId, TelemetrySample } from '@circuit/core';
 
 const BATCH_SIZE = 25;
 const BATCH_INTERVAL_MS = 1_000;
@@ -23,14 +23,35 @@ interface BufferedRow {
  * addendum's "Recording (mobile, SQLite)" section) -- batched inserts (25
  * samples or 1s, whichever first), flushed on lap crossing and `endSession`.
  *
- * Mirrors -- WITHOUT importing or modifying -- `SessionController`'s own
- * `lapPersistenceTail` discipline (packages/core/src/controller/sessionController.ts,
- * out of this ticket's write set): a single serialized promise chain so an
+ * Serializes ITS OWN batch writes with a private `tail` promise chain (so an
  * immediate lap-crossing flush racing the periodic batch boundary can never
- * open two overlapping writes on the same connection, plus a `pendingWork`
- * array `flush()` awaits with `Promise.all` so a caller (composition.ts's
- * `endSession()`) can be sure every write kicked off so far has actually
- * landed.
+ * compute `rowsWritten`/room from a stale pre-write snapshot), plus a
+ * `pendingWork` array `flush()` awaits with `Promise.all` so a caller
+ * (composition.ts's `endSession()`) can be sure every write kicked off so
+ * far has actually landed.
+ *
+ * F1 fix (WPT3, binding): a flush NEVER opens its own `withTransactionAsync`
+ * -- previously it wrapped each batch's inserts in one, which could BEGIN a
+ * nested SQLite transaction while `SessionController`'s own lap-persistence
+ * transaction (packages/core, out of this ticket's write set -- see
+ * `sessionController.ts`'s private `lapPersistenceTail`) was still open on
+ * the SAME on-device connection, throwing "cannot start a transaction within
+ * a transaction" and breaking lap/PB persistence. Each flush is now exactly
+ * ONE parameterized multi-row `INSERT` statement (`writeBatch` below) --
+ * already atomic in SQLite without an explicit transaction wrapper, so this
+ * recorder issues zero `BEGIN`s ever. The actual "never interleaves with an
+ * open controller transaction" guarantee comes from the `SqlDatabase` this
+ * recorder is constructed with: `expoSqlDatabase.ts`'s `openAppDatabase()`
+ * wraps the single on-device connection in `serializeSqlDatabase()` BEFORE
+ * handing it to both `SqlSessionRepository` (the controller's own writes)
+ * and this recorder, so every call -- the controller's transactions AND this
+ * recorder's inserts -- funnels through ONE shared queue and can never run
+ * concurrently, regardless of which one started first. (`SessionController`'s
+ * own tail field is private with no public hook to append onto directly --
+ * packages/core is out of this ticket's write set -- so the shared on-device
+ * connection itself, the one surface both sides genuinely go through, is
+ * where this ticket's binding "telemetry write can never interleave with an
+ * open controller transaction" requirement is actually enforced.)
  *
  * Telemetry NEVER gates lap timing (binding): every method here is either
  * synchronous/fire-and-forget (`record`, `flushOnLapCrossing`) or awaited
@@ -120,6 +141,20 @@ export class TelemetryRecorder {
     this.pendingWork.push(persistence);
   }
 
+  /**
+   * F1 fix: ONE parameterized multi-row `INSERT` for the whole batch -- no
+   * `withTransactionAsync`, no per-row `runAsync` loop (never more than one
+   * statement per flush, so this recorder issues zero `BEGIN`s). A single
+   * multi-row `INSERT` is already atomic in SQLite.
+   *
+   * F5 fix: `capReached` is set whenever `rowsWritten` has reached `rowCap`
+   * AFTER this write, not only when this specific batch was truncated --
+   * previously a batch that landed EXACTLY on the cap (common: the binding
+   * cap and `BATCH_SIZE` are both round numbers) left `capReached` false
+   * until some LATER batch happened to see zero room, so diagnostics briefly
+   * under-reported and `record()` kept buffering (and dropping at the next
+   * flush) instead of rejecting up front.
+   */
   private async writeBatch(batch: readonly BufferedRow[]): Promise<void> {
     const room = this.rowCap - this.rowsWritten;
     if (room <= 0) {
@@ -127,15 +162,16 @@ export class TelemetryRecorder {
       return;
     }
     const toWrite = batch.length > room ? batch.slice(0, room) : batch;
-    await this.db.withTransactionAsync(async () => {
-      for (const row of toWrite) {
-        await this.db.runAsync(
-          'INSERT INTO telemetry_samples (session_id, lap_number, t_mono_ms, channel, value) VALUES (?, ?, ?, ?, ?)',
-          [this.sessionId, row.lapNumber, row.tMonoMs, row.channel, row.value],
-        );
-      }
-    });
+    const placeholders = toWrite.map(() => '(?, ?, ?, ?, ?)').join(', ');
+    const params: SqlBindValue[] = [];
+    for (const row of toWrite) {
+      params.push(this.sessionId, row.lapNumber, row.tMonoMs, row.channel, row.value);
+    }
+    await this.db.runAsync(
+      `INSERT INTO telemetry_samples (session_id, lap_number, t_mono_ms, channel, value) VALUES ${placeholders}`,
+      params,
+    );
     this.rowsWritten += toWrite.length;
-    if (toWrite.length < batch.length) this.capReached = true;
+    if (this.rowsWritten >= this.rowCap) this.capReached = true;
   }
 }

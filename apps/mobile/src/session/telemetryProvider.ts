@@ -28,6 +28,17 @@ export interface TelemetryProviderDeps {
   settingsStore: SettingsStore;
   /** SAME injected monotonic clock the session already uses (never `Date.now()`) -- stamps every `TelemetrySample.tMonoMs` via `@circuit/core`'s `Elm327Session`. */
   monotonicNow: () => number;
+  /**
+   * F8 fix (WPT3, binding): gates `settings.telemetrySimulate` -- a release
+   * build must never silently record simulated vehicle data because a
+   * setting persisted from a dev build happened to still be `true` on disk
+   * (the toggle itself is already `__DEV__`-hidden in `SettingsScreen`, but
+   * the PROVIDER honored the persisted value unconditionally). Test-only
+   * injection seam; defaults to the real React Native `__DEV__` global
+   * (`composition.ts` wires that same real value in explicitly). Never
+   * mutates the persisted setting -- a non-dev build just ignores it.
+   */
+  isDev?: boolean;
 }
 
 export interface TelemetryProviderDiagnostics {
@@ -65,22 +76,45 @@ export interface TelemetryProvider {
   getDiagnostics(): TelemetryProviderDiagnostics;
 }
 
+/**
+ * One `start()`..`stop()` (or `start()`..retry) lifecycle's session plus the
+ * listener unsubscribes THAT session's `onSample`/`onStateChange` calls
+ * returned -- captured here, not in shared module-level fields, so `stop()`
+ * (F3 fix, WPT3) can detach exactly the generation it was called for even if
+ * a NEW `start()` races in and installs a fresh generation while the old
+ * one's `session.stop()` is still pending.
+ */
+interface SessionGeneration {
+  id: number;
+  session: Elm327Session;
+  unsubscribeSample: () => void;
+  unsubscribeState: () => void;
+}
+
 export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryProvider {
   const { settingsStore, monotonicNow } = deps;
+  // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
+  const isDev = deps.isDev ?? (typeof __DEV__ !== 'undefined' ? __DEV__ : false);
   const sampleListeners = new Set<(s: TelemetrySample) => void>();
   const stateListeners = new Set<(state: Elm327State, detail?: string) => void>();
 
-  let session: Elm327Session | null = null;
+  /**
+   * F3 fix: the currently-active generation, or `null` between sessions.
+   * `stop()` captures its OWN local reference to this before awaiting
+   * anything -- see `stop()`'s own comment.
+   */
+  let current: SessionGeneration | null = null;
   let currentState: Elm327State = 'idle';
-  let unsubscribeSample: (() => void) | null = null;
-  let unsubscribeState: (() => void) | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   let retriesUsed = 0;
   let running = false;
+  let generationCounter = 0;
 
   function buildTransport(): ObdTransport {
     const settings = settingsStore.getSettings();
-    if (settings.telemetrySimulate) {
+    // F8 fix: a non-dev build ignores a persisted `telemetrySimulate=true`
+    // entirely (never mutates the stored setting -- just ignores it here).
+    if (settings.telemetrySimulate && isDev) {
       return new SimulatedElm327Transport({ monotonicNow });
     }
     return new TcpObdTransport({ host: settings.adapterHost, port: settings.adapterPort });
@@ -91,14 +125,9 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     for (const listener of [...stateListeners]) listener(state, detail);
   }
 
-  function detachListeners(): void {
-    unsubscribeSample?.();
-    unsubscribeState?.();
-    unsubscribeSample = null;
-    unsubscribeState = null;
-  }
-
   function launchSession(): void {
+    generationCounter += 1;
+    const id = generationCounter;
     const transport = buildTransport();
     const next = createElm327Session(
       transport,
@@ -110,25 +139,42 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       },
       monotonicNow,
     );
-    session = next;
-    unsubscribeSample = next.onSample((sample) => {
-      for (const listener of [...sampleListeners]) listener(sample);
-    });
-    unsubscribeState = next.onStateChange((state, detail) => {
-      emitState(state, detail);
-      if (state === 'failed' && running) scheduleRetry();
-    });
+    // F3 fix: every listener below checks `current?.id === id` before doing
+    // anything -- once a NEWER generation has replaced `current` (a fresh
+    // `start()`, or this generation's own `stop()`/retry teardown), a late
+    // event from THIS (now-stale) session's transport/session is dropped
+    // instead of forwarding a sample/state change for a session nothing
+    // outside this closure should still believe is live.
+    const gen: SessionGeneration = {
+      id,
+      session: next,
+      unsubscribeSample: next.onSample((sample) => {
+        if (current?.id !== id) return;
+        for (const listener of [...sampleListeners]) listener(sample);
+      }),
+      unsubscribeState: next.onStateChange((state, detail) => {
+        if (current?.id !== id) return;
+        emitState(state, detail);
+        if (state === 'failed' && running) scheduleRetry(id);
+      }),
+    };
+    current = gen;
     next.start();
   }
 
-  function scheduleRetry(): void {
+  function scheduleRetry(genId: number): void {
     if (retryTimer !== null || retriesUsed >= 1 || !running) return;
     retriesUsed += 1;
     retryTimer = setTimeout(() => {
       retryTimer = null;
       if (!running) return;
-      detachListeners();
-      session = null;
+      // Stale generation (e.g. a stop()/start() happened while this timer
+      // was pending) -- the CURRENT generation's own lifecycle owns whatever
+      // happens next, not this timer.
+      if (current === null || current.id !== genId) return;
+      current.unsubscribeSample();
+      current.unsubscribeState();
+      current = null;
       launchSession();
     }, RETRY_DELAY_MS);
   }
@@ -148,10 +194,19 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
         clearTimeout(retryTimer);
         retryTimer = null;
       }
-      const active = session;
-      session = null;
-      if (active !== null) await active.stop();
-      detachListeners();
+      // F3 fix: capture THIS call's generation locally, synchronously,
+      // before awaiting anything -- a `start()` racing in during the
+      // `await` below installs a DIFFERENT generation into `current`, whose
+      // listeners this stop() must never touch.
+      const gen = current;
+      if (gen === null) return;
+      await gen.session.stop();
+      gen.unsubscribeSample();
+      gen.unsubscribeState();
+      // Only clear the shared `current` pointer if it's STILL this
+      // generation -- a racing `start()` already replaced it with its own,
+      // which this (now-finished) stop() must leave alone.
+      if (current === gen) current = null;
     },
 
     onSample(cb) {
@@ -161,11 +216,17 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
 
     onStateChange(cb) {
       stateListeners.add(cb);
+      // F10 fix (WPT3): replay the current state synchronously on subscribe
+      // -- mirrors `SessionFacade.subscribe()`'s own semantics elsewhere in
+      // this app. Previously a screen that mounted AFTER telemetry had
+      // already started (or changed state) saw no event until the NEXT
+      // transition, showing a stale/default state indefinitely.
+      cb(currentState);
       return () => stateListeners.delete(cb);
     },
 
     getDiagnostics(): TelemetryProviderDiagnostics {
-      const base = session?.getDiagnostics() ?? { observedHzByChannel: {}, errorCount: 0 };
+      const base = current?.session.getDiagnostics() ?? { observedHzByChannel: {}, errorCount: 0 };
       return {
         state: currentState,
         retriesUsed,

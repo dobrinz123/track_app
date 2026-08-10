@@ -33,6 +33,22 @@ const ACTIVE_SESSION_STATES = new Set([
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Settings'>;
 
+/**
+ * F11 fix (WPT3): validates a FULL port-field draft string -- returns the
+ * parsed port only if the entire string is a plain 1-65535 integer, `null`
+ * otherwise. Rejects partial-numeric garbage (`"123abc"`) that
+ * `Number.parseInt` would otherwise silently truncate and accept as `123`.
+ * Exported (pure, no React/RN import) so its exact behavior can be pinned by
+ * a test -- `SettingsScreen` itself isn't unit-testable in this repo (see
+ * `apps/mobile/test/session/settingsPortDraft.test.ts`'s own doc comment).
+ */
+export function parsePortDraft(text: string): number | null {
+  if (!/^\d+$/.test(text)) return null;
+  const parsed = Number.parseInt(text, 10);
+  if (!Number.isFinite(parsed) || parsed < 1 || parsed > 65_535) return null;
+  return parsed;
+}
+
 const DEADBAND_STEP_MS = 25;
 const MIN_DEADBAND_MS = 0;
 const MAX_DEADBAND_MS = 500;
@@ -99,6 +115,32 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
   const [deleting, setDeleting] = React.useState(false);
   const [deleteBanner, setDeleteBanner] = React.useState<'success' | 'error' | null>(null);
   const [diagnostics, setDiagnostics] = React.useState<LiveDiagnosticsSnapshot | null>(null);
+
+  // F11 fix (WPT3): a local string draft, distinct from the committed
+  // `settings.adapterPort` number -- lets the field hold in-progress/empty
+  // text while typing, and validates the WHOLE string only on blur/submit
+  // (previously every keystroke ran `parseInt` immediately, so pasting
+  // "123abc" silently committed 123, and an in-progress empty field snapped
+  // back on every keystroke instead of just on blur).
+  const [portDraft, setPortDraft] = React.useState(String(settings.adapterPort));
+  const lastCommittedPort = React.useRef(settings.adapterPort);
+  React.useEffect(() => {
+    if (settings.adapterPort !== lastCommittedPort.current) {
+      lastCommittedPort.current = settings.adapterPort;
+      setPortDraft(String(settings.adapterPort));
+    }
+  }, [settings.adapterPort]);
+
+  function commitPortDraft(): void {
+    const parsed = parsePortDraft(portDraft);
+    if (parsed !== null) {
+      lastCommittedPort.current = parsed;
+      settingsStore.update({ adapterPort: parsed });
+      setPortDraft(String(parsed));
+    } else {
+      setPortDraft(String(lastCommittedPort.current));
+    }
+  }
 
   // MUST DO #3 -- read-on-focus + manual refresh only, never a polling
   // timer, so this adds no background work while a session is timing.
@@ -299,13 +341,10 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
                 </Text>
                 <TextInput
                   style={styles.fieldInput}
-                  value={String(settings.adapterPort)}
-                  onChangeText={(text) => {
-                    const parsed = Number.parseInt(text, 10);
-                    if (Number.isFinite(parsed) && parsed > 0 && parsed <= 65_535) {
-                      settingsStore.update({ adapterPort: parsed });
-                    }
-                  }}
+                  value={portDraft}
+                  onChangeText={setPortDraft}
+                  onBlur={commitPortDraft}
+                  onSubmitEditing={commitPortDraft}
                   placeholder="35000"
                   placeholderTextColor={colors.textMuted}
                   keyboardType="number-pad"

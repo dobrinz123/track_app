@@ -1,8 +1,37 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { SqlDatabase, TelemetrySample } from '@circuit/core';
+import type { SqlBindValue, SqlDatabase, SqlRunResult, TelemetrySample } from '@circuit/core';
 import { createSqlJsDatabase } from '../support/sqlJsDatabase';
 import { migrateTelemetrySchema } from '../../src/persistence/telemetrySchema';
 import { TelemetryRecorder } from '../../src/persistence/telemetryRecorder';
+
+/**
+ * Byte-for-byte mirror of `apps/mobile/src/persistence/expoSqlDatabase.ts`'s
+ * `serializeSqlDatabase()` (F1 fix) -- that module's OWN top-level `import
+ * ... from 'expo-sqlite'` breaks vitest's parser the same way importing
+ * `react-native` directly does (confirmed: `composition.ts`'s own
+ * `IS_WEB_RUNTIME` doc comment; every composition test mocks
+ * `../../src/persistence/expoSqlDatabase` entirely rather than importing it
+ * for real), so it cannot be imported here even to reach this one pure,
+ * expo-independent helper. Keep the two in sync on any future change to
+ * either.
+ */
+function serializeSqlDatabase(inner: SqlDatabase): SqlDatabase {
+  let tail: Promise<unknown> = Promise.resolve();
+  function enqueue<T>(op: () => Promise<T>): Promise<T> {
+    const result = tail.then(op, op);
+    tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+  return {
+    execAsync: (sql: string) => enqueue(() => inner.execAsync(sql)),
+    runAsync: (sql: string, params?: readonly SqlBindValue[]) => enqueue(() => inner.runAsync(sql, params)),
+    getAllAsync: <T>(sql: string, params?: readonly SqlBindValue[]) => enqueue(() => inner.getAllAsync<T>(sql, params)),
+    withTransactionAsync: (fn: () => Promise<void>) => enqueue(() => inner.withTransactionAsync(fn)),
+  };
+}
 
 interface TelemetryRow {
   session_id: string;
@@ -166,5 +195,84 @@ describe('TelemetryRecorder 200k row cap', () => {
     const rows = await rowsFor(db, 'sess-cap-mid');
     expect(rows).toHaveLength(25);
     expect(recorder.diagnostics().capReached).toBe(true);
+  });
+
+  it('F5 fix: capReached flips true immediately once a SINGLE batch lands EXACTLY on the cap (not only once a LATER batch sees zero room), and further samples are dropped up front, never buffered', async () => {
+    const db = await migratedDb();
+    const recorder = new TelemetryRecorder(db, 'sess-cap-exact', 25); // rowCap === BATCH_SIZE, so one flush lands exactly on the cap.
+
+    for (let i = 0; i < 25; i += 1) recorder.record(sample('rpm', i, i), null); // exactly fills the cap in ONE batch.
+    await recorder.flush();
+
+    // Pre-fix, this stayed `false` here -- only a SUBSEQUENT batch seeing
+    // zero room flipped it, so diagnostics briefly under-reported and a
+    // caller landing exactly on 200,000 would see `capReached: false`.
+    expect(recorder.diagnostics()).toEqual({ rowsWritten: 25, capReached: true });
+
+    // A further record() is dropped by `record()`'s own guard up front
+    // (never buffered at all -- not merely discarded once flushed).
+    recorder.record(sample('rpm', 999, 999), null);
+    await recorder.flush();
+    expect((await rowsFor(db, 'sess-cap-exact')).length).toBe(25);
+  });
+});
+
+describe('TelemetryRecorder never opens its own transaction (F1 fix)', () => {
+  it('issues zero BEGINs, and (over a `serializeSqlDatabase`-wrapped connection, matching production wiring) its insert never lands between another caller\'s BEGIN and COMMIT on the SAME connection', async () => {
+    const log: string[] = [];
+    let openTransactionDepth = 0;
+    let sawInsertDuringOpenTransaction = false;
+
+    // A hand-rolled fake DB (not sql.js) that records BEGIN/COMMIT/insert
+    // ordering directly -- exactly what this ticket's binding design calls
+    // for, and lets this test assert "zero BEGINs from the recorder" without
+    // relying on a real engine's own nested-transaction error message.
+    const fakeInner: SqlDatabase = {
+      execAsync: async () => {},
+      runAsync: async (sql: string): Promise<SqlRunResult> => {
+        if (sql.startsWith('INSERT INTO telemetry_samples')) {
+          if (openTransactionDepth > 0) sawInsertDuringOpenTransaction = true;
+          log.push('telemetry-insert');
+        } else {
+          log.push(`run:${sql}`);
+        }
+        return { changes: 1 };
+      },
+      getAllAsync: async () => [],
+      withTransactionAsync: async (fn: () => Promise<void>): Promise<void> => {
+        log.push('BEGIN');
+        openTransactionDepth += 1;
+        try {
+          await fn();
+        } finally {
+          openTransactionDepth -= 1;
+          log.push('COMMIT');
+        }
+      },
+    };
+    // Production wiring (`expoSqlDatabase.ts`'s `openAppDatabase()`): the
+    // SAME wrapped connection is handed to BOTH the controller's own
+    // repository (its transactions) and `TelemetryRecorder` (see
+    // `telemetryRecorder.ts`'s own doc comment) -- reproduced here.
+    const db = serializeSqlDatabase(fakeInner);
+
+    // Simulates the controller's own lap-persistence transaction, held open
+    // for a tick, WHILE a telemetry flush is queued concurrently -- exactly
+    // the race the binding "a telemetry write can never interleave with an
+    // open controller transaction" guards against.
+    const controllerTx = db.withTransactionAsync(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+      log.push('controller-write');
+    });
+
+    const recorder = new TelemetryRecorder(db, 'sess-tx-race');
+    recorder.record(sample('rpm', 1, 1), null);
+    recorder.flushOnLapCrossing();
+
+    await Promise.all([controllerTx, recorder.flush()]);
+
+    expect(sawInsertDuringOpenTransaction).toBe(false);
+    expect(log.filter((entry) => entry === 'BEGIN')).toHaveLength(1); // ONLY the controller's -- the recorder issued zero.
+    expect(log).toEqual(['BEGIN', 'controller-write', 'COMMIT', 'telemetry-insert']);
   });
 });
