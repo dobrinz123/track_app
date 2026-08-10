@@ -328,9 +328,9 @@ describe('observed corner-speed overlay', () => {
 
     expect(asset.provenance.source).toContain('user-supplied onboard observation, M2 Competition, 2026-08-10');
     expect(asset.observations.map((observation) => observation.cornerId)).toEqual([
-      3, 4, 6, 8, 9, 11, 12,
+      1, 2, 3, 4, 6, 8, 9, 11, 12,
     ]);
-    expect(asset.observations).toHaveLength(7);
+    expect(asset.observations).toHaveLength(9);
   });
 
   it('uses observed speeds when present and falls back to model v2 when missing', () => {
