@@ -11,6 +11,10 @@ describe('Telemetry addendum settings defaults', () => {
     expect(DEFAULT_SETTINGS.adapterPort).toBe(35_000);
   });
 
+  it('DEFAULT_SETTINGS.transOilPidHex is empty (channel revision: disabled by default)', () => {
+    expect(DEFAULT_SETTINGS.transOilPidHex).toBe('');
+  });
+
   it('InMemorySettingsStore starts with the telemetry defaults and applies partial telemetry updates', () => {
     const store = new InMemorySettingsStore();
     expect(store.getSettings().telemetryEnabled).toBe(false);
@@ -22,6 +26,13 @@ describe('Telemetry addendum settings defaults', () => {
     expect(settings.adapterPort).toBe(35_001);
     // Untouched fields survive the partial update.
     expect(settings.units).toBe('kmh');
+  });
+
+  it('InMemorySettingsStore applies a transOilPidHex update', () => {
+    const store = new InMemorySettingsStore();
+    expect(store.getSettings().transOilPidHex).toBe('');
+    store.update({ transOilPidHex: '221E0C' });
+    expect(store.getSettings().transOilPidHex).toBe('221E0C');
   });
 });
 
@@ -55,6 +66,9 @@ describe('Telemetry addendum settings migration (SqlSettingsStore)', () => {
     expect(settings.telemetrySimulate).toBe(false);
     expect(settings.adapterHost).toBe('192.168.0.10');
     expect(settings.adapterPort).toBe(35_000);
+    // Channel revision: a row persisted before this ticket also has no
+    // transOilPidHex at all -- additively filled in as disabled, same rule.
+    expect(settings.transOilPidHex).toBe('');
   });
 
   it('round-trips a fresh telemetry-enabled update through persist() and a re-open (simulated app restart)', async () => {
@@ -74,5 +88,18 @@ describe('Telemetry addendum settings migration (SqlSettingsStore)', () => {
     expect(settings.telemetrySimulate).toBe(true);
     expect(settings.adapterHost).toBe('192.168.4.1');
     expect(settings.adapterPort).toBe(35_555);
+  });
+
+  it('round-trips a transOilPidHex update through persist() and a re-open (simulated app restart)', async () => {
+    const db = await createSqlJsDatabase();
+    await db.execAsync('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);');
+
+    const store1 = await SqlSettingsStore.create(db);
+    store1.update({ transOilPidHex: '221E0C' });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const store2 = await SqlSettingsStore.create(db);
+    expect(store2.getSettings().transOilPidHex).toBe('221E0C');
   });
 });

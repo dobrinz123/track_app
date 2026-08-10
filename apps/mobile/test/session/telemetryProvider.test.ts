@@ -1,7 +1,52 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Elm327State, TelemetrySample } from '@circuit/core';
 import { InMemorySettingsStore } from '../../src/session/settingsStore';
-import { createTelemetryProvider } from '../../src/session/telemetryProvider';
+import { buildCustomPids, buildPollPlan, createTelemetryProvider } from '../../src/session/telemetryProvider';
+
+describe('buildPollPlan (Telemetry addendum — channel revision, binding)', () => {
+  it('the default (transOilC unconfigured) plan omits transOilC entirely, in binding order', () => {
+    expect(buildPollPlan('')).toEqual([
+      { channel: 'rpm', hz: 5 },
+      { channel: 'speedKph', hz: 5 },
+      { channel: 'throttlePct', hz: 5 },
+      { channel: 'engineOilC', hz: 0.5 },
+      { channel: 'coolantC', hz: 0.2 },
+    ]);
+  });
+
+  it('whitespace-only transOilPidHex is treated as unconfigured, same as empty', () => {
+    expect(buildPollPlan('   ')).toEqual(buildPollPlan(''));
+  });
+
+  it('a configured transOilPidHex adds transOilC at 0.5Hz, between engineOilC and coolantC', () => {
+    expect(buildPollPlan('221E0C')).toEqual([
+      { channel: 'rpm', hz: 5 },
+      { channel: 'speedKph', hz: 5 },
+      { channel: 'throttlePct', hz: 5 },
+      { channel: 'engineOilC', hz: 0.5 },
+      { channel: 'transOilC', hz: 0.5 },
+      { channel: 'coolantC', hz: 0.2 },
+    ]);
+  });
+});
+
+describe('buildCustomPids (Telemetry addendum — channel revision, binding: "raw hex sent verbatim")', () => {
+  it('unconfigured (empty) transOilPidHex returns undefined, not an empty array', () => {
+    expect(buildCustomPids('')).toBeUndefined();
+  });
+
+  it('whitespace-only transOilPidHex also returns undefined', () => {
+    expect(buildCustomPids('   ')).toBeUndefined();
+  });
+
+  it('a configured transOilPidHex is passed through verbatim (trimmed) as the transOilC custom request', () => {
+    expect(buildCustomPids('221E0C')).toEqual([{ channel: 'transOilC', request: '221E0C' }]);
+  });
+
+  it('leading/trailing whitespace is trimmed, internal spacing preserved', () => {
+    expect(buildCustomPids('  22 1E 0C  ')).toEqual([{ channel: 'transOilC', request: '22 1E 0C' }]);
+  });
+});
 
 /**
  * `telemetryProvider.ts` never reaches `react-native-tcp-socket` unless

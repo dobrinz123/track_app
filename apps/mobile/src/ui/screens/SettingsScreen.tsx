@@ -49,6 +49,23 @@ export function parsePortDraft(text: string): number | null {
   return parsed;
 }
 
+/**
+ * Telemetry addendum — channel revision (2026-08-11, binding): validates a
+ * FULL `transOilPidHex` draft string on blur, same "validate the whole
+ * string, not keystroke-by-keystroke" pattern as `parsePortDraft` above.
+ * Hex characters (0-9, A-F/a-f) and spaces only -- any other character
+ * anywhere in the string rejects the whole draft (`null`). An empty or
+ * whitespace-only string is valid and means "disabled" (returns `''`);
+ * otherwise returns the string with leading/trailing whitespace trimmed
+ * (internal spacing, if any, is preserved -- the raw hex is sent verbatim).
+ * Exported (pure, no React/RN import) so its exact behavior can be pinned by
+ * a test, same reasoning as `parsePortDraft`'s own doc comment.
+ */
+export function parseHexPidDraft(text: string): string | null {
+  if (!/^[0-9A-Fa-f ]*$/.test(text)) return null;
+  return text.trim();
+}
+
 const DEADBAND_STEP_MS = 25;
 const MIN_DEADBAND_MS = 0;
 const MAX_DEADBAND_MS = 500;
@@ -139,6 +156,29 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
       setPortDraft(String(parsed));
     } else {
       setPortDraft(String(lastCommittedPort.current));
+    }
+  }
+
+  // Channel revision: same draft/blur pattern as the port field above --
+  // holds in-progress text while typing, validates the WHOLE string only on
+  // blur/submit via `parseHexPidDraft`.
+  const [transOilPidDraft, setTransOilPidDraft] = React.useState(settings.transOilPidHex);
+  const lastCommittedTransOilPid = React.useRef(settings.transOilPidHex);
+  React.useEffect(() => {
+    if (settings.transOilPidHex !== lastCommittedTransOilPid.current) {
+      lastCommittedTransOilPid.current = settings.transOilPidHex;
+      setTransOilPidDraft(settings.transOilPidHex);
+    }
+  }, [settings.transOilPidHex]);
+
+  function commitTransOilPidDraft(): void {
+    const parsed = parseHexPidDraft(transOilPidDraft);
+    if (parsed !== null) {
+      lastCommittedTransOilPid.current = parsed;
+      settingsStore.update({ transOilPidHex: parsed });
+      setTransOilPidDraft(parsed);
+    } else {
+      setTransOilPidDraft(lastCommittedTransOilPid.current);
     }
   }
 
@@ -302,9 +342,9 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
                 Vehicle telemetry
               </Text>
               <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
-                Advisory, experimental: reads engine RPM, speed, throttle, and coolant temperature from a
-                WiFi OBD-II adapter on your local network. Strictly read-only -- never used for lap timing or
-                safety decisions.
+                Advisory, experimental: reads engine RPM, speed, throttle, engine oil, and coolant temperature
+                from a WiFi OBD-II adapter on your local network. Strictly read-only -- never used for lap
+                timing or safety decisions.
               </Text>
             </View>
             <Switch
@@ -351,6 +391,29 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
                   accessibilityLabel="Telemetry adapter port"
                 />
               </View>
+              <View style={styles.fieldRow}>
+                <Text style={styles.fieldLabel} maxFontSizeMultiplier={1.3}>
+                  Trans oil PID (hex)
+                </Text>
+                <TextInput
+                  style={styles.fieldInput}
+                  value={transOilPidDraft}
+                  onChangeText={setTransOilPidDraft}
+                  onBlur={commitTransOilPidDraft}
+                  onSubmitEditing={commitTransOilPidDraft}
+                  placeholder="disabled"
+                  placeholderTextColor={colors.textMuted}
+                  autoCapitalize="characters"
+                  autoCorrect={false}
+                  keyboardType="numbers-and-punctuation"
+                  accessibilityLabel="Transmission oil temperature PID, hex"
+                />
+              </View>
+              <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                Advanced, vehicle-specific: no standard PID exists for transmission oil temperature. Enter your
+                vehicle's raw hex request to enable the reading, or leave blank to disable it. Advisory only --
+                consult your vehicle's documentation.
+              </Text>
               {
                 // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
                 __DEV__ ? (

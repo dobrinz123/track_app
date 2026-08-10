@@ -1,21 +1,55 @@
 import {
   createElm327Session,
   SimulatedElm327Transport,
+  type Elm327Config,
   type Elm327Session,
   type Elm327State,
   type ObdTransport,
+  type TelemetryChannelId,
   type TelemetrySample,
 } from '@circuit/core';
 import type { SettingsStore } from './settingsStore';
 import { TcpObdTransport } from './tcpObdTransport';
 
-/** Telemetry addendum's example poll plan (docs/architecture/contracts.md): rpm 10Hz, speedKph 5Hz, throttlePct 5Hz, coolantC 0.5Hz. */
-const POLL_PLAN = [
-  { channel: 'rpm', hz: 10 },
-  { channel: 'speedKph', hz: 5 },
-  { channel: 'throttlePct', hz: 5 },
-  { channel: 'coolantC', hz: 0.5 },
-] as const;
+/**
+ * Telemetry addendum — channel revision (2026-08-11, binding) poll plan:
+ * rpm 5Hz (record-only -- RPM left the strip, it's on the car's own dash),
+ * speedKph 5Hz, throttlePct 5Hz, engineOilC 0.5Hz (standard PID 0x5C),
+ * transOilC 0.5Hz ONLY when the user has configured a custom PID request
+ * (`settings.transOilPidHex` -- empty means "not configured", the entry is
+ * omitted entirely rather than relying on `@circuit/core`'s own "unconfigured
+ * transOilC is silently ignored" fallback), coolantC 0.2Hz. Exported (pure,
+ * no react-native import) so the exact plan built from a given settings value
+ * can be pinned by a test.
+ */
+export function buildPollPlan(transOilPidHex: string): Array<{ channel: TelemetryChannelId; hz: number }> {
+  const plan: Array<{ channel: TelemetryChannelId; hz: number }> = [
+    { channel: 'rpm', hz: 5 },
+    { channel: 'speedKph', hz: 5 },
+    { channel: 'throttlePct', hz: 5 },
+    { channel: 'engineOilC', hz: 0.5 },
+  ];
+  if (transOilPidHex.trim() !== '') {
+    plan.push({ channel: 'transOilC', hz: 0.5 });
+  }
+  plan.push({ channel: 'coolantC', hz: 0.2 });
+  return plan;
+}
+
+/**
+ * Telemetry addendum — channel revision: `transOilC` has no standard mode-01
+ * PID, so it's sent as a raw custom request (verbatim hex, decoded as the
+ * last data byte minus 40 by `@circuit/core`) built from the user's
+ * vehicle-specific `settings.transOilPidHex`. `undefined` (not an empty
+ * array) when unconfigured, matching `Elm327Config.customPids`'s own optional
+ * shape.
+ */
+export function buildCustomPids(
+  transOilPidHex: string,
+): Array<{ channel: TelemetryChannelId; request: string }> | undefined {
+  const trimmed = transOilPidHex.trim();
+  return trimmed === '' ? undefined : [{ channel: 'transOilC', request: trimmed }];
+}
 
 const INIT_TIMEOUT_MS = 5_000;
 const COMMAND_TIMEOUT_MS = 1_500;
@@ -42,26 +76,58 @@ export interface TelemetryProviderDeps {
 }
 
 // ---------------------------------------------------------------------------
-// Dashboard telemetry strip (Telemetry addendum — P4b amendment, binding):
+// Dashboard telemetry strip (Telemetry addendum — channel revision, binding):
 // "visible ONLY while telemetryEnabled AND the provider state is 'polling';
-// shows at most rpm, throttlePct, coolantC (coolant tinted amber >= 98 C, red
-// >= 105 C)." Kept here (a plain-TS module with no react-native import, so it
-// stays cheaply unit-testable, house rule) rather than in `TelemetryStrip.tsx`
-// itself, which stays thin/untested.
+// slots THR | ENG OIL | TRANS OIL -- third slot falls back to COOLANT when
+// transOilC is not configured. RPM and G never on the strip." Kept here (a
+// plain-TS module with no react-native import, so it stays cheaply
+// unit-testable, house rule) rather than in `TelemetryStrip.tsx` itself,
+// which stays thin/untested.
 // ---------------------------------------------------------------------------
+
+export type TelemetryStripTint = 'normal' | 'amber' | 'red';
+/** @deprecated kept as an alias -- `telemetryStripCoolantTint`'s original return type name, still exported for anything importing it by this name. */
+export type TelemetryStripCoolantTint = TelemetryStripTint;
+
+function tintFor(value: number | null, amberAt: number, redAt: number): TelemetryStripTint {
+  if (value === null) return 'normal';
+  if (value >= redAt) return 'red';
+  if (value >= amberAt) return 'amber';
+  return 'normal';
+}
 
 /** Coolant tint thresholds (named constants, binding: "coolant tinted amber >= 98 C, red >= 105 C"). */
 export const TELEMETRY_STRIP_COOLANT_AMBER_C = 98;
 export const TELEMETRY_STRIP_COOLANT_RED_C = 105;
 
-export type TelemetryStripCoolantTint = 'normal' | 'amber' | 'red';
+/** Engine oil tint thresholds (channel revision, binding: "engineOilC amber >= 120, red >= 130"). */
+export const TELEMETRY_STRIP_ENGINE_OIL_AMBER_C = 120;
+export const TELEMETRY_STRIP_ENGINE_OIL_RED_C = 130;
+
+/** Transmission oil tint thresholds (channel revision, binding: "transOilC amber >= 110, red >= 125"). */
+export const TELEMETRY_STRIP_TRANS_OIL_AMBER_C = 110;
+export const TELEMETRY_STRIP_TRANS_OIL_RED_C = 125;
 
 /** `null` (no coolant sample yet) reads as `'normal'` -- the strip's own placeholder dash, not an alarm color. */
-export function telemetryStripCoolantTint(coolantC: number | null): TelemetryStripCoolantTint {
-  if (coolantC === null) return 'normal';
-  if (coolantC >= TELEMETRY_STRIP_COOLANT_RED_C) return 'red';
-  if (coolantC >= TELEMETRY_STRIP_COOLANT_AMBER_C) return 'amber';
-  return 'normal';
+export function telemetryStripCoolantTint(coolantC: number | null): TelemetryStripTint {
+  return tintFor(coolantC, TELEMETRY_STRIP_COOLANT_AMBER_C, TELEMETRY_STRIP_COOLANT_RED_C);
+}
+
+/** `null` (no engine oil sample yet) reads as `'normal'`, same placeholder-not-alarm rule as coolant. */
+export function telemetryStripEngineOilTint(engineOilC: number | null): TelemetryStripTint {
+  return tintFor(engineOilC, TELEMETRY_STRIP_ENGINE_OIL_AMBER_C, TELEMETRY_STRIP_ENGINE_OIL_RED_C);
+}
+
+/** `null` (no trans oil sample yet, or the channel isn't configured) reads as `'normal'`. */
+export function telemetryStripTransOilTint(transOilC: number | null): TelemetryStripTint {
+  return tintFor(transOilC, TELEMETRY_STRIP_TRANS_OIL_AMBER_C, TELEMETRY_STRIP_TRANS_OIL_RED_C);
+}
+
+export type TelemetryStripThirdSlot = 'transOil' | 'coolant';
+
+/** Binding: "third slot falls back to COOLANT when transOilC is not configured" -- purely a settings check (`transOilPidHex`), independent of whether a transOilC sample has actually arrived yet. */
+export function telemetryStripThirdSlot(transOilPidHex: string): TelemetryStripThirdSlot {
+  return transOilPidHex.trim() === '' ? 'coolant' : 'transOil';
 }
 
 /** Binding visibility rule: "visible ONLY while telemetryEnabled AND the provider state is 'polling'". */
@@ -157,16 +223,20 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     generationCounter += 1;
     const id = generationCounter;
     const transport = buildTransport();
-    const next = createElm327Session(
-      transport,
-      {
-        pollPlan: POLL_PLAN.map((entry) => ({ ...entry })),
-        initTimeoutMs: INIT_TIMEOUT_MS,
-        commandTimeoutMs: COMMAND_TIMEOUT_MS,
-        maxConsecutiveErrors: MAX_CONSECUTIVE_ERRORS,
-      },
-      monotonicNow,
-    );
+    // Channel revision (binding): the poll plan (and whether transOilC's
+    // custom PID is even sent) is read fresh from settings on every
+    // `start()`, same freshness rule as `buildTransport()`'s own read above --
+    // a `transOilPidHex` edit takes effect on the next session, matching
+    // every other settings-gated telemetry field.
+    const transOilPidHex = settingsStore.getSettings().transOilPidHex;
+    const config: Elm327Config = {
+      pollPlan: buildPollPlan(transOilPidHex),
+      customPids: buildCustomPids(transOilPidHex),
+      initTimeoutMs: INIT_TIMEOUT_MS,
+      commandTimeoutMs: COMMAND_TIMEOUT_MS,
+      maxConsecutiveErrors: MAX_CONSECUTIVE_ERRORS,
+    };
+    const next = createElm327Session(transport, config, monotonicNow);
     // F3 fix: every listener below checks `current?.id === id` before doing
     // anything -- once a NEWER generation has replaced `current` (a fresh
     // `start()`, or this generation's own `stop()`/retry teardown), a late

@@ -40,6 +40,7 @@ import { ReplayTimeSource, ReplayTimestampedLocationProvider, ScaledReplayClock 
 import { TMR_CIRCUIT_PROFILE, TMR_CORNERS, TMR_RUNTIME_PROFILE } from './tmrProfile';
 import { startVoiceCoach } from './voiceCoach';
 import { createTelemetryProvider, type TelemetryProvider } from './telemetryProvider';
+import { createGForceProvider, type GForceProvider } from './gforceProvider';
 import { TelemetryRecorder } from '../persistence/telemetryRecorder';
 import { PASSTHROUGH_WRITE_GATE, type SqlWriteGate } from '../persistence/sqlWriteGate';
 
@@ -441,11 +442,26 @@ export const telemetryProvider: TelemetryProvider = createTelemetryProvider({
   isDev: telemetryIsDev,
 });
 
+// ---------------------------------------------------------------------------
+// G-force telemetry (Telemetry addendum — channel revision, binding):
+// `gforceProvider.ts`'s own module doc comment covers its math/portrait-mount
+// assumption/unit handling in full. SAME `telemetryClock` as the OBD
+// `telemetryProvider` above, so every telemetry channel (OBD + accelerometer)
+// shares one time base. Session-scoped, started/stopped alongside the OBD
+// provider by `startTelemetryRecording()`/`stopTelemetryRecording()` below --
+// but INDEPENDENT of it: neither provider's start/stop/failure ever gates the
+// other, and both feed the SAME `TelemetryRecorder`.
+// ---------------------------------------------------------------------------
+export const gForceProvider: GForceProvider = createGForceProvider({
+  monotonicNow: () => telemetryClock.now(),
+});
+
 let telemetryRecorder: TelemetryRecorder | null = null;
 /** In-flight telemetry shutdown (F2 residue fix) -- repeated `stopTelemetryRecording()` calls return this same promise so `onSessionEnded`'s barrier awaits the REAL final flush. Cleared on the next `startTelemetryRecording()`. */
 let telemetryShutdown: Promise<void> | null = null;
 let telemetryCurrentLapNumber: number | null = null;
 let unsubscribeTelemetrySample: (() => void) | null = null;
+let unsubscribeGForceSample: (() => void) | null = null;
 let unsubscribeTelemetryLapWatch: (() => void) | null = null;
 
 /**
@@ -480,6 +496,8 @@ function stopTelemetryRecording(): Promise<void> {
   telemetryRecorder = null;
   unsubscribeTelemetrySample?.();
   unsubscribeTelemetrySample = null;
+  unsubscribeGForceSample?.();
+  unsubscribeGForceSample = null;
   unsubscribeTelemetryLapWatch?.();
   unsubscribeTelemetryLapWatch = null;
   telemetryCurrentLapNumber = null;
@@ -492,14 +510,22 @@ function stopTelemetryRecording(): Promise<void> {
     // there -- this assignment is just defense in depth against any other
     // call path) so the sessionComplete barrier's getter below reads
     // "nothing to wait for" and relays with genuinely zero added latency: no
-    // timer is ever created for this path (binding spec).
+    // timer is ever created for this path (binding spec). Channel revision:
+    // `gForceProvider` gets the SAME defensive, un-awaited stop() -- it never
+    // recorded through `recorder` either on this path.
     telemetryShutdown = null;
     void telemetryProvider.stop();
+    void gForceProvider.stop();
     return Promise.resolve();
   }
   telemetryShutdown = (async () => {
     try {
-      const results = await Promise.allSettled([telemetryProvider.stop(), recorder.endSession()]);
+      // Channel revision: `gForceProvider.stop()` joins the SAME
+      // `allSettled` barrier as the OBD provider and the recorder's own
+      // flush -- a G-provider failure here is isolated (logged, never
+      // thrown) exactly like an OBD-provider failure already was, and never
+      // blocks or fails session-end persistence.
+      const results = await Promise.allSettled([telemetryProvider.stop(), gForceProvider.stop(), recorder.endSession()]);
       for (const result of results) {
         if (result.status === 'rejected') {
           console.warn('[composition] telemetry shutdown step failed', result.reason);
@@ -533,6 +559,13 @@ function startTelemetryRecording(sessionId: string): void {
   unsubscribeTelemetrySample = telemetryProvider.onSample((sample) => {
     recorder.record(sample, telemetryCurrentLapNumber);
   });
+  // Channel revision: `gForceProvider`'s latG/longG samples flow into the
+  // SAME recorder/lap-number tagging as the OBD provider's -- a separate
+  // subscription, independent lifecycle (see `gForceProvider.ts`'s own doc
+  // comment), but one shared `TelemetryRecorder`.
+  unsubscribeGForceSample = gForceProvider.onSample((sample) => {
+    recorder.record(sample, telemetryCurrentLapNumber);
+  });
   unsubscribeTelemetryLapWatch = facade.subscribe((state) => {
     // F4 fix (WPT3, binding): `facade.subscribe()` calls back synchronously
     // with the CURRENT state on every subscribe, including lap 0
@@ -548,6 +581,10 @@ function startTelemetryRecording(sessionId: string): void {
   });
 
   telemetryProvider.start();
+  // Channel revision: started alongside the OBD provider but independently --
+  // neither `start()` call is gated on the other, and neither's own state
+  // (running/failed) affects whether the other is called.
+  gForceProvider.start();
 }
 
 // F2 fix (WPT3, binding): registered once at module load (independent of

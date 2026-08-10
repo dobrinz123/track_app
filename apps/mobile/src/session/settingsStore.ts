@@ -52,6 +52,18 @@ export interface AppSettings {
   adapterHost: string;
   /** WiFi OBD-II adapter TCP port. */
   adapterPort: number;
+  /**
+   * Telemetry addendum — channel revision (2026-08-11, binding). Advanced,
+   * vehicle-specific setting: the raw hex OBD/mode-22 request for
+   * transmission oil temperature, sent verbatim (no standard mode-01 PID
+   * exists for this channel). Decoded as the last response data byte minus
+   * 40, same as every other OBD temperature channel. Empty string (the
+   * default) means "not configured" -- `telemetryProvider.ts`'s poll plan
+   * then omits `transOilC` entirely rather than polling a request nobody
+   * supplied. Hex characters and spaces only; validated on blur by
+   * `SettingsScreen`'s `parseHexPidDraft()`.
+   */
+  transOilPidHex: string;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -64,6 +76,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   telemetrySimulate: false,
   adapterHost: '192.168.0.10',
   adapterPort: 35_000,
+  transOilPidHex: '',
 };
 
 /**

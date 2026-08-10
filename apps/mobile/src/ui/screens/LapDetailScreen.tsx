@@ -13,15 +13,27 @@ import { loadLapTelemetry, bucketTelemetry, type TelemetrySampleRow } from '../.
 type Props = NativeStackScreenProps<RootStackParamList, 'LapDetail'>;
 
 /**
- * Telemetry addendum — P4b amendment (binding): the three channels a lap's
- * TELEMETRY section may chart, in display order. Charts render only for
+ * Telemetry addendum — channel revision (2026-08-11, binding): the channels a
+ * lap's TELEMETRY section may chart, in display order: speedKph, rpm,
+ * throttlePct, latG, longG, engineOilC, transOilC. Charts render only for
  * whichever of these are actually present in `readLapTelemetry`'s rows for
- * this lap -- a channel with zero samples never shows an empty chart.
+ * this lap -- a channel with zero samples never shows an empty chart (so
+ * `latG`/`longG` simply don't appear for a session recorded without motion
+ * data, and `transOilC` simply doesn't appear unless it was configured).
+ * Kept in sync with `apps/mobile/test/persistence/lapDetailChartChannels.test.ts`'s
+ * byte-for-byte mirror -- this file itself imports `react-native`, which
+ * breaks vitest's parser (same constraint as `SettingsScreen.tsx`'s
+ * `parsePortDraft`/`parseHexPidDraft`), so the exact channel-id order is
+ * pinned there instead.
  */
 const TELEMETRY_CHART_CHANNELS: readonly { id: TelemetryChannelId; label: string; unit: string; color: string }[] = [
   { id: 'speedKph', label: 'Speed', unit: 'km/h', color: colors.accent },
   { id: 'rpm', label: 'RPM', unit: 'rpm', color: colors.textSecondary },
   { id: 'throttlePct', label: 'Throttle', unit: '%', color: colors.textMuted },
+  { id: 'latG', label: 'Lateral G', unit: 'g', color: colors.accent },
+  { id: 'longG', label: 'Longitudinal G', unit: 'g', color: colors.textSecondary },
+  { id: 'engineOilC', label: 'Engine oil', unit: '°C', color: colors.warning },
+  { id: 'transOilC', label: 'Trans oil', unit: '°C', color: colors.danger },
 ];
 
 /** Thin-bar sparkline for one channel's bucketed lap telemetry. Pure View/Text -- no svg, no new deps (ticket constraint). */

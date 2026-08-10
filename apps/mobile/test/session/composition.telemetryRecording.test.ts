@@ -99,6 +99,15 @@ vi.mock('../../src/persistence/expoSqlDatabase', () => ({
   },
 }));
 
+/** Passive `GForceProvider` double -- exists ONLY so composition.ts's unconditional `createGForceProvider(...)` import/construction never reaches the real, lazy `import('expo-sensors')` inside `gforceProvider.ts` (vitest must never load it); this file's own tests don't need G samples, so start()/stop() are no-ops. */
+vi.mock('../../src/session/gforceProvider', () => ({
+  createGForceProvider: () => ({
+    start: () => {},
+    stop: async () => {},
+    onSample: () => () => undefined,
+  }),
+}));
+
 /** Fully test-controlled `TelemetryProvider` double -- `feedTelemetry()` below drives its `onSample` listeners directly, decoupled from any real adapter timing. */
 vi.mock('../../src/session/telemetryProvider', () => ({
   createTelemetryProvider: () => ({

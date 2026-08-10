@@ -80,6 +80,15 @@ vi.mock('../../src/session/telemetryProvider', () => ({
   }),
 }));
 
+/** Passive `GForceProvider` double -- exists ONLY so composition.ts's unconditional `createGForceProvider(...)` import/construction never reaches the real, lazy `import('expo-sensors')` inside `gforceProvider.ts` (vitest must never load it); this file's own tests don't need G samples. */
+vi.mock('../../src/session/gforceProvider', () => ({
+  createGForceProvider: () => ({
+    start: () => {},
+    stop: async () => {},
+    onSample: () => () => undefined,
+  }),
+}));
+
 function lap(lapNumber: number, durationMs: number): LapRecord {
   return {
     lapNumber,

@@ -1,5 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { SqlSessionRepository, cleanRecognitionLap, multiLapSession, type LocationSample } from '@circuit/core';
+import {
+  SqlSessionRepository,
+  cleanRecognitionLap,
+  multiLapSession,
+  type LocationSample,
+  type SqlDatabase,
+  type TelemetrySample,
+} from '@circuit/core';
 import { createSqlJsDatabase } from '../support/sqlJsDatabase';
 import { migrateTelemetrySchema } from '../../src/persistence/telemetrySchema';
 
@@ -33,6 +40,28 @@ const seeded = vi.hoisted(() => ({
 const tracked = vi.hoisted(() => ({
   gnssProviders: [] as StubLocationProviderInstance[],
   tcpConnectCalls: 0,
+}));
+
+/** Fully test-controlled `GForceProvider` double -- mirrors the `TcpObdTransport`/`telemetryProvider` mocking pattern above so the real, lazy `import('expo-sensors')` inside `gforceProvider.ts` is never reached by ANY composition test (vitest must never load it). `gforceDouble.emit()` drives its `onSample` listeners directly. */
+const gforceDouble = vi.hoisted(() => ({
+  sampleListeners: new Set<(s: unknown) => void>(),
+  startCalls: 0,
+  stopCalls: 0,
+}));
+
+vi.mock('../../src/session/gforceProvider', () => ({
+  createGForceProvider: () => ({
+    start: () => {
+      gforceDouble.startCalls += 1;
+    },
+    stop: async () => {
+      gforceDouble.stopCalls += 1;
+    },
+    onSample: (cb: (s: unknown) => void) => {
+      gforceDouble.sampleListeners.add(cb);
+      return () => gforceDouble.sampleListeners.delete(cb);
+    },
+  }),
 }));
 
 interface StubLocationProviderInstance {
@@ -128,6 +157,19 @@ function feed(provider: StubLocationProviderInstance, samples: readonly Location
   for (const sample of samples) provider.push(sample);
 }
 
+function feedGForce(sample: TelemetrySample): void {
+  for (const cb of [...gforceDouble.sampleListeners]) cb(sample);
+}
+
+interface TelemetryRow {
+  channel: string;
+  value: number;
+}
+
+async function telemetryRowsByChannel(db: SqlDatabase, channel: string): Promise<TelemetryRow[]> {
+  return db.getAllAsync<TelemetryRow>('SELECT channel, value FROM telemetry_samples WHERE channel = ?', [channel]);
+}
+
 /** Boots a FRESH composition module instance against a fresh, empty, telemetry-migrated sql.js-backed repository. */
 async function bootFresh(): Promise<typeof import('../../src/session/composition')> {
   const db = await createSqlJsDatabase();
@@ -137,6 +179,9 @@ async function bootFresh(): Promise<typeof import('../../src/session/composition
   seeded.repository = repository;
   tracked.gnssProviders.length = 0;
   tracked.tcpConnectCalls = 0;
+  gforceDouble.sampleListeners.clear();
+  gforceDouble.startCalls = 0;
+  gforceDouble.stopCalls = 0;
 
   vi.resetModules();
   const composition = await import('../../src/session/composition');
@@ -286,5 +331,84 @@ describe('composition.ts telemetry session integration (Telemetry addendum, MUST
     // `endSession()` command-level hook, independent of the controller
     // persistence outcome above.
     expect(runningStates.has(composition.telemetryProvider.getDiagnostics().state)).toBe(false);
+  });
+});
+
+describe('composition.ts G-force provider (Telemetry addendum — channel revision, binding): independence from the OBD provider', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('a dead/absent OBD adapter does not stop G recording -- gForceProvider still starts and its samples still land in telemetry_samples', async () => {
+    const composition = await bootFresh();
+    composition.settingsStore.update({ telemetryEnabled: true, telemetrySimulate: false }); // real-adapter path, mocked to fail immediately.
+    const gnss = tracked.gnssProviders[0]!;
+
+    composition.facade.startPreflight();
+    await flushBootstrap();
+    composition.facade.beginCalibration();
+    await flushBootstrap();
+
+    // The OBD provider genuinely reached 'failed' (dead adapter)...
+    expect(composition.telemetryProvider.getDiagnostics().state).toBe('failed');
+    // ...yet gForceProvider was started anyway, independently.
+    expect(gforceDouble.startCalls).toBe(1);
+
+    feedGForce({ channel: 'latG', value: 0.42, tMonoMs: 1 });
+    feedGForce({ channel: 'longG', value: -0.13, tMonoMs: 2 });
+
+    feed(gnss, cleanRecognitionLap(TMR_CIRCUIT_PROFILE, 900_001));
+    await flushBootstrap();
+    composition.facade.acceptCalibration();
+    await flushBootstrap();
+    composition.facade.arm();
+    feed(gnss, multiLapSession(TMR_CIRCUIT_PROFILE, 1, 900_002));
+    await flushBootstrap();
+    composition.facade.endSession();
+    await flushBootstrap();
+    await flushBootstrap();
+
+    expect(gforceDouble.stopCalls).toBe(1); // stopped alongside the (already-failed) OBD provider on session end.
+    const db = seeded.db as SqlDatabase;
+    const latRows = await telemetryRowsByChannel(db, 'latG');
+    const longRows = await telemetryRowsByChannel(db, 'longG');
+    expect(latRows).toEqual([{ channel: 'latG', value: 0.42 }]);
+    expect(longRows).toEqual([{ channel: 'longG', value: -0.13 }]);
+  });
+
+  it('a G-provider that never emits (e.g. no accelerometer available) does not affect OBD recording -- the simulated OBD transport still records normally', async () => {
+    const composition = await bootFresh();
+    composition.settingsStore.update({ telemetryEnabled: true, telemetrySimulate: true }); // simulated OBD transport -- reaches 'polling' and emits real samples on its own.
+    const gnss = tracked.gnssProviders[0]!;
+
+    composition.facade.startPreflight();
+    await flushBootstrap();
+    composition.facade.beginCalibration();
+    await flushBootstrap();
+
+    // gForceProvider started, but (per this test's premise) never emits a
+    // single sample -- e.g. no accelerometer on this device.
+    expect(gforceDouble.startCalls).toBe(1);
+    expect(gforceDouble.sampleListeners.size).toBe(1); // composition.ts DID subscribe -- it just never fires.
+
+    feed(gnss, cleanRecognitionLap(TMR_CIRCUIT_PROFILE, 910_001));
+    await flushBootstrap();
+    composition.facade.acceptCalibration();
+    await flushBootstrap();
+    composition.facade.arm();
+    feed(gnss, multiLapSession(TMR_CIRCUIT_PROFILE, 1, 910_002));
+    await flushBootstrap();
+
+    const runningStates = new Set(['connecting', 'initializing', 'polling']);
+    expect(runningStates.has(composition.telemetryProvider.getDiagnostics().state)).toBe(true);
+
+    composition.facade.endSession();
+    await flushBootstrap();
+    await flushBootstrap();
+
+    expect(gforceDouble.stopCalls).toBe(1);
+    const db = seeded.db as SqlDatabase;
+    expect((await telemetryRowsByChannel(db, 'latG')).length).toBe(0);
+    expect((await telemetryRowsByChannel(db, 'longG')).length).toBe(0);
   });
 });

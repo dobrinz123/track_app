@@ -10,13 +10,23 @@ import { useSettings } from '../hooks/useSettings';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Telemetry'>;
 
-/** The fixed 4-channel poll plan `telemetryProvider.ts` builds every `Elm327Session` with (Telemetry addendum). */
-const CHANNELS: readonly { id: TelemetryChannelId; label: string; unit: string; decimals: number }[] = [
+type Channel = { id: TelemetryChannelId; label: string; unit: string; decimals: number };
+
+/** The base poll-plan channels `telemetryProvider.ts` always builds every `Elm327Session` with (Telemetry addendum — channel revision). RPM stays on this monitor screen even though it left the dashboard strip -- this is not the strip. latG/longG are analysis-only (LapDetailScreen) and never shown here. */
+const BASE_CHANNELS: readonly Channel[] = [
   { id: 'rpm', label: 'Engine RPM', unit: 'rpm', decimals: 0 },
   { id: 'speedKph', label: 'Vehicle speed', unit: 'km/h', decimals: 0 },
   { id: 'throttlePct', label: 'Throttle', unit: '%', decimals: 0 },
+  { id: 'engineOilC', label: 'Engine oil temp', unit: '°C', decimals: 0 },
   { id: 'coolantC', label: 'Coolant temp', unit: '°C', decimals: 0 },
 ];
+
+const TRANS_OIL_CHANNEL: Channel = { id: 'transOilC', label: 'Trans oil temp', unit: '°C', decimals: 0 };
+
+/** `transOilC` only appears once the user has configured its custom PID -- an unconfigured channel is never polled at all (`telemetryProvider.ts`'s `buildPollPlan`), so showing its row unconditionally would just be a permanent dash. */
+function channelsFor(transOilPidHex: string): readonly Channel[] {
+  return transOilPidHex.trim() === '' ? BASE_CHANNELS : [...BASE_CHANNELS, TRANS_OIL_CHANNEL];
+}
 
 const STATE_LABEL: Record<Elm327State, string> = {
   idle: 'NOT CONNECTED',
@@ -112,7 +122,7 @@ export function TelemetryScreen(_props: Props): React.JSX.Element {
             )}
 
             <View style={styles.card}>
-              {CHANNELS.map((channel) => {
+              {channelsFor(settings.transOilPidHex).map((channel) => {
                 const value = lastValues[channel.id];
                 const hz = observedHz[channel.id];
                 return (

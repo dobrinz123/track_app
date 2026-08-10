@@ -1,0 +1,18 @@
+TASK: Produce the production-ready 2-layer PCB for the TRACE OBD dongle in KiCad 10, scripted and DRC-clean, with JLCPCB fabrication+assembly outputs. Binding source: hardware/DESIGN.md sections 2-4 (netlist section 3 is law).
+
+TOOLING: kicad-cli at C:\Users\dobri\AppData\Local\Programs\KiCad\10.0\bin\kicad-cli.exe. KiCad 10's bundled Python (same dir tree, python.exe under KiCad\10.0\bin) has the pcbnew module — use it for board generation scripting. KiCad standard footprint libraries are installed with the app (share/kicad/footprints).
+
+EXPECTED OUTCOME (hardware/kicad/trace-dongle/):
+1. generate_board.py — deterministic script that builds trace-dongle.kicad_pcb from scratch: board outline 55 x 25 mm rounded corners; nets per DESIGN.md section 3; footprints from KiCad standard libs (map: ESP32-C3-MINI-1 -> RF_Module:ESP32-C3-MINI-1; TJA1051 -> Package_SO:SOIC-8_3.9x4.9mm_P1.27mm; TPS54202 -> Package_TO_SOT_SMD:SOT-23-6; SS34 -> Diode_SMD:D_SMB; SMBJ24A -> Diode_SMD:D_SMB; PESD2CAN -> Package_TO_SOT_SMD:SOT-23; PTC 0603, R/C 0603, LEDs 0603, L1 -> Inductor_SMD:L_0630 (or closest 6.8x6.8 shielded); SW1 -> Button_Switch_SMD side tact; J2 -> Connector_PinHeader_2.54mm 1x06; J1 OBD plug: use a 5-pad fallback row (Connector_PinHeader vertical or plain pads) labeled 12V/GND/GND/CANH/CANL at the board edge per DESIGN.md 6 — a true J1962 PCB footprint is not in std libs; the pad row IS the rev-A connector interface, note it).
+2. Placement per DESIGN.md 4: pad row/protection at one short edge; ESP32 module antenna overhanging the OPPOSITE short edge with copper+zone keepout under the antenna area; buck loop compact; CANH/CANL as a short differential pair from U2 to the pad row.
+3. Routing: ALL nets routed (no ratsnest remaining — verify programmatically via pcbnew connectivity or DRC unconnected-items = 0). Track widths: power 0.6mm (12V/3V3), signal 0.25mm, CAN pair 0.3mm. GND: full pours both layers + stitching vias. Clearance 0.2mm min.
+4. DRC GATE (hard): "<kicad-cli>" pcb drc --severity-error --exit-code-violations trace-dongle.kicad_pcb must exit 0 with zero unconnected items and zero errors. Iterate placement/routing until it does. Report the final full DRC summary line and the REAL exit code. This is the acceptance criterion — do not report DONE without it.
+5. production/ outputs: gerbers (kicad-cli pcb export gerbers) + drill (export drill) zipped as gerbers.zip; bom.csv (JLCPCB columns: Comment,Designator,Footprint,LCSC) from DESIGN.md's BOM table; cpl.csv (JLCPCB columns: Designator,Mid X,Mid Y,Layer,Rotation) extracted from the final board via pcbnew scripting.
+6. A top+bottom SVG render for LEAD review: kicad-cli pcb export svg (both layers), saved as review-top.svg / review-bottom.svg.
+
+CONSTRAINTS: 2-layer only. All SMD top side. Keep the script re-runnable (delete+regenerate). If a named std footprint is missing in KiCad 10, choose the closest equivalent and log the substitution in the report (never silently). If ESP32-C3-MINI-1 footprint is absent from RF_Module, construct the courtyard/pads programmatically from the Espressif datasheet dimensions and say so.
+
+MUST DO: run every command for real with captured exit codes; final DRC exit code + violation counts verbatim; list every footprint substitution; state final board dims and remaining top-side free area.
+MUST NOT: No subagents. Nothing outside hardware/kicad/**. Do not alter DESIGN.md (report discrepancies).
+WRITE SET: hardware/kicad/**.
+OUTPUT FORMAT: First line DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED. Then: DRC verdict (exit code + counts verbatim); files produced with sizes; footprint substitutions; placement summary (3 sentences); concerns.
