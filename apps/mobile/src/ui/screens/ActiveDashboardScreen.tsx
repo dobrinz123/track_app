@@ -12,7 +12,7 @@ import { SectorBar } from '../components/SectorBar';
 import { LongPressButton } from '../components/LongPressButton';
 import { StatusBanner } from '../components/StatusBanner';
 import { CoachStrip, COACH_STRIP_HEIGHT } from '../components/CoachStrip';
-import { TelemetryStrip, TELEMETRY_STRIP_HEIGHT } from '../components/TelemetryStrip';
+import { TelemetryStrip } from '../components/TelemetryStrip';
 import { facade, settingsStore } from '../../session/composition';
 import { useFacadeState } from '../hooks/useFacadeState';
 import { useSettings } from '../hooks/useSettings';
@@ -86,20 +86,25 @@ export function ActiveDashboardScreen({ navigation }: Props): React.JSX.Element 
           </View>
         ) : null}
 
-        {/* Fixed-height slot (Telemetry addendum — P4b amendment, S7): reserved
-            ONLY while telemetry is enabled -- WITHIN it, `TelemetryStrip` shows
-            its three values only while the provider is actually 'polling', so
-            a connecting/failed adapter mid-session never reflows anything
-            below it (same pattern as `coachSlot` above). Placed here, in the
-            same dead space above the delta zone, so it never occludes the
-            timer/delta/sector elements below. */}
-        {settings.telemetryEnabled ? (
-          <View style={styles.telemetrySlot}>
-            <TelemetryStrip />
-          </View>
-        ) : null}
-
+        {/* H1 fix (Telemetry addendum — P4b amendment, S7, binding
+            SUPERSEDES the original "fixed slot" design): `TelemetryStrip`
+            contributes ZERO normal-flow height -- no reserved row, no extra
+            container gap -- unlike `coachSlot` above. It is instead an
+            absolutely-positioned overlay pinned to the TOP of `deltaZone`
+            (React Native Views default to `position: 'relative'`, so this
+            positions relative to `deltaZone` with no style change needed
+            here) -- `deltaZone`'s large dead space above the centered delta
+            figure. `TelemetryStrip` itself renders `null` (no styled card,
+            no border/background, no accessibility node) unless
+            settings.telemetryEnabled AND the provider is 'polling' (M1 fix,
+            `isTelemetryStripVisible`) -- so it is always mounted here,
+            unconditionally, and never reflows or occludes `DeltaDisplay`'s
+            own centering (the ONLY normal-flow child of `deltaZone` once the
+            strip is removed from flow) or anything below it. When hidden,
+            this is byte-identical to pre-P4b: no telemetry-related node in
+            the tree at all. */}
         <View style={styles.deltaZone}>
+          <TelemetryStrip />
           <DeltaDisplay delta={state.delta} fontSize={100} />
         </View>
 
@@ -156,7 +161,6 @@ const styles = StyleSheet.create({
   lapCounter: { ...typography.subtitle, color: colors.textSecondary, letterSpacing: 1 },
   bannerSlot: { minHeight: 0 },
   coachSlot: { height: COACH_STRIP_HEIGHT },
-  telemetrySlot: { height: TELEMETRY_STRIP_HEIGHT },
   deltaZone: { flexGrow: 3, alignItems: 'center', justifyContent: 'center' },
   lapTimeZone: { alignItems: 'center', justifyContent: 'center' },
   lapTimeCaption: { ...typography.label, color: colors.textMuted, marginTop: spacing.xs, letterSpacing: 1 },

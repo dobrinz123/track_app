@@ -1280,6 +1280,12 @@ export async function restoreProductionFacade(): Promise<void> {
     }
     if (controller !== null && productionFacade !== null) {
       activeController = controller;
+      // M2 fix: a stale `telemetryShutdown` left over from whatever session
+      // was active before this swap (production or a prior replay/mock) must
+      // never be mistaken for THIS newly-installed facade's own in-flight
+      // shutdown -- see `startDevReplaySession`'s matching comment below for
+      // the full failure mode this closes.
+      telemetryShutdown = null;
       facadeWrapper.setInner(productionFacade);
     }
   });
@@ -1359,6 +1365,22 @@ export async function startDevReplaySession(samples: LocationSample[]): Promise<
 
     replayController = devController;
     activeController = devController;
+    // M2 fix (Codex cross-review finding): DevReplay facades have no
+    // session-start telemetry callback of their own (`startTelemetryRecording()`
+    // -- the ONLY other place that clears `telemetryShutdown` -- is wired
+    // exclusively into `productionFacadeCallbacks().onSessionStarted`, below).
+    // Without this clear, a settled `telemetryShutdown` promise left over
+    // from an earlier PRODUCTION session stays sitting in module state, and
+    // `stopTelemetryRecording()`'s own `telemetryRecorder === null &&
+    // telemetryShutdown !== null` reuse branch (F2 fix, above) hands that
+    // stale promise right back out when THIS replay's `endSession()` fires --
+    // `facadeWrapper`'s `sessionCompleteBarrier` getter then sees a non-null
+    // barrier and creates a real `setTimeout` for it, even though this
+    // replay never ran telemetry at all (violating the binding "zero added
+    // latency, no timer" never-ran guarantee). Clearing it HERE, at every
+    // facade swap-in point, closes that regardless of which prior session
+    // (production, another replay, or the mock) left it behind.
+    telemetryShutdown = null;
     facadeWrapper.setInner(
       new RealSessionFacade(devController, {
         // Same post-session cache refresh the production facade gets, so a
@@ -1391,6 +1413,10 @@ export async function useMockFacadeForDevReplay(): Promise<void> {
       await flushAndDisposeReplay(stale);
     }
     activeController = null;
+    // M2 fix: same stale-`telemetryShutdown` guard as `startDevReplaySession`/
+    // `restoreProductionFacade` above -- the mock facade never runs telemetry
+    // either.
+    telemetryShutdown = null;
     facadeWrapper.setInner(new MockSessionFacade());
   });
 }

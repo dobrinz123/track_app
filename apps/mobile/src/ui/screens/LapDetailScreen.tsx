@@ -8,7 +8,7 @@ import { colors, radii, spacing, typography } from '../theme';
 import { TimeDisplay } from '../components/TimeDisplay';
 import { QualityPill } from '../components/QualityPill';
 import { sessionHistoryStore, getTelemetryReadDb } from '../../session/composition';
-import { readLapTelemetry, bucketTelemetry, type TelemetrySampleRow } from '../../persistence/telemetryRead';
+import { loadLapTelemetry, bucketTelemetry, type TelemetrySampleRow } from '../../persistence/telemetryRead';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'LapDetail'>;
 
@@ -90,6 +90,12 @@ export function LapDetailScreen({ route }: Props): React.JSX.Element {
   // whether this sessionId/lapNumber resolves to a real lap.
   const [telemetryRows, setTelemetryRows] = React.useState<TelemetrySampleRow[] | null>(null);
 
+  // M3 fix: `loadLapTelemetry` (persistence/telemetryRead.ts) owns the
+  // rejection handling -- a failed SQLite read is warned once and resolved
+  // to `[]` (this screen's own "zero rows" branch already hides the
+  // TELEMETRY section for that) instead of leaving `telemetryRows` stuck at
+  // `null` forever with an unhandled rejection. No retry, no spinner, per
+  // the binding "loading state" rule above.
   React.useEffect(() => {
     let cancelled = false;
     setTelemetryRows(null);
@@ -100,8 +106,8 @@ export function LapDetailScreen({ route }: Props): React.JSX.Element {
         cancelled = true;
       };
     }
-    void readLapTelemetry(db, sessionId, lapNumber).then((rows) => {
-      if (!cancelled) setTelemetryRows(rows);
+    void loadLapTelemetry(db, sessionId, lapNumber, () => cancelled).then((rows) => {
+      if (rows !== undefined) setTelemetryRows(rows);
     });
     return () => {
       cancelled = true;

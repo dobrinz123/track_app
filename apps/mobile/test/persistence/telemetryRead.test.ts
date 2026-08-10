@@ -1,8 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { SqlDatabase } from '@circuit/core';
 import { createSqlJsDatabase } from '../support/sqlJsDatabase';
 import { migrateTelemetrySchema } from '../../src/persistence/telemetrySchema';
-import { readLapTelemetry, bucketTelemetry, type TelemetrySampleRow } from '../../src/persistence/telemetryRead';
+import {
+  readLapTelemetry,
+  bucketTelemetry,
+  loadLapTelemetry,
+  type TelemetrySampleRow,
+} from '../../src/persistence/telemetryRead';
 
 async function migratedDb(): Promise<SqlDatabase> {
   const db = await createSqlJsDatabase();
@@ -142,5 +147,108 @@ describe('bucketTelemetry', () => {
     expect(result.buckets).toEqual([null, null, null, null, null, null]);
     expect(result.min).toBeNull();
     expect(result.max).toBeNull();
+  });
+
+  // L1 fix (Codex cross-review finding): bucketCount must be a positive
+  // integer -- a non-positive or fractional value throws immediately instead
+  // of an opaque `new Array(...)` error (negative/fractional) or a silent
+  // empty chart from invalid `-1` indexing (zero).
+  describe('L1 fix: bucketCount validation', () => {
+    const rows: TelemetrySampleRow[] = [{ tMonoMs: 0, channel: 'rpm', value: 1000 }];
+
+    it('bucketCount 0 throws a TypeError', () => {
+      expect(() => bucketTelemetry(rows, 'rpm', 0)).toThrow(TypeError);
+      expect(() => bucketTelemetry(rows, 'rpm', 0)).toThrow(/positive integer/);
+    });
+
+    it('bucketCount -1 throws a TypeError', () => {
+      expect(() => bucketTelemetry(rows, 'rpm', -1)).toThrow(TypeError);
+    });
+
+    it('bucketCount 2.5 (fractional) throws a TypeError', () => {
+      expect(() => bucketTelemetry(rows, 'rpm', 2.5)).toThrow(TypeError);
+    });
+
+    it('bucketCount 1 works (a single bucket averaging every sample)', () => {
+      const result = bucketTelemetry(rows, 'rpm', 1);
+      expect(result.buckets).toEqual([1000]);
+    });
+
+    it('the guard also applies to an empty-channel input (no early-return bypass for bucketCount 0)', () => {
+      expect(() => bucketTelemetry([], 'rpm', 0)).toThrow(TypeError);
+    });
+  });
+});
+
+describe('loadLapTelemetry (M3 fix: LapDetailScreen read-rejection handling)', () => {
+  it('resolves the rows on a successful read, and does not call onError', async () => {
+    const db = await migratedDb();
+    await insertRow(db, 's1', 1, 100, 'rpm', 1000);
+    const onError = () => {
+      throw new Error('onError must not be called on success');
+    };
+
+    const rows = await loadLapTelemetry(db, 's1', 1, () => false, onError);
+
+    expect(rows).toEqual([{ tMonoMs: 100, channel: 'rpm', value: 1000 }]);
+  });
+
+  it('a rejected read resolves to [] and calls onError exactly once (no throw, no retry)', async () => {
+    const failingDb = {
+      getAllAsync: async () => {
+        throw new Error('SQLite read failed (test double)');
+      },
+    } as unknown as SqlDatabase;
+    let errorCalls = 0;
+    let lastError: unknown;
+
+    const rows = await loadLapTelemetry(failingDb, 's1', 1, () => false, (error) => {
+      errorCalls += 1;
+      lastError = error;
+    });
+
+    expect(rows).toEqual([]);
+    expect(errorCalls).toBe(1);
+    expect((lastError as Error).message).toBe('SQLite read failed (test double)');
+  });
+
+  it('cancelled after a successful read resolves undefined -- caller must not set rows', async () => {
+    const db = await migratedDb();
+    await insertRow(db, 's1', 1, 100, 'rpm', 1000);
+
+    const rows = await loadLapTelemetry(db, 's1', 1, () => true);
+
+    expect(rows).toBeUndefined();
+  });
+
+  it('cancelled after a REJECTED read still warns once, but resolves undefined -- caller must not set rows', async () => {
+    const failingDb = {
+      getAllAsync: async () => {
+        throw new Error('SQLite read failed (test double)');
+      },
+    } as unknown as SqlDatabase;
+    let errorCalls = 0;
+
+    const rows = await loadLapTelemetry(failingDb, 's1', 1, () => true, () => {
+      errorCalls += 1;
+    });
+
+    expect(rows).toBeUndefined();
+    expect(errorCalls).toBe(1);
+  });
+
+  it('defaults onError to console.warn (never throws past this helper) when no onError is supplied', async () => {
+    const failingDb = {
+      getAllAsync: async () => {
+        throw new Error('SQLite read failed (test double)');
+      },
+    } as unknown as SqlDatabase;
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const rows = await loadLapTelemetry(failingDb, 's1', 1, () => false);
+
+    expect(rows).toEqual([]);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    warnSpy.mockRestore();
   });
 });

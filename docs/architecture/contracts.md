@@ -367,6 +367,13 @@ export const TELEMETRY_SCHEMA_VERSION = 1;
   returns rows ordered by t_mono_ms; UI aggregates into fixed-count buckets
   (default 80) by averaging per bucket. Charts render ONLY when rows exist; their
   absence changes nothing else on the screen.
-- Dashboard telemetry strip: visible ONLY while telemetryEnabled AND the provider
-  state is 'polling'; shows at most rpm, throttlePct, coolantC (coolant tinted
-  amber >= 98 C, red >= 105 C). It must never occlude or reflow timing elements.
+- Dashboard telemetry strip (H1 fix, binding — SUPERSEDES the original "fixed
+  slot" phrasing): contributes ZERO normal-flow height on the dashboard — no
+  reserved row, no container gap. It renders as an absolutely-positioned
+  overlay pinned to the top of the delta zone (the flex-growing region around
+  the live delta figure), and renders NOTHING at all — no styled card, no
+  accessibility node — unless telemetryEnabled AND the provider state is
+  'polling'; shows at most rpm, throttlePct, coolantC (coolant tinted amber
+  >= 98 C, red >= 105 C) while visible. It must never occlude or reflow
+  timing elements, and when hidden the dashboard layout is byte-identical to
+  before this addendum.

@@ -43,6 +43,40 @@ export async function readLapTelemetry(
   return rows.map((row) => ({ tMonoMs: row.t_mono_ms, channel: row.channel, value: row.value }));
 }
 
+/**
+ * M3 fix (Telemetry addendum — P4b amendment, binding): wraps `readLapTelemetry`
+ * with the binding "loading state: render nothing until the read resolves (no
+ * spinner); a rejected read hides the section instead of leaving it stuck"
+ * behavior for `LapDetailScreen`'s load effect -- extracted here (plain-TS,
+ * no react-native import) so it is directly unit-testable, mirroring
+ * `session/telemetryProvider.ts`'s own view-model split for `TelemetryStrip`
+ * (house rule: the `.tsx` screen itself stays thin/untested).
+ *
+ * NEVER throws or rejects: a `readLapTelemetry` rejection is caught, warned
+ * ONCE via `onError` (defaults to `console.warn`, not a retry/spinner), and
+ * resolves to `[]` -- `LapDetailScreen`'s existing "zero rows" branch already
+ * hides the TELEMETRY section for an empty array, so no separate error UI is
+ * needed. `isCancelled` is consulted AFTER the read settles (success OR
+ * failure) -- when the caller reports the effect already superseded/unmounted
+ * by then, this resolves `undefined` instead, and the caller must not call
+ * `setRows` with it.
+ */
+export async function loadLapTelemetry(
+  db: SqlDatabase,
+  sessionId: string,
+  lapNumber: number,
+  isCancelled: () => boolean,
+  onError: (error: unknown) => void = (error) => console.warn('[telemetryRead] readLapTelemetry failed', error),
+): Promise<TelemetrySampleRow[] | undefined> {
+  try {
+    const rows = await readLapTelemetry(db, sessionId, lapNumber);
+    return isCancelled() ? undefined : rows;
+  } catch (error) {
+    onError(error);
+    return isCancelled() ? undefined : [];
+  }
+}
+
 export interface BucketedTelemetry {
   /** Length always exactly `bucketCount`. `null` for any bucket with zero samples of `channel` in it. */
   buckets: Array<number | null>;
@@ -65,12 +99,22 @@ export interface BucketedTelemetry {
  * Degenerate spans (a single sample, or every row sharing the exact same
  * `tMonoMs`) place every `channel` sample into bucket 0 rather than
  * dividing by zero.
+ *
+ * L1 fix: `bucketCount` MUST be a positive integer -- a non-positive or
+ * fractional value throws a `TypeError` immediately rather than either
+ * throwing an opaque `Invalid array length` from `new Array(...)` (negative/
+ * fractional) or silently returning an empty chart via invalid `-1`
+ * indexing (zero, per `bucketTelemetry`'s own `index >= bucketCount` clamp
+ * never triggering when `bucketCount` is 0).
  */
 export function bucketTelemetry(
   rows: readonly TelemetrySampleRow[],
   channel: TelemetryChannelId,
   bucketCount = 80,
 ): BucketedTelemetry {
+  if (!Number.isInteger(bucketCount) || bucketCount <= 0) {
+    throw new TypeError(`bucketTelemetry: bucketCount must be a positive integer, got ${bucketCount}`);
+  }
   const channelRows = rows.filter((row) => row.channel === channel);
   if (channelRows.length === 0) {
     return { buckets: new Array<number | null>(bucketCount).fill(null), min: null, max: null };
