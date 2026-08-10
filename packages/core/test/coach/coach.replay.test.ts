@@ -53,25 +53,52 @@ function replay(): RecordedCue[] {
   return cues;
 }
 
+/** Collapses a raw per-match cue stream into one entry per (targetLap, corner, kind) "activation" -- the live engine (F1/F2) re-emits a corner every match while approaching, so counting raw cues no longer means "one per corner". */
+function activationsByLap(cues: RecordedCue[]): Map<number, { cornerId: number; kind: CoachCue['kind'] }[]> {
+  const byLap = new Map<number, { cornerId: number; kind: CoachCue['kind'] }[]>();
+  for (const { targetLap, cue } of cues) {
+    const lapActivations = byLap.get(targetLap) ?? [];
+    const last = lapActivations[lapActivations.length - 1];
+    if (last === undefined || last.cornerId !== cue.cornerId || last.kind !== cue.kind) {
+      lapActivations.push({ cornerId: cue.cornerId, kind: cue.kind });
+    }
+    byLap.set(targetLap, lapActivations);
+  }
+  return byLap;
+}
+
 describe('coaching replay integration on TMR v2', () => {
-  it('emits exactly one ordered cue per corner per complete target lap, deterministically', () => {
+  it('deterministically emits a live, repeatedly-updating cue per corner (F1/F2) in strict travel order, once per corner per complete target lap', () => {
     const first = replay();
     const second = replay();
     expect(second).toEqual(first);
 
-    const byLap = new Map<number, RecordedCue[]>();
-    for (const item of first) {
-      const lap = byLap.get(item.targetLap) ?? [];
-      lap.push(item);
-      byLap.set(item.targetLap, lap);
+    // Live re-emission (F1/F2): many more raw cues than "one per corner" now,
+    // since each corner is re-announced every match while in the lead window.
+    expect(first.length).toBeGreaterThan(16);
+
+    for (const { cue } of first) {
+      expect(cue.distanceToTargetM).toBeGreaterThanOrEqual(0);
     }
+
+    const byLap = activationsByLap(first);
     expect([...byLap.keys()]).toEqual([1, 2]);
-    for (const lap of byLap.values()) {
-      expect(lap.map((item) => item.cue.cornerId)).toEqual(
-        Array.from({ length: lap.length }, (_, index) => index + 1),
-      );
+    for (const activations of byLap.values()) {
+      // Collapse the BRAKE->CORNER_AHEAD kind-flip (same corner, target
+      // changes) down to one entry per corner before checking travel order.
+      const cornerOrder: number[] = [];
+      for (const activation of activations) {
+        if (cornerOrder[cornerOrder.length - 1] !== activation.cornerId) cornerOrder.push(activation.cornerId);
+      }
+      expect(cornerOrder).toEqual(Array.from({ length: cornerOrder.length }, (_, index) => index + 1));
     }
-    expect(byLap.get(1)?.length).toBe(byLap.get(2)?.length);
-    expect(byLap.get(1)?.length).toBeGreaterThanOrEqual(8);
+    // Both laps must announce the same DISTINCT corner set (activation
+    // counts can differ by one BRAKE->CORNER_AHEAD kind-split landing on a
+    // different sample boundary between laps -- that's sampling phase, not a
+    // missed/duplicated corner).
+    const lap1Corners = new Set((byLap.get(1) ?? []).map((a) => a.cornerId));
+    const lap2Corners = new Set((byLap.get(2) ?? []).map((a) => a.cornerId));
+    expect(lap1Corners).toEqual(lap2Corners);
+    expect(lap1Corners.size).toBeGreaterThanOrEqual(8);
   });
 });

@@ -1,6 +1,8 @@
 import type { CoachCue } from '@circuit/core';
 import type { FacadeState, SessionFacade } from './facade';
 import type { SettingsStore } from './settingsStore';
+import { formatSpeedSpoken } from '../ui/format';
+import { startLifecycleListener } from '../platform';
 
 /**
  * Phase 3 coaching addendum: optional voice cues over `expo-speech`. Advisory
@@ -57,13 +59,25 @@ function severityWord(severity: CoachCue['severity']): string {
   return SEVERITY_WORDS[severity];
 }
 
-/** Short English phrase for a cue, per the binding ticket spec. Exported for direct unit testing. */
-export function phraseForCue(cue: CoachCue): string {
+/**
+ * Short English phrase for a cue, per the binding ticket spec (F1/F2/F5
+ * fixes). Exported for direct unit testing. `units` defaults to `'kmh'` so
+ * every existing call site that doesn't yet care about the setting keeps
+ * behaving exactly as before.
+ *
+ * - BRAKE always includes the live distance-to-brake-point IN METERS (never
+ *   a bare "Brake." command with no distance -- a driver hearing this must
+ *   know how far away the brake point still is).
+ * - CORNER_AHEAD always includes a full spoken unit word for the advisory
+ *   speed (never a bare number, which a mph-setting driver could otherwise
+ *   misread as already being in mph).
+ */
+export function phraseForCue(cue: CoachCue, units: 'kmh' | 'mph' = 'kmh'): string {
   if (cue.kind === 'BRAKE') {
-    return `Brake. Corner ${cue.cornerId}, ${severityWord(cue.severity)}.`;
+    return `Brake in ${Math.round(cue.distanceToTargetM)} meters. Corner ${cue.cornerId}, ${severityWord(cue.severity)}.`;
   }
   const direction = cue.direction === 'left' ? 'left' : 'right';
-  return `Corner ${cue.cornerId}, ${direction}, ${Math.round(cue.advisorySpeedKph)}.`;
+  return `Corner ${cue.cornerId} ahead, ${direction}, ${formatSpeedSpoken(cue.advisorySpeedKph, units)}.`;
 }
 
 /** Dedupe key: cornerId + kind (lap-scoped separately via `spokenThisLap`'s per-lap clear below). */
@@ -71,22 +85,8 @@ function cueKey(cue: CoachCue): string {
   return `${cue.cornerId}:${cue.kind}`;
 }
 
-/** Speaks one cue: stop (never queue-stack) then speak, each independently guarded so a failure in one never blocks/throws past this function. */
-async function speakCue(cue: CoachCue, speaker: VoiceCoachSpeaker): Promise<void> {
-  try {
-    await speaker.stop();
-  } catch {
-    // Voice failure must never affect the session.
-  }
-  try {
-    speaker.speak(phraseForCue(cue));
-  } catch {
-    // Voice failure must never affect the session.
-  }
-}
-
 export interface VoiceCoachController {
-  /** Unsubscribes from the facade; safe to call multiple times. */
+  /** Unsubscribes from the facade and settings, and stops the app-lifecycle listener; safe to call multiple times. */
   dispose(): void;
 }
 
@@ -97,7 +97,13 @@ export interface VoiceCoachController {
  * cleared whenever `lapNumber` changes, matching `CoachEngine.reset()`'s own
  * per-lap rearm at S/F crossing). Settings are read fresh on every facade
  * update, so a toggle flip takes effect on the very next cue without
- * needing its own subscription.
+ * needing its own subscription for THAT purpose -- but a SEPARATE settings
+ * subscription (M-voice-lifecycle fix) additionally stops any in-flight/
+ * queued speech the INSTANT `coachingEnabled`/`voiceCoachEnabled` turns off,
+ * rather than waiting for the next cue attempt. The app-lifecycle listener
+ * (M-voice-lifecycle fix) does the same on backgrounding -- composition.ts
+ * deliberately keeps the session running in the background, but speech must
+ * not keep talking once the screen isn't in front of the driver.
  */
 export function startVoiceCoach(
   facade: SessionFacade,
@@ -106,8 +112,45 @@ export function startVoiceCoach(
 ): VoiceCoachController {
   const spokenThisLap = new Set<string>();
   let trackedLap: number | null = null;
+  let voiceWasOn = false;
 
-  const unsubscribe = facade.subscribe((state: FacadeState) => {
+  /**
+   * Single serialized promise chain, SCOPED TO THIS `startVoiceCoach()`
+   * instance (M-voice-serialization fix) -- EVERY utterance for this
+   * instance's whole lifetime is `chain = chain.then(stop).then(speak)`, so
+   * a rapid corner chain (e.g. C8 -> C9) can never overlap: the next
+   * `stop()` never starts before the previous `stop()` AND `speak()` have
+   * both settled, even if `stop()` itself is slow or rejects. A rejection
+   * anywhere in the chain is caught and swallowed at that link so the chain
+   * itself never breaks (a later cue must still get its turn).
+   */
+  let voiceChain: Promise<void> = Promise.resolve();
+
+  /** Enqueues one cue's stop-then-speak pair onto the chain; never lets a rejection propagate out (voice failure must never affect the session or stall future cues). */
+  function enqueueSpeak(cue: CoachCue, units: 'kmh' | 'mph'): void {
+    voiceChain = voiceChain
+      .then(() => speaker.stop())
+      .catch(() => {
+        // Voice failure must never affect the session, and must never skip
+        // straight to overlapping the previous utterance -- proceed to
+        // speak only after this settles, exactly as a successful stop()
+        // would.
+      })
+      .then(() => {
+        try {
+          speaker.speak(phraseForCue(cue, units));
+        } catch {
+          // Voice failure must never affect the session.
+        }
+      });
+  }
+
+  /** Enqueues a bare `stop()` onto the chain (M-voice-lifecycle fix) -- background transition or a mid-session toggle-off. Guarded the same way `enqueueSpeak` is. */
+  function enqueueStop(): void {
+    voiceChain = voiceChain.then(() => speaker.stop()).catch(() => undefined);
+  }
+
+  const unsubscribeFacade = facade.subscribe((state: FacadeState) => {
     if (trackedLap !== state.lapNumber) {
       trackedLap = state.lapNumber;
       spokenThisLap.clear();
@@ -123,12 +166,24 @@ export function startVoiceCoach(
     if (spokenThisLap.has(key)) return;
     spokenThisLap.add(key);
 
-    void speakCue(cue, speaker);
+    enqueueSpeak(cue, settings.units);
+  });
+
+  const unsubscribeSettings = settingsStore.subscribe((settings) => {
+    const voiceIsOn = settings.coachingEnabled && settings.voiceCoachEnabled;
+    if (voiceWasOn && !voiceIsOn) enqueueStop();
+    voiceWasOn = voiceIsOn;
+  });
+
+  const lifecycle = startLifecycleListener({
+    onBackground: () => enqueueStop(),
   });
 
   return {
     dispose(): void {
-      unsubscribe();
+      unsubscribeFacade();
+      unsubscribeSettings();
+      lifecycle.stop();
     },
   };
 }

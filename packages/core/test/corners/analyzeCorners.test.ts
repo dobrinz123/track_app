@@ -1,15 +1,17 @@
 import { readFileSync } from 'node:fs';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
+import type { LocalPoint } from '../../src/contracts';
 import { CORNER_ANALYSIS_VERSION } from '../../src/contracts';
 import {
   analyzeCorners,
   applyObservedSpeeds,
   loadObservedSpeedsFromJson,
 } from '../../src/corners';
-import { curvatureProfile, polylineCumulative, polylineLength } from '../../src/geometry';
+import { createProjection, curvatureProfile, polylineCumulative, polylineLength } from '../../src/geometry';
 import { loadProfileFromJson, makeTestProfile, validateProfile } from '../../src/profile';
+import type { RuntimeProfile } from '../../src/profile';
 
 const TMR_V2_ASSET_URL = new URL(
   '../../assets/circuits/transilvania-motor-ring.v2.json',
@@ -20,14 +22,18 @@ const TMR_OBSERVED_SPEEDS_ASSET_URL = new URL(
   import.meta.url,
 );
 
+/**
+ * CORNER_ANALYSIS_VERSION 3 corner IDs (M-direction-split fix remapped these
+ * -- see `contracts.ts`'s doc comment on the constant for the full history).
+ */
 const TMR_OBSERVED_APEX_SPEEDS = new Map([
-  [2, 159],
-  [3, 65],
-  [5, 74],
-  [6, 170],
-  [7, 107],
-  [8, 65],
-  [9, 112],
+  [3, 159],
+  [4, 65],
+  [6, 74],
+  [8, 170],
+  [9, 107],
+  [11, 65],
+  [12, 112],
 ]);
 
 function testRuntime() {
@@ -42,9 +48,129 @@ function tmrRuntime() {
   return result.runtime;
 }
 
+// --- M-direction-split synthetic chicane fixture -----------------------
+// A minimal, hand-built RuntimeProfile (NOT going through full CircuitProfile
+// validation -- analyzeCorners only reads centerline/cumulativeDistancesM/
+// startFinishGate.distanceM) with a real S-chicane: a sustained ~110-degree
+// LEFT arc immediately followed by a sustained ~110-degree RIGHT arc, radius
+// tight enough (60m, curvature ~0.0167 rad/m) to stay comfortably above the
+// default cornerThreshold (0.008) on both sides of the crossover, each arm
+// (~115m) well past the default gapToleranceM (25m) -- exactly the "no real
+// gap between opposite bends" shape the fix targets. Long straights (radius
+// ~0, curvature far below threshold) bound it so nothing else registers as a
+// corner.
+function arcPoints(
+  start: LocalPoint,
+  headingRad: number,
+  radiusM: number,
+  turnRad: number,
+  stepM: number,
+): { points: LocalPoint[]; end: LocalPoint; endHeading: number } {
+  const arcLengthM = Math.abs(radiusM * turnRad);
+  const steps = Math.max(2, Math.round(arcLengthM / stepM));
+  const angularStep = turnRad / steps;
+  const segStepM = arcLengthM / steps;
+  const points: LocalPoint[] = [];
+  let heading = headingRad;
+  let point = start;
+  for (let step = 0; step < steps; step += 1) {
+    heading += angularStep;
+    point = { e: point.e + Math.cos(heading) * segStepM, n: point.n + Math.sin(heading) * segStepM };
+    points.push(point);
+  }
+  return { points, end: point, endHeading: heading };
+}
+
+function straightPoints(
+  start: LocalPoint,
+  headingRad: number,
+  lengthM: number,
+  stepM: number,
+): { points: LocalPoint[]; end: LocalPoint } {
+  const steps = Math.max(2, Math.round(lengthM / stepM));
+  const segStepM = lengthM / steps;
+  const points: LocalPoint[] = [];
+  let point = start;
+  for (let step = 0; step < steps; step += 1) {
+    point = { e: point.e + Math.cos(headingRad) * segStepM, n: point.n + Math.sin(headingRad) * segStepM };
+    points.push(point);
+  }
+  return { points, end: point };
+}
+
+function chicaneRuntime(): RuntimeProfile {
+  const stepM = 4;
+  const turnRad = (110 * Math.PI) / 180;
+  let heading = 0;
+  let point: LocalPoint = { e: 0, n: 0 };
+  const centerline: LocalPoint[] = [point];
+
+  const leadIn = straightPoints(point, heading, 150, stepM);
+  centerline.push(...leadIn.points);
+  point = leadIn.end;
+
+  const leftArc = arcPoints(point, heading, 60, turnRad, stepM);
+  centerline.push(...leftArc.points);
+  point = leftArc.end;
+  heading = leftArc.endHeading;
+
+  const rightArc = arcPoints(point, heading, 60, -turnRad, stepM);
+  centerline.push(...rightArc.points);
+  point = rightArc.end;
+  heading = rightArc.endHeading;
+
+  const leadOut = straightPoints(point, heading, 150, stepM);
+  centerline.push(...leadOut.points);
+
+  const cumulativeDistancesM = polylineCumulative(centerline);
+  const zeroGate = { gate: { id: 'sf', kind: 'startFinish' as const, a: { lat: 0, lon: 0 }, b: { lat: 0, lon: 0 } }, a: { e: 0, n: 0 }, b: { e: 0, n: 0 }, distanceM: 0 };
+  return {
+    projection: createProjection({ lat: 0, lon: 0 }),
+    centerline,
+    cumulativeDistancesM,
+    startFinishGate: zeroGate,
+    sectorGates: [],
+  };
+}
+
 describe('deterministic corner analysis', () => {
   it('materializes the versioned coaching contract', () => {
-    expect(CORNER_ANALYSIS_VERSION).toBe(2);
+    expect(CORNER_ANALYSIS_VERSION).toBe(3);
+  });
+
+  it('M-direction-split: splits a touching left/right chicane (no real gap between the bends) into two corners with the correct, un-suppressed directions', () => {
+    const runtime = chicaneRuntime();
+    const corners = analyzeCorners(runtime);
+
+    // The chicane must produce (at least) one LEFT corner immediately
+    // followed by one RIGHT corner, each with a plausible ~110-degree turn
+    // -- NOT one merged corner whose direction is whichever apex won and
+    // whose angle would read close to 220 degrees (both magnitudes summed).
+    const chicanePair = corners.find(
+      (corner, index) =>
+        corner.direction === 'left' &&
+        corners[index + 1]?.direction === 'right' &&
+        corner.totalAngleDeg < 150 &&
+        (corners[index + 1]?.totalAngleDeg ?? 0) < 150,
+    );
+    expect(chicanePair).toBeDefined();
+    const leftIndex = corners.indexOf(chicanePair!);
+    const rightCorner = corners[leftIndex + 1]!;
+
+    expect(chicanePair!.totalAngleDeg).toBeGreaterThan(60);
+    expect(chicanePair!.totalAngleDeg).toBeLessThan(150);
+    expect(rightCorner.totalAngleDeg).toBeGreaterThan(60);
+    expect(rightCorner.totalAngleDeg).toBeLessThan(150);
+    // The two bends are adjacent (the right corner's entry is at or just
+    // after the left corner's exit) -- proves this really is the SAME
+    // chicane split in two, not two unrelated corners.
+    expect(rightCorner.entryDistanceM).toBeGreaterThanOrEqual(chicanePair!.exitDistanceM - 1e-6);
+    expect(rightCorner.entryDistanceM).toBeLessThan(chicanePair!.exitDistanceM + 30);
+
+    // No corner anywhere in this fixture has a merged, implausible angle
+    // (the pre-fix bug's signature: ~220 degrees, both bends' magnitudes
+    // summed into one run).
+    expect(corners.every((corner) => corner.totalAngleDeg < 150)).toBe(true);
   });
 
   it('reports positive left and negative right signed curvature', () => {
@@ -100,6 +226,38 @@ describe('deterministic corner analysis', () => {
       }
     }
 
+  });
+
+  /**
+   * Byte-stable regression pin (M-direction-split fix's binding requirement)
+   * -- CORNER_ANALYSIS_VERSION 3's TMR corner set, locked down exactly.
+   * Three of the old (v2) 9 corners each secretly contained an implausible
+   * ~180-degree merged left+right pair (see `contracts.ts`'s doc comment);
+   * this fixes that, producing 12 corners. ANY further change to this exact
+   * set (count, direction, or ordering) must be a deliberate, reviewed
+   * algorithm change -- bump CORNER_ANALYSIS_VERSION again and update this
+   * pin together, never one without the other.
+   */
+  it('pins the exact CORNER_ANALYSIS_VERSION 3 TMR corner count/direction/id sequence', () => {
+    const corners = analyzeCorners(tmrRuntime());
+
+    expect(corners.map((corner) => [corner.id, corner.direction])).toEqual([
+      [1, 'right'],
+      [2, 'left'],
+      [3, 'left'],
+      [4, 'right'],
+      [5, 'right'],
+      [6, 'left'],
+      [7, 'right'],
+      [8, 'right'],
+      [9, 'right'],
+      [10, 'left'],
+      [11, 'right'],
+      [12, 'right'],
+    ]);
+    // No corner keeps the pre-fix bug's signature (an implausible, two-bend
+    // merged angle).
+    expect(corners.every((corner) => corner.totalAngleDeg < 150)).toBe(true);
   });
 
   it('allows the angle-aware lateral-g buckets to be overridden', () => {
@@ -161,18 +319,16 @@ describe('deterministic corner analysis', () => {
 });
 
 describe('observed corner-speed overlay', () => {
-  it('loads the checked-in TMR observations and deliberately omits C4/T5', () => {
+  it('loads the checked-in TMR observations (CORNER_ANALYSIS_VERSION 3 IDs) and deliberately omits the rest', () => {
     const corners = analyzeCorners(tmrRuntime());
     const asset = loadObservedSpeedsFromJson(
       readFileSync(TMR_OBSERVED_SPEEDS_ASSET_URL, 'utf8'),
       corners,
     );
 
-    expect(asset.provenance.source).toBe(
-      'user-supplied onboard observation, M2 Competition, 2026-08-10; advisory, unofficial',
-    );
+    expect(asset.provenance.source).toContain('user-supplied onboard observation, M2 Competition, 2026-08-10');
     expect(asset.observations.map((observation) => observation.cornerId)).toEqual([
-      2, 3, 5, 6, 7, 8, 9,
+      3, 4, 6, 8, 9, 11, 12,
     ]);
     expect(asset.observations).toHaveLength(7);
   });
@@ -202,10 +358,15 @@ describe('observed corner-speed overlay', () => {
       }
     }
 
-    expect(overlaidCorners[1]?.advisorySpeedKph).toBe(159);
-    expect(overlaidCorners[3]?.advisorySpeedKph).toBe(modelCorners[3]?.advisorySpeedKph);
-    expect(overlaidCorners[4]?.advisorySpeedKph).toBe(71.5);
-    expect(overlaidCorners[6]?.advisorySpeedKph).toBeCloseTo(99, 12);
+    // Corner-id-keyed (not positional) so this stays correct if the corner
+    // count ever changes again -- one still-unaffected corner (C3, model
+    // unchanged by the split) and one genuinely overlaid corner (C6, whose
+    // model speed the 10% ceiling does NOT clamp).
+    const c3 = overlaidCorners.find((corner) => corner.id === 3);
+    const c6 = overlaidCorners.find((corner) => corner.id === 6);
+    expect(c3?.advisorySpeedKph).toBe(159);
+    expect(c6?.advisorySpeedKph).toBe(74);
+    expect(c6?.speedSource).toBe('observed');
   });
 
   it('rejects unknown corner IDs and speeds outside 20..320 kph', () => {
@@ -221,5 +382,84 @@ describe('observed corner-speed overlay', () => {
     expect(() =>
       applyObservedSpeeds(corners, [{ cornerId: 1, apexSpeedKph: 321, source }]),
     ).toThrow(/between 20 and 320/);
+  });
+
+  it('M-observed-version: an analysisVersion mismatch returns empty observations with a warning, never throws at load time', () => {
+    const corners = analyzeCorners(testRuntime());
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const asset = loadObservedSpeedsFromJson(
+        JSON.stringify({
+          analysisVersion: CORNER_ANALYSIS_VERSION + 1,
+          provenance: { source: 'future analysis' },
+          observations: [{ cornerId: 1, apexSpeedKph: 80, source: 'test' }],
+        }),
+        corners,
+      );
+
+      expect(asset.observations).toEqual([]);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('M-observed-version: an unknown cornerId is skipped with a warning, never crashes the whole load -- other valid observations still apply', () => {
+    const corners = analyzeCorners(testRuntime());
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const asset = loadObservedSpeedsFromJson(
+        JSON.stringify({
+          analysisVersion: CORNER_ANALYSIS_VERSION,
+          provenance: { source: 'partial mismatch' },
+          observations: [
+            { cornerId: 999, apexSpeedKph: 80, source: 'stale' },
+            { cornerId: 1, apexSpeedKph: 90, source: 'still valid' },
+          ],
+        }),
+        corners,
+      );
+
+      expect(asset.observations).toEqual([{ cornerId: 1, apexSpeedKph: 90, source: 'still valid' }]);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('M-observed-version: still throws on a genuinely malformed asset (missing analysisVersion, bad range, duplicate ID)', () => {
+    const corners = analyzeCorners(testRuntime());
+
+    expect(() =>
+      loadObservedSpeedsFromJson(
+        JSON.stringify({ provenance: { source: 'x' }, observations: [] }),
+        corners,
+      ),
+    ).toThrow(/analysisVersion/);
+
+    expect(() =>
+      loadObservedSpeedsFromJson(
+        JSON.stringify({
+          analysisVersion: CORNER_ANALYSIS_VERSION,
+          provenance: { source: 'x' },
+          observations: [{ cornerId: 1, apexSpeedKph: 999, source: 'x' }],
+        }),
+        corners,
+      ),
+    ).toThrow(/between 20 and 320/);
+
+    expect(() =>
+      loadObservedSpeedsFromJson(
+        JSON.stringify({
+          analysisVersion: CORNER_ANALYSIS_VERSION,
+          provenance: { source: 'x' },
+          observations: [
+            { cornerId: 1, apexSpeedKph: 80, source: 'x' },
+            { cornerId: 1, apexSpeedKph: 85, source: 'y' },
+          ],
+        }),
+        corners,
+      ),
+    ).toThrow(/Duplicate/);
   });
 });

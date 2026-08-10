@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { SqlSessionRepository, cleanRecognitionLap, multiLapSession, type LocationSample } from '@circuit/core';
+import { SqlSessionRepository, cleanRecognitionLap, driveLap, multiLapSession, type LocationSample } from '@circuit/core';
 import { createSqlJsDatabase } from '../support/sqlJsDatabase';
 
 /**
@@ -684,5 +684,111 @@ describe('composition.ts DevReplay transition lock (F4 fix)', () => {
 
     flushSpy.mockRestore();
     disposeSpy.mockRestore();
+  });
+});
+
+/** A coaching-cue-dense driving fixture (same shape `sessionController.test.ts`'s own coaching tests use, proven to produce cues on the real TMR geometry). */
+function coachingDenseLap(seed: number) {
+  return driveLap(TMR_CIRCUIT_PROFILE, {
+    seed,
+    lapCount: 1,
+    sampleRateHz: 2,
+    noiseSigmaM: 0,
+    accuracyM: 3,
+    speedMps: ({ progress }: { progress: number }) => 32 + 10 * Math.sin(progress * Math.PI * 2) ** 2,
+  });
+}
+
+/** Drives one full session (calibrate -> arm -> lap -> end) and collects every observed `coachCue`. */
+async function driveOneCoachingSession(
+  composition: Awaited<ReturnType<typeof bootFresh>>,
+  gnss: StubLocationProviderInstance,
+  seed: number,
+): Promise<unknown[]> {
+  const coachCues: unknown[] = [];
+  const unsubscribe = composition.facade.subscribe((s: { coachCue: unknown }) => {
+    coachCues.push(s.coachCue);
+  });
+
+  composition.facade.startPreflight();
+  await flushBootstrap();
+  composition.facade.beginCalibration();
+  await flushBootstrap();
+  feed(gnss, cleanRecognitionLap(TMR_CIRCUIT_PROFILE, seed));
+  await flushBootstrap();
+  composition.facade.acceptCalibration();
+  await flushBootstrap();
+  composition.facade.arm();
+  feed(gnss, coachingDenseLap(seed + 1));
+  await flushBootstrap();
+  composition.facade.endSession();
+  await flushBootstrap();
+
+  unsubscribe();
+  return coachCues;
+}
+
+describe('composition.ts coaching-settings rebuild (F3 fix)', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('toggling coachingEnabled off while idle rebuilds the production controller -- the NEXT session emits zero coaching cues', async () => {
+    const composition = await bootFresh();
+    const gnss = tracked.gnssProviders[0]!;
+
+    expect(composition.settingsStore.getSettings().coachingEnabled).toBe(true);
+    const state = latestFacadeState(composition) as { sessionState: string };
+    expect(state.sessionState).toBe('idle');
+
+    composition.settingsStore.update({ coachingEnabled: false });
+    await flushBootstrap();
+
+    const coachCues = await driveOneCoachingSession(composition, gnss, 900_001);
+
+    expect(coachCues.every((cue) => cue === null)).toBe(true);
+  });
+
+  it('control: the SAME driving fixture produces at least one coaching cue when coachingEnabled stays on (proves the toggle test above is not merely "the fixture never fires")', async () => {
+    const composition = await bootFresh();
+    const gnss = tracked.gnssProviders[0]!;
+
+    const coachCues = await driveOneCoachingSession(composition, gnss, 900_101);
+
+    expect(coachCues.some((cue) => cue !== null)).toBe(true);
+  });
+
+  it('toggling coachingEnabled off mid-session does NOT rebuild until the session ends -- SettingsScreen note territory, not a mid-lap teardown', async () => {
+    const composition = await bootFresh();
+    const gnss = tracked.gnssProviders[0]!;
+
+    composition.facade.startPreflight();
+    await flushBootstrap();
+    composition.facade.beginCalibration();
+    await flushBootstrap();
+    feed(gnss, cleanRecognitionLap(TMR_CIRCUIT_PROFILE, 900_201));
+    await flushBootstrap();
+    composition.facade.acceptCalibration();
+    await flushBootstrap();
+    composition.facade.arm();
+    await flushBootstrap();
+
+    const stateBeforeToggle = latestFacadeState(composition) as { sessionState: string };
+    expect(['outLap', 'timing', 'armed']).toContain(stateBeforeToggle.sessionState);
+
+    // Toggling mid-session must not tear down the live controller (a
+    // rebuild here would destroy in-flight timing/GNSS state).
+    composition.settingsStore.update({ coachingEnabled: false });
+    await flushBootstrap();
+    feed(gnss, coachingDenseLap(900_202));
+    await flushBootstrap();
+
+    // The session still completes normally through the SAME controller --
+    // proves nothing was torn down underneath it.
+    composition.facade.endSession();
+    await flushBootstrap();
+    const finalState = latestFacadeState(composition) as { sessionState: string; laps: unknown[] };
+    expect(finalState.sessionState).toBe('sessionComplete');
+    expect(finalState.laps.length).toBeGreaterThan(0);
   });
 });

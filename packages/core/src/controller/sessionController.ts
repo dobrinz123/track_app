@@ -44,12 +44,16 @@ export interface FacadeStateCore {
   /** Latest known speed in km/h, derived from the most recent sample's `speedMps`; `null` before any sample reports one. */
   speedKph: number | null;
   /**
-   * Latest advisory coaching cue (Phase 3 coaching addendum), or `null` when
-   * coaching is disabled (`SessionControllerDeps.coaching` unset/`enabled:
-   * false`), no corner is currently in lead-distance range, or the last cue
-   * has gone stale -- see `handleSample`'s `COACH_CUE_STALE_MS` handling and
-   * `restoreFromCheckpoint`'s reset. Cleared on lap rollover (S/F crossing)
-   * too, so a cue never bleeds into the next lap's display.
+   * Latest advisory coaching cue (Phase 3 coaching addendum), a LIVE value
+   * re-emitted with an updated `distanceToTargetM` on every accepted match
+   * while approaching (F1/F2 fix). `null` when coaching is disabled
+   * (`SessionControllerDeps.coaching` unset/`enabled: false`), no corner is
+   * currently in lead-distance range, the target has been passed, the
+   * driver is in the pit lane (F4 fix), or the brief `COACH_CUE_FLICKER_HOLD_MS`
+   * grace window has elapsed without a replacement -- see `handleSample`'s
+   * coaching block and `restoreFromCheckpoint`'s reset. Cleared on pit entry
+   * and lap rollover (S/F crossing) too, so a cue never bleeds into the pit
+   * lane or the next lap's display.
    */
   coachCue: CoachCue | null;
 }
@@ -99,8 +103,19 @@ const CALIBRATION_COMPLETE_COVERAGE_FRACTION = 0.98;
 
 const PAUSABLE_STATES = new Set<SessionState>(['calibrating', 'armed', 'outLap', 'timing', 'inPit']);
 const MID_SESSION_STATES = new Set<SessionState>(['outLap', 'timing', 'inPit']);
-/** A displayed `currentCue` with no confirming match update for longer than this is cleared (MUST DO #1) -- covers both a genuinely stale cue (the corner has been driven past with no fresh candidate to replace it) and a quality/match gap. */
-const COACH_CUE_STALE_MS = 5_000;
+/**
+ * A displayed `currentCue` with no confirming match update for longer than
+ * this is cleared (F1/F2 fix). `CoachEngine.onMatch` now re-emits the live
+ * cue every accepted match while approaching (see `coach-engine.ts`'s class
+ * doc comment), so a genuinely passed/rejected corner is expected to clear
+ * almost immediately -- this short grace window exists ONLY to bridge a
+ * single brief quality/matching gap (e.g. one dropped fix) without the strip
+ * visibly flickering off and back on for what is, in practice, the SAME
+ * corner still being approached when the very next match resumes. It is
+ * deliberately far shorter than the old 5s "stale" hold, which could leave a
+ * cue for a corner already driven past on screen for seconds.
+ */
+const COACH_CUE_FLICKER_HOLD_MS = 2_000;
 
 export interface SessionControllerConfig {
   pipeline?: PipelineCoreConfig;
@@ -727,26 +742,37 @@ export class SessionController {
     } else if (result.currentLapElapsedMs !== null && !result.completingStartFinish) {
       this.latestDelta = this.core.computeDelta(result.match, result.currentLapElapsedMs);
     }
-    // Coaching addendum (MUST DO #1): fed only from an ACCEPTED match --
+    // Coaching addendum (F1/F2/F4 fix): fed only from an ACCEPTED match --
     // `result.match` is already `null` for a sample the pipeline rejected on
     // quality grounds (the SAME gate `computeDelta` above relies on), so no
-    // separate quality check is needed here. A fresh cue replaces the
-    // displayed one immediately; otherwise the displayed cue (if any) is
-    // cleared once it has gone `COACH_CUE_STALE_MS` without a replacement --
-    // covers both "driven past the corner with nothing new to show" and a
-    // genuine matching gap.
+    // separate quality check is needed here. F4: racing-line brake/corner
+    // advice must never show or be computed while in the pit lane (pit speed
+    // limits and traffic procedures govern there, not the racing line) --
+    // `CoachEngine` is not even fed a pit-lane match, and any cue already on
+    // screen is cleared the SAME sample pit entry is observed, from EITHER
+    // signal (the hysteresis-debounced `inPit` session state, or the raw
+    // per-match `onPitLane` flag, whichever trips first). Otherwise, a fresh
+    // cue replaces the displayed one immediately; a `null` result holds the
+    // previous cue for at most `COACH_CUE_FLICKER_HOLD_MS` (bridging a single
+    // brief quality/matching gap) before clearing.
     if (this.coachEngine !== null) {
-      const cue = result.match !== null ? this.coachEngine.onMatch(result.match, sample.speedMps) : null;
-      if (cue !== null) {
-        this.currentCue = cue;
-        this.coachCueSetAtMono = this.deps.clock.now();
-      } else if (
-        this.currentCue !== null &&
-        this.coachCueSetAtMono !== null &&
-        this.deps.clock.now() - this.coachCueSetAtMono > COACH_CUE_STALE_MS
-      ) {
+      const inPit = this.core.state.state === 'inPit' || (result.match?.onPitLane ?? false);
+      if (inPit) {
         this.currentCue = null;
         this.coachCueSetAtMono = null;
+      } else {
+        const cue = result.match !== null ? this.coachEngine.onMatch(result.match, sample.speedMps) : null;
+        if (cue !== null) {
+          this.currentCue = cue;
+          this.coachCueSetAtMono = this.deps.clock.now();
+        } else if (
+          this.currentCue !== null &&
+          this.coachCueSetAtMono !== null &&
+          this.deps.clock.now() - this.coachCueSetAtMono > COACH_CUE_FLICKER_HOLD_MS
+        ) {
+          this.currentCue = null;
+          this.coachCueSetAtMono = null;
+        }
       }
     }
     for (const lap of result.completedLaps) {
@@ -831,19 +857,25 @@ export class SessionController {
     // 'reference' (deriveBrakingZones prefers real telemetry over the decel
     // model whenever a usable reference is supplied) -- regenerate zones from
     // it and count the refresh, so diagnostics/tests can observe it happened.
+    // M-PB-refresh fix: `preserveEmitted: true` -- this can resolve mid-lap
+    // (PB persistence is asynchronous), and the driver may already be partway
+    // into the NEW lap by the time it lands. Wiping `coachEngine`'s per-lap
+    // "already driven past" memory here would let an already-completed
+    // corner earlier in that same lap become a fresh candidate again purely
+    // because its zone geometry changed underneath it.
     if (this.coachEngine !== null) {
-      this.refreshCoachZones(candidate);
+      this.refreshCoachZones(candidate, { preserveEmitted: true });
       this.coachZoneRefreshes += 1;
     }
   }
 
-  /** Rebuilds this controller's braking zones from `this.coachCorners` + the given reference lap (or `null` for the physics-only fallback) and reconfigures `coachEngine` with them. A no-op when coaching is disabled. */
-  private refreshCoachZones(reference: ReferenceLap | null): void {
+  /** Rebuilds this controller's braking zones from `this.coachCorners` + the given reference lap (or `null` for the physics-only fallback) and reconfigures `coachEngine` with them. A no-op when coaching is disabled. `options.preserveEmitted` forwards straight to `CoachEngine.configure()` -- see its own doc comment (`contracts.ts`). */
+  private refreshCoachZones(reference: ReferenceLap | null, options?: { preserveEmitted?: boolean }): void {
     if (this.coachEngine === null) return;
     const zones: BrakingZone[] = deriveBrakingZones(reference, this.coachCorners, {
       totalLengthM: this.deps.circuitProfile.totalLengthM,
     });
-    this.coachEngine.configure(this.coachCorners, zones);
+    this.coachEngine.configure(this.coachCorners, zones, options);
   }
 
   private async loadReferenceForSession(): Promise<void> {

@@ -121,6 +121,77 @@ function runDirection(run: Run, samples: CurvatureSample[]): -1 | 1 {
   return curvature > 0 ? 1 : -1;
 }
 
+interface SignSegment {
+  sign: -1 | 1;
+  indices: number[];
+  spanM: number;
+}
+
+/** Splits a run's samples into maximal contiguous same-sign sub-sequences, each tagged with its along-track span. */
+function signSegments(run: Run, samples: CurvatureSample[], totalLengthM: number): SignSegment[] {
+  const segments: SignSegment[] = [];
+  for (const index of run) {
+    const curvature = samples[index]?.curvatureRadPerM;
+    if (curvature === undefined) throw new RangeError('Corner run is sparse');
+    const sign: -1 | 1 = curvature >= 0 ? 1 : -1;
+    const last = segments[segments.length - 1];
+    if (last !== undefined && last.sign === sign) {
+      last.indices.push(index);
+    } else {
+      segments.push({ sign, indices: [index], spanM: 0 });
+    }
+  }
+  for (const segment of segments) {
+    const firstIndex = segment.indices[0];
+    const lastIndex = segment.indices[segment.indices.length - 1];
+    const firstDistanceM = samples[firstIndex ?? -1]?.distanceM;
+    const lastDistanceM = samples[lastIndex ?? -1]?.distanceM;
+    if (firstDistanceM === undefined || lastDistanceM === undefined) {
+      throw new RangeError('Corner run is sparse');
+    }
+    segment.spanM = forwardDistance(firstDistanceM, lastDistanceM, totalLengthM);
+  }
+  return segments;
+}
+
+/**
+ * Splits a single active run into one run per SUSTAINED direction reversal
+ * (M-direction-split fix). Curvature thresholding is direction-agnostic
+ * (`active` above only looks at magnitude), so touching left/right bends or
+ * a short chicane with no gap between them -- curvature never dips below
+ * `cornerThreshold` at the crossover -- previously stayed one run whose
+ * reported direction was whichever apex had the greater magnitude,
+ * suppressing the other direction and distorting its speed advice.
+ *
+ * A brief sign flip (a short wiggle within the dominant direction, e.g. one
+ * or two noisy samples right at a near-zero-curvature crossover) is
+ * deliberately tolerated -- ONLY a same-sign run whose OWN span exceeds
+ * `gapToleranceM` starts a new group. This reuses the same distance
+ * threshold `fillEligibleGaps` above already uses for "is this gap real",
+ * applied here to "is this opposite-direction stretch real" instead.
+ */
+function splitRunByDirection(
+  run: Run,
+  samples: CurvatureSample[],
+  totalLengthM: number,
+  gapToleranceM: number,
+): Run[] {
+  const segments = signSegments(run, samples, totalLengthM);
+  if (segments.length <= 1) return [run];
+
+  const groups: SignSegment[][] = [];
+  for (const segment of segments) {
+    const currentGroup = groups[groups.length - 1];
+    const anchorSign = currentGroup?.[0]?.sign;
+    if (currentGroup !== undefined && (segment.sign === anchorSign || segment.spanM <= gapToleranceM)) {
+      currentGroup.push(segment);
+    } else {
+      groups.push([segment]);
+    }
+  }
+  return groups.map((group) => group.flatMap((segment) => segment.indices));
+}
+
 function fillGap(active: boolean[], run: Run, nextRun: Run): void {
   const endIndex = run[run.length - 1];
   const nextStartIndex = nextRun[0];
@@ -290,7 +361,16 @@ export function analyzeCorners(runtime: RuntimeProfile, config: CornerAnalysisCo
   fillEligibleGaps(active, samples, totalLengthM, resolved.gapToleranceM, false);
   fillEligibleGaps(active, samples, totalLengthM, resolved.mergeDistanceM, true);
 
-  return collectRuns(active).map((run, index): Corner => {
+  // M-direction-split fix: a run built purely from curvature MAGNITUDE can
+  // still straddle a sustained direction reversal (a chicane/touching
+  // opposite bends with no real gap between them) -- split those apart
+  // before building Corner objects, so travel order + IDs both already
+  // reflect the split.
+  const runs = collectRuns(active).flatMap((run) =>
+    splitRunByDirection(run, samples, totalLengthM, resolved.gapToleranceM),
+  );
+
+  return runs.map((run, index): Corner => {
     const entryIndex = run[0];
     const exitIndex = run[run.length - 1];
     const apexSampleIndex = apexIndex(run, samples);

@@ -577,6 +577,72 @@ function installProductionController(): void {
 }
 
 /**
+ * Shared, serialized rebuild (F3 fix) -- disposes the current production
+ * controller/facade and installs a fresh one. Used by BOTH the preflight
+ * gate's terminal-state rebuild (C1 fix, below) and the coaching-settings
+ * rebuild (F3 fix, below): `rebuildInFlight` makes the two mutually
+ * exclusive -- whichever starts first is awaited by whichever calls in
+ * while it's still running, instead of two dispose+install attempts racing
+ * each other. This IS "the gate's serialization", generalized to its
+ * second trigger. A no-op while a DevReplay controller is active
+ * (`activeController !== controller`) -- that swap is
+ * `restoreProductionFacade()`'s job, not this rebuild's.
+ */
+let rebuildInFlight: Promise<void> | null = null;
+
+function rebuildProductionController(): Promise<void> {
+  if (rebuildInFlight !== null) return rebuildInFlight;
+  const attempt = (async () => {
+    if (controller === null || activeController !== controller) return;
+    const staleController = controller;
+    const staleFacade = productionFacade;
+    await staleController.dispose();
+    staleFacade?.dispose();
+    installProductionController();
+  })();
+  rebuildInFlight = attempt;
+  attempt
+    .finally(() => {
+      if (rebuildInFlight === attempt) rebuildInFlight = null;
+    })
+    .catch(() => undefined);
+  return attempt;
+}
+
+/**
+ * F3 fix: `coachingConfig()` is baked into a `SessionController` for its own
+ * whole lifetime (`SessionControllerDeps.coaching`'s own doc comment) --
+ * previously, flipping the coaching toggle before the first session (or
+ * while idle between sessions) had NO effect until some UNRELATED
+ * terminal-state rebuild happened to fire later; the UI showed a fresh
+ * coaching slot immediately, but it stayed empty. Rebuild immediately
+ * whenever `coachingEnabled` actually CHANGES while the controller is
+ * genuinely not in an active session (idle/sessionComplete/error). A
+ * mid-active-session change is deliberately left alone here -- tearing down
+ * live timing/GNSS state under a driver mid-lap would be far worse than a
+ * stale coaching setting for one more lap -- `SettingsScreen` shows a note
+ * that it takes effect next session instead. Routed through the SAME
+ * `rebuildProductionController()` the preflight gate uses, so the two can
+ * never race. Registered ONCE at module load (not inside `runBootstrap()`,
+ * which re-runs on `retryBootstrap()`) so a failed-then-retried bootstrap
+ * never accumulates duplicate subscriptions -- this callback reads the
+ * live module-level `controller`/`activeController` on every invocation
+ * regardless of how many times bootstrap itself has (re)run, and is a
+ * harmless no-op before `controller` exists yet.
+ */
+let lastKnownCoachingEnabled = settingsStore.getSettings().coachingEnabled;
+const COACHING_REBUILD_STATES = new Set<SessionState>(['idle', 'sessionComplete', 'error']);
+settingsStore.subscribe((settings) => {
+  const changed = settings.coachingEnabled !== lastKnownCoachingEnabled;
+  lastKnownCoachingEnabled = settings.coachingEnabled;
+  if (!changed) return;
+  if (controller === null || activeController !== controller) return;
+  const state = currentControllerState(controller);
+  if (!COACHING_REBUILD_STATES.has(state)) return;
+  void rebuildProductionController();
+});
+
+/**
  * Runs the full bootstrap sequence: opens the on-device SQLite database,
  * builds the real `SessionController` + `GnssLocationProvider`, checks for a
  * recoverable checkpoint, and swaps every wrapper above from its in-memory
@@ -647,11 +713,7 @@ async function runBootstrap(): Promise<void> {
       if (controller === null || activeController !== controller) return;
       const state = currentControllerState(controller);
       if (state !== 'sessionComplete' && state !== 'error') return;
-      const staleController = controller;
-      const staleFacade = productionFacade;
-      await staleController.dispose();
-      staleFacade?.dispose();
-      installProductionController();
+      await rebuildProductionController();
     });
 
     const history = new SqlSessionHistoryStore(

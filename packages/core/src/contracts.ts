@@ -231,7 +231,23 @@ export interface Corner {
   advisorySpeedKph: number;   // angle-aware sqrt(latG*g*minRadius) — ADVISORY
   speedSource?: 'model' | 'observed';
 }
-export const CORNER_ANALYSIS_VERSION = 2; // bump on algorithm change
+/**
+ * Bump on algorithm change. 3 (M-direction-split fix): `analyzeCorners` now
+ * splits a run when signed curvature crosses zero and stays opposite-signed
+ * for a SUSTAINED span (> `gapToleranceM`) -- previously a run was collected
+ * purely by curvature MAGNITUDE, so a touching left/right chicane with no
+ * real gap between the two bends stayed one corner, taking whichever apex
+ * had the larger magnitude as "the" direction and suppressing the other.
+ * This changed the checked-in Transilvania Motor Ring's analyzed corner set
+ * (9 -> 12; three previously-merged corners, each with an implausible
+ * ~180-degree `totalAngleDeg`, correctly split into their two real bends --
+ * see `packages/core/test/corners/analyzeCorners.test.ts`'s TMR regression
+ * pin) -- the version bump exists so any consumer keying persisted/cached
+ * data off it (the observed-speeds overlay asset's own `analysisVersion`,
+ * `loadObservedSpeedsFromJson`) notices and revalidates instead of silently
+ * misapplying stale corner-id-keyed data to the new geometry.
+ */
+export const CORNER_ANALYSIS_VERSION = 3;
 
 // ---------- Braking zones ----------
 export interface BrakingZone {
@@ -256,7 +272,15 @@ export interface CoachCue {
 }
 
 export interface CoachEngine {
-  configure(corners: Corner[], zones: BrakingZone[]): void;
+  /**
+   * `options.preserveEmitted` (default `false`): when `true`, this corner's
+   * per-lap "already driven past" completion memory is carried over across
+   * the reconfigure instead of being wiped -- used by a mid-lap braking-zone
+   * refresh (a new PB reference landing), so a corner already completed
+   * earlier in the SAME lap cannot become a fresh candidate again just
+   * because its zone geometry changed.
+   */
+  configure(corners: Corner[], zones: BrakingZone[], options?: { preserveEmitted?: boolean }): void;
   onMatch(match: TrackMatch, speedMps: number | undefined): CoachCue | null;
   reset(): void;
 }

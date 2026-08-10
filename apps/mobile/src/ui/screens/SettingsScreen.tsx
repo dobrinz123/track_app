@@ -212,6 +212,9 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
                 Advisory brake and corner cues on the driving dashboard and circuit screen. Not an official or
                 safety-critical source.
               </Text>
+              <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                Changes during an active session take effect at your next session.
+              </Text>
             </View>
             <Switch
               value={settings.coachingEnabled}

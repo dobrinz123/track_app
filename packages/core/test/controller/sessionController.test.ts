@@ -8,12 +8,14 @@ import type {
   SessionMachineSnapshot,
 } from '../../src/contracts';
 import { SessionController, type FacadeStateCore, type SessionControllerDeps } from '../../src/controller';
+import { deriveBrakingZones } from '../../src/coach';
 import { analyzeCorners } from '../../src/corners';
 import {
   cleanRecognitionLap,
   driveLap,
   multiLapSession,
   pbImprovementSession,
+  pitLaneTransitLap,
   sampleAtLapDistance,
 } from '../../src/fixtures';
 import { InMemorySessionRepository } from '../../src/persistence';
@@ -761,5 +763,74 @@ describe('SessionController coaching (Phase 3 addendum)', () => {
     await controller.flush();
 
     expect(controller.diagnostics().coachZoneRefreshes).toBe(3);
+  });
+
+  it('F4: suppresses coaching cues on the pit lane -- zero cues while inPit, and the display clears the same sample pit entry is observed', async () => {
+    const { profile, controller, states, feed } = setup(undefined, {
+      enabled: true,
+      corners: coachingCorners(),
+    });
+
+    await controller.start('calibration');
+    feed(cleanRecognitionLap(profile, 804));
+    controller.acceptCalibration();
+    await controller.flush();
+    controller.arm();
+
+    feed(pitLaneTransitLap(profile, 804));
+    await controller.flush();
+
+    const pitStates = states.filter((s) => s.sessionState === 'inPit');
+    expect(pitStates.length).toBeGreaterThan(0);
+    // Every single sample observed while inPit must show no coaching cue --
+    // racing-line brake/corner advice must never reach the pit lane.
+    expect(pitStates.every((s) => s.coachCue === null)).toBe(true);
+
+    // The cue is cleared no later than the very first inPit state -- it must
+    // not linger from whatever was showing just before pit entry.
+    const firstPitIndex = states.findIndex((s) => s.sessionState === 'inPit');
+    expect(states[firstPitIndex]?.coachCue).toBeNull();
+  });
+
+  it('F1/F2 controller: clears a cue within the short flicker-hold window once matches stop confirming it -- not the old 5s stale hold', async () => {
+    const { profile, controller, states, feed } = setup(undefined, {
+      enabled: true,
+      corners: coachingCorners(),
+    });
+
+    await controller.start('calibration');
+    feed(cleanRecognitionLap(profile, 806));
+    controller.acceptCalibration();
+    await controller.flush();
+    controller.arm();
+
+    const corners = coachingCorners();
+    const corner = corners[0];
+    if (corner === undefined) throw new Error('TMR has no corners');
+    const zones = deriveBrakingZones(null, corners, { totalLengthM: profile.totalLengthM });
+    const zone = zones[0];
+    if (zone === undefined) throw new Error('Missing braking zone');
+
+    // On-track sample well inside the lead window -- confirms the cue.
+    const approachDistanceM = zone.brakeStartDistanceM - 20;
+    feed([sampleAtLapDistance(profile, approachDistanceM, 0)]);
+    await controller.flush();
+    const confirmed = states[states.length - 1];
+    expect(confirmed?.coachCue?.cornerId).toBe(corner.id);
+
+    // Invalid-quality (rejected) samples from here on -- accuracy above the
+    // matcher's 50m invalid threshold makes `TrackMatcher.match()` return
+    // `null`, so `result.match` is null every time and the flicker-hold
+    // clock is the only thing keeping the cue displayed.
+    feed([sampleAtLapDistance(profile, approachDistanceM + 5, 1_000, { accuracyM: 60 })]);
+    await controller.flush();
+    expect(states[states.length - 1]?.coachCue?.cornerId).toBe(corner.id);
+
+    // Past COACH_CUE_FLICKER_HOLD_MS (2000ms) with still no confirming
+    // match -- must now be cleared. The old 5s stale hold would still be
+    // showing it here (a revert of the F1/F2 fix would fail this line).
+    feed([sampleAtLapDistance(profile, approachDistanceM + 10, 2_500, { accuracyM: 60 })]);
+    await controller.flush();
+    expect(states[states.length - 1]?.coachCue).toBeNull();
   });
 });

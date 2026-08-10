@@ -3,19 +3,22 @@ import { StyleSheet, Text, View } from 'react-native';
 import type { Corner } from '@circuit/core';
 import { colors, fontFamily, spacing, typography } from '../theme';
 import { SeverityChip } from './CoachStrip';
+import { formatSpeedShort, formatSpeedSpoken, type SpeedUnits } from '../format';
+import { settingsStore } from '../../session/composition';
+import { useSettings } from '../hooks/useSettings';
 
 export interface CornersListProps {
   corners: Corner[];
 }
 
-function cornerAccessibilityLabel(corner: Corner): string {
+function cornerAccessibilityLabel(corner: Corner, units: SpeedUnits): string {
   const observed = corner.speedSource === 'observed' ? ', observed apex speed' : '';
-  return `Corner ${corner.id}, ${corner.direction}, severity ${corner.severity} of 6, minimum radius ${Math.round(corner.minRadiusM)} meters, advisory speed ${Math.round(corner.advisorySpeedKph)} kilometers per hour${observed}`;
+  return `Corner ${corner.id}, ${corner.direction}, severity ${corner.severity} of 6, minimum radius ${Math.round(corner.minRadiusM)} meters, advisory speed ${formatSpeedSpoken(corner.advisorySpeedKph, units)}${observed}`;
 }
 
-function CornerRow({ corner }: { corner: Corner }): React.JSX.Element {
+function CornerRow({ corner, units }: { corner: Corner; units: SpeedUnits }): React.JSX.Element {
   return (
-    <View style={styles.row} accessibilityLabel={cornerAccessibilityLabel(corner)}>
+    <View style={styles.row} accessibilityLabel={cornerAccessibilityLabel(corner, units)}>
       <Text style={styles.cornerNum} maxFontSizeMultiplier={1.3}>
         C{corner.id}
       </Text>
@@ -28,7 +31,7 @@ function CornerRow({ corner }: { corner: Corner }): React.JSX.Element {
       </Text>
       <View style={styles.speedGroup}>
         <Text style={styles.speed} maxFontSizeMultiplier={1.3}>
-          {Math.round(corner.advisorySpeedKph)} km/h
+          {formatSpeedShort(corner.advisorySpeedKph, units)}
         </Text>
         {corner.speedSource === 'observed' ? (
           <Text style={styles.observedTag} maxFontSizeMultiplier={1.3}>
@@ -45,12 +48,16 @@ function CornerRow({ corner }: { corner: Corner }): React.JSX.Element {
  * corner list for `CircuitDetailScreen`. Read-only display of the SAME
  * `Corner[]` (`session/tmrProfile.ts`'s `TMR_CORNERS`) every `SessionController`
  * this app builds is configured with; never fetched or fabricated here.
+ * F5 fix: reads `units` from `settingsStore` directly (`CircuitDetailScreen.tsx`
+ * is outside this ticket's write set) so a driver's mph preference is
+ * honored here exactly like everywhere else.
  */
 export function CornersList({ corners }: CornersListProps): React.JSX.Element {
+  const settings = useSettings(settingsStore);
   return (
     <View>
       {corners.map((corner) => (
-        <CornerRow key={corner.id} corner={corner} />
+        <CornerRow key={corner.id} corner={corner} units={settings.units} />
       ))}
       <Text style={styles.disclaimer} maxFontSizeMultiplier={1.3}>
         Corner data is advisory only, derived from track geometry (and, where marked OBSERVED, onboard apex-speed
