@@ -41,7 +41,7 @@ import { TMR_CIRCUIT_PROFILE, TMR_CORNERS, TMR_RUNTIME_PROFILE } from './tmrProf
 import { startVoiceCoach } from './voiceCoach';
 import { createTelemetryProvider, type TelemetryProvider } from './telemetryProvider';
 import { TelemetryRecorder } from '../persistence/telemetryRecorder';
-import type { SqlWriteGate } from '../persistence/sqlWriteGate';
+import { PASSTHROUGH_WRITE_GATE, type SqlWriteGate } from '../persistence/sqlWriteGate';
 
 const DB_NAME = 'circuit-timer.db';
 /** Single-user local app -- no auth/account system exists (MVP scope, ADR-0001/0004). Stable so `sessionId` (`${userId}--<random>`) and stored data survive across launches. */
@@ -1099,9 +1099,19 @@ export async function deleteAllStoredUserData(): Promise<DeleteUserDataResult> {
   // deleted" banner is never shown while up to 200,000 rows/session remain.
   let telemetryOk = true;
   if (result.ok && db !== null) {
-    await db.runAsync('DELETE FROM telemetry_samples');
-    const remaining = await db.getAllAsync<{ count: number }>('SELECT COUNT(*) AS count FROM telemetry_samples');
-    telemetryOk = (remaining[0]?.count ?? 0) === 0;
+    // N1-confirm residue fix (LEAD): a session's final telemetry flush can
+    // still be in flight when the user reaches delete-all -- await any
+    // in-progress shutdown first, then run DELETE + verify while HOLDING the
+    // shared write gate, so no straggler batch INSERT can land between (or
+    // after) them. `stopTelemetryRecording()` is an idempotent no-op when
+    // nothing is recording.
+    await stopTelemetryRecording();
+    const database = db;
+    telemetryOk = await (dbWriteGate ?? PASSTHROUGH_WRITE_GATE).exclusive(async () => {
+      await database.runAsync('DELETE FROM telemetry_samples');
+      const remaining = await database.getAllAsync<{ count: number }>('SELECT COUNT(*) AS count FROM telemetry_samples');
+      return (remaining[0]?.count ?? 0) === 0;
+    });
   }
   const finalResult: DeleteUserDataResult = { ...result, ok: result.ok && telemetryOk };
   if (finalResult.ok && historyStore !== null) await historyStore.refresh();

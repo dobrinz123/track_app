@@ -1,0 +1,8 @@
+Read-only verdict-only confirmation pass, commit 4192a7c (diff vs parent ff32897). Your prior re-verify found N1 (every-call SQL FIFO self-deadlocks all repository transactions) and F2 residue (second stopTelemetryRecording call resolved without awaiting the real flush). The LEAD replaced the design. Confirm or refute, nothing else:
+
+1. N1: new module apps/mobile/src/persistence/sqlWriteGate.ts — gate held ONLY around whole withTransactionAsync spans (gateSqlTransactions) and around TelemetryRecorder.writeBatch's single INSERT (recorder gets the gate via constructor from openAppDatabase). Inner statements pass through ungated. Questions: (a) is the deadlock structurally gone (can any gated unit await another gated unit from inside itself anywhere in the actual call graph — check SqlSessionRepository transaction callbacks and migrateTelemetrySchema)? (b) can a telemetry INSERT still land inside an open controller transaction through ANY path (e.g. a repository write that spans awaits WITHOUT withTransactionAsync)? (c) migrateTelemetrySchema runs on the gated db at startup — any issue?
+2. F7 unreachability: with the deadlock gone, is the delete-all telemetry cleanup (composition.ts) now reachable and correct?
+3. F2 residue: stopTelemetryRecording now caches telemetryShutdown and returns the same in-flight promise on repeated calls (cleared in startTelemetryRecording). Confirm onSessionEnded's allSettled barrier now awaits the genuine final flush; confirm no stale-promise bug across two consecutive sessions (session A end -> session B start -> session B end).
+4. New defects introduced by this diff only.
+
+OUTPUT: First line PASS / FAIL / PASS_WITH_NOTES. Then one short evidence line per question (file:line). No restating of old findings.
