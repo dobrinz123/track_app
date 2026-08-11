@@ -107,3 +107,45 @@ ESD: PESD2CAN (C24911) across CANH/CANL to GND (D3) — automotive ESD on the bu
   D3 PESD2CAN (SOT-23): 1=CANL line, 2=CANH line, 3=GND (common cathode)
 - DRC fine-rule allowance near U1 castellated pads only: clearance may drop to
   0.15mm locally. Everywhere else the 0.2mm rule stands.
+
+## 8. Rev A3 (LEAD, 2026-08-11 — NO-GO remediation; supersedes conflicting earlier sections)
+
+Source of truth for every value below: the datasheets cited in the Codex NO-GO
+review (.foreman/scratch/hwpkg-review-out.log). LEAD's earlier from-memory U3
+pin map was WRONG — everything here is datasheet-derived, and the fix worker
+must re-verify each pin map and LCSC number against the live datasheet/LCSC
+page (web) before applying. No more from-memory electrical facts.
+
+1. U3 TPS54202DDC CORRECT pin map: 1=GND, 2=SW, 3=VIN, 4=FB, 5=EN, 6=BOOT.
+2. FB divider for 3.3V (Vref 0.596V): 100k / 22.1k 1% (replaces 13k).
+3. EN/UVLO divider for ~8.0V rising: 137k (nearest E96 to 136.6k) / 24k.
+4. CAN transceiver REPLACED: TJA1051T/3 out (VCC needs 4.5-5.5V). Use a TRUE
+   3.3V-VCC transceiver WITH a silent-mode pin so the hw listen-only feature
+   survives: first choice TCAN330DR (SOIC-8: 1=TXD,2=GND,3=VCC,4=RXD,5=S,
+   6=CANL,7=CANH,8=SHDN — VERIFY on TI datasheet), SHDN tied to GND, S -> IO6.
+   Fallback if LCSC stock fails: SN65HVD230DR (Rs pin via 10k to GND; hw
+   silent-mode lost -> document that firmware guard is then the only layer).
+   Single 3.3V rail stays.
+5. D2 orientation on BOARD: KiCad D_SMB pad 1 = cathode -> pad 1 must carry
+   VIN_PROT, pad 2 (anode) carries F1 side. Fix net assignment or rotation;
+   same review for LED1/LED2 polarity (pad 1 = cathode -> to GND side... NO:
+   verify per KiCad LED_0603 convention pad 1 = cathode; wire cathode to GND,
+   anode to resistor).
+6. TVS: SMBJ24A out. SMBJ18A (standoff 18V > 14.4V nominal, clamp ~29.2V
+   <= TPS54202 Vin abs max 30V) placed BEFORE D2 (right at F1 output) so it
+   clamps negative pulses via forward conduction too. C_in rating: see 8.
+7. LED2 moved OFF strapping pin IO8 -> IO7 (non-strapping). IO8 gets a 10k
+   pullup to 3V3 only (boot-mode high). firmware/src/status_led.cpp pin
+   updated to IO7.
+8. C_in: 22uF/35V in 0603 is not a real part. Use 2x 10uF/50V X7R 1210
+   (VERIFY LCSC basic-part availability); C_out 2x 22uF/10V X7R 0805+.
+9. BOM: EVERY row gets a real LCSC part number (verify each exists and is
+   in-stock basic/extended on the live site; prefer basic parts). No blank
+   LCSC cells in production/bom.csv.
+10. Antenna keepout: both-layer copper/zone keepout under the U1 antenna area
+    per module datasheet, as a real KiCad rule/keepout zone object.
+11. J1: rev A is PIGTAIL-ONLY (5-pad row) — declared, not pretended; the
+    direct-plug J1962 footprint is deferred to rev B.
+12. Firmware: accept spaced custom-PID hex ("22 1E 0C") like the app does;
+    correlate CAN responses (match positive-response service byte 0x41/0x61/
+    0x62 + echoed PID/DID to the request) instead of first-frame-wins.
