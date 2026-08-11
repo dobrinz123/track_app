@@ -92,3 +92,18 @@ ESD: PESD2CAN (C24911) across CANH/CANL to GND (D3) — automotive ESD on the bu
 - J1962 plug part availability varies; fallback documented: pigtail cable
   (OBD plug w/ leads) soldered to 5 pads (12V, GND, GND, CANH, CANL) — the PCB
   provides both the connector footprint AND the 5-pad fallback row.
+
+## 7. Rev A2 amendments (LEAD, 2026-08-11 — routability unlock after HW2 wave 1)
+
+- Board envelope RAISED to 62 x 30 mm max (was 55 x 25; case width is governed by
+  the 38mm plug aperture anyway, so PCB width up to ~32mm costs nothing — the
+  parametric enclosure re-renders). Use the extra area for spacing, not parts.
+- SW1 may move anywhere along either long edge (do not co-locate with the
+  U2/D3 CAN cluster).
+- BINDING pin maps (LEAD-supplied from standard datasheets; report if any
+  KiCad footprint numbering disagrees):
+  U2 TJA1051T/3 (SO8): 1=TXD, 2=GND, 3=VCC, 4=RXD, 5=VIO, 6=CANL, 7=CANH, 8=S
+  U3 TPS54202 (SOT-23-6 DDC): 1=BOOT, 2=GND, 3=FB, 4=EN, 5=VIN, 6=SW
+  D3 PESD2CAN (SOT-23): 1=CANL line, 2=CANH line, 3=GND (common cathode)
+- DRC fine-rule allowance near U1 castellated pads only: clearance may drop to
+  0.15mm locally. Everywhere else the 0.2mm rule stands.

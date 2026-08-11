@@ -1,0 +1,110 @@
+** Drc report for trace-dongle.kicad_pcb **
+** Created on 2026-08-11T02:58:01 **
+** Report includes: Errors **
+
+** Found 19 DRC violations **
+[shorting_items]: Items shorting two nets (nets 3V3 and FB_NODE)
+    Local override; error
+    @(28.2250 mm, 16.2000 mm): Track [3V3] on F.Cu, length 12.2750 mm
+    @(34.0000 mm, 15.8250 mm): Pad 1 [FB_NODE] of R2 on F.Cu
+[tracks_crossing]: Tracks crossing
+    Local override; error
+    @(44.5000 mm, 11.0000 mm): Track [CAN_RX] on B.Cu, length 39.9000 mm
+    @(5.7250 mm, 0.8500 mm): Track [3V3] on B.Cu, length 12.1500 mm
+[shorting_items]: Items shorting two nets (nets IO9_BOOT and 3V3)
+    Local override; error
+    @(8.1750 mm, 22.0000 mm): Track [IO9_BOOT] on B.Cu, length 15.7579 mm
+    @(9.8250 mm, 22.0000 mm): Via [3V3] on F.Cu - B.Cu
+[clearance]: Clearance violation ( clearance 0.2000 mm; actual 0.1250 mm)
+    Local override; error
+    @(43.6000 mm, 12.8000 mm): Track [CAN_TX] on B.Cu, length 36.3000 mm
+    @(43.6000 mm, 13.3000 mm): Via [CAN_RX] on F.Cu - B.Cu
+[clearance]: Clearance violation ( clearance 0.2000 mm; actual 0.1250 mm)
+    Local override; error
+    @(43.6000 mm, 13.3000 mm): Via [CAN_RX] on F.Cu - B.Cu
+    @(44.0000 mm, 13.8000 mm): Track [CAN_S] on B.Cu, length 31.5250 mm
+[clearance]: Clearance violation ( clearance 0.2000 mm; actual 0.1250 mm)
+    Local override; error
+    @(43.6000 mm, 12.5000 mm): Track [CAN_TX] on B.Cu, length 0.3000 mm
+    @(43.6000 mm, 13.3000 mm): Via [CAN_RX] on F.Cu - B.Cu
+[clearance]: Clearance violation ( clearance 0.2000 mm; actual 0.1250 mm)
+    Local override; error
+    @(28.2250 mm, 16.2000 mm): Track [3V3] on F.Cu, length 12.2750 mm
+    @(36.0000 mm, 10.6750 mm): Track [FB_NODE] on F.Cu, length 5.1500 mm
+[clearance]: Clearance violation ( clearance 0.2000 mm; actual 0.1250 mm)
+    Local override; error
+    @(36.0000 mm, 15.8250 mm): Track [FB_NODE] on F.Cu, length 2.0000 mm
+    @(28.2250 mm, 16.2000 mm): Track [3V3] on F.Cu, length 12.2750 mm
+[shorting_items]: Items shorting two nets (nets 3V3 and IO9_BOOT)
+    Local override; error
+    @(9.8250 mm, 23.5000 mm): Track [3V3] on B.Cu, length 1.5000 mm
+    @(8.1750 mm, 22.0000 mm): Track [IO9_BOOT] on B.Cu, length 15.7579 mm
+[clearance]: Clearance violation ( clearance 0.2000 mm; actual 0.0750 mm)
+    Local override; error
+    @(28.2250 mm, 15.0000 mm): Track [3V3] on B.Cu, length 6.0000 mm
+    @(23.8750 mm, 14.5000 mm): Track [IO9_BOOT] on B.Cu, length 18.6250 mm
+[shorting_items]: Items shorting two nets (nets GND and 3V3)
+    Local override; error
+    @(20.7750 mm, 1.2000 mm): Pad 2 [GND] of C6 on F.Cu
+    @(40.5000 mm, 1.5000 mm): Track [3V3] on F.Cu, length 21.2750 mm
+[tracks_crossing]: Tracks crossing
+    Local override; error
+    @(11.0000 mm, 18.1350 mm): Track [CANL] on F.Cu, length 2.1650 mm
+    @(7.5250 mm, 18.1350 mm): Track [3V3] on F.Cu, length 5.1103 mm
+[clearance]: Clearance violation ( clearance 0.2000 mm; actual 0.1250 mm)
+    Local override; error
+    @(28.2250 mm, 15.0000 mm): Via [3V3] on F.Cu - B.Cu
+    @(23.8750 mm, 14.5000 mm): Track [IO9_BOOT] on B.Cu, length 18.6250 mm
+[tracks_crossing]: Tracks crossing
+    Local override; error
+    @(12.4750 mm, 19.4050 mm): Track [3V3] on F.Cu, length 9.5270 mm
+    @(21.3250 mm, 20.3000 mm): Track [CANL] on F.Cu, length 2.8000 mm
+[solder_mask_bridge]: Front solder mask aperture bridges items with different nets
+    Rule: board setup solder mask min width; error
+    @(28.2250 mm, 16.2000 mm): Track [3V3] on F.Cu, length 12.2750 mm
+    @(34.0000 mm, 15.8250 mm): Pad 1 [FB_NODE] of R2 on F.Cu
+[solder_mask_bridge]: Front solder mask aperture bridges items with different nets
+    Rule: board setup solder mask min width; error
+    @(40.5000 mm, 1.5000 mm): Track [3V3] on F.Cu, length 21.2750 mm
+    @(20.7750 mm, 1.2000 mm): Pad 2 [GND] of C6 on F.Cu
+[solder_mask_bridge]: Front solder mask aperture bridges items with different nets
+    Rule: board setup solder mask min width; error
+    @(40.5000 mm, 1.5000 mm): Track [3V3] on F.Cu, length 21.2750 mm
+    @(25.7750 mm, 1.2000 mm): Pad 2 [GND] of C7 on F.Cu
+[solder_mask_bridge]: Front solder mask aperture bridges items with different nets
+    Rule: board setup solder mask min width; error
+    @(40.5000 mm, 1.5000 mm): Track [3V3] on F.Cu, length 21.2750 mm
+    @(29.2250 mm, 1.2000 mm): Pad 1 [U1_EN] of C8 on F.Cu
+[solder_mask_bridge]: Front solder mask aperture bridges items with different nets
+    Rule: board setup solder mask min width; error
+    @(40.5000 mm, 1.5000 mm): Track [3V3] on F.Cu, length 21.2750 mm
+    @(30.7750 mm, 1.2000 mm): Pad 2 [GND] of C8 on F.Cu
+
+** Found 4 unconnected pads **
+[unconnected_items]: Missing connection between items
+    Local override; error
+    @(1.2000 mm, 1.2000 mm): Zone [GND] on F.Cu, priority 0
+    @(20.7750 mm, 1.2000 mm): Pad 2 [GND] of C6 on F.Cu
+[unconnected_items]: Missing connection between items
+    Local override; error
+    @(25.7750 mm, 1.2000 mm): Pad 2 [GND] of C7 on F.Cu
+    @(20.7750 mm, 1.2000 mm): Pad 2 [GND] of C6 on F.Cu
+[unconnected_items]: Missing connection between items
+    Local override; error
+    @(30.7750 mm, 1.2000 mm): Pad 2 [GND] of C8 on F.Cu
+    @(25.7750 mm, 1.2000 mm): Pad 2 [GND] of C7 on F.Cu
+[unconnected_items]: Missing connection between items
+    Local override; error
+    @(1.2000 mm, 1.2000 mm): Zone [GND] on F.Cu, priority 0
+    @(1.2000 mm, 1.2000 mm): Zone [GND] on F.Cu, priority 0
+
+** Found 0 Footprint errors **
+
+** Ignored checks **
+    - Footprint has no courtyard defined
+    - Track endpoint not centered on via
+    - Tuning profile track geometries
+    - Footprint doesn't match symbol's footprint filters
+    - Footprint component type doesn't match footprint pads
+
+** End of Report **
