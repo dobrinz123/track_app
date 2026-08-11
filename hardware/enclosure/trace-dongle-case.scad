@@ -22,8 +22,8 @@
 part = "both"; // "body" | "lid" | "both"
 
 /* ===================== Board envelope (hardware/DESIGN.md section 4) ===================== */
-pcb_l = 55;      // PCB length (mm), along X
-pcb_w = 25;      // PCB width (mm), along Y
+pcb_l = 62;      // PCB length (mm), along X
+pcb_w = 30;      // PCB width (mm), along Y
 pcb_t = 1.6;     // PCB thickness (mm)
 
 /* ===================== Wall / fit / tolerance ===================== */
