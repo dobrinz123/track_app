@@ -80,7 +80,7 @@ j1 = elm.Ic(
     ],
 ).at((0.5, 14)).label(
     "J1\nOBD-II (J1962) male plug\n"
-    "1x5 2.54mm pigtail fallback, C2337 (cut to 5 pins)\n"
+    "1x5 2.54mm pigtail fallback, TSW-105-07-T-S C5967238 (hand-solder)\n"
     "pins 16/4/5/6/14 used;\nothers NC rev A",
     loc="center", fontsize=8,
 )
@@ -88,7 +88,7 @@ d += j1
 
 # --- 12V_RAW: J1.16 -> F1.1 ---
 d += elm.Line().at(j1.absanchors["16"]).right(0.6)
-f1 = elm.Fuse().right(2).label("F1\nPTC 350mA 0603\nC910820 (16V)", fontsize=7.5)
+f1 = elm.Fuse().right(2).label("F1\nPTC 350mA 0805\nC910821 (24V)", fontsize=7.5)
 d += f1
 d += net_flag(j1.absanchors["16"], "12V_RAW", width=1.7, direction="left")
 net_fused = f1.end
@@ -138,9 +138,10 @@ d += net_flag(vin_prot_rail_end, "VIN_PROT", width=2.0, direction="right")
 # ZONE 2 (x 11-22):  TPS54202 buck (rev A3, DESIGN.md sec8 items 1-3)
 #   U3.VIN <- VIN_PROT ; BST cap SW->BST ; L1 SW->VOUT_3V3(=3V3)
 #   FB divider 100k/22.1k (Vref 0.598V typ, verified TI datasheet) ; EN
-#   divider 133k/24k off VIN_PROT (~7.8V rising UVLO -- 137k, nearest E96 to
-#   the 136.6k target, was 0 in stock at LCSC; 133k is the nearest in-stock
-#   E96 value, see report)
+#   divider 274k/44.2k off VIN_PROT (rev A4: replaces 133k/24k, whose
+#   0.337V hysteresis was below TI's >0.5V recommendation -- 274k/44.2k
+#   gives Vstart=8.519V, Vstop=7.950V, hysteresis=0.569V; both E96 values
+#   verified in stock at LCSC, see report for the full Ip/Ih math)
 #   Physical pin map verified against the live TI datasheet (DDC/SOT-23-6):
 #   1=GND, 2=SW, 3=VIN, 4=FB, 5=EN, 6=BOOT -- LEAD's original sec3/sec7
 #   pin maps were both wrong (Codex NO-GO review); this schematic's pin
@@ -219,16 +220,19 @@ vout_3v3_end = cout2_top
 d += vdd_flag((vout_3v3_end[0] + 0.4, vout_3v3_end[1]), "3V3")
 d += elm.Line().at(vout_3v3_end).to((vout_3v3_end[0] + 0.4, vout_3v3_end[1]))
 
-# EN divider: EN -> 133k -> VIN_PROT ; EN -> 24k -> GND (~7.8V rising UVLO;
-# 137k target was 0 in stock, 133k is the nearest in-stock E96 -- see report)
+# EN divider: EN -> 274k -> VIN_PROT ; EN -> 44.2k -> GND (Vstart=8.519V,
+# Vstop=7.950V, hysteresis=0.569V -- both >0.5V hysteresis and the 8.0-9.0V
+# Vstart target are met; solved from the TPS54202 datasheet's EN/UVLO
+# equations with Ip=0.7uA, Ih=1.55uA, VENrising=1.21V, VENfalling=1.19V --
+# see ticket report for the math)
 en_pt = u3.absanchors["EN"]
 en_node = (en_pt[0] - 1.6, en_pt[1])
 d += elm.Line().at(en_pt).to(en_node)
 d += elm.Dot().at(en_node)
-d += elm.Resistor().at(en_node).up(1.8).label("R3\n133k 1%\nC22870", fontsize=7.5, loc="left")
+d += elm.Resistor().at(en_node).up(1.8).label("R3\n274k 1%\nC22968", fontsize=7.5, loc="left")
 en_top = (en_node[0], en_node[1] + 1.8)
 d += net_flag(en_top, "VIN_PROT", width=2.0, direction="up")
-d += elm.Resistor().at(en_node).down(1.8).label("R4\n24k 1%\nC23352", fontsize=7.5, loc="left")
+d += elm.Resistor().at(en_node).down(1.8).label("R4\n44.2k 1%\nC23056", fontsize=7.5, loc="left")
 d += gnd((en_node[0], en_node[1] - 1.8))
 
 # =====================================================================
@@ -437,7 +441,7 @@ j2 = elm.Ic(
         IcPin(name="IO9", pin="5", side="L", slot="5/6"),
         IcPin(name="EN", pin="6", side="L", slot="6/6"),
     ],
-).at((36, 2)).label("J2\n1x6 2.54mm header\nC2337 (cut to 6 pins)", loc="center", fontsize=8)
+).at((36, 2)).label("J2\n1x6 2.54mm header\nHTSW-106-07-T-S C6209271 (hand-solder)", loc="center", fontsize=8)
 d += j2
 
 txd0 = u1.absanchors["TXD0"]
@@ -474,14 +478,14 @@ d += elm.Line().to(j2.absanchors["EN"])
 # BOM / legend block
 # =====================================================================
 bom_lines = [
-    "BOM rev A3 (ref: LCSC part -- every number below verified live against LCSC/datasheet, see ticket report)",
+    "BOM rev A4 (ref: LCSC part -- every number below verified live against LCSC/datasheet, see ticket report)",
     "U1 ESP32-C3-MINI-1-N4 C2838502   U2 TCAN330DR C2652876 (was TJA1051T/3 -- VCC needed 4.5-5.5V)",
     "U3 TPS54202DDCR C191884   D1 SMBJ18A TVS C151256 (was SMBJ24A)   D2 SS34B Schottky (SMB) C880746",
-    "D3 PESD2CANFD24V-TR C552486 (Nexperia)   F1 0603 PTC 350mA 16V C910820   L1 10uH 2A shielded C167223",
-    "J1/J2 1x40P 2.54mm header (cut to length) C2337   SW1 side tact EVQPUC02K C79174",
+    "D3 PESD2CANFD24V-TR C552486 (Nexperia)   F1 0805 PTC 350mA 24V C910821 (was 16V C910820)   L1 10uH 2A shielded C167223",
+    "J1 1x5 header (hand-solder) C5967238   J2 1x6 header (hand-solder) C6209271   SW1 side tact EVQPUC02K C79174",
     "C1/C2 10uF/50V X7R 1210 C138687   C3/C4 22uF/10V X7R 0805 C907991   C5/C6/C9 100nF/50V 0603 C1591",
     "C7 10uF/25V 0603 C96446   C8 1uF/25V 0603 C5673",
-    "R1 100k C25803 / R2 22.1k C25961 (FB div)   R3 133k C22870 / R4 24k C23352 (EN UVLO div, 137k target OOS)",
+    "R1 100k C25803 / R2 22.1k C25961 (FB div)   R3 274k C22968 / R4 44.2k C23056 (EN UVLO div, Vstart=8.52V hyst=0.57V)",
     "R5/R6/R10 10k C2906982   R7/R8 1k C2907002   R120 DNP (CAN term, not fitted)",
     "LED1 green C84267   LED2 amber/orange C84269",
     "Nets: 12V_RAW, NET_FUSED, VIN_PROT, 3V3, GND, CANH, CANL  (flags = net ties, not physical wire runs)",

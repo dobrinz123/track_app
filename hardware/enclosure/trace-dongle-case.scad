@@ -22,7 +22,7 @@
 part = "both"; // "body" | "lid" | "both"
 
 /* ===================== Board envelope (hardware/DESIGN.md section 4) ===================== */
-pcb_l = 62;      // PCB length (mm), along X
+pcb_l = 68;      // PCB length (mm), along X (rev A4: board grew 62->68 for the C1/C2/C3/C4 1210/0805 footprint growth, see generate_board.py)
 pcb_w = 30;      // PCB width (mm), along Y
 pcb_t = 1.6;     // PCB thickness (mm)
 

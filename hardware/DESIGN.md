@@ -149,3 +149,47 @@ page (web) before applying. No more from-memory electrical facts.
 12. Firmware: accept spaced custom-PID hex ("22 1E 0C") like the app does;
     correlate CAN responses (match positive-response service byte 0x41/0x61/
     0x62 + echoed PID/DID to the request) instead of first-frame-wins.
+
+## 9. Rev A4 (final hardware fix wave, 2026-08-11 — NO-GO reverdict remediation)
+
+Source of truth: the reverdict review (.foreman/scratch/hwpkg-reverdict-out.log,
+"New defects in the remediation diff" + the M1/H6-PARTIAL notes above it).
+Every part/value below is live-verified against LCSC/datasheet pages (see
+generate_board.py's LCSC dict comments and the ticket report for URLs).
+
+1. F1: C910820 (16V) was rating-uncoordinated with the 18V-standoff SMBJ18A
+   TVS and automotive transients. Replaced with C910821 (BSMD0805-035-24V,
+   BHFUSE): 24V max, 350mA hold, 750mA trip, 0805 — footprint grown
+   0603->0805 to match.
+2. SW1: footprint corrected to Panasonic_EVQPUL_EVQPUC (the KiCad std-lib
+   family for EVQPUC02K/C79174) — was Panasonic_EVQPUJ_EVQPUA, a different,
+   pad-incompatible Panasonic side-tact variant.
+3. Enclosure: trace-dongle-case.scad pcb_l updated 62->68 to match the
+   board's actual rev A3 envelope; STLs/preview re-rendered.
+4. Antenna keepout: enlarged to the antenna footprint's real F.Fab-line
+   extent (local Y -11 to -5.6, X -6.6 to 6.6 in
+   fp-lib/TRACE-Custom.pretty/ESP32-C3-MINI-1.kicad_mod) plus a 1mm margin,
+   instead of the old undersized manually-picked rectangle. U1_EN's and
+   3V3's routes through that corner were rerouted around it.
+5. J1/J2: excluded from production/cpl.csv (hand-solder, not JLCPCB
+   machine-placed) via generate_production_csv.py; bom.csv comment column
+   says "hand-solder"; real correctly-sized in-stock LCSC headers used —
+   J1 Samtec TSW-105-07-T-S (1x5, C5967238), J2 Samtec HTSW-106-07-T-S
+   (1x6, C6209271) — replacing the generic C2337 40-pin cut-to-length strip.
+6. C2 (buck input cap): relocated immediately west of U3's VIN pin (pin 3)
+   instead of sitting on the C1<->C2 row 8mm+ away, per TI's close-placement
+   guidance; VIN_PROT now reaches U3.3 in a single short 2-via hop. R3/R4
+   (EN divider) shifted 4mm west to make room.
+7. UVLO divider: R3/R4 changed from 133k/24k (0.337V hysteresis, below TI's
+   >0.5V recommendation) to 274k/44.2k E96 values (C22968/C23056, both in
+   LCSC stock): Vstart=8.519V, Vstop=7.950V, hysteresis=0.569V, solved from
+   the TPS54202 datasheet's EN/UVLO equations (Ip=0.7uA, Ih=1.55uA,
+   VENrising=1.21V, VENfalling=1.19V — SLVSD26C section 6.3.5). See ticket
+   report for the full derivation.
+
+Two script-level fixes surfaced while re-verifying the board after the SW1
+footprint swap (not separate reverdict findings, but required for a clean
+DRC): the SW1 same-numbered-pad bridge helper in generate_board.py now
+skips the new footprint's NPTH mounting-hole pads (empty pad number) rather
+than wiring a netless track between them, and two nearby IO9_BOOT/3V3
+routes were nudged to clear those same NPTH holes.

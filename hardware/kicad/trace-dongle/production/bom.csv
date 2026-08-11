@@ -11,22 +11,22 @@ Comment,Designator,Footprint,LCSC
 SMBJ18A,D1,D_SMB,C151256
 SS34B,D2,D_SMB,C880746
 PESD2CANFD24V-TR,D3,SOT-23,C552486
-PTC 350mA 16V,F1,Fuse_0603_1608Metric,C910820
-"OBD-II 5-pad fallback row (12V/GND/GND/CANH/CANL) -- C2337 pigtail fallback, cut to 5 pins",J1,PinHeader_1x05_P2.54mm_Vertical,C2337
-"1x6 2.54mm UART header -- C2337, cut to 6 pins",J2,PinHeader_1x06_P2.54mm_Vertical,C2337
+PTC 350mA 24V,F1,Fuse_0805_2012Metric,C910821
+"OBD-II 5-pad fallback row (12V/GND/GND/CANH/CANL) -- hand-solder, TSW-105-07-T-S 1x5 header",J1,PinHeader_1x05_P2.54mm_Vertical,C5967238
+"1x6 2.54mm UART header -- hand-solder, HTSW-106-07-T-S 1x6 header",J2,PinHeader_1x06_P2.54mm_Vertical,C6209271
 10uH 2A shielded,L1,L_APV_APH0630,C167223
 green (power),LED1,LED_0603_1608Metric,C84267
 amber/orange (activity),LED2,LED_0603_1608Metric,C84269
 100k (FB div hi),R1,R_0603_1608Metric,C25803
 "10k (IO8 pullup, boot-mode high)",R10,R_0603_1608Metric,C2906982
 22.1k (FB div lo),R2,R_0603_1608Metric,C25961
-133k (EN div hi),R3,R_0603_1608Metric,C22870
-24k (EN div lo),R4,R_0603_1608Metric,C23352
+274k (EN div hi),R3,R_0603_1608Metric,C22968
+44.2k (EN div lo),R4,R_0603_1608Metric,C23056
 10k (U1 EN pullup),R5,R_0603_1608Metric,C2906982
 10k (IO9/BOOT pullup),R6,R_0603_1608Metric,C2906982
 1k,R7,R_0603_1608Metric,C2907002
 1k,R8,R_0603_1608Metric,C2907002
-BOOT tact,SW1,Panasonic_EVQPUJ_EVQPUA,C79174
+BOOT tact,SW1,Panasonic_EVQPUL_EVQPUC,C79174
 ESP32-C3-MINI-1-N4,U1,ESP32-C3-MINI-1,C2838502
 TCAN330DR,U2,SOIC-8_3.9x4.9mm_P1.27mm,C2652876
 TPS54202DDCR,U3,SOT-23-6,C191884

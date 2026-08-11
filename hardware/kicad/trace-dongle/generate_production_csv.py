@@ -7,6 +7,11 @@ cpl.csv columns (JLCPCB): Designator,Mid X,Mid Y,Layer,Rotation
 R9 (R120, DNP per DESIGN.md sec2/sec3 -- CAN bus already terminated) is
 excluded from both: it is not assembled, only its footprint/copper is on
 the board for optional manual fitting later.
+
+J1/J2 (rev A4, NO-GO reverdict item 5) are excluded from cpl.csv ONLY --
+they are through-hole headers with real LCSC part numbers and stay in the
+BOM for procurement, but they are hand-soldered (not JLCPCB machine-
+placed), so they must not appear in the pick-and-place file.
 """
 import csv
 import os
@@ -18,7 +23,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PCB = os.path.join(HERE, "trace-dongle.kicad_pcb")
 PROD = os.path.join(HERE, "production")
 
-DNP = {"R9"}
+DNP = {"R9"}          # excluded from BOTH bom.csv and cpl.csv (not assembled)
+HAND_SOLDER_CPL_EXCLUDE = {"J1", "J2"}  # excluded from cpl.csv only (see module docstring)
 
 # rev A3 (DESIGN.md sec8 item 9): import the LCSC dict straight from
 # generate_board.py instead of keeping a second, independently-maintained
@@ -40,6 +46,9 @@ for fp in board.GetFootprints():
     footprint = fp.GetFPID().GetLibItemName().wx_str() if hasattr(fp.GetFPID().GetLibItemName(), "wx_str") else str(fp.GetFPID().GetLibItemName())
     lcsc = LCSC.get(ref, "")
     bom_rows.append((comment, ref, footprint, lcsc))
+
+    if ref in HAND_SOLDER_CPL_EXCLUDE:
+        continue
 
     pos = fp.GetPosition()
     x_mm = pcbnew.ToMM(pos.x)

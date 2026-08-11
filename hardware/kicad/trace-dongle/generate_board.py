@@ -137,14 +137,23 @@ PLACEMENTS = [
 
     # -- protection chain (unmoved; D2 rotated 180 deg for correct
     #    polarity -- rev A3 item 5) --
-    ("F1",  lib("Fuse"),                        "Fuse_0603_1608Metric",            6.5, 6.0, 0),
+    # rev A4: footprint grown 0603->0805 -- C910821 (24V-rated replacement
+    # for the 16V C910820) is only stocked in 0805 (see LCSC dict below).
+    ("F1",  lib("Fuse"),                        "Fuse_0805_2012Metric",            6.5, 6.0, 0),
     ("D2",  lib("Diode_SMD"),                    "D_SMB",                          13.0, 6.0, 180),
     ("D1",  lib("Diode_SMD"),                    "D_SMB",                          13.0, 11.5, 0),
 
     # -- buck section, downstream of D1/D2 (+REV_A3_SHIFT; C1/C2/C3/C4
     #    footprints grown per item 8) --
     ("C1",  lib("Capacitor_SMD"),                "C_1210_3225Metric",              20.0, 6.0, 0),
-    ("C2",  lib("Capacitor_SMD"),                "C_1210_3225Metric",              23.0 + REV_A3_SHIFT, 6.0, 0),
+    # rev A4 (C2 finding): moved off the C1<->C2 row and placed immediately
+    # west of U3's own VIN pin (pin 3, verified at X=34.8625/Y=6.95 once
+    # placed -- see the VIN_PROT route below) so it is the closest bypass
+    # cap to VIN/GND, per TI's close-placement guidance. Rotated 270 so
+    # pad 1 (VIN_PROT) lands at U3.3's own Y for a short direct F.Cu hop;
+    # pad 2 (GND) lands south, clear of U3's courtyard. R3/R4 (below) moved
+    # west out of this corridor to make room.
+    ("C2",  lib("Capacitor_SMD"),                "C_1210_3225Metric",              31.8, 8.425, 270),
     # C5 (bootstrap cap) placed SOUTH of U3, rotated 90deg so its two pads
     # stack in Y instead of X -- verified TI pin geometry put SW/pin2 and
     # BOOT/pin6 on diagonally opposite corners of the chip (not adjacent,
@@ -153,8 +162,11 @@ PLACEMENTS = [
     # at all. South of U3 (not north/above the CAN B.Cu corridor) avoids
     # that corridor conflicting with BST_NODE/SW_NODE's own B.Cu spans.
     ("C5",  lib("Capacitor_SMD"),                "C_0603_1608Metric",              36.5, 9.8, 90),
-    ("R3",  lib("Resistor_SMD"),                 "R_0603_1608Metric",              27.0 + REV_A3_SHIFT, 9.0, 90),
-    ("R4",  lib("Resistor_SMD"),                 "R_0603_1608Metric",              27.0 + REV_A3_SHIFT, 12.5, 90),
+    # rev A4: shifted west 4mm (32->28) out of the corridor directly west
+    # of U3, which C2 (above) now occupies. Same Y positions, same
+    # rotation -- only X changes.
+    ("R3",  lib("Resistor_SMD"),                 "R_0603_1608Metric",              28.0, 9.0, 90),
+    ("R4",  lib("Resistor_SMD"),                 "R_0603_1608Metric",              28.0, 12.5, 90),
     ("U3",  lib("Package_TO_SOT_SMD"),           "SOT-23-6",                       31.0 + REV_A3_SHIFT, 6.0, 0),
     ("L1",  lib("Inductor_SMD"),                 "L_APV_APH0630",                  39.0 + REV_A3_SHIFT, 6.0, 0),
     ("C3",  lib("Capacitor_SMD"),                "C_0805_2012Metric",              34.0 + REV_A3_SHIFT, 11.0, 0),
@@ -173,7 +185,11 @@ PLACEMENTS = [
     ("LED2", lib("LED_SMD"),                     "LED_0603_1608Metric",            39.0 + REV_A3_SHIFT, 18.2, 0),
     ("R8",  lib("Resistor_SMD"),                 "R_0603_1608Metric",              42.5 + REV_A3_SHIFT, 18.2, 0),
     ("R6",  lib("Resistor_SMD"),                 "R_0603_1608Metric",              43.0 + REV_A3_SHIFT, 21.0, 90),
-    ("SW1", lib("Button_Switch_SMD"),            "Panasonic_EVQPUJ_EVQPUA",        41.0 + REV_A3_SHIFT, 27.3, 0),
+    # rev A4 (SW1 finding): footprint corrected to Panasonic_EVQPUL_EVQPUC,
+    # the KiCad std-lib footprint family for EVQPUC02K/C79174 (was
+    # EVQPUJ_EVQPUA, a different Panasonic side-tact variant with
+    # incompatible pads) -- see LCSC dict below for the verification note.
+    ("SW1", lib("Button_Switch_SMD"),            "Panasonic_EVQPUL_EVQPUC",        41.0 + REV_A3_SHIFT, 27.3, 0),
     ("J2",  lib("Connector_PinHeader_2.54mm"),   "PinHeader_1x06_P2.54mm_Vertical", 47.0 + REV_A3_SHIFT, 24.5, 90),
     # -- NEW (rev A3 item 7): IO8 pullup, keeps it HIGH at boot now that
     #    LED2 (below) moved off it onto IO7. Placed WEST of U1's own
@@ -186,17 +202,17 @@ PLACEMENTS = [
 ]
 
 VALUES = {
-    "J1": "OBD-II 5-pad fallback row (12V/GND/GND/CANH/CANL) -- C2337 pigtail fallback, cut to 5 pins",
-    "F1": "PTC 350mA 16V", "D2": "SS34B", "D1": "SMBJ18A",
+    "J1": "OBD-II 5-pad fallback row (12V/GND/GND/CANH/CANL) -- hand-solder, TSW-105-07-T-S 1x5 header",
+    "F1": "PTC 350mA 24V", "D2": "SS34B", "D1": "SMBJ18A",
     "C1": "10uF/50V X7R 1210", "C2": "10uF/50V X7R 1210", "U3": "TPS54202DDCR", "C5": "100nF (BST)",
-    "L1": "10uH 2A shielded", "R3": "133k (EN div hi)", "R4": "24k (EN div lo)",
+    "L1": "10uH 2A shielded", "R3": "274k (EN div hi)", "R4": "44.2k (EN div lo)",
     "C3": "22uF/10V X7R 0805", "C4": "22uF/10V X7R 0805", "R1": "100k (FB div hi)", "R2": "22.1k (FB div lo)",
     "C6": "100nF (U1 3V3)", "C7": "10uF (U1 3V3)", "C8": "1uF (U1 EN)",
     "U2": "TCAN330DR", "D3": "PESD2CANFD24V-TR", "R9": "DNP (CAN term, not fitted)",
     "C9": "100nF (U2 VCC)", "U1": "ESP32-C3-MINI-1-N4",
     "R5": "10k (U1 EN pullup)", "R6": "10k (IO9/BOOT pullup)", "R10": "10k (IO8 pullup, boot-mode high)",
     "SW1": "BOOT tact", "LED1": "green (power)", "R7": "1k", "LED2": "amber/orange (activity)", "R8": "1k",
-    "J2": "1x6 2.54mm UART header -- C2337, cut to 6 pins",
+    "J2": "1x6 2.54mm UART header -- hand-solder, HTSW-106-07-T-S 1x6 header",
 }
 
 # Every LCSC number below is verified live (LCSC product page and/or the
@@ -211,9 +227,18 @@ LCSC = {
     "D1": "C151256",   # SMBJ18A, Littelfuse, SMB(DO-214AA)
     "D2": "C880746",   # SS34B, SMB(DO-214AA) -- matches the D_SMB footprint (plain SS34/C8678 was SMA)
     "D3": "C552486",   # PESD2CANFD24V-TR, Nexperia, SOT-23
-    "F1": "C910820",   # 0603 PTC 350mA/16V (highest voltage rating available in 0603 at this hold current)
+    # rev A4 (NO-GO reverdict item F1): C910820 was only 16V-rated -- not
+    # coordinated with the 18V-standoff SMBJ18A TVS or automotive load-dump/
+    # jump-start transients. Replaced with C910821 (BSMD0805-035-24V,
+    # BHFUSE): 24V max, 350mA hold, 750mA trip, 0805, 49,540 in stock --
+    # https://www.lcsc.com/product-detail/C910821.html (footprint grown
+    # 0603->0805 below to match).
+    "F1": "C910821",   # 0805 PTC 350mA/24V (BHFUSE BSMD0805-035-24V)
     "L1": "C167223",   # 10uH 2A shielded (C167219 was a 3.3uH part)
-    "SW1": "C79174",   # EVQPUC02K, side-actuated 2-pad SMD tact (C318884 was a 4-pad top-actuated switch)
+    # rev A4 (SW1 finding): footprint switched to Panasonic_EVQPUL_EVQPUC
+    # (matches the EVQPUC02K part family -- see PLACEMENTS below); C79174
+    # itself re-verified in stock at https://www.lcsc.com/product-detail/C79174.html
+    "SW1": "C79174",   # EVQPUC02K, side-actuated 2-pad SMD tact
     "C1": "C138687", "C2": "C138687",  # 10uF/50V X7R 1210
     "C3": "C907991", "C4": "C907991",  # 22uF/10V X7R 0805
     "C5": "C1591", "C6": "C1591", "C9": "C1591",  # 100nF/50V X7R 0603
@@ -221,13 +246,26 @@ LCSC = {
     "C8": "C5673",   # 1uF/25V X5R 0603
     "R1": "C25803",  # 100k 1% 0603
     "R2": "C25961",  # 22.1k 1% 0603
-    "R3": "C22870",  # 133k 1% 0603 (137k target was 0 in stock at LCSC; 133k is the nearest in-stock E96)
-    "R4": "C23352",  # 24k 1% 0603
+    # rev A4 (UVLO hysteresis finding): 133k/24k gave only 0.337V hysteresis
+    # (below TI's >0.5V recommendation). Re-solved the TPS54202 EN/UVLO
+    # equations (Ip=0.7uA, Ih=1.55uA, VENrising=1.21V, VENfalling=1.19V,
+    # TI datasheet SLVSD26C section 6.3.5) for E96 values in LCSC stock --
+    # see ticket report for the math. R3=274k/R4=44.2k -> Vstart=8.519V,
+    # Vstop=7.950V, hysteresis=0.569V (both targets met).
+    "R3": "C22968",  # 274k 1% 0603, UNI-ROYAL 0603WAF2743T5E, 2,200 in stock
+    "R4": "C23056",  # 44.2k 1% 0603, UNI-ROYAL 0603WAF4422T5E, 285,900 in stock
     "R5": "C2906982", "R6": "C2906982", "R10": "C2906982",  # 10k 1% 0603
     "R7": "C2907002", "R8": "C2907002",  # 1k 1% 0603
     "LED1": "C84267",  # green 0603
     "LED2": "C84269",  # orange/amber 0603
-    "J1": "C2337", "J2": "C2337",  # 2.54mm 1x40P male header, cut to length (J1/J2/SW1 are hand-solder THT)
+    # rev A4 (J1/J2 finding): replaced the generic C2337 1x40P cut-to-length
+    # strip with exact-count, in-stock straight male headers (both
+    # hand-solder THT, excluded from cpl.csv -- see generate_production_csv.py):
+    # J1 -- https://www.lcsc.com/product-detail/C5967238.html (Samtec
+    #   TSW-105-07-T-S, 1x5P, Through Hole P=2.54mm, 30 in stock)
+    # J2 -- https://www.lcsc.com/product-detail/C6209271.html (Samtec
+    #   HTSW-106-07-T-S, 1x6P, Through Hole P=2.54mm, 66 in stock)
+    "J1": "C5967238", "J2": "C6209271",  # SW1 is also hand-solder THT/SMD-R/A
     # R9 stays DNP -- no LCSC number, not populated (matches production BOM convention).
 }
 
@@ -363,28 +401,26 @@ ROUTES = [
     # D2.1 (cathode, post-rotation) -> C1.1: same geometry the old
     # D2.2->C1.1 route used.
     ("VIN_PROT",  "D2", "1", "C1", "1", W_POWER, "F", None),
-    # C1.1 -> C2.1: both now 1210 (rev A3 item 8) -- dip further above the
-    # row than the old 0603 hop (taller body) and use the wider C1<->C2
-    # gap this rev's shift opened up.
-    ("VIN_PROT",  "C1", "1", "C2", "1", W_POWER, "W", [(19.0, 3.0), (23.0 + REV_A3_SHIFT, 3.0)]),
-    # C2.1 -> R3.1: kept for R3's own membership in the net (unchanged).
-    ("VIN_PROT",  "C2", "1", "R3", "1", W_POWER, "W", [(22.225 + REV_A3_SHIFT, 9.825)]),
-    # C2.1 -> U3.3 (VIN): retargeted from R3.1 -- U3's real (TI-verified)
-    # pin geometry put VIN, SW and EN/R3's own two pads (verified: R3.1 at
-    # 32,9.825; R3.2 at 32,8.175) all converging on the same narrow X
-    # corridor between R3/R4 (pads at X=32) and U3's west pin column
-    # (X=34.8625); routing THROUGH R3 to reach U3.3 had no way to avoid
-    # crossing EITHER SW_NODE's own escape column or EN_U3_NODE's B.Cu
-    # arrival at R3.2 itself. Going from C2 directly sidesteps R3/R4
-    # entirely (R3.1 is still on the net via the C2.1->R3.1 route above).
-    # Approach column X=33.3 (clear of R3/R4's real pads at X=32 by
-    # 1.3mm, and of SW_NODE's escape column at X=33.8 below by 0.5mm).
-    # B.Cu (was F.Cu "W") -- SW_NODE's own escape column (X=33.8, Y
-    # 6.0-9.025, see below) occupies the ENTIRE width of the narrow
-    # corridor between R3/R4's real pads (X=32) and U3's west pin column
-    # (X=34.8625) for that whole Y span, which includes U3.3's own Y
-    # (6.95) -- no F.Cu path through this corridor can avoid crossing it.
-    ("VIN_PROT",  "C2", "1", "U3", "3", W_POWER, "BW", [(33.3, 6.95)]),
+    # C1.1 -> C2.1 (rev A4: C2 relocated next to U3.VIN -- see PLACEMENTS
+    # above): rise to Y=3.0 clear of F1/D2/D1 and of U3's own courtyard,
+    # travel east to C2's new X, then drop straight down (same X as C2.1)
+    # into the pad.
+    ("VIN_PROT",  "C1", "1", "C2", "1", W_POWER, "W", [(19.0, 3.0), (31.8, 3.0)]),
+    # C2.1 -> R3.1 (rev A4: R3 relocated to X=28 -- see PLACEMENTS above):
+    # leave C2.1 heading west at its own Y (clear of C2's own pad 2/GND,
+    # which is a full row south) to X=29.5 -- west of C2's own pad-2
+    # footprint (rotated 1210 pad spans X=[30.45,33.15]) and east of
+    # R3/R4's own pads (X=28, +-~0.5mm) -- before dropping to R3.1's Y and
+    # making the final short hop west into the pad.
+    ("VIN_PROT",  "C2", "1", "R3", "1", W_POWER, "W", [(29.5, 6.95), (29.5, 9.825)]),
+    # C2.1 -> U3.3 (VIN): rev A4 -- C2 is now placed with pad 1 at U3.3's
+    # own Y (6.95), immediately west of it -- short hop either way, but a
+    # direct F.Cu line still crosses SW_NODE's own F.Cu vertical at
+    # X=33.8 (Y 6.0-9.025, see below), same conflict the pre-rev-A4 design
+    # avoided by going via/B.Cu/via. Kept on B.Cu for that reason; still a
+    # single short 2-via hop (3mm), not the old 8mm+ detour -- satisfies
+    # TI's close-placement guidance for the input bypass cap.
+    ("VIN_PROT",  "C2", "1", "U3", "3", W_POWER, "B", None),
 
     # -- buck switching / bootstrap network -- U3 SW=pin2 (west, mid),
     # BOOT=pin6 (east, north) -- DIAGONALLY opposite corners of the chip
@@ -453,9 +489,19 @@ ROUTES = [
     # down at X=37.1375, U3.5's own X -- but FB_NODE's via at U3.4, one
     # row north at the SAME X, sits inside that vertical's Y span; a
     # via can't be routed "around" the way a track can).
+    # rev A4: R3 moved to X=28 (from X=32) to make room for C2 next to
+    # U3.VIN -- final leg now runs further west, on B.Cu the whole way so
+    # it passes freely underneath C2's F.Cu footprint (different layer,
+    # no clearance interaction) on its way to R3.2.
     ("EN_U3_NODE", "U3", "5", "R3", "2", W_SIGNAL, "BW",
      [(40.0, 6.0), (40.0, 8.175)]),
-    ("EN_U3_NODE", "R3", "2", "R4", "1", W_SIGNAL, "BW", [(25.0 + REV_A3_SHIFT, 8.175), (25.0 + REV_A3_SHIFT, 13.325)]),
+    # rev A4: R3/R4 share the same X (28) one above the other, but R3's own
+    # pad 1 (VIN_PROT, Y=9.825) and R4's own pad 2 (GND, Y=11.675) also sit
+    # on that same column, directly between R3.2(Y=8.175) and R4.1
+    # (Y=13.325) -- a direct vertical would short both. Detour west to
+    # X=26.5 (clear of R3/R4's own pads by >1mm, and of the VIN_PROT
+    # C2->R3.1 detour at X=29.5 above by 3mm) for the full span.
+    ("EN_U3_NODE", "R3", "2", "R4", "1", W_SIGNAL, "W", [(26.5, 8.175), (26.5, 13.325)]),
 
     # -- buck output rail (3V3), local hops (F.Cu) --
     # L1.2 does not connect to R1.1 directly (any path east runs parallel
@@ -545,7 +591,15 @@ ROUTES = [
     # pad in it -- each hop only needs to clear its OWN part's sibling GND
     # pad, which a same-Y horizontal run would otherwise clip).
     ("3V3", "C6", "1", "C7", "1", W_POWER, "W", [(45.525 + REV_A3_SHIFT, 7.3), (49.025 + REV_A3_SHIFT, 7.3)]),
-    ("3V3", "C7", "1", "R5", "2", W_POWER, "W", [(49.025 + REV_A3_SHIFT, 7.3), (55.975 + REV_A3_SHIFT, 7.3)]),
+    # rev A4: final approach to R5.2 dips to Y=7.0 -- a narrow but real
+    # corridor clear of C8's own pads (1 and 2, GND, Y up to 6.475) to the
+    # south by >=0.2mm AND clear of the enlarged antenna keepout's
+    # Y0=~7.4 (see below) to the north by 0.1mm -- BEFORE crossing into
+    # the keepout's X band (>=~60.6), then a short final drop at R5's own
+    # X (which IS inside the keepout's X band, but the drop stays at
+    # Y<7.4 throughout, so it never enters the keepout rectangle).
+    ("3V3", "C7", "1", "R5", "2", W_POWER, "W",
+     [(49.025 + REV_A3_SHIFT, 7.3), (54.5, 7.0), (60.975, 7.0)]),
     # U1.3 taps into the rail via C7.1 (its own column first, clear of C8's
     # pads which sit at a different Y).
     ("3V3", "U1", "3", "C7", "1", W_POWER, "W", [(52.9 + REV_A3_SHIFT, 7.3), (49.025 + REV_A3_SHIFT, 7.3)]),
@@ -596,13 +650,22 @@ ROUTES = [
     # which is north of it) then a short final hop into SW1 -- a direct
     # diagonal here would cross the 3V3/R6.2 bridge below (different X
     # bands were needed for both, see the 3V3 route a few lines down).
-    ("IO9_BOOT", "R6", "1", "SW1", "1", W_SIGNAL, "W", [(43.0 + REV_A3_SHIFT, 26.45)]),
-    # SW1.1 -> J2.5: pad() resolves to SW1's west physical pad; exit
-    # straight up first (away from SW1's own GND pad 2, which sits south
-    # of pad 1) before the long horizontal (clear of J2's own PTH pads,
-    # 0.85mm radius), rather than a diagonal that would clip pad 2 on the way.
+    # rev A4: dips to Y=27.2 while crossing SW1's centerline (X=46) --
+    # straight-at-Y=26.45 used to run directly over the new footprint's
+    # NPTH mounting hole at (46,25.925), only 0.525mm away (needs 0.625mm).
+    ("IO9_BOOT", "R6", "1", "SW1", "1", W_SIGNAL, "W", [(48.0, 26.45), (46.0, 27.2)]),
+    # SW1.1 -> J2.5: pad() resolves to SW1's west physical pad. rev A4:
+    # the horizontal lane moved from Y=26.0 to Y=26.9 -- SW1's new
+    # footprint (Panasonic_EVQPUL_EVQPUC) has an NPTH mounting hole at
+    # (SW1.x, 25.925) that Y=26.0 ran straight through; moving it NORTH to
+    # clear that hole would instead run it straight into J2's own PTH
+    # pads (Y=24.5, 0.85mm annular clearance needed), so it moves SOUTH of
+    # the hole instead -- still >=1mm clear of SW1's own GND pad row
+    # (Y=28.15) and lower NPTH hole (Y=28.675), and touches only SW1's own
+    # pad 1 (same net, both physical instances, Y=[25.95,26.95]) on the
+    # way, which is not a DRC violation.
     ("IO9_BOOT", "SW1", "1", "J2", "5", W_SIGNAL, "W",
-     [(38.375 + REV_A3_SHIFT, 26.0), (57.16 + REV_A3_SHIFT, 26.0)]),
+     [(38.375 + REV_A3_SHIFT, 26.9), (57.16 + REV_A3_SHIFT, 26.9)]),
     # R6.2 (3V3, also carries R7.1's and R10.2's feeds -- see above) -> U1
     # cluster rail (C7.1). B.Cu, same pattern as wave 2: stays west of
     # every CAN net's own near-U1 jog so this vertical never runs parallel
@@ -642,10 +705,17 @@ ROUTES = [
     # R5.1 (U1_EN) sits east of U1's own pin-36-48 column (R5 rotated
     # 180deg for this).
     ("U1_EN", "C8", "1", "R5", "1", W_SIGNAL, "B", None),
-    # R5.1 -> J2.6: B.Cu bridge, well clear of the CAN corridor and of
-    # every F.Cu pad along the way (different layer).
+    # R5.1 -> J2.6: B.Cu bridge. rev A4: the enlarged antenna keepout (see
+    # below) now covers X>=~60.6, Y=~7.9-22.1 on BOTH copper layers, so the
+    # old straight-down approach at X=64.7 (J2.6's own X) through that
+    # whole band is no longer legal. Rerouted around the WEST side of the
+    # keepout instead: west to X=59.0 (clear of the keepout's X0 by 1.6mm,
+    # and of U1's own SMD pad column at X=60.4 -- different layer anyway)
+    # while still above the keepout's Y0, straight down the whole
+    # antenna-adjacent span at that X, then east into J2.6 only at
+    # Y=23.0 (south of the keepout's Y1=22.1).
     ("U1_EN", "R5", "1", "J2", "6", W_SIGNAL, "BW",
-     [(57.625 + REV_A3_SHIFT, 8.5), (59.7 + REV_A3_SHIFT, 8.5)]),
+     [(62.625, 6.5), (59.0, 6.5), (59.0, 23.0), (64.7, 23.0)]),
 
     # TXD0/RXD0 to J2: TXD0's target sits inside RXD0's own X span -- any
     # same-layer Manhattan pairing has one net's vertical crossing the
@@ -886,16 +956,38 @@ def main():
         else:
             raise ValueError(f"unknown route mode {mode}")
 
-    # SW1 (EVQPUJ) has two physical pads for each of its two numbered contacts
-    # (duplicate_pad_numbers_are_jumpers = no in the footprint, so KiCad does NOT treat
-    # them as internally bonded) -- explicit jumper tracks are required or the second
-    # instance of each number is an unconnected island.
+    # SW1 (Panasonic_EVQPUL_EVQPUC, rev A4) has two physical pads for each of
+    # its two numbered contacts (duplicate_pad_numbers_are_jumpers = no in
+    # the footprint, so KiCad does NOT treat them as internally bonded) --
+    # explicit jumper tracks are required or the second instance of each
+    # number is an unconnected island. The footprint also has two NPTH
+    # mounting/alignment holes (empty pad number "", no net) -- these must
+    # be excluded here or the same length==2 grouping wrongly bridges them
+    # with a floating, netless track that DRC flags (tracks_crossing / no
+    # net) against whatever real route happens to run nearby.
+    # The two NPTH mounting holes sit on SW1's own centerline (X=46, one
+    # 0.525mm north of the pad-1 row, one 0.525mm south of the pad-2 row --
+    # a straight pad-to-pad bridge for either number clips its nearest
+    # hole's 0.25mm clearance). Each bridge instead dips 0.35mm TOWARD
+    # the footprint center (into the >=1.5mm-wide band that is clear of
+    # both holes) while crossing X=46, then returns to its own pad row.
+    sw1_center = footprints["SW1"].GetPosition()
+    sw1_center_x_mm = pcbnew.ToMM(sw1_center.x)
+    sw1_center_y_mm = pcbnew.ToMM(sw1_center.y)
     sw1_by_num = {}
     for p in footprints["SW1"].Pads():
+        if p.GetNumber() == "":
+            continue  # NPTH mounting hole, not an electrical contact
         sw1_by_num.setdefault(p.GetNumber(), []).append(p)
     for num, pads in sw1_by_num.items():
         if len(pads) == 2:
-            seg(pads[0].GetPosition(), pads[1].GetPosition(), W_SIGNAL, pcbnew.F_Cu, pads[0].GetNet())
+            pos_a, pos_b = pads[0].GetPosition(), pads[1].GetPosition()
+            row_y_mm = pcbnew.ToMM(pos_a.y)
+            dip_y_mm = row_y_mm + (0.35 if row_y_mm < sw1_center_y_mm else -0.35)
+            apex = pcbnew.VECTOR2I(MM(sw1_center_x_mm), MM(dip_y_mm))
+            net = pads[0].GetNet()
+            seg(pos_a, apex, W_SIGNAL, pcbnew.F_Cu, net)
+            seg(apex, pos_b, W_SIGNAL, pcbnew.F_Cu, net)
 
     # -- GND copper pour (both layers) --
     for layer in (pcbnew.F_Cu, pcbnew.B_Cu):
@@ -912,28 +1004,33 @@ def main():
             outline.Append(pcbnew.VECTOR2I(MM(x), MM(y)))
         board.Add(zone)
 
-    # -- antenna keepout (rev A3 item 10): a real both-layer rule-area zone
-    # under U1's antenna end, per the ESP32-C3-MINI-1 datasheet's "no
-    # copper under antenna" guidance (DESIGN.md sec4) -- previously only a
-    # text comment existed on the constructed footprint, no enforced
-    # KiCad object, so the wave-2 GND pour covered it with copper. The
-    # antenna edge sits at the high-X end of U1's footprint (its
-    # "Antenna edge (no copper)" reference mark, local (0, -7.675),
-    # transforms under U1's rot=270 to (u1.x + 7.675, u1.y)); the keepout
-    # covers a generous margin around that mark out to the board edge, on
-    # both copper layers, computed from U1's ACTUAL placed position so it
-    # stays correct if REV_A3_SHIFT or U1's placement ever changes.
-    # Sized to the antenna trace region specifically, NOT the module's
-    # whole east end -- an earlier, larger attempt (+4.5/+-7.5) blocked
-    # the legitimate U1_EN and 3V3 routes to R5/J2 that also run through
-    # U1's east side (y=6-9), which is outside the antenna's actual span.
-    # U1_EN's own route reaches (U1.x+9.2, 8.5) -- the keepout starts
-    # just past that, at U1.x+9.7, to stay clear of it.
+    # -- antenna keepout (rev A3 item 10, ENLARGED rev A4): a real
+    # both-layer rule-area zone under U1's antenna end, per the
+    # ESP32-C3-MINI-1 datasheet's "no copper under antenna" guidance
+    # (DESIGN.md sec4). The antenna region is bounded by the constructed
+    # footprint's own F.Fab reference lines (fp-lib/TRACE-Custom.pretty/
+    # ESP32-C3-MINI-1.kicad_mod: local Y -11 to -5.6, local X -6.6 to 6.6,
+    # i.e. the full 5.4mm-tall x 13.2mm-wide antenna trace area, not just
+    # the single "no copper" text-comment point at local (0,-7.675) that
+    # the rev A3 keepout was (wrongly) centered on). Transform verified
+    # empirically against pcbnew's own placed coordinates for U1's rot=270
+    # (global_X = u1.x - local_Y, global_Y = u1.y + local_X): the antenna
+    # zone maps to X in [u1.x+5.6, u1.x+11.0], Y in [u1.y-6.6, u1.y+6.6].
+    # A 1mm margin is added on every non-board-edge side (Espressif's
+    # guidance gives no exact on-module figure, only "keep the antenna
+    # clear and cut the board close to it" -- see
+    # https://docs.espressif.com/projects/esp-hardware-design-guidelines/en/latest/esp32c3/pcb-layout-design.html
+    # -- 1mm is the conservative, commonly-used allowance for a module
+    # whose antenna is fully inside the board like this one). Extends all
+    # the way to the board edge in X (nothing useful can route past the
+    # antenna anyway). U1_EN's bridge to J2 (below) is rerouted around the
+    # west side of this zone instead of through it.
     u1_pos = footprints["U1"].GetPosition()
     u1_x_mm = pcbnew.ToMM(u1_pos.x)
     u1_y_mm = pcbnew.ToMM(u1_pos.y)
-    ant_x0, ant_x1 = u1_x_mm + 9.7, BOARD_W - 0.5
-    ant_y0, ant_y1 = u1_y_mm - 4.0, u1_y_mm + 4.0
+    ANTENNA_MARGIN = 1.0
+    ant_x0, ant_x1 = u1_x_mm + 5.6 - ANTENNA_MARGIN, BOARD_W - 0.5
+    ant_y0, ant_y1 = u1_y_mm - 6.6 - ANTENNA_MARGIN, u1_y_mm + 6.6 + ANTENNA_MARGIN
     for layer in (pcbnew.F_Cu, pcbnew.B_Cu):
         keepout = pcbnew.ZONE(board)
         keepout.SetLayer(layer)
