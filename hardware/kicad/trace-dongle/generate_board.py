@@ -201,6 +201,54 @@ PLACEMENTS = [
     ("R10", lib("Resistor_SMD"),                 "R_0603_1608Metric",              44.5, 22.0, 0),
 ]
 
+# DRC (silk_overlap / silk_over_copper) fix: the footprints' default
+# reference-field offsets put several ref texts on top of each other or on
+# top of a neighbour's exposed pad copper, once real (dense, rev-A3/A4)
+# placement was in effect -- see ticket report for the exact pairs. Only
+# these 8 refs need to move; every other footprint's default silk position
+# is already clear. Absolute board mm coordinates (post-placement), text
+# size is untouched (stays at the footprint default, 1.0mm height, above
+# the 0.6mm floor). Verified clear of every neighbouring pad/silk object
+# by re-running `kicad-cli pcb drc` after each placement.
+REF_POS = {
+    # D1/D2 (D_SMB, protection chain): default offsets land BOTH refs in
+    # the 5.5mm gap between the two diodes, overlapping each other and
+    # each other's silkscreen outline (each diode's own D_SMB body silk
+    # extends ~1.5mm past its pads, further than either default offset
+    # anticipated). D1's ref moves east of its own east pad (GND, into
+    # the clear column before C1/D2's own footprints); D2's ref moves
+    # north, into the sliver between its own body silk and the board's
+    # top edge.
+    "D1": (17.8, 11.5),
+    "D2": (13.0, 2.5),
+    # C2/C5 (buck input/bootstrap caps): default offsets land only 1.5mm
+    # apart. Move both south of their own GND/SW_NODE pads (clear of each
+    # other, of R3/R4/U3, and of the BST_NODE B.Cu landing track and C3).
+    "C2": (31.8, 11.6),
+    "C5": (36.5, 13.6),
+    # R7 (LED1 series resistor, rotated 90deg -- its ref text rotates
+    # with it, so the tight LED1/R7/LED2/R8 row (only ~1mm gaps between
+    # neighbouring pad columns) has no room for it at all, in any X
+    # position, at that row's Y. Move it below the row entirely, into the
+    # clear pocket south of its own pads and north of the R7->R6 3V3 rail
+    # (Y=20.175), west of R10's default ref.
+    "R7": (41.5, 22.0),
+    # LED2: default offset (north of the part) lands on R2's FB_NODE pad;
+    # "LED2" is wide enough (4 chars) that no nearby spot in the crowded
+    # LED1/R7/LED2/R8/R10 cluster clears every neighbour. Move it into
+    # the open pocket north-west of the cluster (south of C3/C4, west of
+    # R1/R2, clear of every route in that gap).
+    "LED2": (41.0, 15.0),
+    # R1 (FB divider hi): default offset (west of the part) lands on C4's
+    # GND pad. Move east, into the clear column between R1's own pads and
+    # U1's nearest real copper (X=50.6).
+    "R1": (48.0, 12.0),
+    # SW1 (BOOT tact): default offset (4.5mm north of the part) lands on
+    # R10's pad/silkscreen. Move south, just above SW1's own NPTH
+    # mounting hole, clear of R10 and of J2's PTH pad column (X>=51.15).
+    "SW1": (46.0, 24.2),
+}
+
 VALUES = {
     "J1": "OBD-II 5-pad fallback row (12V/GND/GND/CANH/CANL) -- hand-solder, TSW-105-07-T-S 1x5 header",
     "F1": "PTC 350mA 24V", "D2": "SS34B", "D1": "SMBJ18A",
@@ -837,6 +885,9 @@ def main():
         fp.Reference().SetVisible(True)
         fp.SetPosition(pcbnew.VECTOR2I(MM(x), MM(y)))
         fp.SetOrientationDegrees(rot)
+        if ref in REF_POS:
+            rx, ry = REF_POS[ref]
+            fp.Reference().SetPosition(pcbnew.VECTOR2I(MM(rx), MM(ry)))
         # all parts top-side SMD per DESIGN.md sec4, except J1/J2/SW1 (THT, hand-solder)
         board.Add(fp)
         footprints[ref] = fp
@@ -914,7 +965,33 @@ def main():
         t.SetNet(net)
         board.Add(t)
 
+    # DRC (holes_co_located) fix: two independent root causes were putting
+    # drilled holes exactly on top of each other.
+    #   1. Several route entries share an endpoint pad (e.g. R6.2 is the
+    #      target of both the "R6->C7" and "J2.1->R6.2" B/BW routes) --
+    #      each call to add_via() blindly dropped its own via at that same
+    #      pad position, so the SAME pad got two coincident vias.
+    #   2. Some B/BW route endpoints land on J2's pins, which are THT
+    #      (PTH) pads -- those already bond F.Cu/B.Cu themselves, so a via
+    #      stacked exactly on top of one is redundant (and coincident).
+    # Fix: skip via emission for any THT pad position (precomputed below),
+    # and dedupe by a seen-set keyed on rounded position so a second route
+    # touching an already-via'd pad reuses it instead of stacking another.
+    tht_pad_positions = set()
+    for fp in footprints.values():
+        for p in fp.Pads():
+            if p.GetAttribute() == pcbnew.PAD_ATTRIB_PTH:
+                pos = p.GetPosition()
+                tht_pad_positions.add((round(pcbnew.ToMM(pos.x), 3), round(pcbnew.ToMM(pos.y), 3)))
+    via_seen = set()
+
     def add_via(pos, net, width=MM(0.5), drill=MM(0.3)):
+        key = (round(pcbnew.ToMM(pos.x), 3), round(pcbnew.ToMM(pos.y), 3))
+        if key in tht_pad_positions:
+            return  # a THT pad already bonds F.Cu/B.Cu here; a via would be redundant/coincident
+        if key in via_seen:
+            return  # another route already dropped a via at this exact pad position
+        via_seen.add(key)
         v = pcbnew.PCB_VIA(board)
         v.SetPosition(pos)
         v.SetWidth(width)
