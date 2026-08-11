@@ -10,6 +10,7 @@ the board for optional manual fitting later.
 """
 import csv
 import os
+import sys
 
 import pcbnew
 
@@ -19,11 +20,13 @@ PROD = os.path.join(HERE, "production")
 
 DNP = {"R9"}
 
-LCSC = {
-    "U1": "C3013922", "U2": "C264757", "U3": "C316922",
-    "D1": "C114213", "D2": "C8678", "D3": "C24911", "F1": "C88724", "L1": "C167219",
-    "SW1": "C318884",
-}
+# rev A3 (DESIGN.md sec8 item 9): import the LCSC dict straight from
+# generate_board.py instead of keeping a second, independently-maintained
+# copy here -- the old duplicate was the wave-2 (partial, since-corrected)
+# table, which is exactly how bom.csv ended up with 21 blank LCSC cells
+# despite generate_board.py's own dict having grown a full part list.
+sys.path.insert(0, HERE)
+from generate_board import LCSC  # noqa: E402
 
 board = pcbnew.LoadBoard(PCB)
 

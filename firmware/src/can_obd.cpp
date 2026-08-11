@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <driver/twai.h>
 
+#include "can_response_match.h"
 #include "pid_codec.h"
 #include "read_only_guard.h"
 
@@ -111,6 +112,14 @@ ElmCanResult can_obd_query(const char *request_hex, char *response_hex_out, size
 
     uint8_t length = rx.data[0] & 0x0F;
     if (length == 0 || length > rx.data_length_code - 1) continue;
+
+    // hardware/DESIGN.md sec8 item12 (rev A3 NO-GO fix): reject any frame
+    // that isn't the actual positive response to THIS request (wrong
+    // service, wrong echoed PID/DID, or a negative 0x7F response) instead
+    // of accepting the first 0x7E8-0x7EF frame unconditionally -- a
+    // busy/multi-ECU bus can otherwise have an unrelated frame mistaken
+    // for the answer.
+    if (!can_response_matches_request(payload, nbytes, &rx.data[1], length)) continue;
     uint8_t service = rx.data[1];
 
     // Mode-01 response (service 0x41 = 0x01 | 0x40): format via pid_codec so

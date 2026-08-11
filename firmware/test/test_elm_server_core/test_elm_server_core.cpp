@@ -147,6 +147,34 @@ void test_custom_hex_request_no_data_on_can_failure() {
   TEST_ASSERT_EQUAL_INT(1, ctx.calls);
 }
 
+// hardware/DESIGN.md sec8 item12 (rev A3 NO-GO fix): the app sends custom-PID
+// requests with internal spaces verbatim (packages/core/src/telemetry/
+// pidCodec.ts's buildCustomPids keeps '22 1E 0C' as-is). elm_line_parser.c
+// only trims/upper-cases -- elm_server_core.c must accept the spacing and
+// forward the CAN layer a compacted, contiguous hex string.
+void test_spaced_custom_hex_request_is_accepted_and_compacted_for_can_query() {
+  ElmServerState state;
+  elm_server_state_init(&state);
+  state.echo_enabled = false;
+  StubCtx ctx{"221E1C", "62 1E 1C 87", 0}; // stub expects the COMPACTED form
+  char out[128];
+  elm_server_handle_command(&state, "22 1E 1C", stub_can_query, &ctx, out, sizeof out);
+  TEST_ASSERT_EQUAL_STRING("62 1E 1C 87\r>", out);
+  TEST_ASSERT_EQUAL_INT(1, ctx.calls);
+}
+
+// Spaced mode-01 requests must compact to the same 4-char PID match too.
+void test_spaced_mode01_request_is_accepted_and_compacted_for_can_query() {
+  ElmServerState state;
+  elm_server_state_init(&state);
+  state.echo_enabled = false;
+  StubCtx ctx{"010C", "41 0C 1A F8", 0};
+  char out[128];
+  elm_server_handle_command(&state, "01 0C", stub_can_query, &ctx, out, sizeof out);
+  TEST_ASSERT_EQUAL_STRING("41 0C 1A F8\r>", out);
+  TEST_ASSERT_EQUAL_INT(1, ctx.calls);
+}
+
 void test_garbage_non_hex_request_is_no_data_without_can_query() {
   ElmServerState state;
   elm_server_state_init(&state);
@@ -170,6 +198,8 @@ int main() {
   RUN_TEST(test_unsupported_mode01_pid_never_queries_can_and_returns_no_data);
   RUN_TEST(test_custom_hex_request_is_forwarded_and_response_echoed_verbatim);
   RUN_TEST(test_custom_hex_request_no_data_on_can_failure);
+  RUN_TEST(test_spaced_custom_hex_request_is_accepted_and_compacted_for_can_query);
+  RUN_TEST(test_spaced_mode01_request_is_accepted_and_compacted_for_can_query);
   RUN_TEST(test_garbage_non_hex_request_is_no_data_without_can_query);
   return UNITY_END();
 }

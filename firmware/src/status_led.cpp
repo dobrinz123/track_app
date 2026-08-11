@@ -4,7 +4,8 @@
 
 namespace {
 
-constexpr int kLedGpio = 8; // hardware/DESIGN.md: IO8 -> LED2 via 1k
+constexpr int kLedGpio = 7; // hardware/DESIGN.md sec8 item7 (rev A3): LED2 moved off
+                            // strapping pin IO8 -> IO7 (non-strapping)
 constexpr uint32_t kSlowBlinkMs = 500;
 constexpr uint32_t kFastBlinkMs = 100;
 
