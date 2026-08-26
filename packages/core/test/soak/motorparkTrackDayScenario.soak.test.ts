@@ -119,7 +119,7 @@ describe('MotorPark acceptance scenario: hard/cool laps + up-to-an-hour pit paus
     const durations = valid.map((lap) => lap.durationMs);
     for (const d of durations) {
       expect(d).toBeGreaterThan(60_000);
-      expect(d).toBeLessThan(220_000);
+      expect(d).toBeLessThan(200_000);
     }
     const coolLap = valid[1]!;
     const hardBefore = valid[0]!;

@@ -221,7 +221,7 @@ export function pitLaneTransitLap(
   const beforeEntryStartRaw = runtime.startFinishGate.distanceM - 20;
   // The start/finish gate's raw distance is NOT always near 0 -- it depends on
   // where the closed centerline happens to be parameterized from (TMR's S/F
-  // sits at raw~0; MotorPark's sits at raw~totalLengthM, i.e. right at the
+  // sits at raw~totalLengthM; MotorPark's sits at raw~0, i.e. right at the
   // seam). Unwrap the entry gate forward from the lap-start reference so a
   // late-in-lap S/F (entry raw BEHIND the start reference) still produces the
   // intended "drive from S/F to pit entry" stretch instead of an empty loop.

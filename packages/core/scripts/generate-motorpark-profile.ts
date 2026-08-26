@@ -23,6 +23,13 @@ const EXTENSION_WAY_ID = 949_617_051;
 // const CHORD_WAY_ID = 333_031_200;
 const PIT_LANE_SE_WAY_ID = 953_930_215; // track-side entry, near 44.77690, 26.47614
 const PIT_LANE_NW_WAY_ID = 953_930_214; // rejoins track, near 44.78067, 26.47028
+// Pit-lane topology (ticket CN-FIX1 F1, correcting the CN-W1 addendum's wrong
+// "~41 m gap" claim, which compared endpoint coordinates instead of node ids):
+// the two pit ways SHARE this node -- there is no unmapped gap. Way 214's
+// first node is a short-configuration pit connector, excluded because it is
+// not part of the full-layout pit lane.
+const PIT_SHARED_NODE_ID = 8_829_181_316; // way215's last node == way214's node[1]
+const PIT_NW_EXCLUDED_CONNECTOR_NODE_ID = 8_829_250_717; // way214's node[0]
 
 // Binding geometry decisions verified by LEAD against live Overpass (see
 // .foreman/scratch/ticket-cnw1-motorpark-profile.md) -- asserted below so the
@@ -515,8 +522,78 @@ export function generateMotorparkProfile(
     throw new Error('Spliced centerline has insufficient geometry');
   }
 
-  const pitLanePolyline: LatLon[] = [...pitSeWay.geometry, ...pitNwWay.geometry];
+  // --- Pit-lane topology guards (ticket CN-FIX1 F1) ---
+  const pitSeLastNode = pitSeWay.nodes[pitSeWay.nodes.length - 1];
+  if (pitSeLastNode !== PIT_SHARED_NODE_ID) {
+    throw new Error(
+      `Pit-lane SE way ${PIT_LANE_SE_WAY_ID} does not end at the expected shared node ` +
+        `${PIT_SHARED_NODE_ID} (got ${String(pitSeLastNode)}).`,
+    );
+  }
+  if (pitNwWay.nodes[0] !== PIT_NW_EXCLUDED_CONNECTOR_NODE_ID) {
+    throw new Error(
+      `Pit-lane NW way ${PIT_LANE_NW_WAY_ID} does not start with the expected excluded ` +
+        `short-config connector node ${PIT_NW_EXCLUDED_CONNECTOR_NODE_ID} (got ` +
+        `${String(pitNwWay.nodes[0])}).`,
+    );
+  }
+  const pitNwSharedIndex = pitNwWay.nodes.indexOf(PIT_SHARED_NODE_ID);
+  if (pitNwSharedIndex !== 1) {
+    throw new Error(
+      `Pit-lane NW way ${PIT_LANE_NW_WAY_ID} shared node ${PIT_SHARED_NODE_ID} is at index ` +
+        `${pitNwSharedIndex}, expected 1 (immediately after the excluded connector).`,
+    );
+  }
+  const pitEntryNode = pitSeWay.nodes[0];
+  const pitExitNode = pitNwWay.nodes[pitNwWay.nodes.length - 1];
+  if (pitEntryNode === undefined || !extensionWay.nodes.includes(pitEntryNode)) {
+    throw new Error(
+      `Pit entry node ${String(pitEntryNode)} (way ${PIT_LANE_SE_WAY_ID} first node) must lie ` +
+        `on the full-layout extension way ${EXTENSION_WAY_ID}.`,
+    );
+  }
+  if (pitExitNode === undefined || !mainLoopWay.nodes.includes(pitExitNode)) {
+    throw new Error(
+      `Pit exit node ${String(pitExitNode)} (way ${PIT_LANE_NW_WAY_ID} last node) must lie on ` +
+        `the main loop way ${MAIN_LOOP_WAY_ID}.`,
+    );
+  }
+
+  // pitLane.polyline = way215.geometry ++ way214.geometry (interior, after the
+  // shared node -- deduped, and the excluded connector node dropped).
+  const pitLanePolyline: LatLon[] = [
+    ...pitSeWay.geometry,
+    ...pitNwWay.geometry.slice(pitNwSharedIndex + 1),
+  ];
   if (pitLanePolyline.length < 2) throw new Error('Pit lane geometry is insufficient');
+  for (let index = 1; index < pitLanePolyline.length; index += 1) {
+    const previous = pitLanePolyline[index - 1];
+    const current = pitLanePolyline[index];
+    if (previous !== undefined && current !== undefined && sameLatLon(previous, current)) {
+      throw new Error(`Pit lane polyline has consecutive identical points at index ${index}.`);
+    }
+  }
+  {
+    // No-backtracking guard: heading must not reverse by more than 150 degrees
+    // between consecutive segments anywhere along the pit polyline.
+    const backtrackProjection = createLocalProjection(centroid(pitLanePolyline));
+    const backtrackLocal = pitLanePolyline.map((point) => backtrackProjection.toLocal(point));
+    for (let index = 1; index < backtrackLocal.length - 1; index += 1) {
+      const previous = backtrackLocal[index - 1];
+      const current = backtrackLocal[index];
+      const next = backtrackLocal[index + 1];
+      if (previous === undefined || current === undefined || next === undefined) continue;
+      const inHeadingDeg = Math.atan2(current.e - previous.e, current.n - previous.n) * RAD_TO_DEG;
+      const outHeadingDeg = Math.atan2(next.e - current.e, next.n - current.n) * RAD_TO_DEG;
+      const turnDeg = Math.abs(((outHeadingDeg - inHeadingDeg + 540) % 360) - 180);
+      if (turnDeg > 150) {
+        throw new Error(
+          `Pit lane polyline backtracks at vertex ${index} (heading reverses by ` +
+            `${turnDeg.toFixed(1)} degrees).`,
+        );
+      }
+    }
+  }
 
   // The bounding center is the arithmetic centroid of the centerline itself
   // (there is no rotation step here), matching TMR's re-projection choice so
@@ -632,11 +709,13 @@ export function generateMotorparkProfile(
       `closed length ${totalLengthM.toFixed(1)} m vs published 4052 m (racingcircuits.info, ` +
       `${(lengthErrorFraction * 100).toFixed(2)}% delta) vs 4129 m (motorparkromania.ro, ` +
       `${(Math.abs(totalLengthM - 4129) / 4129 * 100).toFixed(2)}% delta) -- both published ` +
-      'figures recorded for reference. Pit lane: way 953930215 (249 m, SE, track-side entry) ' +
-      'then way 953930214 (430 m, NW, rejoins track); there is a ~41 m unmapped gap between ' +
-      'the two ways (garage apron, not mapped as raceway) bridged by a straight connector -- ' +
-      'the pitLane.polyline simply concatenates both ways, so that gap is one implicit ' +
-      'straight segment in the polyline. corridorWidthM=16 combines the published 11-16 m ' +
+      'figures recorded for reference. Pit lane: way 953930215 (SE, track-side entry) then way ' +
+      '953930214 (NW, rejoins track); the two ways SHARE node 8829181316 -- there is NO ' +
+      'unmapped gap (corrected after Codex CN-REV1; the earlier "~41 m gap" claim wrongly ' +
+      'compared endpoint coordinates instead of node ids). Way 953930214 node[0] (8829250717) ' +
+      'is a short-configuration pit connector, excluded because it is not part of the ' +
+      'full-layout pit lane; pitLane.polyline = way215.geometry followed by way214.geometry ' +
+      'after the shared node (deduped). corridorWidthM=16 combines the published 11-16 m ' +
       '[PLAUSIBLE] track width with a GNSS matching margin. ' +
       sectorNotes,
   };
