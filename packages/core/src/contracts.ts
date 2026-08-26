@@ -105,6 +105,14 @@ export interface CalibrationDiagnostics {
   estimatedBias: { e: number; n: number }; // bounded, session-scoped
   directionDetected: 'clockwise' | 'counterclockwise' | 'unknown';
   observedRateHz: number;
+  /** Distance-along-centerline (m, from start/finish) where the longest post-bias-correction
+   * uncovered stretch begins. 0 when there is no uncovered stretch (full coverage). Additive
+   * (optional) field: only `CalibrationEngine.finish()` populates it -- other producers of a
+   * `CalibrationDiagnostics` (synthetic/cancelled results, replay harness) are unaffected. */
+  uncoveredGapStartM?: number;
+  /** End of that stretch (m, from start/finish); clamped to totalLengthM, so a gap that spans
+   * the start/finish line is reported as ending at the line rather than wrapping past it. */
+  uncoveredGapEndM?: number;
 }
 
 export interface CalibrationResult {

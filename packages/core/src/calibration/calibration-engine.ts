@@ -4,6 +4,7 @@ import type {
   CalibrationResult,
   LocalPoint,
   LocationSample,
+  TrackMatch,
 } from '../contracts';
 import { polylineLength, projectOntoPolyline } from '../geometry';
 import type { RuntimeProfile } from '../profile';
@@ -28,6 +29,20 @@ interface AcceptedPoint {
   segmentIndex: number;
 }
 
+/**
+ * A quality-ok, matched sample retained purely because it fell within the wide Learn
+ * corridor (D1 field-calibration fix) -- independent of tight-corridor acceptance.
+ * `distanceM`/`lateralM`/`unwrappedProgressM` are the matcher's own values (same ones
+ * that gate tight on-track acceptance); `localPoint` is kept so `finish()` can subtract
+ * an estimated bias and re-project onto the centerline from scratch.
+ */
+interface WideSample {
+  distanceM: number;
+  lateralM: number;
+  unwrappedProgressM: number;
+  localPoint: LocalPoint;
+}
+
 const DEFAULT_CONFIG: Omit<CalibrationConfig, 'direction'> = {
   coverageBinM: 25,
   corridorWidthM: 20,
@@ -37,6 +52,17 @@ const DEFAULT_CONFIG: Omit<CalibrationConfig, 'direction'> = {
 
 /** Hard ceiling on `acceptedPoints` (~2.7 h at 1 Hz) -- L1 fix. Calibration is expected to finish within one short Learn lap; a session left calibrating far past that is force-failed rather than growing this array forever. */
 const MAX_ACCEPTED_POINTS = 10_000;
+
+/**
+ * D1 field-calibration fix: an unvalidated OSM centerline can be laterally offset from
+ * the real racing line by more than `corridorWidthM` for a contiguous stretch, which
+ * makes strict on-track coverage impossible to reach even when the driver never left
+ * the circuit (root cause of the 81-90%-coverage field failure). Every quality-ok,
+ * matched sample within this wider corridor is retained in `wideSamples` so `finish()`
+ * can estimate a systematic bias and recover coverage against the bias-corrected
+ * positions. Tight-corridor semantics (`corridorWidthM`) are unchanged everywhere else.
+ */
+const LEARN_WIDE_CORRIDOR_M = 40;
 
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
@@ -50,6 +76,15 @@ function percentile95(values: number[]): number {
 
 function mean(values: number[]): number {
   return values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? ((sorted[mid - 1] ?? 0) + (sorted[mid] ?? 0)) / 2
+    : (sorted[mid] ?? 0);
 }
 
 function inferredDirection(profile: RuntimeProfile): 'clockwise' | 'counterclockwise' {
@@ -75,6 +110,7 @@ export class CalibrationEngine implements CalibrationEngineContract {
   private previousQualitySample: LocationSample | undefined;
   private previousAcceptedProgressM: number | undefined;
   private acceptedPoints: AcceptedPoint[] = [];
+  private wideSamples: WideSample[] = [];
   private samplesAccepted = 0;
   private samplesRejected = 0;
   private rejectionReasons: Record<string, number> = {};
@@ -113,6 +149,7 @@ export class CalibrationEngine implements CalibrationEngineContract {
     this.previousQualitySample = undefined;
     this.previousAcceptedProgressM = undefined;
     this.acceptedPoints = [];
+    this.wideSamples = [];
     this.samplesAccepted = 0;
     this.samplesRejected = 0;
     this.rejectionReasons = {};
@@ -135,6 +172,12 @@ export class CalibrationEngine implements CalibrationEngineContract {
     this.lastQualityOk = qualityOk;
     this.lastOnTrack = onTrack;
 
+    // D1 field-calibration fix: retain every quality-ok, matched sample within the wide
+    // Learn corridor regardless of tight on-track acceptance below -- see `WideSample`.
+    if (qualityOk && match !== null && Math.abs(match.lateralM) <= LEARN_WIDE_CORRIDOR_M) {
+      this.recordWideSample(match, sample);
+    }
+
     if (!qualityOk || !onTrack || match === null) {
       this.samplesRejected += 1;
       const reasons = [...assessment.reasons];
@@ -148,13 +191,13 @@ export class CalibrationEngine implements CalibrationEngineContract {
     }
 
     this.samplesAccepted += 1;
-    this.markCoverage(match.distanceM);
+    this.markCoverage(this.coverage, match.distanceM);
     if (this.previousAcceptedProgressM !== undefined) {
       const deltaM = match.unwrappedProgressM - this.previousAcceptedProgressM;
       if (Math.abs(deltaM) <= this.totalLengthM / 2) {
         if (deltaM > 0.5) this.positiveDirectionM += deltaM;
         if (deltaM < -0.5) this.negativeDirectionM += -deltaM;
-        this.markCoverageBetween(this.previousAcceptedProgressM, match.unwrappedProgressM);
+        this.markCoverageBetween(this.coverage, this.previousAcceptedProgressM, match.unwrappedProgressM);
       }
     }
     this.previousAcceptedProgressM = match.unwrappedProgressM;
@@ -178,24 +221,68 @@ export class CalibrationEngine implements CalibrationEngineContract {
     this.previousQualitySample = sample;
   }
 
+  /** Live progress during the Learn lap. Deliberately still reports TIGHT-corridor
+   * coverage (unchanged by the D1 field-calibration fix): `finish()`'s bias-corrected
+   * acceptance coverage can end up higher than what was ever shown live here, once a
+   * systematic offset is estimated and corrected for. See `CalibrationConfig`. */
   progress(): { coverageFraction: number; onTrack: boolean; qualityOk: boolean } {
     return {
-      coverageFraction: this.coverageFraction(),
+      coverageFraction: this.coverageFraction(this.coverage),
       onTrack: this.lastOnTrack,
       qualityOk: this.lastQualityOk,
     };
   }
 
   finish(): CalibrationResult {
-    const coverageFraction = this.coverageFraction();
     const totalSamples = this.samplesAccepted + this.samplesRejected;
-    const rejectedFraction = totalSamples === 0 ? 1 : this.samplesRejected / totalSamples;
     const observedRateHz = this.observedRateHz();
     const directionDetected = this.directionDetected();
-    const bias = this.estimateBias();
-    const lateralValues = this.lateralValuesAfterBias(bias);
+
+    // D1 field-calibration fix: bias is estimated from the tight-corridor accepted
+    // points as before; a systematic offset larger than corridorWidthM can leave that
+    // set too small to trust for a whole lap, so fall back to a median-anchored
+    // estimate from the wide Learn corridor instead.
+    const bias =
+      this.acceptedPoints.length < 50 ? this.estimateBiasFromWide() : this.estimateBias();
+
+    // Re-project every wide-corridor sample with the bias applied and recompute
+    // coverage + lateral stats from whichever of them now land inside the tight
+    // corridor -- this is what recovers coverage on a track whose unvalidated OSM
+    // centerline is laterally offset from the real racing line for a stretch.
+    const correctedProjections = this.wideSamples.map(({ localPoint }) =>
+      projectOntoPolyline(
+        { e: localPoint.e - bias.e, n: localPoint.n - bias.n },
+        this.profile.centerline,
+        this.profile.cumulativeDistancesM,
+        true,
+      ),
+    );
+    const correctedInCorridor = correctedProjections.filter(
+      (projection) => Math.abs(projection.lateralM) <= this.config.corridorWidthM,
+    );
+
+    const coverage = this.emptyCoverage();
+    let previousDistanceM: number | undefined;
+    for (const projection of correctedInCorridor) {
+      if (previousDistanceM !== undefined) {
+        this.markCoverageBetween(coverage, previousDistanceM, projection.distanceM);
+      }
+      this.markCoverage(coverage, projection.distanceM);
+      previousDistanceM = projection.distanceM;
+    }
+    const coverageFraction = this.coverageFraction(coverage);
+    const gap = this.longestUncoveredRun(coverage);
+
+    const lateralValues = correctedInCorridor.map((projection) => Math.abs(projection.lateralM));
     const meanLateralM = mean(lateralValues);
     const p95LateralM = percentile95(lateralValues);
+
+    // D2 acceptance relax: POOR_GNSS is judged against the WIDE-corridor accept set
+    // (`wideSamples`), not the tight one -- so a tight corridor being too narrow for an
+    // unvalidated centerline can never masquerade as bad GNSS.
+    const wideRejectedFraction =
+      totalSamples === 0 ? 1 : (totalSamples - this.wideSamples.length) / totalSamples;
+
     const diagnostics: CalibrationDiagnostics = {
       coverageFraction,
       samplesAccepted: this.samplesAccepted,
@@ -206,14 +293,16 @@ export class CalibrationEngine implements CalibrationEngineContract {
       estimatedBias: { ...bias },
       directionDetected,
       observedRateHz,
+      uncoveredGapStartM: gap.startM,
+      uncoveredGapEndM: gap.endM,
     };
 
     const failureReasons: string[] = [];
-    if (coverageFraction < 0.95) failureReasons.push('INSUFFICIENT_COVERAGE');
+    if (coverageFraction < 0.85) failureReasons.push('INSUFFICIENT_COVERAGE');
     if (directionDetected !== this.expectedDirection) failureReasons.push('WRONG_DIRECTION');
-    if (rejectedFraction > 0.3) failureReasons.push('POOR_GNSS');
+    if (wideRejectedFraction > 0.5) failureReasons.push('POOR_GNSS');
     if (observedRateHz < 0.5) failureReasons.push('RATE_TOO_LOW');
-    if (this.longestUncoveredRunM() > 100) failureReasons.push('COVERAGE_GAP');
+    if (gap.lengthM > 250) failureReasons.push('COVERAGE_GAP');
     if (this.calibrationOverrun) failureReasons.push('CALIBRATION_OVERRUN');
 
     const qualityRatio = totalSamples === 0 ? 0 : this.samplesAccepted / totalSamples;
@@ -244,38 +333,61 @@ export class CalibrationEngine implements CalibrationEngineContract {
     );
   }
 
-  private markCoverage(distanceM: number): void {
+  /** `coverage` is an explicit param (not always `this.coverage`) so `finish()` can
+   * recompute a separate, bias-corrected coverage bitmap without touching the live one
+   * `progress()` reports mid-lap. */
+  private markCoverage(coverage: boolean[], distanceM: number): void {
     const normalized = ((distanceM % this.totalLengthM) + this.totalLengthM) % this.totalLengthM;
-    const bin = Math.min(this.coverage.length - 1, Math.floor(normalized / this.config.coverageBinM));
-    this.coverage[bin] = true;
+    const bin = Math.min(coverage.length - 1, Math.floor(normalized / this.config.coverageBinM));
+    coverage[bin] = true;
   }
 
-  private markCoverageBetween(fromM: number, toM: number): void {
+  private markCoverageBetween(coverage: boolean[], fromM: number, toM: number): void {
     const deltaM = toM - fromM;
     const maximumContinuousStepM = Math.max(100, this.config.coverageBinM * 4);
     if (Math.abs(deltaM) > maximumContinuousStepM) return;
     const steps = Math.max(1, Math.ceil(Math.abs(deltaM) / (this.config.coverageBinM / 2)));
     for (let step = 0; step <= steps; step += 1) {
-      this.markCoverage(fromM + (deltaM * step) / steps);
+      this.markCoverage(coverage, fromM + (deltaM * step) / steps);
     }
   }
 
-  private coverageFraction(): number {
-    const covered = this.coverage.reduce((sum, value) => sum + (value ? 1 : 0), 0);
-    return covered / this.coverage.length;
+  private coverageFraction(coverage: boolean[]): number {
+    const covered = coverage.reduce((sum, value) => sum + (value ? 1 : 0), 0);
+    return covered / coverage.length;
   }
 
-  private longestUncoveredRunM(): number {
-    if (this.coverage.every(Boolean)) return 0;
-    if (this.coverage.every((value) => !value)) return this.totalLengthM;
-    const doubled = [...this.coverage, ...this.coverage];
-    let longest = 0;
-    let current = 0;
-    for (const covered of doubled) {
-      current = covered ? 0 : current + 1;
-      longest = Math.max(longest, Math.min(current, this.coverage.length));
+  /** Longest uncovered run in a coverage bitmap, plus its start/end distance-along-
+   * centerline (D3 driver diagnostics). A run that wraps past the start/finish line is
+   * reported as ending at `totalLengthM` rather than wrapping past it. */
+  private longestUncoveredRun(coverage: boolean[]): { lengthM: number; startM: number; endM: number } {
+    if (coverage.every(Boolean)) return { lengthM: 0, startM: 0, endM: 0 };
+    if (coverage.every((value) => !value)) {
+      return { lengthM: this.totalLengthM, startM: 0, endM: this.totalLengthM };
     }
-    return Math.min(this.totalLengthM, longest * this.config.coverageBinM);
+    const binCount = coverage.length;
+    const doubled = [...coverage, ...coverage];
+    let longestLen = 0;
+    let longestStartBin = 0;
+    let currentLen = 0;
+    let currentStartBin = 0;
+    for (let index = 0; index < doubled.length; index += 1) {
+      if (doubled[index]) {
+        currentLen = 0;
+        continue;
+      }
+      if (currentLen === 0) currentStartBin = index;
+      currentLen += 1;
+      const cappedLen = Math.min(currentLen, binCount);
+      if (cappedLen > longestLen) {
+        longestLen = cappedLen;
+        longestStartBin = currentStartBin;
+      }
+    }
+    const lengthM = Math.min(this.totalLengthM, longestLen * this.config.coverageBinM);
+    const startM = (longestStartBin % binCount) * this.config.coverageBinM;
+    const endM = Math.min(this.totalLengthM, startM + lengthM);
+    return { lengthM, startM, endM };
   }
 
   private directionDetected(): 'clockwise' | 'counterclockwise' | 'unknown' {
@@ -336,6 +448,76 @@ export class CalibrationEngine implements CalibrationEngineContract {
     const before = percentile95(this.acceptedPoints.map((point) => Math.abs(point.lateralM)));
     const after = percentile95(this.lateralValuesAfterBias(candidate));
     return before > 0 && after <= before * 0.8 ? candidate : { e: 0, n: 0 };
+  }
+
+  /** D1 fallback bias estimate used when `acceptedPoints` (tight-corridor) is too small
+   * to trust (< 50 points) -- reprojects every `wideSamples` point fresh against the
+   * centerline (its own `lateralM` came from the matcher's possibly hinted projection;
+   * this recomputes the same full, unhinted projection `acceptedPoints` use) and solves
+   * the same least-squares bias, but anchored on a median-trimmed observation set so a
+   * systematic offset dominates over any noisier subset. */
+  private estimateBiasFromWide(): LocalPoint {
+    const observations = this.wideObservations();
+    if (observations.length < 10) return { e: 0, n: 0 };
+
+    const medianLateralM = median(observations.map((observation) => observation.lateralM));
+    const madM = median(
+      observations.map((observation) => Math.abs(observation.lateralM - medianLateralM)),
+    );
+    const toleranceM = Math.max(3, madM * 3);
+    const trimmed = observations.filter(
+      (observation) => Math.abs(observation.lateralM - medianLateralM) <= toleranceM,
+    );
+    const candidate = this.solveBias(trimmed.length >= 10 ? trimmed : observations);
+    const magnitude = Math.hypot(candidate.e, candidate.n);
+    if (magnitude < 1.5 || magnitude > LEARN_WIDE_CORRIDOR_M) return { e: 0, n: 0 };
+
+    const before = percentile95(observations.map((observation) => Math.abs(observation.lateralM)));
+    const after = percentile95(
+      observations.map((observation) =>
+        Math.abs(
+          observation.lateralM - observation.normalE * candidate.e - observation.normalN * candidate.n,
+        ),
+      ),
+    );
+    return before > 0 && after <= before * 0.8 ? candidate : { e: 0, n: 0 };
+  }
+
+  private wideObservations(): Array<{ normalE: number; normalN: number; lateralM: number }> {
+    const observations: Array<{ normalE: number; normalN: number; lateralM: number }> = [];
+    for (const sample of this.wideSamples) {
+      const projection = projectOntoPolyline(
+        sample.localPoint,
+        this.profile.centerline,
+        this.profile.cumulativeDistancesM,
+        true,
+      );
+      const a = this.profile.centerline[projection.segmentIndex];
+      const b = this.profile.centerline[(projection.segmentIndex + 1) % this.profile.centerline.length];
+      if (a === undefined || b === undefined) continue;
+      const length = Math.hypot(b.e - a.e, b.n - a.n);
+      if (length === 0) continue;
+      observations.push({
+        normalE: -(b.n - a.n) / length,
+        normalN: (b.e - a.e) / length,
+        lateralM: projection.lateralM,
+      });
+    }
+    return observations;
+  }
+
+  private recordWideSample(match: TrackMatch, sample: LocationSample): void {
+    if (this.wideSamples.length >= MAX_ACCEPTED_POINTS) {
+      this.calibrationOverrun = true;
+      return;
+    }
+    const localPoint = this.profile.projection.toLocal({ lat: sample.lat, lon: sample.lon });
+    this.wideSamples.push({
+      distanceM: match.distanceM,
+      lateralM: match.lateralM,
+      unwrappedProgressM: match.unwrappedProgressM,
+      localPoint,
+    });
   }
 
   private solveBias(
