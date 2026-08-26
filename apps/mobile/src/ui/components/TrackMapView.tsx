@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import type { LayoutChangeEvent } from 'react-native';
-import { StyleSheet, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 import type { LocalPoint } from '@circuit/core';
 import { colors, radii } from '../theme';
 import {
@@ -317,6 +317,19 @@ export function TrackMapView({
           ]}
         />
       )}
+      {/* Legend: the amber RAW-GPS dot legitimately floats OFF the line by the
+          live lateral offset -- without naming both dots, that reads as a bug
+          (user field feedback). Bottom-left, out of the outline's way. */}
+      <View pointerEvents="none" style={styles.legend}>
+        <View style={[styles.legendDot, { backgroundColor: colors.accent }]} />
+        <Text style={styles.legendText} maxFontSizeMultiplier={1.2}>
+          GPS
+        </Text>
+        <View style={[styles.legendDot, { backgroundColor: onTrack ? colors.success : colors.danger }]} />
+        <Text style={styles.legendText} maxFontSizeMultiplier={1.2}>
+          On-track position
+        </Text>
+      </View>
     </View>
   );
 }
@@ -336,6 +349,16 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   outlineSegment: { backgroundColor: colors.textMuted },
+  legend: {
+    position: 'absolute',
+    left: 8,
+    bottom: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  legendDot: { width: 6, height: 6, borderRadius: 3 },
+  legendText: { color: colors.textMuted, fontSize: 10 },
   startFinishTick: { backgroundColor: colors.accent },
   rawDot: { backgroundColor: colors.accent },
   matchedDot: {},
