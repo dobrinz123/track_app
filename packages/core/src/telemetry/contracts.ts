@@ -48,3 +48,18 @@ export interface Elm327Session {
 }
 
 export const TELEMETRY_SCHEMA_VERSION = 1;
+
+// ---------- Neutral session shape (Phase 4e / ENET addendum) ----------
+// `Elm327Session`'s start/stop/onSample/onStateChange/getDiagnostics shape,
+// generalized over the state-vocabulary type so a second transport engine
+// (see `telemetry/enet/**`) can implement the identical surface with its own
+// state union, without any change to `Elm327Session` itself (additive only).
+// `Elm327Session` remains assignable to `TelemetrySession<Elm327State>` by
+// structure; nothing above this comment changes.
+export interface TelemetrySession<TState extends string = Elm327State> {
+  start(): void;
+  stop(): Promise<void>;
+  onSample(cb: (s: TelemetrySample) => void): () => void;
+  onStateChange(cb: (st: TState, detail?: string) => void): () => void;
+  getDiagnostics(): { observedHzByChannel: Record<string, number>; errorCount: number; lastError?: string };
+}

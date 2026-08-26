@@ -1,0 +1,171 @@
+import type { TelemetryChannelId } from '../contracts';
+import { decodeMode01Response, encodeMode01Request, isMode01TelemetryChannel, type Mode01TelemetryChannelId } from '../pidCodec';
+
+/** Channels that are never a valid ENET/OBD request target (device-sensor channels, per the ENET addendum: "no latG/longG"). */
+const NON_ENET_CHANNELS: ReadonlySet<TelemetryChannelId> = new Set(['latG', 'longG']);
+
+export interface EnetChannelDecodeSpec {
+  byteOffset: number;
+  byteLength: 1 | 2;
+  signed?: boolean;
+  scale: number;
+  offset: number;
+}
+
+export interface EnetChannelSpec {
+  channel: TelemetryChannelId;
+  mode: 'obd01' | 'did';
+  /** obd01: 2 hex chars (PID); did: 4 hex chars (DID). */
+  requestHex: string;
+  targetAddress?: number;
+  /** did only: how to decode the ReadDataByIdentifier response's data bytes. */
+  decode?: EnetChannelDecodeSpec;
+  /** REQUIRED for did specs: where the DID/decode formula came from (no public DID table exists -- every did spec is a user-supplied empirical finding). */
+  provenance: string;
+}
+
+/**
+ * Built-in default specs (ENET addendum): obd01 for rpm 0x0C, speedKph 0x0D,
+ * throttlePct 0x11, coolantC 0x05, engineOilC 0x5C -- all EMPIRICAL on the
+ * A90 (never confirmed to answer over ENET-direct-to-DME, see
+ * enet-protocol-research.md #3). No default `did` specs: no public B58/DSC
+ * DID table exists, so any `did` spec must be supplied by the caller with
+ * its own `provenance`.
+ */
+export const DEFAULT_ENET_CHANNEL_SPECS: readonly EnetChannelSpec[] = [
+  {
+    channel: 'rpm',
+    mode: 'obd01',
+    requestHex: '0C',
+    provenance: 'standard mode-01 PID 0x0C; EMPIRICAL whether the DME answers it over ENET (see enet-protocol-research.md #3)',
+  },
+  {
+    channel: 'speedKph',
+    mode: 'obd01',
+    requestHex: '0D',
+    provenance: 'standard mode-01 PID 0x0D; EMPIRICAL whether the DME answers it over ENET (see enet-protocol-research.md #3)',
+  },
+  {
+    channel: 'throttlePct',
+    mode: 'obd01',
+    requestHex: '11',
+    provenance: 'standard mode-01 PID 0x11; EMPIRICAL whether the DME answers it over ENET (see enet-protocol-research.md #3)',
+  },
+  {
+    channel: 'coolantC',
+    mode: 'obd01',
+    requestHex: '05',
+    provenance: 'standard mode-01 PID 0x05; EMPIRICAL whether the DME answers it over ENET (see enet-protocol-research.md #3)',
+  },
+  {
+    channel: 'engineOilC',
+    mode: 'obd01',
+    requestHex: '5C',
+    provenance: 'standard mode-01 PID 0x5C; EMPIRICAL whether the DME answers it over ENET (see enet-protocol-research.md #3)',
+  },
+];
+
+export interface EnetChannelSpecValidation {
+  valid: EnetChannelSpec[];
+  warnings: string[];
+}
+
+/**
+ * Validates a list of channel specs: rejects device-sensor channels
+ * (latG/longG), malformed `requestHex` (not hex, or the wrong length for the
+ * spec's `mode`), and `did` specs missing `decode` or a non-empty
+ * `provenance`. A channel repeated across specs keeps only the LAST entry
+ * (with a warning) -- never silently merges or picks the first.
+ */
+export function validateEnetChannelSpecs(specs: readonly EnetChannelSpec[]): EnetChannelSpecValidation {
+  const byChannel = new Map<TelemetryChannelId, EnetChannelSpec>();
+  const warnings: string[] = [];
+
+  for (const spec of specs) {
+    const reason = rejectionReason(spec);
+    if (reason !== null) {
+      warnings.push(`Ignoring ENET channel spec for ${spec.channel}: ${reason}`);
+      continue;
+    }
+    if (byChannel.has(spec.channel)) {
+      warnings.push(`Duplicate ENET channel spec for ${spec.channel}: the last one wins`);
+    }
+    byChannel.set(spec.channel, spec);
+  }
+
+  return { valid: [...byChannel.values()], warnings };
+}
+
+function rejectionReason(spec: EnetChannelSpec): string | null {
+  if (NON_ENET_CHANNELS.has(spec.channel)) {
+    return `channel ${spec.channel} is a device-sensor channel, never a valid ENET/OBD request target`;
+  }
+  const compact = spec.requestHex.replace(/\s+/g, '');
+  if (compact.length === 0 || !/^[0-9A-Fa-f]+$/.test(compact)) {
+    return `requestHex "${spec.requestHex}" is not valid hex`;
+  }
+  if (spec.mode === 'obd01') {
+    if (compact.length !== 2) {
+      return `obd01 requestHex must be exactly 2 hex characters (one PID byte), got ${compact.length}`;
+    }
+    return null;
+  }
+  if (compact.length !== 4) {
+    return `did requestHex must be exactly 4 hex characters (one DID), got ${compact.length}`;
+  }
+  if (spec.decode === undefined) {
+    return 'did spec is missing a decode definition';
+  }
+  if (spec.provenance.trim() === '') {
+    return 'did spec is missing provenance';
+  }
+  return null;
+}
+
+/**
+ * Decodes one channel's raw UDS response data bytes into its telemetry
+ * value. `obd01` specs REUSE `pidCodec`'s own decode formulas by round-
+ * tripping the raw bytes through the same ASCII response shape
+ * `decodeMode01Response` already parses (`41 <pid> <data...>`) -- this keeps
+ * exactly one decode formula per standard PID in the whole codebase, rather
+ * than a second hand-copied one here.
+ */
+export function decodeEnetChannelValue(spec: EnetChannelSpec, dataBytes: Uint8Array): number {
+  if (spec.mode === 'obd01') {
+    if (!isMode01TelemetryChannel(spec.channel)) {
+      throw new Error(`No mode-01 decoder for channel ${spec.channel}`);
+    }
+    return decodeObd01DataBytes(spec.channel, dataBytes);
+  }
+  if (spec.decode === undefined) throw new Error(`Channel ${spec.channel} did spec has no decode definition`);
+  return decodeDidBytes(dataBytes, spec.decode);
+}
+
+function decodeObd01DataBytes(channel: Mode01TelemetryChannelId, dataBytes: Uint8Array): number {
+  const pidHex = encodeMode01Request(channel).slice(2);
+  const syntheticResponse = `41 ${pidHex} ${bytesToHexPairs(dataBytes)}`;
+  return decodeMode01Response(channel, syntheticResponse);
+}
+
+function decodeDidBytes(dataBytes: Uint8Array, decode: EnetChannelDecodeSpec): number {
+  const { byteOffset, byteLength, signed, scale, offset } = decode;
+  if (byteOffset < 0 || byteOffset + byteLength > dataBytes.length) {
+    throw new Error(
+      `DID decode byteOffset ${byteOffset} + byteLength ${byteLength} is out of range for a ${dataBytes.length}-byte payload`,
+    );
+  }
+  let raw = 0;
+  for (let index = 0; index < byteLength; index += 1) {
+    raw = raw * 256 + (dataBytes[byteOffset + index] ?? 0);
+  }
+  if (signed === true) {
+    const bits = byteLength * 8;
+    const signBit = 2 ** (bits - 1);
+    if (raw >= signBit) raw -= 2 ** bits;
+  }
+  return raw * scale + offset;
+}
+
+function bytesToHexPairs(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+}

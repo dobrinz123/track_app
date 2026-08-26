@@ -226,3 +226,6 @@ Plan: research spike (ENET/HSFZ protocol from open sources, ECU addresses, B58 D
 - HANDOFF DOC (user directive): docs/roadmap/phase-5-llm-corner-analysis.md — goal (LLM per-corner analysis), channel priorities, build order (P4e ENET → cornerMetrics pure module → car envelope → opt-in export/LLM → UI), constraints. Linked from playbook §5 and memory.
 | P4e-scout-proto | sonnet (web) | DONE_WITH_CONCERNS — VERIFIED (primary): HSFZ header/control words, TCP 6801, UDP 6811; ediabaslib GPL-3 / scapy GPL-2 → reimplement, never vendor. MEDIUM: DME 0x12, tester 0xF4/0xF1. NOT FOUND: DSC/EGS/SZL addresses, any public B58/DSC DID table, mode-01-over-ENET behavior, keep-alive interval, achievable Hz; Supra exposes NO brake/steering on mode-01 (SupraMKV snippet). Forums 403'd on direct fetch → snippet-tier evidence flagged. |
 - P4e-T0 contracts: DONE (LEAD) — "ENET telemetry addendum" (frame layout, whitelist {01,22,3E}, EnetChannelSpec with provenance, defaults, diagnostics, DID-probe dev screen, simulator).
+- Codex seat: quota reset confirmed (SEAT-OK echo, 2026-08-27 early) → available for P4e cross-review.
+| P4e-T1 | sonnet | DISPATCHED — ENET/HSFZ+UDS core engine + simulator + whitelist + tests, ticket-p4e-t1-enet-core.md |
+| P4e-T2 | sonnet | STAGED — mobile wiring ticket drafted (API surface placeholder until T1 collects) |
