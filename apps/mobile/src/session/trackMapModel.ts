@@ -206,10 +206,16 @@ export function buildOutlineSegments(
   containerH: number,
 ): OutlineSegment[] {
   const segments: OutlineSegment[] = [];
-  for (let index = 0; index < fittedPoints.length - 1; index += 1) {
+  // A circuit is a closed loop, but the OSM-derived centerline's endpoints sit
+  // ~179 m apart (the start/finish straight) -- without an explicit closing
+  // segment the drawn outline has a visible gap there (user field report).
+  // Iterating to length (not length-1) pairs the LAST point back with the
+  // FIRST via the modulo below, closing the loop; degenerate closings (first
+  // and last already coincident) produce a ~0-length segment, which is fine.
+  for (let index = 0; index < fittedPoints.length; index += 1) {
     const a = fittedPoints[index];
-    const b = fittedPoints[index + 1];
-    if (a === undefined || b === undefined) continue;
+    const b = fittedPoints[(index + 1) % fittedPoints.length];
+    if (a === undefined || b === undefined || fittedPoints.length < 3) continue;
     const ax = a.xFrac * containerW;
     const ay = a.yFrac * containerH;
     const bx = b.xFrac * containerW;

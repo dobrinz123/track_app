@@ -161,8 +161,11 @@ describe('buildOutlineSegments (F2 connected outline)', () => {
       { xFrac: 0, yFrac: 0 },
     ];
     const segments = buildOutlineSegments(square, 100, 100);
-    expect(segments).toHaveLength(4);
-    for (const segment of segments) expect(segment.lengthPx).toBeCloseTo(100, 5);
+    // 4 sides + the loop-closing segment (degenerate here: last point already
+    // repeats the first, so the closer has ~0 length).
+    expect(segments).toHaveLength(5);
+    for (const segment of segments.slice(0, 4)) expect(segment.lengthPx).toBeCloseTo(100, 5);
+    expect(segments[4]!.lengthPx).toBeCloseTo(0, 5);
 
     const angles = segments.map((segment) => segment.angleDeg);
     expect(angles[0]).toBeCloseTo(0, 5); // right
@@ -171,9 +174,22 @@ describe('buildOutlineSegments (F2 connected outline)', () => {
     expect(angles[3]).toBeCloseTo(-90, 5); // up
   });
 
-  it('returns no segments for fewer than 2 points', () => {
+  it('returns no segments for fewer than 3 points', () => {
     expect(buildOutlineSegments([{ xFrac: 0, yFrac: 0 }], 100, 100)).toEqual([]);
     expect(buildOutlineSegments([], 100, 100)).toEqual([]);
+  });
+
+  it('closes an OPEN loop with a real closing segment (the user-reported missing last piece)', () => {
+    const openSquare = [
+      { xFrac: 0, yFrac: 0 },
+      { xFrac: 1, yFrac: 0 },
+      { xFrac: 1, yFrac: 1 },
+      { xFrac: 0, yFrac: 1 },
+    ];
+    const segments = buildOutlineSegments(openSquare, 100, 100);
+    expect(segments).toHaveLength(4);
+    expect(segments[3]!.lengthPx).toBeCloseTo(100, 5); // (0,1) back to (0,0)
+    expect(segments[3]!.angleDeg).toBeCloseTo(-90, 5);
   });
 });
 
