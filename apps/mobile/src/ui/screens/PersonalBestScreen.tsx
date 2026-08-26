@@ -7,14 +7,17 @@ import { colors, radii, spacing, typography } from '../theme';
 import { TimeDisplay } from '../components/TimeDisplay';
 import { QualityPill } from '../components/QualityPill';
 import { formatDateUtc } from '../format';
-import { sessionHistoryStore } from '../../session/composition';
-import { TRANSILVANIA_MOTOR_RING } from '../data/circuit';
+import { sessionHistoryStore, settingsStore } from '../../session/composition';
+import { resolveSelectedCircuit } from '../../session/circuitCatalog';
+import { useSettings } from '../hooks/useSettings';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'PersonalBest'>;
 
-/** S11 — personal best details with provenance (date, session), quality flags. */
+/** S11 — personal best details with provenance (date, session), quality flags. Header names the SELECTED circuit (ticket CN-W3), not a hardcoded constant. */
 export function PersonalBestScreen({ navigation }: Props): React.JSX.Element {
   const pb = sessionHistoryStore.getPersonalBest();
+  const settings = useSettings(settingsStore);
+  const selected = resolveSelectedCircuit(settings);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -26,7 +29,7 @@ export function PersonalBestScreen({ navigation }: Props): React.JSX.Element {
           Personal Best
         </Text>
         <Text style={styles.circuit} maxFontSizeMultiplier={1.3}>
-          {TRANSILVANIA_MOTOR_RING.displayName} · {TRANSILVANIA_MOTOR_RING.layoutId}
+          {selected.profile.displayName} · {selected.profile.layoutId}
         </Text>
 
         {!pb ? (

@@ -8,9 +8,10 @@ import { colors, radii, spacing, typography } from '../theme';
 import { ProgressRing } from '../components/ProgressRing';
 import { LongPressButton } from '../components/LongPressButton';
 import { StatusBanner } from '../components/StatusBanner';
-import { facade } from '../../session/composition';
-import { TMR_CIRCUIT_PROFILE, TMR_RUNTIME_PROFILE } from '../../session/tmrProfile';
+import { facade, settingsStore } from '../../session/composition';
+import { resolveSelectedCircuit } from '../../session/circuitCatalog';
 import { useFacadeState } from '../hooks/useFacadeState';
+import { useSettings } from '../hooks/useSettings';
 import { TrackMapView } from '../components/TrackMapView';
 import { fitCenterlineAutoRotated } from '../../session/trackMapModel';
 
@@ -31,6 +32,11 @@ export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Elemen
   useKeepAwake();
   const state = useFacadeState(facade);
   const navigatedRef = useRef(false);
+  // Ticket CN-W3: centerline / S-F / corridor width come from the SELECTED
+  // circuit (`useSettings` subscribes live; a circuit switch mid-calibration
+  // is unreachable from the UI, but this stays correct even so).
+  const settings = useSettings(settingsStore);
+  const selected = useMemo(() => resolveSelectedCircuit(settings), [settings]);
 
   useEffect(() => {
     if (state.calibrationResult && !navigatedRef.current) {
@@ -55,7 +61,7 @@ export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Elemen
     state.calibration?.matchedLocalX !== undefined && state.calibration?.matchedLocalY !== undefined
       ? { e: state.calibration.matchedLocalX, n: state.calibration.matchedLocalY }
       : undefined;
-  const offsetOverCorridor = lateralM !== undefined && Math.abs(lateralM) > TMR_CIRCUIT_PROFILE.corridorWidthM;
+  const offsetOverCorridor = lateralM !== undefined && Math.abs(lateralM) > selected.profile.corridorWidthM;
 
   // P1 fix (map containment on a phone screen): size the map container itself, rather
   // than letting `TrackMapView` assume a fixed width:height ratio -- width is the
@@ -67,8 +73,8 @@ export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Elemen
   // `containerAspect` passed in here (1) is a placeholder -- `contentAspect` is the
   // input points' own natural aspect and does not depend on it.
   const mapContentAspect = useMemo(
-    () => fitCenterlineAutoRotated(TMR_RUNTIME_PROFILE.centerline, 1).contentAspect,
-    [],
+    () => fitCenterlineAutoRotated(selected.runtime.centerline, 1).contentAspect,
+    [selected.runtime],
   );
   const windowWidth = useWindowDimensions().width;
   const mapWidth = windowWidth - spacing.lg * 2;
@@ -135,8 +141,8 @@ export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Elemen
         </View>
         <View style={[styles.mapWrap, { width: mapWidth, height: mapHeight }]}>
           <TrackMapView
-            centerline={TMR_RUNTIME_PROFILE.centerline}
-            startFinishLocal={TMR_RUNTIME_PROFILE.startFinishGate.a}
+            centerline={selected.runtime.centerline}
+            startFinishLocal={selected.runtime.startFinishGate.a}
             rawLocal={rawLocal}
             matchedLocal={matchedLocal}
             onTrack={onTrack}

@@ -1,6 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { circuitCatalog, MOTORPARK_CIRCUIT_PROFILE, MOTORPARK_RUNTIME_PROFILE } from '../../src/session/circuitCatalog';
-import { TMR_CIRCUIT_PROFILE, TMR_RUNTIME_PROFILE } from '../../src/session/tmrProfile';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  circuitCatalog,
+  MOTORPARK_CIRCUIT_PROFILE,
+  MOTORPARK_RUNTIME_PROFILE,
+  resolveSelectedCircuit,
+} from '../../src/session/circuitCatalog';
+import { TMR_CIRCUIT_PROFILE, TMR_CORNERS, TMR_RUNTIME_PROFILE } from '../../src/session/tmrProfile';
 
 function summaryFor(profile: typeof TMR_CIRCUIT_PROFILE) {
   return {
@@ -55,5 +60,41 @@ describe('circuitCatalog (real bundled TMR + MotorPark assets, CN-W2)', () => {
     );
 
     expect(circuitCatalog.get('does-not-exist')).toBeNull();
+  });
+});
+
+describe('circuitCatalog corners (ticket CN-W3: catalog entries carry {profile, runtime, corners})', () => {
+  it('TMR corners are identical to TMR_CORNERS (same overlaid set, unchanged)', () => {
+    const tmr = circuitCatalog.get(TMR_CIRCUIT_PROFILE.circuitId);
+    expect(tmr).not.toBeNull();
+    expect(tmr!.corners).toBe(TMR_CORNERS);
+    // The overlay is real: at least one corner carries an observed speed.
+    expect(tmr!.corners.some((c) => c.speedSource === 'observed')).toBe(true);
+  });
+
+  it('MotorPark corners: length 10, model-derived only (NO observed-speed overlay)', () => {
+    const motorpark = circuitCatalog.get(MOTORPARK_CIRCUIT_PROFILE.circuitId);
+    expect(motorpark).not.toBeNull();
+    expect(motorpark!.corners).toHaveLength(10);
+    expect(motorpark!.corners.every((c) => c.speedSource !== 'observed')).toBe(true);
+  });
+});
+
+describe('resolveSelectedCircuit (ticket CN-W3)', () => {
+  it('returns the bundled entry matching a known selectedCircuitId', () => {
+    const resolved = resolveSelectedCircuit({ selectedCircuitId: MOTORPARK_CIRCUIT_PROFILE.circuitId });
+    expect(resolved.profile).toBe(MOTORPARK_CIRCUIT_PROFILE);
+    expect(resolved.runtime).toBe(MOTORPARK_RUNTIME_PROFILE);
+  });
+
+  it('falls back to TMR and warns for an unknown selectedCircuitId (never a crash, never a fetch)', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const resolved = resolveSelectedCircuit({ selectedCircuitId: 'does-not-exist' });
+    expect(resolved.profile).toBe(TMR_CIRCUIT_PROFILE);
+    expect(resolved.runtime).toBe(TMR_RUNTIME_PROFILE);
+    expect(resolved.corners).toBe(TMR_CORNERS);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]![0]).toContain('does-not-exist');
+    warnSpy.mockRestore();
   });
 });

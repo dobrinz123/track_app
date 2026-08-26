@@ -6,7 +6,7 @@ import type { LapRecord } from '@circuit/core';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
 import { TimeDisplay } from '../components/TimeDisplay';
-import { facade } from '../../session/composition';
+import { facade, settingsStore } from '../../session/composition';
 import { useFacadeState } from '../hooks/useFacadeState';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'SessionResults'>;
@@ -125,7 +125,10 @@ export function SessionResultsScreen({ navigation }: Props): React.JSX.Element {
         </Pressable>
         <Pressable
           style={[styles.button, styles.secondaryButton]}
-          onPress={() => navigation.navigate('CircuitDetail')}
+          // Ticket CN-W3: `CircuitDetail` now requires `circuitId` (navigation/types.ts) --
+          // pass the currently selected circuit's id (unaffected by the fact that a
+          // session just ended, since the selection never changes mid-session).
+          onPress={() => navigation.navigate('CircuitDetail', { circuitId: settingsStore.getSettings().selectedCircuitId })}
           accessibilityRole="button"
           accessibilityLabel="Back to circuit"
         >

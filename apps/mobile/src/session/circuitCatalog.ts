@@ -1,10 +1,16 @@
-import { loadProfileFromJson, summarize, type CircuitProfile, type RuntimeProfile } from '@circuit/core';
-import { TMR_CIRCUIT_PROFILE, TMR_RUNTIME_PROFILE } from './tmrProfile';
+import {
+  analyzeCorners,
+  loadProfileFromJson,
+  summarize,
+  type CircuitProfile,
+  type Corner,
+  type RuntimeProfile,
+} from '@circuit/core';
+import { TMR_CIRCUIT_PROFILE, TMR_CORNERS, TMR_RUNTIME_PROFILE } from './tmrProfile';
+import type { AppSettings } from './settingsStore';
 // Static import (same contract as tmrProfile.ts, ADR-0004): Metro inlines this
 // `.json` module into the Hermes bundle at build time -- NOT a runtime
-// fetch/fs read. MotorPark has no observed-speeds overlay yet (TMR-only,
-// Phase 3 coaching addendum), so this entry is profile+runtime only, exactly
-// what `AppCircuitCatalog.get()` already returns.
+// fetch/fs read.
 import motorparkProfileJson from '@circuit/core/assets/circuits/motorpark-romania.v1.json';
 
 /**
@@ -26,37 +32,51 @@ export interface CircuitSummary {
   sectorStatus: string;
 }
 
+/** A bundled circuit's full data -- profile, runtime companion, and its coaching corner set (ticket CN-W3, contracts.md's Multi-circuit selection addendum). */
+export interface BundledCircuit {
+  profile: CircuitProfile;
+  runtime: RuntimeProfile;
+  corners: Corner[];
+}
+
 export interface AppCircuitCatalog {
   list(): CircuitSummary[];
-  get(circuitId: string): { profile: CircuitProfile; runtime: RuntimeProfile } | null;
+  get(circuitId: string): BundledCircuit | null;
 }
 
 /**
  * Bundled MotorPark România profile+runtime (ticket CN-W2), loaded through
  * the SAME validation path (`loadProfileFromJson`) as TMR above -- see
- * tmrProfile.ts's `load()` for the identical pattern this mirrors.
+ * tmrProfile.ts's `load()` for the identical pattern this mirrors. Corners
+ * are analyzed (ticket CN-W3) but MotorPark ships NO observed-speeds overlay
+ * yet -- unlike TMR, its corner set stays purely model-derived (contracts.md:
+ * "an observed-speeds overlay is applied ONLY when that circuit ships one").
  */
-function loadMotorPark(): { profile: CircuitProfile; runtime: RuntimeProfile } {
+function loadMotorPark(): { profile: CircuitProfile; runtime: RuntimeProfile; corners: Corner[] } {
   const result = loadProfileFromJson(JSON.stringify(motorparkProfileJson));
   if (!result.ok) {
     throw new Error(`Bundled MotorPark profile failed validation: ${result.errors.join(', ')}`);
   }
-  return { profile: result.profile, runtime: result.runtime };
+  return { profile: result.profile, runtime: result.runtime, corners: analyzeCorners(result.runtime) };
 }
 
 const motorpark = loadMotorPark();
 export const MOTORPARK_CIRCUIT_PROFILE: CircuitProfile = motorpark.profile;
 export const MOTORPARK_RUNTIME_PROFILE: RuntimeProfile = motorpark.runtime;
+export const MOTORPARK_CORNERS: Corner[] = motorpark.corners;
 
 /** Bundled circuits: Transilvania Motor Ring + MotorPark România (session/tmrProfile.ts, above). */
-const ENTRIES: ReadonlyMap<string, { profile: CircuitProfile; runtime: RuntimeProfile }> = new Map([
-  [TMR_CIRCUIT_PROFILE.circuitId, { profile: TMR_CIRCUIT_PROFILE, runtime: TMR_RUNTIME_PROFILE }],
-  [MOTORPARK_CIRCUIT_PROFILE.circuitId, { profile: MOTORPARK_CIRCUIT_PROFILE, runtime: MOTORPARK_RUNTIME_PROFILE }],
+const ENTRIES: ReadonlyMap<string, BundledCircuit> = new Map([
+  [TMR_CIRCUIT_PROFILE.circuitId, { profile: TMR_CIRCUIT_PROFILE, runtime: TMR_RUNTIME_PROFILE, corners: TMR_CORNERS }],
+  [
+    MOTORPARK_CIRCUIT_PROFILE.circuitId,
+    { profile: MOTORPARK_CIRCUIT_PROFILE, runtime: MOTORPARK_RUNTIME_PROFILE, corners: MOTORPARK_CORNERS },
+  ],
 ]);
 
 /**
- * Today's `AppCircuitCatalog` backing implementation -- the single bundled
- * TMR entry, wrapped in the multi-circuit-ready interface. NOT yet backed by
+ * Today's `AppCircuitCatalog` backing implementation -- both bundled entries,
+ * wrapped in the multi-circuit-ready interface. NOT yet backed by
  * `@circuit/core`'s `createCircuitCatalog` (still landing on a concurrent
  * branch); this in-app implementation is deliberately swappable in place.
  */
@@ -68,3 +88,19 @@ export const circuitCatalog: AppCircuitCatalog = {
     return ENTRIES.get(circuitId) ?? null;
   },
 };
+
+/**
+ * Resolves the app's ONE selected circuit (contracts.md's Multi-circuit
+ * selection addendum) from persisted settings. An id that isn't in the
+ * bundled catalog -- a stale/corrupt settings row, or a circuit removed from
+ * a later catalog build -- falls back to TMR (the documented default) with a
+ * `console.warn`, never a crash and never a fetch.
+ */
+export function resolveSelectedCircuit(settings: Pick<AppSettings, 'selectedCircuitId'>): BundledCircuit {
+  const entry = ENTRIES.get(settings.selectedCircuitId);
+  if (entry !== undefined) return entry;
+  console.warn(
+    `[circuitCatalog] resolveSelectedCircuit: unknown selectedCircuitId "${settings.selectedCircuitId}" -- falling back to ${TMR_CIRCUIT_PROFILE.circuitId}`,
+  );
+  return ENTRIES.get(TMR_CIRCUIT_PROFILE.circuitId)!;
+}

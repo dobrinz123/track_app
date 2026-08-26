@@ -1,6 +1,6 @@
 export type RootStackParamList = {
   CircuitSelection: undefined;
-  CircuitDetail: undefined;
+  CircuitDetail: { circuitId: string };
   Preflight: undefined;
   CalibrationInstructions: undefined;
   ActiveCalibration: undefined;

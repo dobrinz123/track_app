@@ -1,6 +1,7 @@
 import Constants from 'expo-constants';
 import type {
   CircuitProfile,
+  Corner,
   LocationProvider,
   LocationSample,
   RuntimeProfile,
@@ -40,6 +41,7 @@ import { InMemorySettingsStore } from './settingsStore';
 import { RealSessionFacade, type RealSessionFacadeCallbacks } from './realFacade';
 import { ReplayTimeSource, ReplayTimestampedLocationProvider, ScaledReplayClock } from './liveTimestampedProvider';
 import { TMR_CIRCUIT_PROFILE, TMR_CORNERS, TMR_RUNTIME_PROFILE } from './tmrProfile';
+import { circuitCatalog, resolveSelectedCircuit } from './circuitCatalog';
 import { startVoiceCoach } from './voiceCoach';
 import { createTelemetryProvider, type TelemetryProvider } from './telemetryProvider';
 import { createGForceProvider, type GForceProvider } from './gforceProvider';
@@ -718,6 +720,8 @@ let controller: SessionController | null = null;
 let productionFacade: RealSessionFacade | null = null;
 let gnssProvider: GnssLocationProvider | null = null;
 let historyStore: SqlSessionHistoryStore | null = null;
+/** The bundled circuitId `controller` (the production one) was last BUILT for -- ticket CN-W3's preflight-gate rebuild-on-circuit-change trigger compares this against `settingsStore.getSettings().selectedCircuitId`. Set by `createProductionController()`, read by the gate below and by `resumeRecovery()`'s defensive rebuild guard. */
+let productionControllerCircuitId: string | null = null;
 /**
  * The `SessionController` currently backing `facade` -- the production one,
  * or (in `__DEV__`) `startDevReplaySession`'s replay controller. Tracked
@@ -804,8 +808,8 @@ function currentControllerState(ctrl: SessionController): SessionState {
  * coaching config is fixed for its own lifetime -- see
  * `SessionControllerDeps.coaching`'s own doc comment in `@circuit/core`).
  */
-function coachingConfig(): { enabled: boolean; corners: typeof TMR_CORNERS } {
-  return { enabled: settingsStore.getSettings().coachingEnabled, corners: TMR_CORNERS };
+function coachingConfig(corners: Corner[]): { enabled: boolean; corners: Corner[] } {
+  return { enabled: settingsStore.getSettings().coachingEnabled, corners };
 }
 
 /**
@@ -829,9 +833,16 @@ function createProductionController(): SessionController {
     await provider.stop();
     await provider.start();
   };
+  // Multi-circuit selection addendum (ticket CN-W3): read fresh at EACH
+  // build call site (bootstrap, and every later terminal/circuit-change
+  // rebuild) so the just-persisted selection is what a freshly built
+  // controller is actually configured for -- a running controller's own
+  // circuit stays fixed for its whole lifetime, same as `coachingConfig()`.
+  const selected = resolveSelectedCircuit(settingsStore.getSettings());
+  productionControllerCircuitId = selected.profile.circuitId;
   return new SessionController({
-    runtimeProfile: TMR_RUNTIME_PROFILE,
-    circuitProfile: TMR_CIRCUIT_PROFILE,
+    runtimeProfile: selected.runtime,
+    circuitProfile: selected.profile,
     locationProvider: provider,
     clock,
     repository,
@@ -839,7 +850,7 @@ function createProductionController(): SessionController {
     appVersion: appVersion(),
     algorithmVersion: ALGORITHM_VERSION,
     restartProvider,
-    coaching: coachingConfig(),
+    coaching: coachingConfig(selected.corners),
   });
 }
 
@@ -985,6 +996,86 @@ settingsStore.subscribe((settings) => {
 });
 
 /**
+ * Resolves which bundled circuit a recoverable checkpoint belongs to
+ * (contracts.md's Multi-circuit selection addendum, ticket CN-W3):
+ * `LocalSessionRepository.loadCheckpoint` returns only `{ snapshot, laps }`
+ * -- no `circuitId` -- so the sole available signal is whether `sessionId`
+ * appears in some bundled circuit's COMPLETED-session history
+ * (`listSessions`).
+ *
+ * DEVIATION from the addendum's literal text (flagged in this ticket's
+ * report): the addendum reads "a checkpoint whose circuit is not bundled is
+ * discarded with a warning", which taken literally would mean "not found in
+ * ANY circuit's listSessions -> discard". But `@circuit/core` only ever
+ * writes a row into the `sessions` table inside `SessionController.endSession()`
+ * (packages/core/src/controller/sessionController.ts:557-568; see also
+ * persistence-sql/sqlSessionRepository.ts:218-222's own comment: "a session
+ * that has a checkpoint ... but was never saved via saveSession ... has no
+ * row in `sessions`") -- a genuinely in-progress or just-crashed session's
+ * checkpoint is BY CONSTRUCTION never present in ANY circuit's
+ * `listSessions` result yet (its own row cannot exist until the session
+ * ends). Discarding on every "not found" would therefore silently disable
+ * the ADR-0003 §3 recovery feature on a session's first crash, for EITHER
+ * circuit -- including every scenario `composition.recovery.test.ts` already
+ * exercises (each seeds a checkpoint with no matching `sessions` row and
+ * asserts recovery IS still offered), which would violate this ticket's own
+ * "TMR default path must remain behaviorally identical" constraint.
+ *
+ * Returning `null` here therefore means "no cross-circuit evidence either
+ * way -- keep the CURRENTLY SELECTED circuit" rather than "discard": a
+ * session can only ever have been started under whatever circuit was
+ * selected when it began (mid-session selection changes are unreachable
+ * from the UI, per the addendum itself), so the persisted selection is
+ * already the right answer in the overwhelmingly common case. A match IS
+ * switched to when found -- e.g. an active-session pointer left lingering
+ * after a session that actually completed (and so has a real `sessions`
+ * row) under a DIFFERENT circuit than the one currently selected.
+ */
+async function resolveRecoveryCircuitId(repo: LocalSessionRepository, sessionId: string): Promise<string | null> {
+  for (const summary of circuitCatalog.list()) {
+    const sessions = await repo.listSessions(LOCAL_USER_ID, summary.circuitId);
+    if (sessions.some((s) => s.sessionId === sessionId)) return summary.circuitId;
+  }
+  return null;
+}
+
+/**
+ * Selects the app's ONE active circuit (contracts.md's Multi-circuit
+ * selection addendum, ticket CN-W3): validates `circuitId` against the
+ * bundled catalog (an unknown id is a warned no-op, never a crash),
+ * persists the choice, and rebuilds/refreshes `SqlSessionHistoryStore` for
+ * it -- the SAME `historyWrapper.setInner()` + `refresh()` sequence
+ * bootstrap itself uses -- so History/PB immediately reflect the newly
+ * selected circuit. Does NOT touch the production controller itself; the
+ * preflight gate (`setPreflightGate` above) is what rebuilds that, lazily,
+ * the next time it is genuinely idle.
+ */
+export async function selectCircuit(circuitId: string): Promise<void> {
+  const entry = circuitCatalog.get(circuitId);
+  if (entry === null) {
+    console.warn(`[composition] selectCircuit: unknown circuitId "${circuitId}" -- ignoring`);
+    return;
+  }
+  settingsStore.update({ selectedCircuitId: circuitId });
+  // Bootstrap not finished yet (repository not ready): the history store is
+  // built for whichever circuit is persisted at that point anyway
+  // (`runBootstrap()`'s own `bootSelected` read), so there is nothing further
+  // to rebuild here yet -- Start Session stays disabled until bootstrap is
+  // 'ready' regardless (`CircuitDetailScreen`'s own gate).
+  if (repository === null) return;
+  const history = new SqlSessionHistoryStore(
+    repository,
+    LOCAL_USER_ID,
+    entry.profile.circuitId,
+    entry.profile.layoutId,
+    entry.profile.layoutVersion,
+  );
+  await history.refresh();
+  historyWrapper.setInner(history);
+  historyStore = history;
+}
+
+/**
  * Runs the full bootstrap sequence: opens the on-device SQLite database,
  * builds the real `SessionController` + `GnssLocationProvider`, checks for a
  * recoverable checkpoint, and swaps every wrapper above from its in-memory
@@ -1055,16 +1146,29 @@ async function runBootstrap(): Promise<void> {
     facadeWrapper.setPreflightGate(async () => {
       if (controller === null || activeController !== controller) return;
       const state = currentControllerState(controller);
-      if (state !== 'sessionComplete' && state !== 'error') return;
+      const terminal = state === 'sessionComplete' || state === 'error';
+      // Multi-circuit selection addendum (ticket CN-W3, binding): also
+      // rebuild when the controller's circuit differs from the current
+      // selection AND the controller is genuinely idle -- NEVER during
+      // outLap/timing/inPit/paused (a circuit switch mid-session is
+      // unreachable from the UI and must never tear down a live session).
+      const circuitChanged =
+        state === 'idle' && productionControllerCircuitId !== settingsStore.getSettings().selectedCircuitId;
+      if (!terminal && !circuitChanged) return;
       await rebuildProductionController();
     });
 
+    // Multi-circuit selection addendum (ticket CN-W3): the history store is
+    // built for the PERSISTED selection (settings were hydrated above, before
+    // this point), not hardcoded TMR -- `selectCircuit()` rebuilds it again
+    // later, on demand, the same way.
+    const bootSelected = resolveSelectedCircuit(settingsStore.getSettings());
     const history = new SqlSessionHistoryStore(
       repository,
       LOCAL_USER_ID,
-      TMR_CIRCUIT_PROFILE.circuitId,
-      TMR_CIRCUIT_PROFILE.layoutId,
-      TMR_CIRCUIT_PROFILE.layoutVersion,
+      bootSelected.profile.circuitId,
+      bootSelected.profile.layoutId,
+      bootSelected.profile.layoutVersion,
     );
     await history.refresh();
     historyWrapper.setInner(history);
@@ -1074,6 +1178,24 @@ async function runBootstrap(): Promise<void> {
     if (activeSessionId !== null) {
       const checkpoint = await repository.loadCheckpoint(activeSessionId);
       if (checkpoint !== null && checkpoint.snapshot.state !== 'sessionComplete') {
+        // Multi-circuit selection addendum (ticket CN-W3): resolve which
+        // bundled circuit this checkpoint belongs to (see
+        // `resolveRecoveryCircuitId`'s own doc comment for the exact
+        // mechanism and its documented limitation) and switch the selection
+        // to it BEFORE the controller is (re)built -- otherwise a recovered
+        // MotorPark session would resume against a TMR-configured controller.
+        const resolvedCircuitId = await resolveRecoveryCircuitId(repository, activeSessionId);
+        if (resolvedCircuitId !== null && resolvedCircuitId !== settingsStore.getSettings().selectedCircuitId) {
+          await selectCircuit(resolvedCircuitId);
+        }
+        // The production controller was already built above (`buildProductionController()`),
+        // possibly for the PRE-switch selection -- rebuild now, before
+        // activation/recovery, if the selection just changed underneath it.
+        // No dispose needed: nothing has subscribed to or started this
+        // not-yet-activated controller/provider yet.
+        if (controller !== null && productionControllerCircuitId !== settingsStore.getSettings().selectedCircuitId) {
+          buildProductionController();
+        }
         const recoveryLapCount = checkpoint.laps.length + (midSessionState(checkpoint.snapshot) ? 1 : 0);
         setPendingRecovery({ sessionId: activeSessionId, lapCount: recoveryLapCount });
       } else if (db !== null) {
@@ -1177,6 +1299,17 @@ export async function resumeRecovery(): Promise<boolean> {
     const info = pendingRecovery;
     if (info === null) return false;
     setRecoveryNotice(null);
+    // Multi-circuit selection addendum (ticket CN-W3): defensive guard --
+    // bootstrap's own recovery resolution already rebuilds the production
+    // controller for the right circuit BEFORE offering this recovery (see
+    // `runBootstrap()`), but a `retryBootstrap()` or other rebuild could in
+    // principle have run in between. Rebuild once more here if the currently
+    // built controller's circuit still doesn't match the selection, so this
+    // resume is NEVER driven by a controller configured for the wrong
+    // circuit's geometry.
+    if (controller !== null && productionControllerCircuitId !== settingsStore.getSettings().selectedCircuitId) {
+      await rebuildProductionController();
+    }
     const { db: database, repository: repo, controller: ctrl } = await ready();
     const checkpoint = await repo.loadCheckpoint(info.sessionId);
     if (checkpoint === null) {
@@ -1247,13 +1380,22 @@ export async function discardRecovery(): Promise<void> {
 
 export async function deleteAllStoredUserData(): Promise<DeleteUserDataResult> {
   const { repository: repo } = await ready();
-  const result = await deleteAllUserData(
-    repo,
-    LOCAL_USER_ID,
-    TMR_CIRCUIT_PROFILE.circuitId,
-    TMR_CIRCUIT_PROFILE.layoutId,
-    TMR_CIRCUIT_PROFILE.layoutVersion,
-  );
+  // Multi-circuit selection addendum (ticket CN-W3): delete-all spans EVERY
+  // bundled circuit, not just the currently selected one -- `deleteUserData`
+  // itself is a single per-userId wipe (not circuit-scoped), so this loop's
+  // real job is the per-circuit VERIFY-EMPTY check; success requires every
+  // bundled circuit to come back empty.
+  const perCircuitResults: DeleteUserDataResult[] = [];
+  for (const summary of circuitCatalog.list()) {
+    perCircuitResults.push(
+      await deleteAllUserData(repo, LOCAL_USER_ID, summary.circuitId, summary.layoutId, summary.layoutVersion),
+    );
+  }
+  const result: DeleteUserDataResult = {
+    ok: perCircuitResults.every((r) => r.ok),
+    remainingSessionCount: perCircuitResults.reduce((sum, r) => sum + r.remainingSessionCount, 0),
+    referenceLapCleared: perCircuitResults.every((r) => r.referenceLapCleared),
+  };
   // F7 fix (WPT3, binding): `telemetry_samples` (Telemetry addendum) is a
   // mobile-owned table (`persistence/telemetrySchema.ts`) that
   // `@circuit/core`'s `deleteAllUserData`/`LocalSessionRepository.deleteUserData`
@@ -1415,6 +1557,18 @@ export async function startDevReplaySession(
     const replayInner = new ReplayLocationProvider(samples, { speedFactor });
     const replayProvider: LocationProvider = new ReplayTimestampedLocationProvider(replayInner, timeSource);
 
+    // Multi-circuit selection addendum (ticket CN-W3): coaching corners for
+    // the replay controller are resolved from the bundled catalog by the
+    // REPLAY's own circuitId -- previously this hardcoded TMR_CORNERS even
+    // for a MotorPark fixture. Falls back to TMR_CORNERS (with a warning)
+    // only if a caller ever names a circuit outside the bundled catalog,
+    // which no real call site does.
+    const replayEntry = circuitCatalog.get(circuit.circuitProfile.circuitId);
+    if (replayEntry === null) {
+      console.warn(
+        `[composition] startDevReplaySession: circuitId "${circuit.circuitProfile.circuitId}" is not in the bundled catalog -- coaching corners default to TMR`,
+      );
+    }
     const devController = new SessionController({
       runtimeProfile: circuit.runtimeProfile,
       circuitProfile: circuit.circuitProfile,
@@ -1428,7 +1582,7 @@ export async function startDevReplaySession(
         await replayProvider.stop();
         await replayProvider.start();
       },
-      coaching: coachingConfig(),
+      coaching: coachingConfig(replayEntry?.corners ?? TMR_CORNERS),
     });
 
     replayController = devController;

@@ -4,10 +4,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
-import { ADVISORY_NOTICE, TRANSILVANIA_MOTOR_RING } from '../data/circuit';
+import { ADVISORY_NOTICE, circuitDisplayData } from '../data/circuit';
 import { StatusBanner } from '../components/StatusBanner';
 import { CornersList } from '../components/CornersList';
-import { TMR_CORNERS } from '../../session/tmrProfile';
+import { circuitCatalog } from '../../session/circuitCatalog';
+import { TMR_CIRCUIT_PROFILE } from '../../session/tmrProfile';
 import {
   discardRecovery,
   resumeRecovery,
@@ -34,9 +35,14 @@ function MetaRow({ label, value }: { label: string; value: string }): React.JSX.
   );
 }
 
-/** S2 — circuit metadata + provenance + entry points to session/history/settings. */
-export function CircuitDetailScreen({ navigation }: Props): React.JSX.Element {
-  const circuit = TRANSILVANIA_MOTOR_RING;
+/** S2 — circuit metadata + provenance + entry points to session/history/settings. Renders the circuit named by `route.params.circuitId` (ticket CN-W3) via the bundled catalog -- never a per-circuit hardcoded constant. */
+export function CircuitDetailScreen({ navigation, route }: Props): React.JSX.Element {
+  // Defensive fallback to TMR only: `route.params.circuitId` always names a
+  // bundled circuit in real navigation (CircuitSelectionScreen only ever
+  // passes a real catalog row's own id), matching `resolveSelectedCircuit`'s
+  // own "unknown id -> TMR" contract elsewhere.
+  const entry = circuitCatalog.get(route.params.circuitId) ?? circuitCatalog.get(TMR_CIRCUIT_PROFILE.circuitId)!;
+  const circuit = circuitDisplayData(entry.profile);
   const [recovery, setRecovery] = useState<PendingRecovery | null>(null);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   // C2 fix: "Start Session" stays disabled (with an inline note, or an error
@@ -102,7 +108,8 @@ export function CircuitDetailScreen({ navigation }: Props): React.JSX.Element {
           {circuit.displayName}
         </Text>
         <Text style={styles.subtitle} maxFontSizeMultiplier={1.3}>
-          {circuit.locality}, {circuit.county}, {circuit.country}
+          {circuit.locality}
+          {circuit.extras.county !== undefined ? `, ${circuit.extras.county}` : ''}, {circuit.country}
         </Text>
 
         {/* Bootstrap failure (C2 fix): inline banner (never a modal) -- Start Session stays disabled below regardless. F3 fix: gains an inline Retry button (retryBootstrap()) so a transient failure doesn't require a full app restart. */}
@@ -176,13 +183,17 @@ export function CircuitDetailScreen({ navigation }: Props): React.JSX.Element {
           <MetaRow label="Length" value={`${circuit.lengthKm.toFixed(3)} km`} />
           <MetaRow label="Layout" value={circuit.layoutId} />
           <MetaRow label="Direction" value={circuit.direction === 'clockwise' ? 'Clockwise' : 'Counter-clockwise'} />
-          <MetaRow label="Opened" value={String(circuit.openedYear)} />
+          <MetaRow label="Geometry" value={circuit.geometryStatus === 'official' ? 'Official' : 'Community-derived'} />
+          <MetaRow label="Sectors" value={circuit.sectorStatus === 'official' ? 'Official' : 'App-defined'} />
+          {circuit.extras.openedYear !== undefined ? (
+            <MetaRow label="Opened" value={String(circuit.extras.openedYear)} />
+          ) : null}
         </View>
 
         <Text style={styles.sectionKicker} maxFontSizeMultiplier={1.3}>
           CORNERS
         </Text>
-        <CornersList corners={TMR_CORNERS} />
+        <CornersList corners={entry.corners} />
 
         <Pressable
           style={[styles.button, styles.primaryButton, bootstrapState !== 'ready' && styles.buttonDisabled]}
@@ -223,6 +234,12 @@ export function CircuitDetailScreen({ navigation }: Props): React.JSX.Element {
             Settings
           </Text>
         </Pressable>
+
+        {/* Provenance (ticket CN-W3): built from the profile's own `source` +
+            first `confidenceNotes` sentence -- never claims "official". */}
+        <Text style={styles.footerText} maxFontSizeMultiplier={1.3}>
+          {circuit.provenanceText}
+        </Text>
 
         {/* Legal relocation (compliance): ODbL attribution + advisory disclaimer condensed to one small
             muted line here; the full text lives in Settings > About (always reachable). */}

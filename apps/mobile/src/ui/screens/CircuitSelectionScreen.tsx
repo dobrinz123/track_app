@@ -7,13 +7,13 @@ import { colors, fontFamily, radii, spacing, typography } from '../theme';
 import { TraceLogo } from '../components/TraceLogo';
 import { TraceWordmark } from '../components/TraceWordmark';
 import { circuitCatalog, type CircuitSummary } from '../../session/circuitCatalog';
+import { selectCircuit } from '../../session/composition';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'CircuitSelection'>;
 
 /**
  * S1 -- multi-circuit-ready selection list, driven by `AppCircuitCatalog`.
- * Only one row exists today (Transilvania Motor Ring), but the screen is
- * built as an N-row list from day one so a future catalog entry needs no
+ * The screen is built as an N-row list so a new catalog entry needs no
  * layout change. ODbL attribution and the recreational-timing-aid
  * disclaimer live on S2 (Circuit Detail) and Settings > About now, not here.
  */
@@ -39,7 +39,16 @@ export function CircuitSelectionScreen({ navigation }: Props): React.JSX.Element
               key={circuit.circuitId}
               circuit={circuit}
               bordered={index > 0}
-              onPress={() => navigation.navigate('CircuitDetail')}
+              onPress={() => {
+                // Ticket CN-W3: persist the selection (and rebuild the
+                // per-circuit history store) BEFORE navigating, so
+                // CircuitDetail/History/PB already reflect the tapped
+                // circuit the instant they mount.
+                void (async () => {
+                  await selectCircuit(circuit.circuitId);
+                  navigation.navigate('CircuitDetail', { circuitId: circuit.circuitId });
+                })();
+              }}
             />
           ))}
           <View style={[styles.moreRow, circuits.length > 0 && styles.rowBorder]}>

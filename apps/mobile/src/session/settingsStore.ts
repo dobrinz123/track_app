@@ -1,3 +1,5 @@
+import { TMR_CIRCUIT_PROFILE } from './tmrProfile';
+
 export type SpeedUnits = 'kmh' | 'mph';
 
 export interface CoverageBinsSetting {
@@ -64,6 +66,18 @@ export interface AppSettings {
    * `SettingsScreen`'s `parseHexPidDraft()`.
    */
   transOilPidHex: string;
+  /**
+   * Multi-circuit selection addendum (contracts.md, 2026-08-26, ticket
+   * CN-W3): the ONE circuit every production `SessionController`, the
+   * session-history store, coaching corners, the calibration track map, and
+   * the circuit/PB screens are built for. Defaults to Transilvania Motor
+   * Ring (`DEFAULT_SETTINGS`, below) -- existing installs with no persisted
+   * value hydrate to this exact default, so TMR's behavior is unchanged.
+   * An id absent from the bundled catalog resolves back to this default with
+   * a `console.warn` (`circuitCatalog.ts`'s `resolveSelectedCircuit`) --
+   * never a crash, never a fetch.
+   */
+  selectedCircuitId: string;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -77,6 +91,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   adapterHost: '192.168.0.10',
   adapterPort: 35_000,
   transOilPidHex: '',
+  selectedCircuitId: TMR_CIRCUIT_PROFILE.circuitId,
 };
 
 /**

@@ -6,20 +6,27 @@ import type { RootStackParamList } from '../navigation/types';
 import { colors, radii, spacing, typography } from '../theme';
 import { TimeDisplay } from '../components/TimeDisplay';
 import { formatDateUtc } from '../format';
-import { sessionHistoryStore } from '../../session/composition';
+import { sessionHistoryStore, settingsStore } from '../../session/composition';
+import { resolveSelectedCircuit } from '../../session/circuitCatalog';
+import { useSettings } from '../hooks/useSettings';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'SessionHistory'>;
 
-/** S9 — list of stored sessions (mock data via session store for now) with drill-down into lap detail. */
+/** S9 — list of stored sessions (mock data via session store for now) with drill-down into lap detail. Header names the SELECTED circuit (ticket CN-W3): `sessionHistoryStore` is already rebuilt per-circuit by `selectCircuit()`, so its own listings already reflect this. */
 export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
   const sessions = sessionHistoryStore.listSessions();
   const pb = sessionHistoryStore.getPersonalBest();
+  const settings = useSettings(settingsStore);
+  const selected = resolveSelectedCircuit(settings);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
       <ScrollView contentContainerStyle={styles.container}>
         <Text style={styles.title} maxFontSizeMultiplier={1.3}>
           Session History
+        </Text>
+        <Text style={styles.circuit} maxFontSizeMultiplier={1.3}>
+          {selected.profile.displayName} · {selected.profile.layoutId}
         </Text>
 
         {pb ? (
@@ -87,6 +94,7 @@ const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
   container: { padding: spacing.lg, gap: spacing.md },
   title: { ...typography.title, color: colors.textPrimary },
+  circuit: { ...typography.body, color: colors.textSecondary },
   pbCard: {
     backgroundColor: colors.surfaceRaised,
     borderRadius: radii.md,
