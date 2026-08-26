@@ -1133,6 +1133,34 @@ async function unlockedRebuildProductionController(): Promise<void> {
   await staleController.dispose();
   staleFacade?.dispose();
   installProductionController();
+  // CN-FIX6 (contracts.md's "Multi-circuit selection — provider ownership
+  // amendment", binding, user finding): THIS layer owns the GNSS provider
+  // singleton, so the provider is stopped here, after the fresh controller
+  // is installed.
+  //
+  // Why it is needed: `SessionController.dispose()` stops only a provider
+  // the disposed controller itself had running (`providerRunning`), and a
+  // `start()` aborted by disposal deliberately never stops a possibly-shared
+  // provider (CN-FIX5 item 2 -- core cannot know who owns it). Both are
+  // right core-side, and both can leave the OS watcher running with no
+  // session behind it: a lit location indicator and a battery drain the user
+  // can see, which is exactly the residual this closes.
+  //
+  // Why it is safe: the controller just installed is idle BY CONSTRUCTION
+  // (nothing has started it), the previous controller's pending `start()` --
+  // if any -- is serialized by the provider ahead of this stop, and every
+  // command that starts a session is itself a locked section queued BEHIND
+  // this one, so it restarts the provider through `ensureProviderRunning()`
+  // as usual. Idempotent: stopping an already-stopped provider is a no-op.
+  //
+  // Failure is logged, never thrown: a provider that cannot be stopped (a
+  // revoked permission, an OS hiccup) must not fail the selection/recovery/
+  // delete-all operation that drove this rebuild.
+  try {
+    await gnssProvider?.stop();
+  } catch (error) {
+    console.warn('[composition] stopping the GNSS provider after a controller rebuild failed', error);
+  }
 }
 
 /**

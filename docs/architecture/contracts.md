@@ -520,3 +520,11 @@ left ordering holes. Replaced by ONE ordering boundary:
 - DevReplay cancellation is honored only BEFORE the selection write. Once the selection write has
   begun, the run completes the selection consistently (settings + history + controller agree),
   then skips install and navigation and returns `CANCELLED`. There is no rollback.
+
+### Multi-circuit selection — provider ownership amendment (2026-08-26, binding, user finding)
+- The composition layer owns the GNSS provider singleton. After ANY production rebuild inside
+  `lifecycleLock` (terminal-state, circuit-change, coaching, delete-all), the freshly installed
+  controller is idle by construction, so the rebuild routine stops the GNSS provider (idempotent,
+  failures logged, never thrown). A controller that later starts a session restarts it through
+  `ensureProviderRunning()` as before. Consequence: no session-less GNSS watcher can outlive a
+  rebuild — the "orphaned provider" residual is closed at the owner, not in core.
