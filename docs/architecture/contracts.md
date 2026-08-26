@@ -408,3 +408,39 @@ export type TelemetryChannelId =
 // Lap-detail charts (revised order): speedKph, rpm, throttlePct, latG, longG,
 // engineOilC, transOilC — each renders only when rows exist (unchanged rule).
 ```
+
+## Multi-circuit selection addendum (2026-08-26, binding — Circuit N+1 campaign)
+
+Until this addendum every production `SessionController`, the session-history
+store, the delete-all flow, coaching corners, the calibration track map and the
+circuit/PB screens hardcoded Transilvania Motor Ring. With a second bundled
+circuit (MotorPark România, `motorpark-romania`) the app has ONE selected circuit:
+
+- `AppSettings.selectedCircuitId: string` (default `'transilvania-motor-ring'`),
+  persisted like every other setting. An id that is not in the bundled catalog
+  resolves to the default with a `console.warn` — never a crash, never a fetch.
+- The bundled catalog entry is the unit of truth: `{ profile, runtime, corners }`
+  per circuit. `corners = analyzeCorners(runtime)`; an observed-speeds overlay
+  is applied ONLY when that circuit ships one (TMR today). Circuits without an
+  overlay get model-derived advisories only (playbook §2 step 4).
+- `createProductionController()` reads the selected circuit at build time. The
+  preflight gate rebuilds the controller when it is terminal (existing C1 rule)
+  OR when its circuit differs from the selection and it is `idle`. A controller
+  is never rebuilt mid-session (`outLap`/`timing`/`inPit`/`paused`): selection
+  changes while a session is running are not reachable from the UI and, if
+  they ever were, must be refused, not applied.
+- `SqlSessionHistoryStore` is per (circuit, layout); selecting a circuit rebuilds
+  and refreshes it so History/PB always show the selected circuit. PB reference
+  laps stay keyed by `circuitId/layoutId/layoutVersion` (unchanged PB rules).
+- Recovery: the checkpoint's circuit is resolved by looking the active session
+  id up in `listSessions(userId, circuitId)` across the bundled catalog; the
+  selection is switched to that circuit BEFORE the controller resumes. A
+  checkpoint whose circuit is not bundled is discarded with a warning.
+- Delete-all data spans EVERY bundled circuit (per-circuit `deleteAllUserData`
+  with its verify-empty check, results aggregated) plus telemetry samples.
+- Navigation: `CircuitDetail: { circuitId }`; the detail screen renders from the
+  catalog profile (name, locality, country, length, layout, direction,
+  geometry/sector status, provenance + ODbL attribution from `source`), never
+  from a per-circuit constant. Nothing is ever labeled "official".
+- Circuit-independent surfaces (dashboard, voice, telemetry, track-map
+  renderer) stay circuit-independent; only their inputs come from the selection.
