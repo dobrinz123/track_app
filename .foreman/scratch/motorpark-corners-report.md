@@ -69,3 +69,36 @@ running `npm run generate:motorpark` then loading the asset through
 - This is a PLAUSIBILITY check only (count in [10,18]); exact corner
   identity/sequence pinning is deliberately deferred to LEAD's comparison against
   a published track-map image, per ticket CN-W1.
+
+## LEAD verdict (ticket CN-W1 follow-up)
+
+LEAD verified the 10-corner analysis above is CONSISTENT with the published clockwise
+track map (LapMeta CW, 16 numbered turns). Mapping:
+
+| analyzeCorners idx | dir   | published turn(s) |
+|---------------------|-------|--------------------|
+| C1                  | right | T1                 |
+| C2                  | right | T4                 |
+| C3                  | left  | T5                 |
+| C4                  | left  | T6                 |
+| C5                  | right | T7                 |
+| C6                  | right | T9                 |
+| C7                  | left  | T10                |
+| C8                  | right | T13+T14 (same-direction compound) |
+| C9                  | right | T15                |
+| C10                 | left  | T16                |
+
+T2/T3/T8/T11/T12 are gentle kinks (radius > 125 m) that fall below the
+corner-detection curvature threshold by design and correctly have no
+corresponding `analyzeCorners` entry.
+
+C8 (T13+T14, arc ≈198°) is a legitimate same-direction compound (both bends
+turn the same way, right, with no real gap between them) — this is NOT the
+opposite-sign direction-split merge bug that CORNER_ANALYSIS_VERSION 3's
+M-direction-split fix guards against (that fix only splits a run when
+curvature crosses zero and stays opposite-signed for a sustained span; T13+T14
+never changes sign, so it correctly stays one corner).
+
+The regression suite now pins this exact sequence (count === 10, directions in
+order, entry distances monotonically increasing, C8 arc > 150°) instead of the
+prior [10, 18] plausibility band.

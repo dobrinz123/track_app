@@ -60,11 +60,46 @@ describe('MotorPark România generated v1 profile asset', () => {
     expect(result.runtime.cumulativeDistancesM.length).toBe(result.runtime.centerline.length);
   });
 
-  it('has a plausible corner count (exact sequence pinned only after LEAD verifies the published map)', () => {
+  it('matches the LEAD-verified corner sequence against the published LapMeta CW track map', () => {
     const result = loadProfileFromJson(assetJson);
     if (!result.ok) throw new Error(result.errors.join(', '));
     const corners = analyzeCorners(result.runtime);
-    expect(corners.length).toBeGreaterThanOrEqual(10);
-    expect(corners.length).toBeLessThanOrEqual(18);
+
+    // LEAD verdict (ticket CN-W1 follow-up): 10 corners map onto the published
+    // 16-turn LapMeta CW track map as C1=T1, C2=T4, C3=T5, C4=T6, C5=T7, C6=T9,
+    // C7=T10, C8=T13+T14, C9=T15, C10=T16 -- T2/T3/T8/T11/T12 are gentle kinks
+    // (radius > 125 m) that fall below the corner-detection curvature threshold
+    // by design. See .foreman/scratch/motorpark-corners-report.md.
+    expect(corners.length).toBe(10);
+    expect(corners.map((corner) => corner.direction)).toEqual([
+      'right',
+      'right',
+      'left',
+      'left',
+      'right',
+      'right',
+      'left',
+      'right',
+      'right',
+      'left',
+    ]);
+
+    for (let index = 1; index < corners.length; index += 1) {
+      const previous = corners[index - 1];
+      const current = corners[index];
+      if (previous === undefined || current === undefined) throw new Error('Corners are sparse');
+      expect(current.entryDistanceM).toBeGreaterThan(previous.entryDistanceM);
+    }
+
+    // Corner 8 is a LEAD-verified same-direction compound (T13+T14 on the
+    // published map, both right-handers with no real gap between them) --
+    // its wide ~198 degree arc is legitimate, NOT the opposite-sign
+    // direction-split merge bug the M-direction-split fix (CORNER_ANALYSIS_VERSION
+    // 3) guards against. If a future algorithm change splits this compound into
+    // two corners, that must be a deliberate, reviewed change to this pin --
+    // not a silent regression.
+    const compoundCorner = corners[7];
+    if (compoundCorner === undefined) throw new Error('Corner 8 is missing');
+    expect(compoundCorner.totalAngleDeg).toBeGreaterThan(150);
   });
 });
