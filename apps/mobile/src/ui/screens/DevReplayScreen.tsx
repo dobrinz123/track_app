@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
@@ -9,12 +9,10 @@ import {
   estimateObservedRateHz,
   getLiveDiagnostics,
   restoreProductionFacade,
-  selectCircuit,
-  startDevReplaySession,
+  runDevReplayScenario,
   useMockFacadeForDevReplay,
   type LiveDiagnosticsSnapshot,
 } from '../../session/composition';
-import { circuitCatalog } from '../../session/circuitCatalog';
 import { DEV_REPLAY_SCENARIOS, type DevReplayScenario } from '../../session/devReplayScenarios';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'DevReplay'>;
@@ -43,6 +41,14 @@ const SCENARIOS: DevReplayScenario[] = DEV_REPLAY_SCENARIOS;
 export function DevReplayScreen({ navigation }: Props): React.JSX.Element {
   const [runningId, setRunningId] = useState<string | null>(null);
   const [diagnostics, setDiagnostics] = useState<LiveDiagnosticsSnapshot | null>(null);
+  /**
+   * N5 fix (contracts.md's lifecycle lock amendment, binding, ticket
+   * CN-FIX3): this screen's run generation. Bumped when a new fixture is
+   * tapped and on unmount -- `runDevReplayScenario()` reads it through
+   * `isCancelled` and aborts (installing nothing, navigating nowhere) as soon
+   * as the run it belongs to is stale.
+   */
+  const runGeneration = useRef(0);
 
   // MUST DO #3 -- read-on-focus + manual refresh only, no polling timer.
   useFocusEffect(
@@ -53,63 +59,57 @@ export function DevReplayScreen({ navigation }: Props): React.JSX.Element {
 
   // C6 fix: restores the production facade/controller on unmount, so an
   // unfinished replay never keeps its provider/watchdog running (or keeps
-  // driving `facade`) once this screen goes away.
+  // driving `facade`) once this screen goes away. N5 fix: the generation bump
+  // cancels any scenario still in flight, and the restore itself queues on
+  // the SAME lifecycle lock that scenario holds -- so it can only run after
+  // the scenario has finished (and, being cancelled, installed nothing).
   useEffect(() => {
     return () => {
+      runGeneration.current += 1;
       void restoreProductionFacade();
     };
   }, []);
 
   const runScenario = async (scenario: DevReplayScenario): Promise<void> => {
+    // N5 fix: this run's identity. Any EARLIER run still in flight is stale
+    // from here on and will abort at its next `isCancelled()` check.
+    runGeneration.current += 1;
+    const generation = runGeneration.current;
     setRunningId(scenario.id);
     try {
-      const circuit = circuitCatalog.get(scenario.circuitId);
-      if (circuit === null) {
+      // N5 fix (binding): restore -> select -> start is now ONE
+      // `lifecycleLock` section inside composition.ts
+      // (`runDevReplayScenario`), instead of three separately-locked calls an
+      // unmount cleanup could complete between. The screen contributes only
+      // the cancellation signal.
+      const result = await runDevReplayScenario(scenario, () => runGeneration.current !== generation);
+      if (result.reason === 'CANCELLED') return;
+      if (result.reason === 'UNKNOWN_CIRCUIT') {
         throw new Error(`No bundled circuit found for circuitId "${scenario.circuitId}"`);
       }
-      // C6 fix: restore production (disposing any still-active replay
-      // controller) before building a new one, every time -- not just on
-      // unmount -- so switching straight from one fixture to another never
-      // leaves the previous replay's provider/watchdog running. Run BEFORE
-      // `selectCircuit()` below so its own H2 session-active check reads the
-      // (by-then idle/terminal) production controller, not a still-live
-      // PREVIOUS replay controller mid-transition.
-      await restoreProductionFacade();
-      // M2 fix (ticket CN-FIX2, binding, dev-only path): select the
-      // fixture's OWN circuit through the real `selectCircuit()` before
-      // starting the replay -- previously this screen built a
-      // scenario-matched replay `SessionController` without ever updating
-      // the app's selected circuit, so `ActiveCalibrationScreen`'s track map
-      // (which derives centerline/S-F/corridor width from the SELECTION, not
-      // the replay controller) kept showing whichever circuit was selected
-      // before, while History/PB/Detail also disagreed with the replay. A
-      // refusal (`SESSION_ACTIVE` -- a genuine live session is running,
-      // vanishingly rare for this dev-only screen but not impossible) aborts
-      // the run with a visible alert instead of silently driving a replay
-      // controller the rest of the app's selection-derived UI won't agree
-      // with.
-      const selection = await selectCircuit(scenario.circuitId);
-      if (!selection.ok) {
+      if (!result.ok) {
+        // `SESSION_ACTIVE` -- a genuine live session is running (vanishingly
+        // rare for this dev-only screen, but not impossible). Abort visibly
+        // rather than silently driving a replay the rest of the app's
+        // selection-derived UI won't agree with.
         Alert.alert(
           'Replay blocked',
           'A session is currently active on the selected circuit -- cannot switch circuits until it ends.',
         );
         return;
       }
-      const samples = scenario.build(circuit.profile);
-      await startDevReplaySession(samples, {
-        circuitProfile: circuit.profile,
-        runtimeProfile: circuit.runtime,
-      });
       navigation.navigate('CalibrationInstructions');
     } catch (error) {
       Alert.alert('Replay failed to start', error instanceof Error ? error.message : String(error));
     } finally {
-      setRunningId(null);
+      if (runGeneration.current === generation) setRunningId(null);
     }
   };
 
   const runMock = async (): Promise<void> => {
+    // N5 fix: same generation bump -- switching to the scripted mock cancels
+    // any fixture scenario still in flight.
+    runGeneration.current += 1;
     await restoreProductionFacade();
     await useMockFacadeForDevReplay();
     navigation.navigate('CalibrationInstructions');

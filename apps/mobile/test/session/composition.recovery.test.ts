@@ -27,6 +27,9 @@ import { createSqlJsDatabase } from '../support/sqlJsDatabase';
  */
 const ACTIVE_SESSION_KEY = 'activeSessionId';
 
+/** ticket CN-FIX3 (N1): `PendingRecovery` now carries the circuit the interrupted session ran on. None of these fixtures persist an `activeSessionCircuitId` or a completed `sessions` row, so every one of them resolves to the default selection -- Transilvania Motor Ring. */
+const TMR_CIRCUIT_ID = 'transilvania-motor-ring';
+
 const seeded = vi.hoisted(() => ({
   db: undefined as unknown,
   repository: undefined as unknown,
@@ -127,7 +130,7 @@ describe('composition.ts recovery decision logic (MUST DO #7)', () => {
     composition.subscribeRecovery((r) => {
       recovery = r;
     });
-    expect(recovery).toEqual({ sessionId: 'driver-1--rec-timing', lapCount: 3 });
+    expect(recovery).toEqual({ sessionId: 'driver-1--rec-timing', lapCount: 3, circuitId: TMR_CIRCUIT_ID });
   });
 
   it('"paused" with a mid-session priorState (outLap) still counts the in-flight lap', async () => {
@@ -140,7 +143,7 @@ describe('composition.ts recovery decision logic (MUST DO #7)', () => {
     composition.subscribeRecovery((r) => {
       recovery = r;
     });
-    expect(recovery).toEqual({ sessionId: 'driver-1--rec-paused', lapCount: 1 });
+    expect(recovery).toEqual({ sessionId: 'driver-1--rec-paused', lapCount: 1, circuitId: TMR_CIRCUIT_ID });
   });
 
   it('"paused" with a non-mid-session priorState (armed) does NOT add an in-flight lap', async () => {
@@ -153,7 +156,7 @@ describe('composition.ts recovery decision logic (MUST DO #7)', () => {
     composition.subscribeRecovery((r) => {
       recovery = r;
     });
-    expect(recovery).toEqual({ sessionId: 'driver-1--rec-paused-armed', lapCount: 1 });
+    expect(recovery).toEqual({ sessionId: 'driver-1--rec-paused-armed', lapCount: 1, circuitId: TMR_CIRCUIT_ID });
   });
 
   it('a non-mid-session state (armed) recovers as lapCount = laps.length exactly', async () => {
@@ -166,7 +169,7 @@ describe('composition.ts recovery decision logic (MUST DO #7)', () => {
     composition.subscribeRecovery((r) => {
       recovery = r;
     });
-    expect(recovery).toEqual({ sessionId: 'driver-1--rec-armed', lapCount: 1 });
+    expect(recovery).toEqual({ sessionId: 'driver-1--rec-armed', lapCount: 1, circuitId: TMR_CIRCUIT_ID });
   });
 
   it('a checkpoint already in "sessionComplete" is never offered as a recovery', async () => {
@@ -207,7 +210,7 @@ describe('composition.ts resumeRecovery() (C5 fix -- active-session pointer)', (
     composition.subscribeRecovery((r) => {
       recoveryBeforeResume = r;
     });
-    expect(recoveryBeforeResume).toEqual({ sessionId: 'driver-1--rec-c5', lapCount: 3 });
+    expect(recoveryBeforeResume).toEqual({ sessionId: 'driver-1--rec-c5', lapCount: 3, circuitId: TMR_CIRCUIT_ID });
 
     // F5 navigation contract: a genuine resume resolves true (gates navigation).
     const resumed = await composition.resumeRecovery();
@@ -239,7 +242,7 @@ describe('composition.ts resumeRecovery() (C5 fix -- active-session pointer)', (
     // immediately, so THIS assertion would see `null` instead -- the second
     // death would silently lose the ability to ever recover this session
     // again, despite it still being active in-memory when it died.
-    expect(recoveryAfterRelaunch).toEqual({ sessionId: 'driver-1--rec-c5', lapCount: 3 });
+    expect(recoveryAfterRelaunch).toEqual({ sessionId: 'driver-1--rec-c5', lapCount: 3, circuitId: TMR_CIRCUIT_ID });
   });
 });
 
@@ -318,7 +321,7 @@ describe('composition.ts resumeRecovery() vanished-checkpoint abort (F5 fix)', (
     composition.subscribeRecovery((r) => {
       recoveryBefore = r;
     });
-    expect(recoveryBefore).toEqual({ sessionId: 'driver-1--rec-vanished', lapCount: 1 });
+    expect(recoveryBefore).toEqual({ sessionId: 'driver-1--rec-vanished', lapCount: 1, circuitId: TMR_CIRCUIT_ID });
 
     // Simulate the checkpoint vanishing out-of-band (e.g. a data-deletion
     // action ran) between bootstrap's initial read and the resume attempt.

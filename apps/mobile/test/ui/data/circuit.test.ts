@@ -89,15 +89,36 @@ describe('circuitDisplayData (ticket CN-W3)', () => {
       expect(officialOccurrencesAreNegated(statusLabel(data.geometryStatus))).toBe(true);
       expect(officialOccurrencesAreNegated(statusLabel(data.sectorStatus))).toBe(true);
       // Neither bundled circuit's real geometryStatus/sectorStatus is
-      // 'official' today -- confirm `statusLabel()` renders the raw value
-      // as-is (never a bespoke capitalized "Official" substitute).
-      expect(statusLabel(data.geometryStatus)).toBe(data.geometryStatus.replace(/-/g, ' '));
-      expect(statusLabel(data.sectorStatus)).toBe(data.sectorStatus.replace(/-/g, ' '));
+      // 'official' today -- both render as their own capitalized, hyphenated
+      // words, never a bespoke "Official" substitute.
+      expect(statusLabel('community-derived')).toBe('Community-derived');
+      expect(statusLabel('app-defined')).toBe('App-defined');
     }
   });
 
-  it('statusLabel() never substitutes a capitalized "Official" label -- it renders the raw status verbatim (hyphens spaced), even for the literal value "official"', () => {
-    expect(statusLabel('official')).toBe('official');
-    expect(statusLabel('official')).not.toBe('Official');
+  /**
+   * N6 fix (ticket CN-FIX3, contracts.md's lifecycle lock amendment,
+   * binding). This REPLACES the CN-FIX2 test that asserted
+   * `statusLabel('official') === 'official'` -- that pinned exactly the
+   * behavior CN-REV3's N6 flagged: a future bundled profile carrying the
+   * schema-permitted `geometryStatus: 'official'` rendered the bare word.
+   */
+  it('N6: no schema-permitted status value ever renders the word "official" -- it maps to the neutral "Source-declared"', () => {
+    // Every value `packages/core/src/contracts.ts` permits for
+    // geometryStatus ('official' | 'community-derived' | 'dev-only') and
+    // sectorStatus ('official' | 'app-defined').
+    const SCHEMA_STATUS_VALUES = ['official', 'community-derived', 'dev-only', 'app-defined'];
+    for (const status of SCHEMA_STATUS_VALUES) {
+      expect(statusLabel(status)).not.toMatch(/official/i);
+    }
+    expect(statusLabel('official')).toBe('Source-declared');
+  });
+
+  it('LEAD field-feedback addendum (CN-FIX3): status labels are capitalized and keep their hyphen -- an unknown future value just gets its first letter capitalized', () => {
+    expect(statusLabel('community-derived')).toBe('Community-derived');
+    expect(statusLabel('app-defined')).toBe('App-defined');
+    expect(statusLabel('dev-only')).toBe('Dev-only');
+    expect(statusLabel('surveyed-2027')).toBe('Surveyed-2027');
+    expect(statusLabel('')).toBe('');
   });
 });

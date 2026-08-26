@@ -596,12 +596,12 @@ describe('composition.ts DevReplay transition lock (F4 fix)', () => {
 
     // Three transitions fired back-to-back, none awaited in between -- if
     // they ran unserialized, whichever finished last (a race) would decide
-    // the outcome. Under the F4 lock they instead execute strictly in the
-    // order each call actually reaches `withDevReplayLock` (composition.ts's
-    // `ready()`-await inside `startDevReplaySession` vs. `restoreProductionFacade()`'s
-    // immediate entry means that ORDER, not raw call order, is what's
-    // deterministic -- which is exactly the property under test: SOME strict
-    // order is always enforced, never overlap).
+    // the outcome. They instead execute strictly in CALL order under the one
+    // `lifecycleLock` (ticket CN-FIX3): `startDevReplaySession()` acquires the
+    // lock FIRST and awaits `ready()` inside it, so the old caveat -- that
+    // its pre-lock `ready()` await could let `restoreProductionFacade()`
+    // overtake it, making the enforced order differ from the raw call order
+    // -- no longer applies. The last call issued is the one that wins.
     const p1 = composition.startDevReplaySession(cleanRecognitionLap(TMR_CIRCUIT_PROFILE, 600_001));
     const p2 = composition.restoreProductionFacade();
     const p3 = composition.startDevReplaySession(cleanRecognitionLap(TMR_CIRCUIT_PROFILE, 600_002));

@@ -57,18 +57,34 @@ function buildProvenanceText(source: CircuitProfile['source']): string {
 }
 
 /**
- * L2 fix (ticket CN-FIX2, binding): neutral display label for a raw
- * `geometryStatus`/`sectorStatus` value -- the raw status string itself,
- * hyphens spaced for readability (e.g. `'community-derived'` ->
- * `'community derived'`). Deliberately NEVER substitutes a bespoke,
- * capitalized "Official" label for it (contracts.md: no render branch may
- * ever display "Official" as a status, even for a hypothetical future
- * circuit whose profile literally carries `geometryStatus`/`sectorStatus
- * === 'official'`) -- replaces `CircuitDetailScreen`'s old
- * `status === 'official' ? 'Official' : '...'` ternary.
+ * Neutral display label for a raw `geometryStatus`/`sectorStatus` value.
+ *
+ * L2 fix (ticket CN-FIX2, binding): never a bespoke "Official" claim.
+ * N6 fix (ticket CN-FIX3, contracts.md's lifecycle lock amendment, binding):
+ * the schema-permitted value `'official'` (`packages/core/src/contracts.ts`)
+ * previously rendered as the bare word "official" -- a claim the app cannot
+ * make for ANY bundled profile, since it never verifies geometry itself. It
+ * maps to the neutral "Source-declared" instead: the SOURCE says so, the app
+ * does not. Every other value keeps its own words verbatim.
+ *
+ * Presentation (LEAD field-feedback addendum to CN-FIX3, binding): labels are
+ * capitalized and keep their hyphen -- `'community-derived'` ->
+ * "Community-derived", `'app-defined'` -> "App-defined" -- restoring the
+ * pre-CN-FIX2 rendering that the raw lowercase/hyphen-spaced version
+ * regressed. An unknown future value simply gets its first letter
+ * capitalized, hyphens intact.
  */
+const STATUS_LABELS: Readonly<Record<string, string>> = {
+  official: 'Source-declared',
+  'community-derived': 'Community-derived',
+  'app-defined': 'App-defined',
+  'dev-only': 'Dev-only',
+};
+
 export function statusLabel(status: string): string {
-  return status.replace(/-/g, ' ');
+  const mapped = STATUS_LABELS[status];
+  if (mapped !== undefined) return mapped;
+  return status.length === 0 ? status : `${status[0]!.toUpperCase()}${status.slice(1)}`;
 }
 
 /**

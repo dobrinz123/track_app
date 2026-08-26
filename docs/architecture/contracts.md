@@ -467,3 +467,24 @@ session is never discoverable through `listSessions`. The recovery rule is there
   resolve to the default), never against the raw setting.
 - UI copy: the word "official" may appear only inside a negation ("not an official …"); no
   render branch may ever display "Official" as a status.
+
+### Multi-circuit selection — lifecycle lock amendment (2026-08-26, binding, after Codex CN-REV3)
+Three separate serialization mechanisms (`selectionChain`, `rebuildInFlight`, `withDevReplayLock`)
+left ordering holes. Replaced by ONE ordering boundary:
+- `lifecycleLock` — a single async mutex in `composition.ts`. Every operation that reads or
+  replaces the production controller runs ENTIRELY inside it: `selectCircuit`, every production
+  rebuild (terminal-state, circuit-change, coaching-settings), the preflight gate INCLUDING the
+  forward of START_PREFLIGHT to the controller it just validated, `resumeRecovery`/`discardRecovery`
+  from checkpoint read to reassert, `deleteAllStoredUserData`, and the whole DevReplay sequence
+  (restore → select → start) plus DevReplay cleanup/restore.
+- Recovery circuit wins: `PendingRecovery` carries `circuitId`. `resumeRecovery()` switches the
+  selection to that circuit (inside the lock), rebuilds for it if needed, restores the checkpoint
+  into that controller, and reasserts `activeSessionId` + `activeSessionCircuitId` with the
+  recovery's circuit — never the current selection.
+- Delete-all: the telemetry-samples deletion + verify-empty runs regardless of per-circuit
+  outcomes; aggregate `ok` = every circuit ok AND telemetry ok.
+- DevReplay: the screen owns a run generation; a scenario whose generation is stale by the time
+  it would install a replay or navigate aborts without side effects. Unmount cleanup runs under
+  the same lock, after any in-flight scenario.
+- Status labels never render the bare word "official" for any schema-permitted status value:
+  `official` maps to the neutral label "source-declared" (it is still not verified by the app).

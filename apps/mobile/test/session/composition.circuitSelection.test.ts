@@ -468,7 +468,7 @@ describe("composition.ts recovery's circuit resolution via listSessions (ticket 
     composition.subscribeRecovery((r) => {
       recovery = r;
     });
-    expect(recovery).toEqual({ sessionId, lapCount: 1 });
+    expect(recovery).toEqual({ sessionId, lapCount: 1, circuitId: MOTORPARK_CIRCUIT_PROFILE.circuitId });
 
     // History/PB now reflect MotorPark too (selectCircuit's own history rebuild).
     expect(composition.sessionHistoryStore.listSessions().some((s) => s.sessionId === sessionId)).toBe(true);
@@ -498,7 +498,7 @@ describe("composition.ts recovery's circuit resolution via listSessions (ticket 
     composition.subscribeRecovery((r) => {
       recovery = r;
     });
-    expect(recovery).toEqual({ sessionId, lapCount: 2 });
+    expect(recovery).toEqual({ sessionId, lapCount: 2, circuitId: TMR_CIRCUIT_PROFILE.circuitId });
   });
 });
 
@@ -544,7 +544,7 @@ describe('composition.ts M4 fix (ticket CN-FIX2) -- activeSessionCircuitId recov
     composition.subscribeRecovery((r) => {
       recovery = r;
     });
-    expect(recovery).toEqual({ sessionId, lapCount: 1 });
+    expect(recovery).toEqual({ sessionId, lapCount: 1, circuitId: MOTORPARK_CIRCUIT_PROFILE.circuitId });
 
     const resumed = await composition.resumeRecovery();
     expect(resumed).toBe(true);

@@ -42,6 +42,8 @@ import { RealSessionFacade, type RealSessionFacadeCallbacks } from './realFacade
 import { ReplayTimeSource, ReplayTimestampedLocationProvider, ScaledReplayClock } from './liveTimestampedProvider';
 import { TMR_CIRCUIT_PROFILE, TMR_CORNERS, TMR_RUNTIME_PROFILE } from './tmrProfile';
 import { circuitCatalog, resolveSelectedCircuit, type BundledCircuit } from './circuitCatalog';
+import { createLifecycleLock } from './lifecycleLock';
+import type { DevReplayScenario } from './devReplayScenarios';
 import { startVoiceCoach } from './voiceCoach';
 import { createTelemetryProvider, type TelemetryProvider } from './telemetryProvider';
 import { createGForceProvider, type GForceProvider } from './gforceProvider';
@@ -157,12 +159,22 @@ class SwappableFacade implements SessionFacade {
   private readonly relay: (s: FacadeState) => void;
   /**
    * One-shot-controller gate (C1 fix). When set, every `startPreflight()`
-   * call runs this first and awaits it before forwarding the command to
-   * `inner` -- composition.ts uses it to dispose and swap in a fresh
-   * production controller/facade if the current one is terminal
-   * (`sessionComplete`/`error`) before a new session can begin.
+   * call runs this instead of forwarding directly -- composition.ts uses it
+   * to dispose and swap in a fresh production controller/facade if the
+   * current one is terminal (`sessionComplete`/`error`) or built for a
+   * different circuit than the current selection, before a new session can
+   * begin.
+   *
+   * N3 fix (contracts.md's lifecycle lock amendment, binding, ticket
+   * CN-FIX3): the gate is handed a `forward` callback and calls it ITSELF,
+   * from INSIDE `lifecycleLock` -- previously this wrapper forwarded after
+   * the gate's promise resolved, i.e. AFTER the lock was already released,
+   * so a queued selection could commit a different circuit in between and
+   * leave the started session running on the other one's geometry. `forward`
+   * reads `this.inner` at call time, so it always reaches the controller the
+   * gate just validated/rebuilt.
    */
-  private preflightGate: (() => Promise<void>) | null = null;
+  private preflightGate: ((forward: () => void) => Promise<void>) | null = null;
   /**
    * F2 fix (C1 residue): the SAME in-flight gate promise is shared by every
    * `startPreflight()` call that arrives while it's still running, instead
@@ -208,7 +220,7 @@ class SwappableFacade implements SessionFacade {
     this.innerUnsubscribe = next.subscribe((s) => this.relay(s));
   }
 
-  setPreflightGate(gate: (() => Promise<void>) | null): void {
+  setPreflightGate(gate: ((forward: () => void) => Promise<void>) | null): void {
     this.preflightGate = gate;
   }
 
@@ -237,7 +249,14 @@ class SwappableFacade implements SessionFacade {
     }
     let inFlight = this.gateInFlight;
     if (inFlight === null) {
-      inFlight = gate();
+      // N3 fix: the gate itself forwards, inside the lifecycle lock, once it
+      // has validated/rebuilt the controller. Concurrent `startPreflight()`
+      // calls still SHARE that one gate run (F2 fix) -- they now share its
+      // single forward too, which is exactly right: the duplicate taps were
+      // never meant to dispatch START_PREFLIGHT more than once.
+      inFlight = gate(() => {
+        this.inner.startPreflight();
+      });
       this.gateInFlight = inFlight;
       // `.finally()` re-throws on a rejected `inFlight`, producing its own
       // (otherwise unobserved) derived promise -- the actual per-call
@@ -251,14 +270,12 @@ class SwappableFacade implements SessionFacade {
         .catch(() => undefined);
     }
     inFlight
-      .then(() => {
-        // Forwarded only on the gate's success path: if it rejected, `inner`
-        // is whatever it was before this call (the gate itself never swaps
-        // it on failure -- see `installProductionController`'s callers), so
-        // that STALE facade must never receive this command.
-        this.inner.startPreflight();
-      })
+      .then(() => undefined)
       .catch((error: unknown) => {
+        // The gate forwards on its own success path only (inside the lock);
+        // if it rejected, `inner` is whatever it was before this call (the
+        // gate never swaps it on failure -- see `installProductionController`'s
+        // callers), and that STALE facade never received the command.
         // No unhandled rejection, and no silent failure: surfaced through
         // the same `FacadeState.lastError` field `RealSessionFacade`
         // already exposes, on THIS wrapper's own broadcast (not `inner`'s,
@@ -664,6 +681,17 @@ export function subscribeBootstrapState(cb: (s: BootstrapState) => void): () => 
 export interface PendingRecovery {
   sessionId: string;
   lapCount: number;
+  /**
+   * N1 fix (contracts.md's lifecycle lock amendment, binding, ticket
+   * CN-FIX3): the bundled circuit this checkpoint actually belongs to,
+   * resolved ONCE at bootstrap (persisted `activeSessionCircuitId` -> catalog
+   * scan -> the selection in force at that moment). `resumeRecovery()`
+   * resumes on THIS circuit no matter what the user selected in between, and
+   * `CircuitDetailScreen`'s banner names it -- previously the recovery
+   * carried no circuit identity at all, so a selection made after the crash
+   * but before Resume silently retargeted the recovery.
+   */
+  circuitId: string;
 }
 
 let pendingRecovery: PendingRecovery | null = null;
@@ -976,43 +1004,52 @@ function installProductionController(): void {
 }
 
 /**
- * Shared, serialized rebuild (F3 fix) -- disposes the current production
- * controller/facade and installs a fresh one. Used by BOTH the preflight
- * gate's terminal-state rebuild (C1 fix, below) and the coaching-settings
- * rebuild (F3 fix, below): `rebuildInFlight` makes the two mutually
- * exclusive -- whichever starts first is awaited by whichever calls in
- * while it's still running, instead of two dispose+install attempts racing
- * each other. This IS "the gate's serialization", generalized to its
- * second trigger. A no-op while a DevReplay controller is active
- * (`activeController !== controller`) -- that swap is
+ * THE single ordering boundary (contracts.md's "Multi-circuit selection —
+ * lifecycle lock amendment", binding, ticket CN-FIX3) -- see
+ * `lifecycleLock.ts`'s own module doc comment. Replaces the three separate
+ * mechanisms this module used to run (`selectionChain`, `rebuildInFlight`,
+ * `withDevReplayLock`): every operation that reads or replaces the production
+ * controller now runs ENTIRELY inside one `lifecycleLock.run(...)` section,
+ * so a controller captured by one operation can never be disposed by another
+ * mid-flight, and no two operations can commit different circuits.
+ *
+ * Call rule (enforced by construction throughout this file): code already
+ * INSIDE a section calls the `unlocked*` routines below, never the locked
+ * public wrappers -- re-entering `run()` would queue behind itself.
+ * `lifecycleLock` intentionally refuses the synchronously-detectable form of
+ * that mistake with `LifecycleLockReentry` rather than hanging.
+ *
+ * Deliberately NOT taken by `runBootstrap()`/`retryBootstrap()`: locked
+ * operations `await ready()` from INSIDE their section, so a bootstrap that
+ * needed the lock would deadlock against the very first such caller. Nothing
+ * bootstrap does needs it -- until `ready()` resolves, `facade` is still the
+ * inert `PendingFacade` and every locked operation is parked on `ready()`.
+ */
+const lifecycleLock = createLifecycleLock();
+
+/**
+ * Disposes the current production controller/facade and installs a fresh one.
+ * MUST be called with `lifecycleLock` already held (H3/N2 fix): the whole
+ * dispose+install has to be inside the SAME critical section as the decision
+ * that asked for it, so the caller's captured controller reference and the
+ * module's `controller` can never diverge. A no-op while a DevReplay
+ * controller is active (`activeController !== controller`) -- that swap is
  * `restoreProductionFacade()`'s job, not this rebuild's.
  */
-let rebuildInFlight: Promise<void> | null = null;
-
-function rebuildProductionController(): Promise<void> {
-  if (rebuildInFlight !== null) return rebuildInFlight;
-  const attempt = (async () => {
-    if (controller === null || activeController !== controller) return;
-    const staleController = controller;
-    const staleFacade = productionFacade;
-    // Telemetry addendum (g): defensively stop any still-active recording
-    // before the controller it was recording alongside is disposed -- in the
-    // normal flow `onSessionEnded` (above) already did this; this guards the
-    // 'error' terminal-state path, which does not run through `endSession()`.
-    // Awaited (F2 fix) so the final flush actually lands before disposal
-    // proceeds, instead of racing ahead of it.
-    await stopTelemetryRecording();
-    await staleController.dispose();
-    staleFacade?.dispose();
-    installProductionController();
-  })();
-  rebuildInFlight = attempt;
-  attempt
-    .finally(() => {
-      if (rebuildInFlight === attempt) rebuildInFlight = null;
-    })
-    .catch(() => undefined);
-  return attempt;
+async function unlockedRebuildProductionController(): Promise<void> {
+  if (controller === null || activeController !== controller) return;
+  const staleController = controller;
+  const staleFacade = productionFacade;
+  // Telemetry addendum (g): defensively stop any still-active recording
+  // before the controller it was recording alongside is disposed -- in the
+  // normal flow `onSessionEnded` (above) already did this; this guards the
+  // 'error' terminal-state path, which does not run through `endSession()`.
+  // Awaited (F2 fix) so the final flush actually lands before disposal
+  // proceeds, instead of racing ahead of it.
+  await stopTelemetryRecording();
+  await staleController.dispose();
+  staleFacade?.dispose();
+  installProductionController();
 }
 
 /**
@@ -1027,9 +1064,17 @@ function rebuildProductionController(): Promise<void> {
  * mid-active-session change is deliberately left alone here -- tearing down
  * live timing/GNSS state under a driver mid-lap would be far worse than a
  * stale coaching setting for one more lap -- `SettingsScreen` shows a note
- * that it takes effect next session instead. Routed through the SAME
- * `rebuildProductionController()` the preflight gate uses, so the two can
- * never race. Registered ONCE at module load (not inside `runBootstrap()`,
+ * that it takes effect next session instead.
+ *
+ * N2 fix (lifecycle lock amendment, binding): the rebuild runs inside
+ * `lifecycleLock`, and the "is the controller genuinely idle/terminal?"
+ * decision is re-taken INSIDE that section -- so a coaching toggle flipped
+ * while `resumeRecovery()` is awaiting its checkpoint read now queues behind
+ * the resume and then correctly SKIPS (the controller is mid-session by
+ * then), instead of disposing the controller recovery had already captured.
+ * The cheap synchronous pre-check below is kept as-is so a toggle observed
+ * before any controller exists (bootstrap's own settings hydration) stays the
+ * exact no-op it always was. Registered ONCE at module load (not inside `runBootstrap()`,
  * which re-runs on `retryBootstrap()`) so a failed-then-retried bootstrap
  * never accumulates duplicate subscriptions -- this callback reads the
  * live module-level `controller`/`activeController` on every invocation
@@ -1043,9 +1088,17 @@ settingsStore.subscribe((settings) => {
   lastKnownCoachingEnabled = settings.coachingEnabled;
   if (!changed) return;
   if (controller === null || activeController !== controller) return;
-  const state = currentControllerState(controller);
-  if (!COACHING_REBUILD_STATES.has(state)) return;
-  void rebuildProductionController();
+  void lifecycleLock
+    .run(async () => {
+      // Re-checked with the lock HELD: whatever was true when the toggle
+      // fired may no longer be true by the time this section actually runs.
+      if (controller === null || activeController !== controller) return;
+      if (!COACHING_REBUILD_STATES.has(currentControllerState(controller))) return;
+      await unlockedRebuildProductionController();
+    })
+    .catch((error: unknown) => {
+      console.warn('[composition] coaching-settings rebuild failed', error);
+    });
 });
 
 /**
@@ -1104,8 +1157,22 @@ export interface SelectCircuitResult {
   reason?: 'SESSION_ACTIVE';
 }
 
-/** H2 fix (binding): a selection is refused -- never applied -- while the controller currently driving `facade` is genuinely mid-session. `'paused'` counts unconditionally here (unlike `midSessionState()`'s own recovery-lapCount math, which only counts it when its `priorState` was itself mid-session) -- the contracts amendment lists it directly alongside outLap/timing/inPit. */
-const SESSION_ACTIVE_STATES = new Set<SessionState>(['outLap', 'timing', 'inPit', 'paused']);
+/**
+ * H2 fix (binding): a selection is refused -- never applied -- unless the
+ * controller currently driving `facade` is genuinely BETWEEN sessions.
+ *
+ * N3 fix (lifecycle lock amendment, binding, ticket CN-FIX3): expressed as
+ * the idle/terminal ALLOW-list rather than the old
+ * `outLap`/`timing`/`inPit`/`paused` deny-list. The preflight gate now
+ * forwards START_PREFLIGHT from inside the lock, so a selection queued behind
+ * it observes a controller already in `preflight`/`awaitingCalibration`/
+ * `calibrating`/`calibrationReview`/`armed` -- states the deny-list let
+ * through, which is exactly how the started session and the persisted
+ * selection ended up on different circuits. Every one of them is now a
+ * refusal; `idle`/`sessionComplete`/`error` (the same set the coaching
+ * rebuild treats as "safe to replace the controller") still pass.
+ */
+const SELECTABLE_STATES = new Set<SessionState>(['idle', 'sessionComplete', 'error']);
 
 /** Applies a validated circuit selection to the persisted settings ONLY -- no bootstrap-await, no session-active refusal, no serialization. Shared by the public `selectCircuit()` below and `runBootstrap()`'s own recovery-circuit switch, which CANNOT go through `selectCircuit()` itself: that function awaits `ready()` (i.e. `bootstrapPromise`), and calling it from inside `runBootstrap()` -- the very function that promise is for -- would deadlock forever. */
 function applySelectedCircuit(entry: BundledCircuit): void {
@@ -1128,14 +1195,47 @@ async function rebuildHistoryForSelection(entry: BundledCircuit): Promise<void> 
 }
 
 /**
- * M1 fix (binding): shared tail every `selectCircuit()` call chains onto --
- * guarantees concurrent calls apply their settings + history-store writes in
- * the SAME order they were issued (the last call in program order is also
- * the last to actually run and "wins"), instead of two overlapping attempts
- * racing each other's completion order (a slow first call's history refresh
- * finishing AFTER a fast second call's, clobbering the second call's result).
+ * The selection change itself -- settings + history store, in that order.
+ * MUST be called with `lifecycleLock` held (M1 fix's ordering guarantee now
+ * comes from the lock, which every other lifecycle operation shares, rather
+ * than from a selection-only chain). Callers are the locked `selectCircuit()`
+ * below, `resumeRecovery()`'s recovery-circuit switch, and
+ * `runDevReplayScenario()`.
  */
-let selectionChain: Promise<void> = Promise.resolve();
+async function unlockedApplySelection(entry: BundledCircuit): Promise<void> {
+  applySelectedCircuit(entry);
+  await rebuildHistoryForSelection(entry);
+  // N3 fix (lifecycle lock amendment, binding, ticket CN-FIX3): the
+  // production controller is rebuilt for the new circuit HERE, in the same
+  // critical section as the settings/history writes, so the invariant "an
+  // IDLE production controller is always built for the resolved selection"
+  // holds continuously. Previously the rebuild happened lazily, in the
+  // preflight gate only -- and `RealSessionFacade.startPreflight()` is a
+  // no-op controller-side (the state machine first moves at
+  // `beginCalibration()`), so a selection committed after the gate had
+  // already run left the NEXT session starting on the previous circuit's
+  // geometry while settings/history said otherwise. Restricted to `idle`
+  // exactly like the gate's own circuit-change trigger: a terminal
+  // (`sessionComplete`/`error`) controller is still the gate's to replace,
+  // and a mid-session one is unreachable here (the selection would have been
+  // refused before this point).
+  if (
+    controller !== null &&
+    activeController === controller &&
+    currentControllerState(controller) === 'idle' &&
+    productionControllerCircuitId !== resolveSelectedCircuit(settingsStore.getSettings()).profile.circuitId
+  ) {
+    await unlockedRebuildProductionController();
+  }
+}
+
+/** Shared refusal check for every locked selection change -- `null` when the change may proceed. */
+function refuseSelectionIfSessionActive(): SelectCircuitResult | null {
+  if (activeController !== null && !SELECTABLE_STATES.has(currentControllerState(activeController))) {
+    return { ok: false, reason: 'SESSION_ACTIVE' };
+  }
+  return null;
+}
 
 /**
  * Selects the app's ONE active circuit (contracts.md's Multi-circuit
@@ -1147,20 +1247,21 @@ let selectionChain: Promise<void> = Promise.resolve();
  *    during cold-launch bootstrap is never silently lost to the settings
  *    hydration that follows it (the temporary in-memory settings store
  *    being overwritten by the just-loaded persisted one).
- *  - H3 fix: awaits any in-flight controller rebuild before reading
- *    controller state.
- *  - H2 fix: is REFUSED -- `{ ok: false, reason: 'SESSION_ACTIVE' }`,
- *    settings/history untouched -- while `activeController` is genuinely
- *    mid-session (`SESSION_ACTIVE_STATES`).
- *  - M1 fix: serialized against every other concurrent `selectCircuit()`
- *    call via `selectionChain`.
+ *  - H3 fix: no rebuild can be in flight while this runs -- rebuilds are
+ *    sections of the SAME `lifecycleLock` (ticket CN-FIX3), so one has either
+ *    already finished or has not started.
+ *  - H2/N3 fix: is REFUSED -- `{ ok: false, reason: 'SESSION_ACTIVE' }`,
+ *    settings/history untouched -- unless `activeController` is genuinely
+ *    between sessions (`SELECTABLE_STATES`).
+ *  - M1 fix: serialized against every other lifecycle operation (not just
+ *    other selections) by `lifecycleLock`'s FIFO ordering.
  *
- * Persists the choice and rebuilds/refreshes `SqlSessionHistoryStore` for it
- * -- the SAME `historyWrapper.setInner()` + `refresh()` sequence bootstrap
- * itself uses -- so History/PB immediately reflect the newly selected
- * circuit. Does NOT touch the production controller itself; the preflight
- * gate (`setPreflightGate` above) is what rebuilds that, lazily, the next
- * time it is genuinely idle (L1 fix: comparing the RESOLVED selection).
+ * Persists the choice, rebuilds/refreshes `SqlSessionHistoryStore` for it --
+ * the SAME `historyWrapper.setInner()` + `refresh()` sequence bootstrap
+ * itself uses, so History/PB immediately reflect the newly selected circuit
+ * -- and (N3 fix) rebuilds the idle production controller for it in the same
+ * critical section, so the controller and the persisted selection can never
+ * be observed disagreeing. See `unlockedApplySelection()`.
  */
 export function selectCircuit(circuitId: string): Promise<SelectCircuitResult> {
   const entry = circuitCatalog.get(circuitId);
@@ -1169,31 +1270,23 @@ export function selectCircuit(circuitId: string): Promise<SelectCircuitResult> {
     return Promise.resolve({ ok: true });
   }
 
-  let result: SelectCircuitResult = { ok: true };
-  const run = async (): Promise<void> => {
+  return lifecycleLock.run(async (): Promise<SelectCircuitResult> => {
     // H1 fix: bootstrap must be fully done (settings hydrated, production
-    // controller built) before anything below runs.
+    // controller built) before anything below runs. Awaited from INSIDE the
+    // section deliberately -- bootstrap never takes this lock, so there is
+    // nothing to deadlock against, and holding the lock across the wait is
+    // what keeps a selection tapped during cold launch ordered against
+    // everything issued after it.
     await ready();
-    // H3 fix: never evaluate controller state mid-rebuild.
-    while (rebuildInFlight !== null) await rebuildInFlight.catch(() => undefined);
-    // H2 fix: refuse while genuinely mid-session.
-    if (activeController !== null && SESSION_ACTIVE_STATES.has(currentControllerState(activeController))) {
-      result = { ok: false, reason: 'SESSION_ACTIVE' };
-      return;
-    }
-    applySelectedCircuit(entry);
-    await rebuildHistoryForSelection(entry);
-    result = { ok: true };
-  };
-
-  // M1 fix: chain onto the shared tail -- `run` for THIS call only starts
-  // once every earlier queued call has fully settled.
-  const chained = selectionChain.then(run, run);
-  selectionChain = chained.then(
-    () => undefined,
-    () => undefined,
-  );
-  return chained.then(() => result);
+    // H2/N3 fix: refuse unless the controller is genuinely between sessions.
+    // No separate rebuild wait is needed any more (H3): a rebuild can only
+    // run in its own section, which has already finished by the time this one
+    // starts.
+    const refusal = refuseSelectionIfSessionActive();
+    if (refusal !== null) return refusal;
+    await unlockedApplySelection(entry);
+    return { ok: true };
+  });
 }
 
 /**
@@ -1264,32 +1357,44 @@ async function runBootstrap(): Promise<void> {
     // transitions entirely. A no-op while a DevReplay controller is active
     // (`activeController !== controller`) -- that swap is `restoreProductionFacade()`'s
     // job, not this gate's.
-    facadeWrapper.setPreflightGate(async () => {
-      // H3 fix (contracts.md's recovery amendment, binding): await any
-      // ALREADY-RUNNING rebuild (e.g. the coaching-settings rebuild below)
-      // to completion BEFORE reading controller state -- otherwise this
-      // gate could read/act on a controller that a concurrent rebuild is
-      // about to dispose out from under it. Looped (not a single await) so
-      // a rebuild that starts again right after this one finishes is still
-      // caught.
-      while (rebuildInFlight !== null) await rebuildInFlight.catch(() => undefined);
-      if (controller === null || activeController !== controller) return;
-      const state = currentControllerState(controller);
-      const terminal = state === 'sessionComplete' || state === 'error';
-      // Multi-circuit selection addendum (ticket CN-W3, binding): also
-      // rebuild when the controller's circuit differs from the current
-      // selection AND the controller is genuinely idle -- NEVER during
-      // outLap/timing/inPit/paused (a circuit switch mid-session is
-      // unreachable from the UI and must never tear down a live session).
-      // L1 fix (binding): compared against the RESOLVED selection (an
-      // unknown persisted id falls back to the default, with a warning),
-      // never the raw setting -- otherwise a stale/unbundled
-      // `selectedCircuitId` would never equal `productionControllerCircuitId`
-      // and this gate would rebuild on every single idle preflight.
-      const resolvedCircuitId = resolveSelectedCircuit(settingsStore.getSettings()).profile.circuitId;
-      const circuitChanged = state === 'idle' && productionControllerCircuitId !== resolvedCircuitId;
-      if (!terminal && !circuitChanged) return;
-      await rebuildProductionController();
+    facadeWrapper.setPreflightGate(async (forward) => {
+      // H3/N3 fix (contracts.md's lifecycle lock amendment, binding): the
+      // WHOLE gate -- state read, rebuild decision, rebuild, AND the forward
+      // of START_PREFLIGHT to the controller it just validated -- is ONE
+      // section of `lifecycleLock`. Nothing can dispose that controller or
+      // change the selection between the decision and the forward. (The
+      // complementary half of N3 lives in `unlockedApplySelection()`: a
+      // selection queued behind this section rebuilds the idle controller for
+      // itself, so the controller a session actually starts on is always the
+      // persisted selection.)
+      await lifecycleLock.run(async () => {
+        if (controller === null || activeController !== controller) {
+          // A DevReplay controller is driving `facade` (or bootstrap has not
+          // built one yet): nothing to rebuild, but the command still has to
+          // reach whatever `inner` currently is.
+          forward();
+          return;
+        }
+        const state = currentControllerState(controller);
+        const terminal = state === 'sessionComplete' || state === 'error';
+        // Multi-circuit selection addendum (ticket CN-W3, binding): also
+        // rebuild when the controller's circuit differs from the current
+        // selection AND the controller is genuinely idle -- NEVER during
+        // outLap/timing/inPit/paused (a circuit switch mid-session is
+        // unreachable from the UI and must never tear down a live session).
+        // Since CN-FIX3 a selection change already rebuilds for itself, so
+        // this is now the belt-and-braces path (a selection applied while a
+        // DevReplay controller was active, say) rather than the only one.
+        // L1 fix (binding): compared against the RESOLVED selection (an
+        // unknown persisted id falls back to the default, with a warning),
+        // never the raw setting -- otherwise a stale/unbundled
+        // `selectedCircuitId` would never equal `productionControllerCircuitId`
+        // and this gate would rebuild on every single idle preflight.
+        const resolvedCircuitId = resolveSelectedCircuit(settingsStore.getSettings()).profile.circuitId;
+        const circuitChanged = state === 'idle' && productionControllerCircuitId !== resolvedCircuitId;
+        if (terminal || circuitChanged) await unlockedRebuildProductionController();
+        forward();
+      });
     });
 
     // Multi-circuit selection addendum (ticket CN-W3): the history store is
@@ -1375,7 +1480,17 @@ async function runBootstrap(): Promise<void> {
             buildProductionController();
           }
           const recoveryLapCount = checkpoint.laps.length + (midSessionState(checkpoint.snapshot) ? 1 : 0);
-          setPendingRecovery({ sessionId: activeSessionId, lapCount: recoveryLapCount });
+          // N1 fix (binding): the recovery carries its OWN circuit from here
+          // on -- the resolved id when one was found, otherwise the selection
+          // in force at this moment (which, per `resolveRecoveryCircuitId`'s
+          // doc comment, IS the right answer for the ordinary first-crash
+          // case). `resumeRecovery()` never re-derives it from a later
+          // selection.
+          setPendingRecovery({
+            sessionId: activeSessionId,
+            lapCount: recoveryLapCount,
+            circuitId: resolveSelectedCircuit(settingsStore.getSettings()).profile.circuitId,
+          });
         }
       } else if (db !== null) {
         await setActiveSession(db, null);
@@ -1474,93 +1589,118 @@ function runRecoveryOperation<T>(operation: () => Promise<T>): Promise<T> {
  * (CircuitDetailScreen) navigates to `ActiveDashboard` after this resolves.
  */
 export async function resumeRecovery(): Promise<boolean> {
-  return runRecoveryOperation(async () => {
-    const info = pendingRecovery;
-    if (info === null) return false;
-    setRecoveryNotice(null);
-    // H3 fix (contracts.md's recovery amendment, binding): await any
-    // already-running rebuild BEFORE reading/using controller state below --
-    // otherwise this could act on a controller a concurrent rebuild is about
-    // to dispose.
-    while (rebuildInFlight !== null) await rebuildInFlight.catch(() => undefined);
-    // Multi-circuit selection addendum (ticket CN-W3): defensive guard --
-    // bootstrap's own recovery resolution already rebuilds the production
-    // controller for the right circuit BEFORE offering this recovery (see
-    // `runBootstrap()`), but a `retryBootstrap()` or other rebuild could in
-    // principle have run in between. Rebuild once more here if the currently
-    // built controller's circuit still doesn't match the selection, so this
-    // resume is NEVER driven by a controller configured for the wrong
-    // circuit's geometry. L1 fix: compared against the RESOLVED selection.
-    if (
-      controller !== null &&
-      productionControllerCircuitId !== resolveSelectedCircuit(settingsStore.getSettings()).profile.circuitId
-    ) {
-      await rebuildProductionController();
-    }
-    const { db: database, repository: repo, controller: ctrl } = await ready();
-    const checkpoint = await repo.loadCheckpoint(info.sessionId);
-    if (checkpoint === null) {
-      // F5 fix (C10 residue): the checkpoint this banner was offering to
-      // resume has vanished from disk since bootstrap's initial read (e.g.
-      // `deleteAllStoredUserData()` ran, or the row was otherwise removed
-      // out-of-band). Previously this fell through to `ctrl.start('session')`
-      // anyway -- with no restored history, that mints a BRAND NEW session id
-      // on the fresh controller, then this method persisted the OLD, now-
-      // vanished `info.sessionId` as the active-session pointer, permanently
-      // desyncing the pointer from the session actually running. Abort
-      // instead: clear the banner, clear the pointer (so next launch doesn't
-      // re-offer a recovery that can never succeed), and never start a
-      // session here at all.
+  return runRecoveryOperation(async () =>
+    // H3/N1/N2 fix (contracts.md's lifecycle lock amendment, binding): the
+    // ENTIRE resume -- checkpoint read, recovery-circuit switch, rebuild,
+    // restore, start, and the reassertion of both active-session keys -- is
+    // ONE section of `lifecycleLock`. Nothing can rebuild (and dispose) the
+    // controller between the read and the restore any more, and nothing can
+    // change the selection out from under it. `runRecoveryOperation` stays
+    // OUTSIDE the lock as the C10 duplicate-call dedup it always was (a
+    // second Resume/Discard tap shares this same in-flight operation rather
+    // than queueing a second, by-then-empty one).
+    lifecycleLock.run(async () => {
+      const info = pendingRecovery;
+      if (info === null) return false;
+      setRecoveryNotice(null);
+      const { db: database, repository: repo } = await ready();
+      const checkpoint = await repo.loadCheckpoint(info.sessionId);
+      if (checkpoint === null) {
+        // F5 fix (C10 residue): the checkpoint this banner was offering to
+        // resume has vanished from disk since bootstrap's initial read (e.g.
+        // `deleteAllStoredUserData()` ran, or the row was otherwise removed
+        // out-of-band). Previously this fell through to `ctrl.start('session')`
+        // anyway -- with no restored history, that mints a BRAND NEW session id
+        // on the fresh controller, then this method persisted the OLD, now-
+        // vanished `info.sessionId` as the active-session pointer, permanently
+        // desyncing the pointer from the session actually running. Abort
+        // instead: clear the banner, clear the pointer (so next launch doesn't
+        // re-offer a recovery that can never succeed), and never start a
+        // session here at all.
+        setPendingRecovery(null);
+        setRecoveryNotice('The recovered session could not be found and was discarded.');
+        if (database !== null) await setActiveSession(database, null);
+        return false;
+      }
+
+      // N1 fix (lifecycle lock amendment, binding): the RECOVERY's circuit
+      // wins over whatever the user selected between the crash and this tap.
+      // The selection change goes through the SAME unlocked apply the public
+      // `selectCircuit()` uses (settings + history store) -- it cannot go
+      // through `selectCircuit()` itself, which would re-enter the lock this
+      // section already holds.
+      const recoveryEntry = circuitCatalog.get(info.circuitId);
+      if (recoveryEntry === null) {
+        // Defensive only: bootstrap validated this id against the catalog
+        // before ever offering the recovery.
+        console.warn(
+          `[composition] resumeRecovery: recovery circuit "${info.circuitId}" is not bundled -- resuming on the current selection`,
+        );
+      } else if (recoveryEntry.profile.circuitId !== settingsStore.getSettings().selectedCircuitId) {
+        await unlockedApplySelection(recoveryEntry);
+      }
+      const recoveryCircuitId =
+        recoveryEntry?.profile.circuitId ?? resolveSelectedCircuit(settingsStore.getSettings()).profile.circuitId;
+      // Rebuild if the built controller isn't already configured for the
+      // recovery circuit (L1 fix: compared against the RESOLVED id). Inside
+      // the lock, so the controller read immediately below is the one this
+      // rebuild just installed.
+      if (controller !== null && productionControllerCircuitId !== recoveryCircuitId) {
+        await unlockedRebuildProductionController();
+      }
+      const ctrl = controller;
+      if (ctrl === null) throw new Error('composition: resumeRecovery() found no production controller');
+      ctrl.restoreFromCheckpoint(info.sessionId, checkpoint.snapshot, checkpoint.laps);
+      await ctrl.start('session');
+      // F6 fix (WPT3, binding): normal session start reaches
+      // `startTelemetryRecording()` through `RealSessionFacadeCallbacks.onSessionStarted`
+      // (`productionFacadeCallbacks()` above) -- `resumeRecovery()` drives the
+      // SAME `ctrl` directly and never goes through that facade callback at
+      // all, so a recovered session previously recorded no OBD data even with
+      // telemetry enabled. Same hook, same gating (`telemetryEnabled`/no
+      // on-device db are both still checked inside `startTelemetryRecording()`
+      // itself) -- just called explicitly for the id already known here.
+      startTelemetryRecording(info.sessionId);
       setPendingRecovery(null);
-      setRecoveryNotice('The recovered session could not be found and was discarded.');
-      if (database !== null) await setActiveSession(database, null);
-      return false;
-    }
-    ctrl.restoreFromCheckpoint(info.sessionId, checkpoint.snapshot, checkpoint.laps);
-    await ctrl.start('session');
-    // F6 fix (WPT3, binding): normal session start reaches
-    // `startTelemetryRecording()` through `RealSessionFacadeCallbacks.onSessionStarted`
-    // (`productionFacadeCallbacks()` above) -- `resumeRecovery()` drives the
-    // SAME `ctrl` directly and never goes through that facade callback at
-    // all, so a recovered session previously recorded no OBD data even with
-    // telemetry enabled. Same hook, same gating (`telemetryEnabled`/no
-    // on-device db are both still checked inside `startTelemetryRecording()`
-    // itself) -- just called explicitly for the id already known here.
-    startTelemetryRecording(info.sessionId);
-    setPendingRecovery(null);
-    // C5 fix: the recovered session is active again -- keep the active-session
-    // pointer (re-affirmed, in case it somehow drifted) rather than clearing
-    // it. It is cleared only by the existing `onSessionEnded` callback once
-    // this session actually finishes; clearing it here meant a SECOND process
-    // death mid-resume left no pointer for the next launch to discover, so
-    // recovery was silently never offered again. M4 fix: reasserts
-    // `activeSessionCircuitId` alongside it, from `productionControllerCircuitId`
-    // -- the circuit `ctrl` (just possibly rebuilt above) is actually
-    // configured for -- so a second crash mid-resume still recovers the
-    // right circuit.
-    if (database !== null && productionControllerCircuitId !== null) {
-      await setActiveSession(database, { sessionId: info.sessionId, circuitId: productionControllerCircuitId });
-    }
-    return true;
-  });
+      // C5 fix: the recovered session is active again -- keep the active-session
+      // pointer (re-affirmed, in case it somehow drifted) rather than clearing
+      // it. It is cleared only by the existing `onSessionEnded` callback once
+      // this session actually finishes; clearing it here meant a SECOND process
+      // death mid-resume left no pointer for the next launch to discover, so
+      // recovery was silently never offered again. M4/N1 fix: reasserts
+      // `activeSessionCircuitId` alongside it with the RECOVERY's circuit --
+      // the circuit `ctrl` (just possibly rebuilt above) is actually
+      // configured for -- so a second crash mid-resume still recovers the
+      // right circuit.
+      if (database !== null) {
+        await setActiveSession(database, { sessionId: info.sessionId, circuitId: recoveryCircuitId });
+      }
+      return true;
+    }),
+  );
 }
 
 /** Discards a recoverable checkpoint without resuming (ADR-0003 §3): marks it terminal so it is never offered again -- `LocalSessionRepository` has no delete method, so this overwrites the checkpoint's snapshot to `sessionComplete` instead. */
 export async function discardRecovery(): Promise<void> {
-  return runRecoveryOperation(async () => {
-    const info = pendingRecovery;
-    if (info === null) return;
-    setRecoveryNotice(null);
-    const { db: database, repository: repo } = await ready();
-    await repo.saveCheckpoint(
-      info.sessionId,
-      { state: 'sessionComplete', lapNumber: 0, context: {} },
-      [],
-    );
-    setPendingRecovery(null);
-    // M4 fix: clears BOTH keys together (setActiveSession(database, null)).
-    if (database !== null) await setActiveSession(database, null);
-  });
+  // Same section discipline as `resumeRecovery()` above: the checkpoint
+  // overwrite and the two-key clear are one `lifecycleLock` critical section,
+  // behind the C10 duplicate-call dedup.
+  return runRecoveryOperation(async () =>
+    lifecycleLock.run(async () => {
+      const info = pendingRecovery;
+      if (info === null) return;
+      setRecoveryNotice(null);
+      const { db: database, repository: repo } = await ready();
+      await repo.saveCheckpoint(
+        info.sessionId,
+        { state: 'sessionComplete', lapNumber: 0, context: {} },
+        [],
+      );
+      setPendingRecovery(null);
+      // M4 fix: clears BOTH keys together (setActiveSession(database, null)).
+      if (database !== null) await setActiveSession(database, null);
+    }),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1580,6 +1720,14 @@ export interface AggregatedDeleteUserDataResult extends DeleteUserDataResult {
 }
 
 export async function deleteAllStoredUserData(): Promise<AggregatedDeleteUserDataResult> {
+  // Lifecycle lock amendment (binding): delete-all wipes the very data the
+  // recovery/selection/rebuild operations read and write, so it runs as one
+  // section of the SAME lock they do -- never interleaved with a resume, a
+  // selection change, or a controller rebuild.
+  return lifecycleLock.run(unlockedDeleteAllStoredUserData);
+}
+
+async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDataResult> {
   const { repository: repo } = await ready();
   // Multi-circuit selection addendum (ticket CN-W3): delete-all spans EVERY
   // bundled circuit, not just the currently selected one -- `deleteUserData`
@@ -1619,8 +1767,15 @@ export async function deleteAllStoredUserData(): Promise<AggregatedDeleteUserDat
   // all -- delete it here, in the SAME flow, and verify it actually landed
   // empty before ever reporting success, so the UI's "All stored data
   // deleted" banner is never shown while up to 200,000 rows/session remain.
+  //
+  // N4 fix (lifecycle lock amendment, binding, ticket CN-FIX3): this step is
+  // NO LONGER gated on the per-circuit aggregate. A rejected circuit delete
+  // used to suppress the telemetry DELETE + verify-empty entirely, leaving up
+  // to 200,000 rows/session on disk after the user asked for a full wipe. The
+  // telemetry step always runs; the aggregate `ok` is `circuitsOk &&
+  // telemetryOk`, and `errorText` names whichever half failed.
   let telemetryOk = true;
-  if (result.ok && db !== null) {
+  if (db !== null) {
     // N1-confirm residue fix (LEAD): a session's final telemetry flush can
     // still be in flight when the user reaches delete-all -- await any
     // in-progress shutdown first, then run DELETE + verify while HOLDING the
@@ -1629,11 +1784,22 @@ export async function deleteAllStoredUserData(): Promise<AggregatedDeleteUserDat
     // nothing is recording.
     await stopTelemetryRecording();
     const database = db;
-    telemetryOk = await (dbWriteGate ?? PASSTHROUGH_WRITE_GATE).exclusive(async () => {
-      await database.runAsync('DELETE FROM telemetry_samples');
-      const remaining = await database.getAllAsync<{ count: number }>('SELECT COUNT(*) AS count FROM telemetry_samples');
-      return (remaining[0]?.count ?? 0) === 0;
-    });
+    try {
+      telemetryOk = await (dbWriteGate ?? PASSTHROUGH_WRITE_GATE).exclusive(async () => {
+        await database.runAsync('DELETE FROM telemetry_samples');
+        const remaining = await database.getAllAsync<{ count: number }>(
+          'SELECT COUNT(*) AS count FROM telemetry_samples',
+        );
+        return (remaining[0]?.count ?? 0) === 0;
+      });
+    } catch (error) {
+      // N4 (binding): symmetric with the per-circuit try/catch above -- a
+      // rejected telemetry delete/verify is reported as `ok: false` plus the
+      // fixed "telemetry" phrase in `errorText`, never as raw exception text
+      // and never as a rejection escaping into the UI's delete handler.
+      console.warn('[composition] deleteAllStoredUserData: telemetry deletion failed', error);
+      telemetryOk = false;
+    }
   }
   const finalResult: DeleteUserDataResult = { ...result, ok: result.ok && telemetryOk };
   // M4 fix (binding): a leftover active-session pointer is meaningless once
@@ -1647,7 +1813,7 @@ export async function deleteAllStoredUserData(): Promise<AggregatedDeleteUserDat
     : [
         failedCircuitIds.length > 0 ? `circuits rejected: ${failedCircuitIds.join(', ')}` : null,
         !perCircuitOk && failedCircuitIds.length === 0 ? 'one or more circuits did not verify empty' : null,
-        !telemetryOk ? 'telemetry rows remained' : null,
+        !telemetryOk ? 'telemetry rows remained or could not be deleted' : null,
       ]
         .filter((part): part is string => part !== null)
         .join('; ') || 'delete-all failed';
@@ -1663,24 +1829,17 @@ export async function deleteAllStoredUserData(): Promise<AggregatedDeleteUserDat
 // (`replayController`/`activeController`/`facadeWrapper`'s inner) but
 // previously ran independently -- a rapid start/restore/start "storm"
 // (double-tapping a fixture row, `DevReplayScreen` unmounting mid-transition)
-// could interleave them: one call's `replayController = null` racing
-// another's read of it, or a just-installed replay controller getting
-// silently overwritten by a stale restore that started before it. All three
-// now run through `withDevReplayLock`, a single async transition queue --
-// never overlapping, always executing in call order.
+// could interleave them.
+//
+// N5 fix (lifecycle lock amendment, binding, ticket CN-FIX3): the separate
+// `withDevReplayLock` queue is GONE -- every replay transition is a section of
+// the one `lifecycleLock`, and the screen's whole restore -> select -> start
+// sequence is ONE section (`runDevReplayScenario`) rather than three
+// independently-locked steps a concurrent unmount cleanup could slot between.
+// Cleanup that fires mid-scenario therefore runs strictly AFTER the scenario,
+// and the scenario's own `isCancelled()` checks keep it from installing a
+// replay (or reporting success) once the screen it belonged to is gone.
 // ---------------------------------------------------------------------------
-
-let devReplayLock: Promise<void> = Promise.resolve();
-
-/** Queues `op` behind whatever DevReplay transition is already running, and keeps the chain alive even if `op` throws (mirrors `GnssLocationProvider`'s own `op` chain, C3 fix) so one failed transition can never wedge every later one behind a never-settling link. */
-function withDevReplayLock<T>(op: () => Promise<T>): Promise<T> {
-  const result = devReplayLock.then(op, op);
-  devReplayLock = result.then(
-    () => undefined,
-    () => undefined,
-  );
-  return result;
-}
 
 /** Flushes a stale replay controller's pending persistence (F4 fix: a completed lap's telemetry/checkpoint/PB write) BEFORE disposing it, so switching away mid-replay can never drop a just-finished lap. A flush failure is logged, not thrown -- it must never block the transition it's guarding (`restoreProductionFacade()` runs unconditionally, including from `DevReplayScreen`'s fire-and-forget unmount cleanup). */
 async function flushAndDisposeReplay(stale: SessionController): Promise<void> {
@@ -1697,28 +1856,33 @@ async function flushAndDisposeReplay(stale: SessionController): Promise<void> {
  * long-lived `productionFacade` -- no new `RealSessionFacade` is created, so
  * this never leaks a fresh controller subscription. A no-op if there is no
  * replay controller to dispose and the production controller is already
- * active. Called by `DevReplayScreen` on unmount and before starting a new
- * replay/mock session. F4 fix: runs under `withDevReplayLock`, and flushes
- * the stale replay controller before disposing it.
+ * active. Called by `DevReplayScreen` on unmount (N5 fix: after bumping its
+ * run generation, so this queues behind any in-flight scenario, which by then
+ * has cancelled itself) and by `runDevReplayScenario()` internally. F4 fix:
+ * runs under the shared `lifecycleLock`, and flushes the stale replay
+ * controller before disposing it.
  */
 export async function restoreProductionFacade(): Promise<void> {
-  return withDevReplayLock(async () => {
-    if (replayController !== null) {
-      const stale = replayController;
-      replayController = null;
-      await flushAndDisposeReplay(stale);
-    }
-    if (controller !== null && productionFacade !== null) {
-      activeController = controller;
-      // M2 fix: a stale `telemetryShutdown` left over from whatever session
-      // was active before this swap (production or a prior replay/mock) must
-      // never be mistaken for THIS newly-installed facade's own in-flight
-      // shutdown -- see `startDevReplaySession`'s matching comment below for
-      // the full failure mode this closes.
-      telemetryShutdown = null;
-      facadeWrapper.setInner(productionFacade);
-    }
-  });
+  return lifecycleLock.run(unlockedRestoreProductionFacade);
+}
+
+/** `restoreProductionFacade()`'s body -- MUST be called with `lifecycleLock` held (`runDevReplayScenario()` calls it directly, from inside its own section). */
+async function unlockedRestoreProductionFacade(): Promise<void> {
+  if (replayController !== null) {
+    const stale = replayController;
+    replayController = null;
+    await flushAndDisposeReplay(stale);
+  }
+  if (controller !== null && productionFacade !== null) {
+    activeController = controller;
+    // M2 fix: a stale `telemetryShutdown` left over from whatever session
+    // was active before this swap (production or a prior replay/mock) must
+    // never be mistaken for THIS newly-installed facade's own in-flight
+    // shutdown -- see `startDevReplaySession`'s matching comment below for
+    // the full failure mode this closes.
+    telemetryShutdown = null;
+    facadeWrapper.setInner(productionFacade);
+  }
 }
 
 /**
@@ -1774,8 +1938,19 @@ export async function startDevReplaySession(
     runtimeProfile: TMR_RUNTIME_PROFILE,
   },
 ): Promise<void> {
+  // N5 fix (binding): the lock is acquired FIRST and `ready()` awaited INSIDE
+  // it -- previously the `await ready()` happened before the lock, so a raw
+  // `start(); restore();` call order could still execute as restore-then-start.
+  return lifecycleLock.run(() => unlockedStartDevReplaySession(samples, circuit));
+}
+
+/** `startDevReplaySession()`'s body -- MUST be called with `lifecycleLock` held. */
+async function unlockedStartDevReplaySession(
+  samples: LocationSample[],
+  circuit: { circuitProfile: CircuitProfile; runtimeProfile: RuntimeProfile },
+): Promise<void> {
   const { repository: repo } = await ready();
-  return withDevReplayLock(async () => {
+  {
     if (replayController !== null) {
       const stale = replayController;
       replayController = null;
@@ -1845,6 +2020,68 @@ export async function startDevReplaySession(
         },
       }),
     );
+  }
+}
+
+/** Outcome of `runDevReplayScenario()` -- `CANCELLED` means the screen's run generation moved on (unmount, or another fixture tapped) and NOTHING was installed. */
+export interface DevReplayScenarioResult {
+  ok: boolean;
+  reason?: 'SESSION_ACTIVE' | 'CANCELLED' | 'UNKNOWN_CIRCUIT';
+}
+
+/**
+ * N5 fix (contracts.md's lifecycle lock amendment, binding, ticket CN-FIX3):
+ * `DevReplayScreen`'s whole restore -> select -> start sequence as ONE
+ * `lifecycleLock` section, so an unmount cleanup issued mid-sequence can no
+ * longer complete BETWEEN those steps and leave the scenario installing a
+ * replay controller into a screen that is already gone.
+ *
+ * `isCancelled()` is the screen's own run-generation check, consulted twice:
+ * once before the replay controller is installed (so a cancelled scenario
+ * installs nothing at all and leaves production restored) and once before
+ * returning `ok` (so a scenario cancelled during the install is unwound the
+ * same way and the screen never navigates). The screen calls this ONE
+ * function instead of sequencing three separately-locked calls.
+ */
+export async function runDevReplayScenario(
+  scenario: DevReplayScenario,
+  isCancelled: () => boolean = () => false,
+): Promise<DevReplayScenarioResult> {
+  return lifecycleLock.run(async (): Promise<DevReplayScenarioResult> => {
+    const entry = circuitCatalog.get(scenario.circuitId);
+    if (entry === null) return { ok: false, reason: 'UNKNOWN_CIRCUIT' };
+    await ready();
+
+    // C6 fix: restore production (disposing any still-active replay
+    // controller) before building a new one, every time -- so switching
+    // straight from one fixture to another never leaves the previous
+    // replay's provider/watchdog running. Runs BEFORE the selection below so
+    // the session-active check reads the (by-then idle/terminal) production
+    // controller, not a still-live PREVIOUS replay controller.
+    await unlockedRestoreProductionFacade();
+
+    // M2 fix (ticket CN-FIX2, binding, dev-only path): the fixture's OWN
+    // circuit becomes the app's selection, so the calibration track map,
+    // History/PB and Detail all agree with the replay being driven.
+    const refusal = refuseSelectionIfSessionActive();
+    if (refusal !== null) return { ok: false, reason: 'SESSION_ACTIVE' };
+    await unlockedApplySelection(entry);
+
+    const samples = scenario.build(entry.profile);
+    if (isCancelled()) return { ok: false, reason: 'CANCELLED' };
+
+    await unlockedStartDevReplaySession(samples, {
+      circuitProfile: entry.profile,
+      runtimeProfile: entry.runtime,
+    });
+    if (isCancelled()) {
+      // Cancelled during the install: unwind it here, inside the same
+      // section, rather than leaving a replay controller driving `facade`
+      // for a screen that has already gone away.
+      await unlockedRestoreProductionFacade();
+      return { ok: false, reason: 'CANCELLED' };
+    }
+    return { ok: true };
   });
 }
 
@@ -1854,12 +2091,13 @@ export async function startDevReplaySession(
  * controller first (defense in depth -- `DevReplayScreen` already calls
  * `restoreProductionFacade()` before this), so switching to the scripted mock
  * can never leave an unfinished replay's provider/watchdog running underneath.
- * F4 fix: now async and runs under `withDevReplayLock` (the dispose used to
- * be a fire-and-forget `void stale.dispose()`, racing whichever transition
- * ran next), and flushes the stale replay controller before disposing it.
+ * F4 fix: now async and runs under the shared `lifecycleLock` (the dispose
+ * used to be a fire-and-forget `void stale.dispose()`, racing whichever
+ * transition ran next), and flushes the stale replay controller before
+ * disposing it.
  */
 export async function useMockFacadeForDevReplay(): Promise<void> {
-  return withDevReplayLock(async () => {
+  return lifecycleLock.run(async () => {
     if (replayController !== null) {
       const stale = replayController;
       replayController = null;
@@ -1894,6 +2132,17 @@ export interface LiveDiagnosticsSnapshot {
    * `GnssLocationProvider` has been constructed (still booting).
    */
   gnss: GnssDiagnostics | null;
+}
+
+/**
+ * The bundled circuitId the CURRENT production `SessionController` was built
+ * for -- `null` before bootstrap has built one. Read-only diagnostic (same
+ * read-on-demand shape as `getLiveDiagnostics()` below): it is what makes
+ * "the controller really is on the recovery's circuit" directly assertable,
+ * rather than inferable only from calibration behavior.
+ */
+export function getProductionCircuitId(): string | null {
+  return productionControllerCircuitId;
 }
 
 /** Snapshot of whichever session is currently live, or `null` before any controller exists (still booting). */

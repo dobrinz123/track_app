@@ -77,6 +77,13 @@ export function CircuitDetailScreen({ navigation, route }: Props): React.JSX.Ele
     }
   };
 
+  // N1 fix (ticket CN-FIX3): the recovery carries its own circuit, so the
+  // banner can name it. Falls back to the raw id only if a catalog build ever
+  // dropped that circuit (bootstrap already refuses to offer a recovery for
+  // an unbundled circuit, so this is defensive).
+  const recoveryCircuitName =
+    recovery === null ? '' : (circuitCatalog.get(recovery.circuitId)?.profile.displayName ?? recovery.circuitId);
+
   const handleResume = async (): Promise<void> => {
     setRecoveryBusy(true);
     try {
@@ -144,9 +151,14 @@ export function CircuitDetailScreen({ navigation, route }: Props): React.JSX.Ele
           <View style={styles.recoveryBanner} accessibilityLiveRegion="polite">
             <Text style={styles.recoveryText} maxFontSizeMultiplier={1.3}>
               {/* C10 fix: resume does NOT require a fresh calibration -- it arms
-                  directly off the stored reference lap (SessionController.start('session')). */}
-              Recovered an interrupted session ({recovery.lapCount} lap{recovery.lapCount === 1 ? '' : 's'}). Resume
-              continues the interrupted session; lap {recovery.lapCount} was invalidated. Or discard it.
+                  directly off the stored reference lap (SessionController.start('session')).
+                  N1 fix (ticket CN-FIX3, binding): the banner NAMES the circuit the
+                  interrupted session actually ran on -- it is global (it shows on
+                  every circuit's detail screen), and Resume always continues on that
+                  circuit, not on whatever is selected right now. */}
+              Recovered an interrupted session on {recoveryCircuitName} ({recovery.lapCount} lap
+              {recovery.lapCount === 1 ? '' : 's'}). Resume continues it on {recoveryCircuitName}; lap{' '}
+              {recovery.lapCount} was invalidated. Or discard it.
             </Text>
             <View style={styles.recoveryActions}>
               <Pressable
