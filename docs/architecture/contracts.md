@@ -603,3 +603,25 @@ export interface EnetChannelSpec {
   scale/offset; decoded values must be finite or the sample is dropped and counted as a decode error.
 - TesterPresent interval is clamped to ≥ 500 ms and never issued back-to-back ahead of channel polling
   more than once per interval; ACK latency is attributed only to a frame whose echoed head matches.
+
+### ENET addendum — poll plan, probe & robustness amendment (2026-08-27, binding, after Codex P4e-REV2)
+- Correlation completeness: a diagnostic payload from the correct addresses that does not parse as a UDS
+  response is counted (`malformedResponses`) and leaves the in-flight slot untouched (timeout or the real
+  response resolves it); any diagnostic response while no request is in flight increments `unmatchedResponses`.
+- ENET poll plan derives from the RESOLVED channel specs: every spec's channel is polled at the rate table
+  (rpm/speed/throttle 5 Hz, coolant 0.2 Hz, oil temps 0.5 Hz, intake/load 1 Hz, unknown 1 Hz). On the ENET
+  path `transOilC` is NOT gated by the ELM-era `transOilPidHex`.
+- Channel-spec JSON from settings is untrusted: every array member is structurally validated (object;
+  channel ∈ TelemetryChannelId minus latG/longG; mode; requestHex string; optional targetAddress 0–255;
+  decode object shape; provenance string) BEFORE any core call; failures are surfaced as errors in the UI and
+  the provider/monitor fall back to the built-in defaults — nothing throws on blur or render.
+- DID probe (dev): allowed ONLY when `telemetryEnabled && adapterType === 'enet'` and the telemetry provider
+  is `idle`/`stopped`/`failed` (never while connecting/polling) — the MHD adapter accepts one ECU client;
+  the probe shows a "stop telemetry first" message otherwise; it uses the simulated transport when
+  `telemetrySimulate` is on; responses are correlated (swapped addresses, SID+0x40/0x7F echo, identifier
+  echo) and unmatched frames are logged as UNMATCHED, never as OK.
+- `EnetTcpTransport` is one-shot: remote close/error sets `closed`, drops the socket, rejects later `send()`
+  and a second `connect()`; connect timeout is tested.
+- Persisted settings are repaired on hydration: adapterType ∉ enum → 'elm327'; enetPort ∉ 1–65535 →
+  6801; tester/target ∉ 0–255 → defaults; specs JSON unparsable → ''.
+- New settings rows must not overflow at 360pt/1.3×: labels shrink/wrap; inputs keep a minimum width.

@@ -41,7 +41,13 @@ when `adapterType === 'elm327'` (the default).
    building + whitelist refusal) tested.
 
 ## API SURFACE FROM P4e-T1 (filled by LEAD after T1 collection)
-<<T1_API_SURFACE>>
+Exported from `@circuit/core` (source: `packages/core/src/telemetry/enet/**`, read the code + tests):
+- Engine: `createEnetSession(transport, config)` → `EnetSession` (`start/stop/onSample/onStateChange/getDiagnostics`), `EnetConfig`, `DEFAULT_ENET_CONFIG`, `EnetState` (`idle|connecting|handshake|polling|stopped|failed`), `EnetDiagnostics` (per-channel supported/unsupported + NRC, frames tx/rx, ack latency p50/p95, `lastRawFrameHex`, errorCount/lastError).
+- Specs: `EnetChannelSpec`, `EnetChannelDecodeSpec`, `DEFAULT_ENET_CHANNEL_SPECS`, `validateEnetChannelSpecs(specs) → {valid, warnings}`, `decodeEnetChannelValue`.
+- Codecs (for the DID probe): `encodeFrame`, `HsfzFrameParser`, `HSFZ_CONTROL`, `buildReadDataByIdentifierRequest`, `buildObdMode01Request`, `buildTesterPresentRequest`, `assertAllowedRequest` (throws `UdsServiceNotAllowed`), `parseUdsResponse`, `bytesToHex`, `UDS_NRC`.
+- Simulator: `SimulatedEnetTransport`, `SimulatedEnetTransportConfig`, `DEFAULT_ENET_SCENARIO`, `EnetSimulatedChannelScript`.
+- Transport contract: `ObdTransport` (unchanged, byte chunks); `TelemetrySession<TState>` alias.
+Note: the transport delivers/accepts raw bytes — the ENET engine expects binary-safe chunks (see `bytesToBinaryString`/`binaryStringToBytes` helpers if the socket layer works in strings; prefer Uint8Array end to end).
 
 ## CONSTRAINTS
 - No new dependencies (react-native-tcp-socket already present). No changes under `packages/core/**`

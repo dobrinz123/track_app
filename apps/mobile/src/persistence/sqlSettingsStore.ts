@@ -1,5 +1,6 @@
 import type { SqlDatabase } from '@circuit/core';
 import { DEFAULT_SETTINGS, type AppSettings, type SettingsStore } from '../session/settingsStore';
+import { repairPersistedEnetSettings } from '../session/enetSettingsValidation';
 
 const SETTINGS_KEY = 'app-settings';
 
@@ -43,6 +44,16 @@ export class SqlSettingsStore implements SettingsStore {
         // settings are non-critical and never block app startup.
       }
     }
+    // P4e-FIX2 L1 fix (binding, review finding): `isPartialAppSettings` only
+    // proves the persisted JSON was "some object" -- a PRESENT but malformed
+    // ENET field (e.g. `enetPort: 70000`, `enetTesterAddress: -1`) would
+    // otherwise overwrite `DEFAULT_SETTINGS` unchecked. `repairPersistedEnetSettings`
+    // resets exactly those fields back to their defaults when structurally
+    // invalid; every other (including every ELM327) field is untouched.
+    // Applied unconditionally (a no-op when `initial` is already
+    // `DEFAULT_SETTINGS`, i.e. no row / a corrupt row) so there is only one
+    // hydration path to reason about.
+    initial = repairPersistedEnetSettings(initial);
     return new SqlSettingsStore(db, initial);
   }
 

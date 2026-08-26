@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_ENET_CHANNEL_SPECS,
   decodeEnetChannelValue,
+  ENET_DEFAULT_CHANNEL_RATES_HZ,
   validateEnetChannelSpecs,
   type EnetChannelSpec,
 } from '../../../src/telemetry/enet/enetChannelSpecs';
@@ -167,5 +168,38 @@ describe('decodeEnetChannelValue', () => {
     const spec = did({ decode: { byteOffset: 0, byteLength: 2, scale: Number.MAX_VALUE, offset: 0 } });
     const value = decodeEnetChannelValue(spec, Uint8Array.from([0xff, 0xff]));
     expect(Number.isFinite(value)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P4e-FIX2-core: poll-plan rate table (contracts.md "poll plan, probe &
+// robustness amendment") -- so the mobile layer can build an ENET poll plan
+// from RESOLVED channel specs instead of reusing the fixed ELM plan.
+// ---------------------------------------------------------------------------
+describe('ENET_DEFAULT_CHANNEL_RATES_HZ', () => {
+  it('has the binding rate for every named channel group', () => {
+    expect(ENET_DEFAULT_CHANNEL_RATES_HZ.rpm).toBe(5);
+    expect(ENET_DEFAULT_CHANNEL_RATES_HZ.speedKph).toBe(5);
+    expect(ENET_DEFAULT_CHANNEL_RATES_HZ.throttlePct).toBe(5);
+    expect(ENET_DEFAULT_CHANNEL_RATES_HZ.coolantC).toBe(0.2);
+    expect(ENET_DEFAULT_CHANNEL_RATES_HZ.engineOilC).toBe(0.5);
+    expect(ENET_DEFAULT_CHANNEL_RATES_HZ.transOilC).toBe(0.5);
+    expect(ENET_DEFAULT_CHANNEL_RATES_HZ.intakeC).toBe(1);
+    expect(ENET_DEFAULT_CHANNEL_RATES_HZ.engineLoadPct).toBe(1);
+  });
+
+  it('omits latG/longG (never valid ENET/OBD request targets) and every entry is a positive, finite number', () => {
+    expect(ENET_DEFAULT_CHANNEL_RATES_HZ).not.toHaveProperty('latG');
+    expect(ENET_DEFAULT_CHANNEL_RATES_HZ).not.toHaveProperty('longG');
+    for (const hz of Object.values(ENET_DEFAULT_CHANNEL_RATES_HZ)) {
+      expect(Number.isFinite(hz)).toBe(true);
+      expect(hz as number).toBeGreaterThan(0);
+    }
+  });
+
+  it("every DEFAULT_ENET_CHANNEL_SPECS channel has a named rate (no silent fallback needed for the built-ins)", () => {
+    for (const spec of DEFAULT_ENET_CHANNEL_SPECS) {
+      expect(ENET_DEFAULT_CHANNEL_RATES_HZ[spec.channel]).toBeDefined();
+    }
   });
 });

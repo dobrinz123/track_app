@@ -2,11 +2,13 @@ import {
   createElm327Session,
   createEnetSession,
   DEFAULT_ENET_CONFIG,
+  ENET_DEFAULT_CHANNEL_RATES_HZ,
   SimulatedElm327Transport,
   SimulatedEnetTransport,
   type Elm327Config,
   type Elm327Session,
   type Elm327State,
+  type EnetChannelSpec,
   type EnetConfig,
   type EnetSession,
   type EnetState,
@@ -301,20 +303,45 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   }
 
   /**
+   * P4e-FIX2 (binding, "poll plan, probe & robustness amendment", supersedes
+   * the original "poll plan reused" design): the ENET poll plan is derived
+   * from the RESOLVED channel specs themselves (built-in defaults, or the
+   * user's validated `did`/`obd01` specs) -- one poll entry per spec channel,
+   * at the binding rate table (`ENET_DEFAULT_CHANNEL_RATES_HZ`, `@circuit/core`
+   * -- rpm/speed/throttle 5 Hz, coolant 0.2 Hz, oil temps 0.5 Hz, intake/load
+   * 1 Hz, unknown channel 1 Hz). This REPLACES reusing the fixed ELM327
+   * `buildPollPlan` for ENET: that plan silently dropped `intakeC`/
+   * `engineLoadPct` entirely (never in its fixed 5-channel list) and gated
+   * `transOilC` on the unrelated ELM-era `transOilPidHex` setting -- on the
+   * ENET path `transOilC` is polled whenever the resolved specs include it,
+   * full stop.
+   */
+  const ENET_UNKNOWN_CHANNEL_RATE_HZ = 1;
+
+  function buildEnetPollPlan(
+    channelSpecs: readonly EnetChannelSpec[],
+  ): Array<{ channel: TelemetryChannelId; hz: number }> {
+    return channelSpecs.map((spec) => ({
+      channel: spec.channel,
+      hz: ENET_DEFAULT_CHANNEL_RATES_HZ[spec.channel] ?? ENET_UNKNOWN_CHANNEL_RATE_HZ,
+    }));
+  }
+
+  /**
    * ENET telemetry addendum: builds the ENET engine's config from settings --
    * channel specs (parsed/validated JSON, or the built-in defaults --
-   * `resolveEnetChannelSpecs`), the SAME poll plan `buildPollPlan` already
-   * builds for ELM327 (channel ids/rates are adapter-agnostic; the addendum:
-   * "poll plan reused"), tester/target addresses from settings, and the
-   * addendum's default tester-present interval/command-timeout/error-budget
+   * `resolveEnetChannelSpecs`), the poll plan derived from those SAME resolved
+   * specs (`buildEnetPollPlan`, above), tester/target addresses from settings,
+   * and the addendum's default tester-present interval/command-timeout/error-budget
    * (`DEFAULT_ENET_CONFIG`, `COMMAND_TIMEOUT_MS`/`MAX_CONSECUTIVE_ERRORS`
    * shared with the ELM327 config below).
    */
   function buildEnetConfig(): EnetConfig {
     const settings = settingsStore.getSettings();
+    const channelSpecs = resolveEnetChannelSpecs(settings.enetChannelSpecsJson);
     return {
-      channelSpecs: resolveEnetChannelSpecs(settings.enetChannelSpecsJson),
-      pollPlan: buildPollPlan(settings.transOilPidHex),
+      channelSpecs,
+      pollPlan: buildEnetPollPlan(channelSpecs),
       testerAddress: settings.enetTesterAddress,
       targetAddress: settings.enetTargetAddress,
       testerPresentIntervalMs: DEFAULT_ENET_CONFIG.testerPresentIntervalMs,

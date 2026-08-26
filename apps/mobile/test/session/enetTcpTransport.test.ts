@@ -1,6 +1,37 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { bytesToBinaryString } from '@circuit/core';
 import { EnetTcpTransport } from '../../src/session/enetTcpTransport';
+
+/** A minimal fake `react-native-tcp-socket` `Socket`: a tiny event emitter plus `write`/`destroy` spies, enough for every test in this file to drive `connect`/`data`/`error`/`close` deterministically. */
+function makeFakeSocket() {
+  const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
+  return {
+    on(event: string, handler: (...args: unknown[]) => void): void {
+      const list = handlers.get(event) ?? [];
+      list.push(handler);
+      handlers.set(event, list);
+    },
+    emit(event: string, ...args: unknown[]): void {
+      for (const handler of handlers.get(event) ?? []) handler(...args);
+    },
+    write: vi.fn(() => true),
+    destroy: vi.fn(),
+  };
+}
+
+async function connectedTransport(fakeSocket: ReturnType<typeof makeFakeSocket>): Promise<EnetTcpTransport> {
+  const createConnection = (_opts: unknown, onConnect: () => void) => {
+    queueMicrotask(onConnect);
+    return fakeSocket;
+  };
+  const transport = new EnetTcpTransport({
+    host: '192.168.4.20',
+    port: 6_801,
+    loadModule: async () => ({ default: { createConnection } }) as unknown as typeof import('react-native-tcp-socket'),
+  });
+  await transport.connect();
+  return transport;
+}
 
 /**
  * Mirrors `tcpObdTransport.test.ts`'s own F9-fix coverage (same lazy-load /
@@ -29,7 +60,7 @@ describe('EnetTcpTransport: close() during a pending module import (mirrors tcpO
     await transport.close();
     resolveImport!();
 
-    await expect(connectPromise).rejects.toThrow(/close\(\)/);
+    await expect(connectPromise).rejects.toThrow(/closed/);
     expect(createConnection).not.toHaveBeenCalled();
   });
 });
@@ -99,5 +130,124 @@ describe('EnetTcpTransport: byte-safety over react-native-tcp-socket', () => {
 
     expect(received).toHaveLength(1);
     expect(Array.from(received[0]!, (ch) => ch.charCodeAt(0))).toEqual(Array.from(incomingBytes));
+  });
+});
+
+/**
+ * P4e-FIX2 M2 fix (binding, Codex P4e-REV2 Part B): "remote close/error ->
+ * closed=true, socket=null; send() after close rejects; second connect()
+ * rejects" -- the review's finding was that ONLY the close-notification
+ * itself was deduplicated (`closeEmitted`), while `closed`/`socket` silently
+ * kept claiming the transport was still open, so `send()` after a remote
+ * close wrote to a dead socket instead of throwing, and nothing stopped a
+ * second `connect()` from creating ANOTHER socket on the same "one-shot"
+ * instance.
+ */
+describe('EnetTcpTransport: one-shot terminal state after remote close/error (P4e-FIX2 M2 fix)', () => {
+  it('a remote "close" event: closed=true, socket=null (send() throws instead of writing to a dead socket)', async () => {
+    const fakeSocket = makeFakeSocket();
+    const transport = await connectedTransport(fakeSocket);
+
+    const closeEvents: Array<Error | undefined> = [];
+    transport.onClose((err) => closeEvents.push(err));
+
+    fakeSocket.emit('close');
+
+    expect(closeEvents).toHaveLength(1);
+    expect(() => transport.send('x')).toThrow(/send\(\)/);
+    expect(fakeSocket.write).not.toHaveBeenCalled();
+  });
+
+  it('a remote "error" event (with no following close): closed=true, socket=null, send() throws', async () => {
+    const fakeSocket = makeFakeSocket();
+    const transport = await connectedTransport(fakeSocket);
+
+    const closeEvents: Array<Error | undefined> = [];
+    transport.onClose((err) => closeEvents.push(err));
+
+    const remoteError = new Error('ECONNRESET (test double)');
+    fakeSocket.emit('error', remoteError);
+
+    expect(closeEvents).toEqual([remoteError]);
+    expect(() => transport.send('x')).toThrow(/send\(\)/);
+  });
+
+  it('a second connect() after a remote close rejects (one-shot instance, never reused)', async () => {
+    const fakeSocket = makeFakeSocket();
+    const transport = await connectedTransport(fakeSocket);
+
+    fakeSocket.emit('close');
+
+    await expect(transport.connect()).rejects.toThrow(/closed/);
+  });
+
+  it('"error" immediately followed by "close" emits exactly ONE close notification, carrying the error', async () => {
+    const fakeSocket = makeFakeSocket();
+    const transport = await connectedTransport(fakeSocket);
+
+    const closeEvents: Array<Error | undefined> = [];
+    transport.onClose((err) => closeEvents.push(err));
+
+    const remoteError = new Error('boom (test double)');
+    fakeSocket.emit('error', remoteError);
+    fakeSocket.emit('close');
+
+    expect(closeEvents).toHaveLength(1);
+    expect(closeEvents[0]).toBe(remoteError);
+  });
+
+  it("close() (local) still leaves closed/socket in the SAME terminal state remote close does -- a second connect() rejects", async () => {
+    const fakeSocket = makeFakeSocket();
+    const transport = await connectedTransport(fakeSocket);
+
+    await transport.close();
+
+    expect(() => transport.send('x')).toThrow(/send\(\)/);
+    await expect(transport.connect()).rejects.toThrow(/closed/);
+  });
+});
+
+describe('EnetTcpTransport: connect() timeout (P4e-FIX2 M2, binding: "connect timeout is tested")', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('rejects after connectTimeoutMs when the socket never connects, and destroys the socket', async () => {
+    const fakeSocket = makeFakeSocket();
+    const createConnection = () => fakeSocket; // never invokes the connect callback.
+    const transport = new EnetTcpTransport({
+      host: '192.168.4.20',
+      port: 6_801,
+      connectTimeoutMs: 5_000,
+      loadModule: async () => ({ default: { createConnection } }) as unknown as typeof import('react-native-tcp-socket'),
+    });
+
+    const connectPromise = transport.connect();
+    const assertion = expect(connectPromise).rejects.toThrow(/timed out after 5000ms/);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await assertion;
+
+    expect(fakeSocket.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('a connect() that resolves before the timeout never rejects (no spurious timeout)', async () => {
+    const fakeSocket = makeFakeSocket();
+    const createConnection = (_opts: unknown, onConnect: () => void) => {
+      queueMicrotask(onConnect);
+      return fakeSocket;
+    };
+    const transport = new EnetTcpTransport({
+      host: '192.168.4.20',
+      port: 6_801,
+      connectTimeoutMs: 5_000,
+      loadModule: async () => ({ default: { createConnection } }) as unknown as typeof import('react-native-tcp-socket'),
+    });
+
+    await expect(transport.connect()).resolves.toBeUndefined();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(fakeSocket.destroy).not.toHaveBeenCalled();
   });
 });

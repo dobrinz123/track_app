@@ -10,6 +10,28 @@ import {
 /** Channels that are never a valid ENET/OBD request target (device-sensor channels, per the ENET addendum: "no latG/longG"). */
 const NON_ENET_CHANNELS: ReadonlySet<TelemetryChannelId> = new Set(['latG', 'longG']);
 
+/**
+ * Binding poll rate table (contracts.md "poll plan, probe & robustness
+ * amendment"): the ENET poll plan is derived from the RESOLVED channel specs
+ * (built-in defaults plus any user `did` specs), one rate per channel, rather
+ * than reusing the fixed ELM327 poll plan (which silently drops any ENET-only
+ * channel, e.g. `intakeC`/`engineLoadPct`, and gates `transOilC` on an
+ * unrelated ELM setting). A channel with no entry here falls back to 1 Hz --
+ * every channel currently reachable over ENET (obd01 defaults + any `did`
+ * channel) IS listed, so that fallback is only ever exercised for a future
+ * channel this table hasn't been updated for yet.
+ */
+export const ENET_DEFAULT_CHANNEL_RATES_HZ: Readonly<Partial<Record<TelemetryChannelId, number>>> = {
+  rpm: 5,
+  speedKph: 5,
+  throttlePct: 5,
+  coolantC: 0.2,
+  engineOilC: 0.5,
+  transOilC: 0.5,
+  intakeC: 1,
+  engineLoadPct: 1,
+};
+
 export interface EnetChannelDecodeSpec {
   byteOffset: number;
   byteLength: 1 | 2;

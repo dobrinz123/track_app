@@ -65,7 +65,14 @@ export class EnetTcpTransport implements ObdTransport {
     const load = this.config.loadModule ?? loadTcpSocketModule;
     const module = await load();
     if (this.closed) {
-      throw new Error('EnetTcpTransport: close() was called before connect() finished loading the transport module');
+      // P4e-FIX2 (binding): ALSO the "second connect() on a one-shot
+      // instance" guard -- `notifyClose` (below) sets `closed` on a REMOTE
+      // close/error too, not just a local `close()` call, so this same check
+      // now also rejects a second `connect()` attempt after the adapter (or
+      // an earlier `close()`) has ended this transport's one lifecycle.
+      throw new Error(
+        'EnetTcpTransport: closed (locally or by the remote) -- connect() cannot be reused, construct a fresh transport instance',
+      );
     }
     const TcpSocket = module.default;
     const timeoutMs = this.config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
@@ -155,7 +162,20 @@ export class EnetTcpTransport implements ObdTransport {
     stale?.destroy();
   }
 
+  /**
+   * P4e-FIX2 fix (binding, review finding): a REMOTE close/error must leave
+   * this transport in the SAME one-shot terminal state a local `close()`
+   * does -- `closed = true` and `socket = null` UNCONDITIONALLY (even on a
+   * repeat call, e.g. 'error' immediately followed by 'close'), so a
+   * `send()` after a remote close throws (`this.socket === null`) instead of
+   * writing to a dead socket, and a second `connect()` rejects via the
+   * `closed` check above -- instead of ONLY the single close-notification
+   * itself being deduplicated while the transport's own state silently kept
+   * claiming to be open.
+   */
   private notifyClose(err?: Error): void {
+    this.closed = true;
+    this.socket = null;
     if (this.closeEmitted) return;
     this.closeEmitted = true;
     for (const listener of [...this.closeListeners]) listener(err);

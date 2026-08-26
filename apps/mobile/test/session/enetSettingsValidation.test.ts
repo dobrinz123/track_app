@@ -1,14 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
-import { assertAllowedRequest, UdsServiceNotAllowed } from '@circuit/core';
 import {
-  buildDidProbeRequest,
   ENET_CHANNEL_SPECS_JSON_ERROR,
   formatHexByte,
   HEX_BYTE_VALIDATION_ERROR,
   parseHexByteDraft,
+  repairPersistedEnetSettings,
   resolveEnetChannelSpecs,
   validateEnetChannelSpecsJson,
 } from '../../src/session/enetSettingsValidation';
+import { DEFAULT_SETTINGS } from '../../src/session/settingsStore';
 
 describe('parseHexByteDraft / formatHexByte (ENET tester/target address fields)', () => {
   it('accepts 1-2 hex digits, case-insensitive, in [0x00, 0xFF]', () => {
@@ -79,6 +79,56 @@ describe('validateEnetChannelSpecsJson / resolveEnetChannelSpecs (enetChannelSpe
     expect(result.specs).toEqual([]);
   });
 
+  /**
+   * P4e-FIX2 HIGH fix (binding, Codex P4e-REV2 Part B): structurally invalid
+   * array MEMBERS -- `[null]`, `[{}]`, `[1]` -- must never reach
+   * `@circuit/core`'s `validateEnetChannelSpecs` (which would dereference
+   * `spec.requestHex.replace(...)` on `undefined` and throw a raw
+   * `TypeError`). Each is caught here and reported as an error string
+   * instead -- and because EVERY member of a non-empty array failed
+   * structurally, the draft as a whole is `ok: false` (a malformed draft, not
+   * a deliberate "zero channels" choice -- that's reserved for a literal
+   * `"[]"`, covered separately above).
+   */
+  it('never throws for structurally invalid array members: [null], [{}], [1] -- reported as ok:false, not a crash', () => {
+    expect(() => validateEnetChannelSpecsJson('[null]')).not.toThrow();
+    expect(() => validateEnetChannelSpecsJson('[{}]')).not.toThrow();
+    expect(() => validateEnetChannelSpecsJson('[1]')).not.toThrow();
+
+    for (const draft of ['[null]', '[{}]', '[1]']) {
+      const result = validateEnetChannelSpecsJson(draft);
+      expect(result.ok).toBe(false);
+      expect(result.specs).toEqual([]);
+      expect(result.error).toBe(ENET_CHANNEL_SPECS_JSON_ERROR);
+    }
+  });
+
+  it('rejects a well-typed-looking entry with a wrong-typed field (requestHex as a number, decode.byteLength invalid) -- both members structurally bad, so ok:false', () => {
+    const draft = JSON.stringify([
+      { channel: 'rpm', mode: 'obd01', requestHex: 12, provenance: 'wrong type' },
+      {
+        channel: 'coolantC',
+        mode: 'did',
+        requestHex: 'F1A0',
+        decode: { byteOffset: 0, byteLength: 3, scale: 1, offset: -40 },
+        provenance: 'bad byteLength',
+      },
+    ]);
+    const result = validateEnetChannelSpecsJson(draft);
+    expect(result.ok).toBe(false);
+    expect(result.specs).toEqual([]);
+    expect(result.error).toBe(ENET_CHANNEL_SPECS_JSON_ERROR);
+  });
+
+  it('a mix of one structurally-valid and several structurally-invalid members keeps only the valid one', () => {
+    const draft = JSON.stringify([null, {}, 1, { channel: 'rpm', mode: 'obd01', requestHex: '0C', provenance: 'ok' }]);
+    const result = validateEnetChannelSpecsJson(draft);
+    expect(result.ok).toBe(true);
+    expect(result.specs).toHaveLength(1);
+    expect(result.specs[0]!.channel).toBe('rpm');
+    expect(result.warnings.length).toBeGreaterThanOrEqual(3);
+  });
+
   it('resolveEnetChannelSpecs falls back to DEFAULT_ENET_CHANNEL_SPECS for an empty draft', () => {
     const specs = resolveEnetChannelSpecs('');
     expect(specs.length).toBeGreaterThan(0);
@@ -91,6 +141,28 @@ describe('validateEnetChannelSpecsJson / resolveEnetChannelSpecs (enetChannelSpe
       const specs = resolveEnetChannelSpecs('not json at all');
       expect(specs.map((s) => s.channel)).toContain('rpm');
       expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  /**
+   * H1 fix, applied to the two call sites the review named directly:
+   * `SettingsScreen`'s blur handler (`commitEnetChannelSpecsDraft` calls
+   * `validateEnetChannelSpecsJson`, exercised above) and `TelemetryScreen`'s
+   * render (`enetChannelsFor` calls `resolveEnetChannelSpecs` directly, on
+   * every render) -- neither may ever throw for `[null]`/`[{}]`/`[1]`.
+   */
+  it('resolveEnetChannelSpecs (the exact function TelemetryScreen calls during render) never throws for structurally invalid members, falling back to defaults', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      for (const draft of ['[null]', '[{}]', '[1]', '[null, {}, 1]']) {
+        let specs: ReturnType<typeof resolveEnetChannelSpecs> = [];
+        expect(() => {
+          specs = resolveEnetChannelSpecs(draft);
+        }).not.toThrow();
+        expect(specs.length).toBeGreaterThan(0); // falls back to the built-in defaults, not an empty list.
+      }
     } finally {
       warnSpy.mockRestore();
     }
@@ -110,61 +182,63 @@ describe('validateEnetChannelSpecsJson / resolveEnetChannelSpecs (enetChannelSpe
   });
 });
 
-describe('buildDidProbeRequest (dev DID-probe screen: request building + whitelist refusal)', () => {
-  it('mode "did" builds a ReadDataByIdentifier (0x22) request for a valid 4-hex-char DID', () => {
-    const result = buildDidProbeRequest('did', '1E0C');
-    expect(result.ok).toBe(true);
-    expect(result.pdu).toEqual(Uint8Array.from([0x22, 0x1e, 0x0c]));
+describe('repairPersistedEnetSettings (P4e-FIX2 L1, binding: settings hydration repair)', () => {
+  it("the review's exact persisted object: enetPort/enetTesterAddress out of range are repaired, valid adapterType kept", () => {
+    const persisted = { ...DEFAULT_SETTINGS, adapterType: 'enet' as const, enetPort: 70_000, enetTesterAddress: -1 };
+    const repaired = repairPersistedEnetSettings(persisted);
+    expect(repaired.adapterType).toBe('enet');
+    expect(repaired.enetPort).toBe(DEFAULT_SETTINGS.enetPort);
+    expect(repaired.enetTesterAddress).toBe(DEFAULT_SETTINGS.enetTesterAddress);
+    // Untouched valid fields survive.
+    expect(repaired.enetTargetAddress).toBe(DEFAULT_SETTINGS.enetTargetAddress);
   });
 
-  it('mode "obd01" builds an OBD mode-01 (0x01) request for a valid 2-hex-char PID', () => {
-    const result = buildDidProbeRequest('obd01', '0C');
-    expect(result.ok).toBe(true);
-    expect(result.pdu).toEqual(Uint8Array.from([0x01, 0x0c]));
+  it('adapterType outside the enum resets to elm327', () => {
+    const persisted = { ...DEFAULT_SETTINGS, adapterType: 'bogus' as never };
+    expect(repairPersistedEnetSettings(persisted).adapterType).toBe('elm327');
   });
 
-  it('ignores internal spacing and is case-insensitive', () => {
-    expect(buildDidProbeRequest('did', '1e 0c').pdu).toEqual(Uint8Array.from([0x22, 0x1e, 0x0c]));
-    expect(buildDidProbeRequest('obd01', ' 0c ').pdu).toEqual(Uint8Array.from([0x01, 0x0c]));
+  it('enetPort of 0, negative, non-integer, or > 65535 resets to the default port', () => {
+    for (const badPort of [0, -1, 1.5, 65_536, 'not a number' as never]) {
+      const persisted = { ...DEFAULT_SETTINGS, enetPort: badPort };
+      expect(repairPersistedEnetSettings(persisted).enetPort).toBe(DEFAULT_SETTINGS.enetPort);
+    }
   });
 
-  it('rejects the wrong hex length for each mode, without sending anything', () => {
-    const didTooShort = buildDidProbeRequest('did', '1E');
-    expect(didTooShort.ok).toBe(false);
-    expect(didTooShort.pdu).toBeNull();
-    expect(didTooShort.error).toContain('4 hex characters');
-
-    const pidTooLong = buildDidProbeRequest('obd01', '0C12');
-    expect(pidTooLong.ok).toBe(false);
-    expect(pidTooLong.error).toContain('2 hex characters');
+  it('enetTesterAddress/enetTargetAddress outside [0, 255] reset to their defaults', () => {
+    for (const badByte of [-1, 256, 1.5, 'F4' as never]) {
+      const persisted = { ...DEFAULT_SETTINGS, enetTesterAddress: badByte, enetTargetAddress: badByte };
+      const repaired = repairPersistedEnetSettings(persisted);
+      expect(repaired.enetTesterAddress).toBe(DEFAULT_SETTINGS.enetTesterAddress);
+      expect(repaired.enetTargetAddress).toBe(DEFAULT_SETTINGS.enetTargetAddress);
+    }
   });
 
-  it('rejects non-hex input', () => {
-    const result = buildDidProbeRequest('did', 'ZZZZ');
-    expect(result.ok).toBe(false);
-    expect(result.error).toBe('Enter hex digits only');
+  it('enetChannelSpecsJson that is unparsable JSON resets to "" ', () => {
+    const persisted = { ...DEFAULT_SETTINGS, enetChannelSpecsJson: '{not json' };
+    expect(repairPersistedEnetSettings(persisted).enetChannelSpecsJson).toBe('');
   });
 
-  it('rejects an empty draft', () => {
-    expect(buildDidProbeRequest('did', '').ok).toBe(false);
+  it('enetChannelSpecsJson that is not a string resets to "" ', () => {
+    const persisted = { ...DEFAULT_SETTINGS, enetChannelSpecsJson: 42 as never };
+    expect(repairPersistedEnetSettings(persisted).enetChannelSpecsJson).toBe('');
   });
 
-  /**
-   * "Nothing outside {0x01, 0x22, 0x3E} can be sent -- the whitelist error is
-   * shown, not bypassed" (contracts.md ENET addendum, binding). Both of
-   * `buildDidProbeRequest`'s modes only ever construct a whitelisted SID by
-   * construction (0x22/0x01), so the gate it re-checks (`assertAllowedRequest`,
-   * the SAME core gate `enetSession.ts`'s own `executeDiagnosticRequest`
-   * re-checks before every send) is exercised directly here against a
-   * manually-built disallowed PDU -- proving the underlying whitelist really
-   * does refuse anything else, not just that the picker happens not to offer
-   * it.
-   */
-  it('the underlying whitelist gate (assertAllowedRequest) refuses any SID outside {0x01, 0x22, 0x3E}', () => {
-    expect(() => assertAllowedRequest(Uint8Array.from([0x27, 0x01]))).toThrow(UdsServiceNotAllowed);
-    expect(() => assertAllowedRequest(Uint8Array.from([0x10, 0x03]))).toThrow(UdsServiceNotAllowed);
-    expect(() => assertAllowedRequest(Uint8Array.from([0x01, 0x0c]))).not.toThrow();
-    expect(() => assertAllowedRequest(Uint8Array.from([0x22, 0x1e, 0x0c]))).not.toThrow();
-    expect(() => assertAllowedRequest(Uint8Array.from([0x3e, 0x80]))).not.toThrow();
+  it('a valid enetChannelSpecsJson string is left untouched (even with per-entry warnings, e.g. a device-sensor channel)', () => {
+    const draft = JSON.stringify([{ channel: 'rpm', mode: 'obd01', requestHex: '0C', provenance: 'ok' }]);
+    const persisted = { ...DEFAULT_SETTINGS, enetChannelSpecsJson: draft };
+    expect(repairPersistedEnetSettings(persisted).enetChannelSpecsJson).toBe(draft);
+  });
+
+  it('every valid field is left exactly as hydrated (a no-op on already-valid settings)', () => {
+    const persisted = {
+      ...DEFAULT_SETTINGS,
+      adapterType: 'enet' as const,
+      enetHost: '192.168.4.20',
+      enetPort: 6_802,
+      enetTesterAddress: 0xf1,
+      enetTargetAddress: 0x10,
+    };
+    expect(repairPersistedEnetSettings(persisted)).toEqual(persisted);
   });
 });

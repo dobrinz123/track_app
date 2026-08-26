@@ -92,6 +92,14 @@ export interface EnetDiagnostics {
    */
   unmatchedResponses: number;
   /**
+   * Diagnostic payloads from the CORRECT addresses that do not parse as a
+   * UDS response at all (empty, or a negative response too short to carry
+   * its NRC) -- counted, never clearing/rejecting the in-flight slot (poll
+   * plan, probe & robustness amendment). The real response, or the
+   * request's own timeout, is still free to resolve it afterward.
+   */
+  malformedResponses: number;
+  /**
    * Samples dropped because the decoded value was not finite (NaN/Infinity
    * from a bad scale/offset/spec) -- counted separately from `errorCount` and
    * never resets `consecutiveErrors` either way (framing & correlation
@@ -180,6 +188,7 @@ class EnetSessionEngine implements EnetSession {
   /** L1 starvation guarantee: at least one channel poll must happen between two TesterPresent sends (irrelevant, trivially satisfied, when there are no channels to poll). */
   private channelPolledSinceLastTesterPresent = true;
   private unmatchedResponses = 0;
+  private malformedResponses = 0;
   private decodeErrorsCount = 0;
   /** L2: the head bytes (SID + first data byte) of the last REAL diagnostic request sent -- TesterPresent/alive-check replies never set this, so their acks never match it. */
   private lastDiagnosticRequestHead: Uint8Array | null = null;
@@ -272,6 +281,7 @@ class EnetSessionEngine implements EnetSession {
       aliveChecksAnswered: this.aliveChecksAnswered,
       ...(this.lastRawFrameHex === undefined ? {} : { lastRawFrameHex: this.lastRawFrameHex }),
       unmatchedResponses: this.unmatchedResponses,
+      malformedResponses: this.malformedResponses,
       decodeErrors: this.decodeErrorsCount,
     };
   }
@@ -568,7 +578,12 @@ class EnetSessionEngine implements EnetSession {
    */
   private handleDiagnosticFrame(frame: HsfzDiagnosticFrame): void {
     const pending = this.pending;
-    if (pending === null) return; // unsolicited/late response -- lastRawFrameHex already recorded by the caller.
+    if (pending === null) {
+      // No request is in flight at all -- this is definitionally unmatched
+      // (poll plan, probe & robustness amendment), not merely ignored.
+      this.unmatchedResponses += 1;
+      return;
+    }
 
     if (frame.source !== pending.expectedResponseSource || frame.target !== pending.expectedResponseTarget) {
       this.unmatchedResponses += 1;
@@ -578,10 +593,13 @@ class EnetSessionEngine implements EnetSession {
     let parsed: ReturnType<typeof parseUdsResponse>;
     try {
       parsed = parseUdsResponse(frame.payload);
-    } catch (error) {
-      this.pending = null;
-      clearTimeout(pending.timer);
-      pending.reject(asError(error));
+    } catch {
+      // Correct addresses, but the payload doesn't parse as a UDS response at
+      // all (empty, or a negative response too short to carry its NRC) --
+      // counted, but the in-flight slot is left untouched: the real response
+      // (or this request's own timeout) is still free to resolve it later
+      // (poll plan, probe & robustness amendment -- H2 residual).
+      this.malformedResponses += 1;
       return;
     }
 

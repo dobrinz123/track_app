@@ -113,4 +113,75 @@ describe('SqlSettingsStore (against sql.js)', () => {
     const store = await SqlSettingsStore.create(db);
     expect(store.getSettings()).toEqual(DEFAULT_SETTINGS);
   });
+
+  /**
+   * P4e-FIX2 L1 fix (binding, Codex P4e-REV2 Part B finding): a PRESENT but
+   * structurally malformed ENET field must be repaired, not accepted
+   * verbatim -- `isPartialAppSettings` only proves the persisted JSON was
+   * "some object", so `{"enetPort":70000,"enetTesterAddress":-1}` used to
+   * overwrite `DEFAULT_SETTINGS` unchecked. The review's exact persisted
+   * object.
+   */
+  it("the review's exact persisted object -- enetPort/enetTesterAddress out of range are repaired on hydration, valid adapterType kept", async () => {
+    const raw = await createRawSqlJsDatabase();
+    const db = wrapExistingSqlJsDatabase(raw);
+    await SqlSessionRepository.create(db);
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'app-settings',
+      JSON.stringify({ adapterType: 'enet', enetPort: 70_000, enetTesterAddress: -1 }),
+    ]);
+
+    const store = await SqlSettingsStore.create(db);
+    const settings = store.getSettings();
+
+    expect(settings.adapterType).toBe('enet');
+    expect(settings.enetPort).toBe(DEFAULT_SETTINGS.enetPort);
+    expect(settings.enetTesterAddress).toBe(DEFAULT_SETTINGS.enetTesterAddress);
+    // Untouched, already-valid fields survive the repair unchanged.
+    expect(settings.enetTargetAddress).toBe(DEFAULT_SETTINGS.enetTargetAddress);
+  });
+
+  it('a persisted adapterType outside the enum resets to elm327 on hydration', async () => {
+    const raw = await createRawSqlJsDatabase();
+    const db = wrapExistingSqlJsDatabase(raw);
+    await SqlSessionRepository.create(db);
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'app-settings',
+      JSON.stringify({ adapterType: 'bogus' }),
+    ]);
+
+    const store = await SqlSettingsStore.create(db);
+    expect(store.getSettings().adapterType).toBe('elm327');
+  });
+
+  it('a persisted enetChannelSpecsJson that is unparsable JSON resets to "" on hydration', async () => {
+    const raw = await createRawSqlJsDatabase();
+    const db = wrapExistingSqlJsDatabase(raw);
+    await SqlSessionRepository.create(db);
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'app-settings',
+      JSON.stringify({ enetChannelSpecsJson: '{not json' }),
+    ]);
+
+    const store = await SqlSettingsStore.create(db);
+    expect(store.getSettings().enetChannelSpecsJson).toBe('');
+  });
+
+  it('a valid, fully-in-range ENET settings row hydrates unchanged (repair is a no-op)', async () => {
+    const raw = await createRawSqlJsDatabase();
+    const db = wrapExistingSqlJsDatabase(raw);
+    await SqlSessionRepository.create(db);
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'app-settings',
+      JSON.stringify({ adapterType: 'enet', enetHost: '192.168.4.20', enetPort: 6_802, enetTesterAddress: 0xf1, enetTargetAddress: 0x10 }),
+    ]);
+
+    const store = await SqlSettingsStore.create(db);
+    const settings = store.getSettings();
+    expect(settings.adapterType).toBe('enet');
+    expect(settings.enetHost).toBe('192.168.4.20');
+    expect(settings.enetPort).toBe(6_802);
+    expect(settings.enetTesterAddress).toBe(0xf1);
+    expect(settings.enetTargetAddress).toBe(0x10);
+  });
 });

@@ -665,6 +665,117 @@ describe('EnetSessionEngine: response correlation (H2)', () => {
     expect(samples.some((s) => s.channel === 'engineOilC' && s.value === 35)).toBe(true);
     await session.stop();
   });
+
+  // -------------------------------------------------------------------------
+  // P4e-FIX2-core: H2 residual (Codex P4e-REV2 Part A "PARTIAL").
+  // -------------------------------------------------------------------------
+  it("a correct-address payload that fails to parse as UDS (empty `[]`) counts malformedResponses and leaves the pending request untouched", async () => {
+    vi.useFakeTimers();
+    const clock = new FakeClock();
+    const transport = new ScriptableTransport();
+    const session = createEnetSession(
+      transport,
+      config({ pollPlan: [{ channel: 'rpm', hz: 5 }], commandTimeoutMs: 2_000, testerPresentIntervalMs: 5_000 }),
+      () => clock.now(),
+    );
+    const samples: TelemetrySample[] = [];
+    session.onSample((sample) => samples.push(sample));
+    await startUntil(session, 'polling');
+    await advanceUntil(clock, () => transport.sentFrames.length >= 1);
+
+    // Correct addresses (source=ECU target address, target=tester), but an
+    // EMPTY UDS payload -- parseUdsResponse throws on this, yet it must NOT
+    // clear/reject the still-legitimately-outstanding rpm request.
+    transport.deliverRaw(
+      encodeFrame({ control: HSFZ_CONTROL.DIAGNOSTIC_REQ_RES, source: 0x12, target: 0xf4, payload: new Uint8Array(0) }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(session.getDiagnostics().malformedResponses).toBeGreaterThan(0);
+    expect(samples).toHaveLength(0);
+    expect(session.getDiagnostics().errorCount).toBe(0); // not treated as a channel error either.
+
+    // The real response, arriving afterward, still resolves the SAME (never-cleared) pending request.
+    transport.deliverRaw(
+      encodeFrame({
+        control: HSFZ_CONTROL.DIAGNOSTIC_REQ_RES,
+        source: 0x12,
+        target: 0xf4,
+        payload: Uint8Array.from([0x41, 0x0c, 0x1a, 0xf8]),
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(samples.some((s) => s.channel === 'rpm' && s.value === 1_726)).toBe(true);
+    await session.stop();
+  });
+
+  it('a correct-address short negative response (`7F 01`, too short to carry an NRC) counts malformedResponses and leaves the pending request untouched', async () => {
+    vi.useFakeTimers();
+    const clock = new FakeClock();
+    const transport = new ScriptableTransport();
+    const session = createEnetSession(
+      transport,
+      config({ pollPlan: [{ channel: 'rpm', hz: 5 }], commandTimeoutMs: 2_000, testerPresentIntervalMs: 5_000 }),
+      () => clock.now(),
+    );
+    const samples: TelemetrySample[] = [];
+    session.onSample((sample) => samples.push(sample));
+    await startUntil(session, 'polling');
+    await advanceUntil(clock, () => transport.sentFrames.length >= 1);
+
+    transport.deliverRaw(
+      encodeFrame({
+        control: HSFZ_CONTROL.DIAGNOSTIC_REQ_RES,
+        source: 0x12,
+        target: 0xf4,
+        payload: Uint8Array.from([0x7f, 0x01]), // negative response missing its NRC byte
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(session.getDiagnostics().malformedResponses).toBeGreaterThan(0);
+    expect(samples).toHaveLength(0);
+
+    transport.deliverRaw(
+      encodeFrame({
+        control: HSFZ_CONTROL.DIAGNOSTIC_REQ_RES,
+        source: 0x12,
+        target: 0xf4,
+        payload: Uint8Array.from([0x41, 0x0c, 0x1a, 0xf8]),
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(samples.some((s) => s.channel === 'rpm' && s.value === 1_726)).toBe(true);
+    await session.stop();
+  });
+
+  it('a diagnostic response arriving while no request is pending increments unmatchedResponses', async () => {
+    vi.useFakeTimers();
+    const clock = new FakeClock();
+    const transport = new ScriptableTransport();
+    const session = createEnetSession(
+      transport,
+      config({ pollPlan: [], testerPresentIntervalMs: 5_000 }), // no channels -> `pending` never gets set.
+      () => clock.now(),
+    );
+    await startUntil(session, 'polling');
+
+    expect(session.getDiagnostics().unmatchedResponses).toBe(0);
+    transport.deliverRaw(
+      encodeFrame({
+        control: HSFZ_CONTROL.DIAGNOSTIC_REQ_RES,
+        source: 0x12,
+        target: 0xf4,
+        payload: Uint8Array.from([0x41, 0x0c, 0x1a, 0xf8]),
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(session.getDiagnostics().unmatchedResponses).toBeGreaterThan(0);
+    await session.stop();
+  });
 });
 
 // ---------------------------------------------------------------------------

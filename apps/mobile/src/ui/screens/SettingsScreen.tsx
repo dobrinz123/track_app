@@ -603,7 +603,7 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
                       Tester address (hex)
                     </Text>
                     <TextInput
-                      style={styles.fieldInput}
+                      style={styles.hexFieldInput}
                       value={enetTesterAddressDraft}
                       onChangeText={setEnetTesterAddressDraft}
                       onBlur={commitEnetTesterAddressDraft}
@@ -621,7 +621,7 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
                       Target address (hex)
                     </Text>
                     <TextInput
-                      style={styles.fieldInput}
+                      style={styles.hexFieldInput}
                       value={enetTargetAddressDraft}
                       onChangeText={setEnetTargetAddressDraft}
                       onBlur={commitEnetTargetAddressDraft}
@@ -943,7 +943,14 @@ const styles = StyleSheet.create({
   toggleTextGroup: { flex: 1, gap: 2 },
   toggleTitle: { ...typography.body, color: colors.textPrimary, fontFamily: fontFamily.bodySemibold },
   fieldRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.md },
-  fieldLabel: { ...typography.body, color: colors.textSecondary },
+  // P4e-FIX2 L2 fix (binding, review finding): `flexShrink: 1` lets a long
+  // label (e.g. "Tester address (hex)") wrap onto a second line instead of
+  // refusing to shrink below its intrinsic width -- React Native's default
+  // `flexShrink: 0` was what let this row's total width exceed a 360pt
+  // screen. The paired `fieldInput`/`hexFieldInput` widths below are the
+  // floor this is NOT allowed to eat into (contracts.md: "labels shrink/wrap;
+  // inputs keep a minimum width").
+  fieldLabel: { ...typography.body, color: colors.textSecondary, flexShrink: 1 },
   fieldInput: {
     ...typography.body,
     color: colors.textPrimary,
@@ -954,6 +961,19 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.sm,
     paddingVertical: 6,
     minWidth: 140,
+    textAlign: 'right',
+  },
+  /** Narrower `fieldInput` variant for the ENET tester/target address fields (2 hex chars) -- the shared 140pt `fieldInput` floor was sized for host/port text, unnecessarily wide for a hex byte and part of the 360pt overflow risk. */
+  hexFieldInput: {
+    ...typography.body,
+    color: colors.textPrimary,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radii.sm,
+    backgroundColor: colors.surface,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 6,
+    minWidth: 64,
     textAlign: 'right',
   },
   fieldColumn: { gap: spacing.xs },

@@ -8,41 +8,33 @@ import {
   encodeFrame,
   HSFZ_CONTROL,
   HsfzFrameParser,
-  parseUdsResponse,
   SimulatedEnetTransport,
   UDS_NRC,
-  type HsfzFrame,
+  type Elm327State,
   type ObdTransport,
 } from '@circuit/core';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
-import { settingsStore } from '../../session/composition';
+import { settingsStore, telemetryProvider } from '../../session/composition';
 import { useSettings } from '../hooks/useSettings';
 import { EnetTcpTransport } from '../../session/enetTcpTransport';
+import { formatHexByte, parseHexByteDraft } from '../../session/enetSettingsValidation';
 import {
   buildDidProbeRequest,
-  formatHexByte,
-  parseHexByteDraft,
+  correlateDidProbeResponse,
+  evaluateDidProbeGating,
+  pushDidProbeLogEntry,
+  DID_PROBE_LOG_CAP,
+  type DidProbeLogEntry,
   type DidProbeMode,
-} from '../../session/enetSettingsValidation';
+  type DidProbeSentRequest,
+} from '../../session/didProbe';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'DidProbe'>;
 
 /** One request-timeout budget for the probe -- deliberately fixed (not settings-configurable): a manual, one-off diagnostic tool, not part of the polling engine's own configurable `commandTimeoutMs`. */
 const PROBE_TIMEOUT_MS = 3_000;
-const MAX_LOG_ENTRIES = 50;
-
-interface ProbeLogEntry {
-  id: number;
-  atLabel: string;
-  mode: DidProbeMode;
-  targetAddressHex: string;
-  requestHex: string;
-  ok: boolean;
-  detail: string;
-  roundTripMs?: number;
-}
 
 const NRC_NAMES: Readonly<Record<number, string>> = {
   [UDS_NRC.GENERAL_REJECT]: 'generalReject',
@@ -58,27 +50,36 @@ function nrcLabel(nrc: number): string {
   return name === undefined ? hex : `${hex} (${name})`;
 }
 
+interface ProbeOutcome {
+  status: 'matched' | 'unmatched';
+  rawHex: string;
+  nrc?: number;
+  roundTripMs: number;
+}
+
 /**
- * Fires ONE whitelisted UDS request over `transport` and resolves with the
- * raw response frame hex + parsed NRC (if any) once a diagnostic-control
- * response frame arrives (ack/alive-check/status frames are ignored --
- * they're not the answer this probe is waiting for), or rejects on timeout /
- * transport close / a malformed response. Connects and closes the transport
- * itself -- this screen never keeps a connection open between probes, same
- * "no retry, no persistence" spirit as the rest of this dev-only tool.
+ * Fires ONE whitelisted UDS request over `transport` and resolves once a
+ * diagnostic-control response frame arrives (ack/alive-check/status frames
+ * are ignored -- they're not the answer this probe is waiting for), or
+ * rejects on timeout / transport close. The frame is correlated to `sent`
+ * via `didProbe.ts`'s `correlateDidProbeResponse` (P4e-FIX2 M3, binding):
+ * addresses swapped + SID+0x40/0x7F echo + identifier echo -- a frame that
+ * fails correlation resolves as `'unmatched'`, NEVER as a match, so the
+ * caller can never log a stray/foreign frame as `OK`. Connects and closes
+ * the transport itself -- this screen never keeps a connection open between
+ * probes, same "no retry, no persistence" spirit as the rest of this
+ * dev-only tool.
  */
 async function sendOneProbeRequest(
   transport: ObdTransport,
-  testerAddress: number,
-  targetAddress: number,
+  sent: DidProbeSentRequest,
   pdu: Uint8Array,
-): Promise<{ rawHex: string; nrc?: number; roundTripMs: number }> {
+): Promise<ProbeOutcome> {
   const startedAtMs = Date.now();
   await transport.connect();
   try {
-    return await new Promise<{ rawHex: string; nrc?: number; roundTripMs: number }>((resolve, reject) => {
+    return await new Promise<ProbeOutcome>((resolve, reject) => {
       let settled = false;
-      const parser = new HsfzFrameParser();
 
       const finish = (fn: () => void): void => {
         if (settled) return;
@@ -93,9 +94,10 @@ async function sendOneProbeRequest(
         finish(() => reject(new Error(`DID probe timed out after ${PROBE_TIMEOUT_MS}ms (no response)`)));
       }, PROBE_TIMEOUT_MS);
 
+      const parser = new HsfzFrameParser();
       const unsubscribeData = transport.onData((chunk) => {
         if (settled) return;
-        let frames: HsfzFrame[];
+        let frames: ReturnType<HsfzFrameParser['push']>;
         try {
           frames = parser.push(binaryStringToBytes(chunk));
         } catch {
@@ -105,12 +107,13 @@ async function sendOneProbeRequest(
           if (frame.control !== HSFZ_CONTROL.DIAGNOSTIC_REQ_RES) continue; // ack/alive-check/status/etc. -- not the answer.
           const rawHex = bytesToHex(encodeFrame(frame));
           const roundTripMs = Date.now() - startedAtMs;
-          try {
-            const parsed = parseUdsResponse(frame.payload);
-            const nrc = parsed.kind === 'negative' ? parsed.nrc : undefined;
-            finish(() => resolve({ rawHex, ...(nrc === undefined ? {} : { nrc }), roundTripMs }));
-          } catch (error) {
-            finish(() => reject(error instanceof Error ? error : new Error(String(error))));
+          const correlation = correlateDidProbeResponse(sent, frame);
+          if (correlation.kind === 'matched') {
+            finish(() =>
+              resolve({ status: 'matched', rawHex, roundTripMs, ...(correlation.nrc === undefined ? {} : { nrc: correlation.nrc }) }),
+            );
+          } else {
+            finish(() => resolve({ status: 'unmatched', rawHex, roundTripMs }));
           }
           return;
         }
@@ -122,8 +125,8 @@ async function sendOneProbeRequest(
 
       const frame = encodeFrame({
         control: HSFZ_CONTROL.DIAGNOSTIC_REQ_RES,
-        source: testerAddress,
-        target: targetAddress,
+        source: sent.testerAddress,
+        target: sent.targetAddress,
         payload: pdu,
       });
       transport.send(bytesToBinaryString(frame));
@@ -138,47 +141,75 @@ async function sendOneProbeRequest(
  * ENET DID/PID probe: the empirical tool for discovering B58/DSC identifiers
  * (contracts.md ENET addendum) by sending ONE request at a time to a target
  * address and reading back the raw response. Every request is built by
- * `enetSettingsValidation.ts`'s `buildDidProbeRequest`, which re-checks the
- * SAME read-only whitelist (`{0x01, 0x22, 0x3E}`) the ENET session engine
- * itself enforces -- "the whitelist error is shown, not bypassed": a rejected
- * request never reaches a transport at all, it just renders inline like any
- * other input error. Talks to the same adapter settings (`enetHost`/
- * `enetPort`/`enetTesterAddress`) and honors `telemetrySimulate` (dev) the
- * same as the telemetry monitor, but owns its OWN one-shot transport --
- * independent of `telemetryProvider`'s continuous polling session, so probing
- * never interferes with (or requires) an active telemetry session.
+ * `didProbe.ts`'s `buildDidProbeRequest`, which re-checks the SAME read-only
+ * whitelist (`{0x01, 0x22, 0x3E}`) the ENET session engine itself enforces --
+ * "the whitelist error is shown, not bypassed": a rejected request never
+ * reaches a transport at all, it just renders inline like any other input
+ * error.
+ *
+ * P4e-FIX2 H2 fix (binding, "poll plan, probe & robustness amendment"):
+ * allowed ONLY while `telemetryEnabled && adapterType === 'enet'` AND the
+ * shared `telemetryProvider` is `idle`/`stopped`/`failed` (never while
+ * `connecting`/`initializing`/`polling`) -- the MHD adapter accepts one ECU
+ * client, so this screen never opens its own connection alongside an active
+ * polling session; `evaluateDidProbeGating` (`didProbe.ts`) is the single
+ * source of truth for that decision, re-checked both to disable the Send
+ * button AND again at the top of `send()` itself (defense in depth against a
+ * state change racing the button press). Uses `SimulatedEnetTransport` when
+ * `telemetrySimulate` is on (dev only), same as the telemetry monitor.
  */
 export function DidProbeScreen(_props: Props): React.JSX.Element {
   const settings = useSettings(settingsStore);
+  const [providerState, setProviderState] = React.useState<Elm327State>('idle');
   const [mode, setMode] = React.useState<DidProbeMode>('did');
   const [targetAddressDraft, setTargetAddressDraft] = React.useState(formatHexByte(settings.enetTargetAddress));
   const [requestHexDraft, setRequestHexDraft] = React.useState('');
   const [sending, setSending] = React.useState(false);
   const [error, setErrorText] = React.useState<string | null>(null);
-  const [log, setLog] = React.useState<ProbeLogEntry[]>([]);
+  const [log, setLog] = React.useState<DidProbeLogEntry[]>([]);
   const nextLogId = React.useRef(0);
 
-  function appendLog(entry: Omit<ProbeLogEntry, 'id' | 'atLabel'>): void {
-    const record: ProbeLogEntry = { ...entry, id: nextLogId.current, atLabel: new Date().toLocaleTimeString() };
+  React.useEffect(() => {
+    // `onStateChange` replays the current state synchronously on subscribe
+    // (telemetryProvider.ts's own binding semantics) -- gating is correct
+    // from the very first render, not just after the next transition.
+    return telemetryProvider.onStateChange((state) => setProviderState(state));
+  }, []);
+
+  const gating = evaluateDidProbeGating({
+    telemetryEnabled: settings.telemetryEnabled,
+    adapterType: settings.adapterType,
+    providerState,
+  });
+
+  function appendLog(entry: Omit<DidProbeLogEntry, 'id' | 'atEpochMs'>): void {
+    const record: DidProbeLogEntry = { ...entry, id: nextLogId.current, atEpochMs: Date.now() };
     nextLogId.current += 1;
-    setLog((prev) => [record, ...prev].slice(0, MAX_LOG_ENTRIES));
+    setLog((prev) => pushDidProbeLogEntry(prev, record));
   }
 
   async function send(): Promise<void> {
     setErrorText(null);
+    // Re-check gating here (not just the disabled Send button) -- a state
+    // change (e.g. telemetry starting to poll) racing the button press must
+    // never let a probe through.
+    if (!gating.allowed) {
+      setErrorText(gating.message);
+      return;
+    }
     const targetAddress = parseHexByteDraft(targetAddressDraft);
     if (targetAddress === null) {
       setErrorText('Target address: enter a hex byte, 00-FF');
       return;
     }
     const built = buildDidProbeRequest(mode, requestHexDraft);
-    if (!built.ok || built.pdu === null) {
+    if (!built.ok || built.pdu === null || built.sid === null || built.identifier === null) {
       setErrorText(built.error ?? 'Invalid request');
       appendLog({
         mode,
         targetAddressHex: formatHexByte(targetAddress),
         requestHex: requestHexDraft,
-        ok: false,
+        status: 'error',
         detail: built.error ?? 'Invalid request',
       });
       return;
@@ -196,20 +227,37 @@ export function DidProbeScreen(_props: Props): React.JSX.Element {
           })
         : new EnetTcpTransport({ host: settings.enetHost, port: settings.enetPort });
 
+    const sent: DidProbeSentRequest = {
+      mode,
+      sid: built.sid,
+      identifier: built.identifier,
+      testerAddress: settings.enetTesterAddress,
+      targetAddress,
+    };
+
     try {
-      const result = await sendOneProbeRequest(transport, settings.enetTesterAddress, targetAddress, built.pdu);
-      const detail =
-        result.nrc === undefined
-          ? `OK: ${result.rawHex}`
-          : `NRC ${nrcLabel(result.nrc)} -- raw: ${result.rawHex}`;
-      appendLog({
-        mode,
-        targetAddressHex: formatHexByte(targetAddress),
-        requestHex: requestHexDraft,
-        ok: true,
-        detail,
-        roundTripMs: result.roundTripMs,
-      });
+      const result = await sendOneProbeRequest(transport, sent, built.pdu);
+      if (result.status === 'unmatched') {
+        appendLog({
+          mode,
+          targetAddressHex: formatHexByte(targetAddress),
+          requestHex: requestHexDraft,
+          status: 'unmatched',
+          detail: `UNMATCHED (addresses/SID/identifier did not correlate) -- raw: ${result.rawHex}`,
+          roundTripMs: result.roundTripMs,
+        });
+      } else {
+        const detail =
+          result.nrc === undefined ? `OK: ${result.rawHex}` : `NRC ${nrcLabel(result.nrc)} -- raw: ${result.rawHex}`;
+        appendLog({
+          mode,
+          targetAddressHex: formatHexByte(targetAddress),
+          requestHex: requestHexDraft,
+          status: 'ok',
+          detail,
+          roundTripMs: result.roundTripMs,
+        });
+      }
     } catch (probeError) {
       const message = probeError instanceof Error ? probeError.message : String(probeError);
       setErrorText(message);
@@ -217,13 +265,15 @@ export function DidProbeScreen(_props: Props): React.JSX.Element {
         mode,
         targetAddressHex: formatHexByte(targetAddress),
         requestHex: requestHexDraft,
-        ok: false,
+        status: 'error',
         detail: message,
       });
     } finally {
       setSending(false);
     }
   }
+
+  const sendDisabled = sending || !gating.allowed;
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -236,6 +286,14 @@ export function DidProbeScreen(_props: Props): React.JSX.Element {
           {' '}0x01 (OBD PID), 0x22 (ReadDataByIdentifier) and 0x3E (TesterPresent) can ever be sent -- anything
           else is refused, not bypassed.
         </Text>
+
+        {gating.allowed ? null : (
+          <View style={styles.disabledCard}>
+            <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+              {gating.message}
+            </Text>
+          </View>
+        )}
 
         <View style={styles.card}>
           <View style={styles.fieldRow}>
@@ -251,6 +309,7 @@ export function DidProbeScreen(_props: Props): React.JSX.Element {
               autoCapitalize="characters"
               autoCorrect={false}
               keyboardType="numbers-and-punctuation"
+              editable={gating.allowed}
               accessibilityLabel="DID probe target address, hex byte"
             />
           </View>
@@ -268,8 +327,9 @@ export function DidProbeScreen(_props: Props): React.JSX.Element {
                   key={opt.value}
                   style={[styles.segment, active && styles.segmentActive]}
                   onPress={() => setMode(opt.value)}
+                  disabled={!gating.allowed}
                   accessibilityRole="button"
-                  accessibilityState={{ selected: active }}
+                  accessibilityState={{ selected: active, disabled: !gating.allowed }}
                   accessibilityLabel={`Probe mode: ${opt.label}${active ? ', selected' : ''}`}
                 >
                   <Text style={[styles.segmentText, active && styles.segmentTextActive]} maxFontSizeMultiplier={1.3}>
@@ -293,6 +353,7 @@ export function DidProbeScreen(_props: Props): React.JSX.Element {
               autoCapitalize="characters"
               autoCorrect={false}
               keyboardType="numbers-and-punctuation"
+              editable={gating.allowed}
               accessibilityLabel="DID probe request hex"
             />
           </View>
@@ -304,12 +365,12 @@ export function DidProbeScreen(_props: Props): React.JSX.Element {
           )}
 
           <Pressable
-            style={[styles.button, sending && styles.buttonDisabled]}
+            style={[styles.button, sendDisabled && styles.buttonDisabled]}
             onPress={() => void send()}
-            disabled={sending}
+            disabled={sendDisabled}
             accessibilityRole="button"
             accessibilityLabel="Send DID probe request"
-            accessibilityState={{ disabled: sending }}
+            accessibilityState={{ disabled: sendDisabled }}
           >
             <Text style={styles.buttonText} maxFontSizeMultiplier={1.3}>
               {sending ? 'Sending…' : 'Send'}
@@ -318,7 +379,7 @@ export function DidProbeScreen(_props: Props): React.JSX.Element {
         </View>
 
         <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
-          LOG (last {MAX_LOG_ENTRIES})
+          LOG (last {DID_PROBE_LOG_CAP})
         </Text>
         {log.length === 0 ? (
           <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
@@ -328,11 +389,16 @@ export function DidProbeScreen(_props: Props): React.JSX.Element {
           log.map((entry) => (
             <View key={entry.id} style={styles.logRow}>
               <Text style={styles.logHeader} maxFontSizeMultiplier={1.3}>
-                {entry.atLabel} · {entry.mode === 'did' ? '0x22' : '0x01'} {entry.requestHex} → {entry.targetAddressHex}
+                {new Date(entry.atEpochMs).toLocaleTimeString()} · {entry.mode === 'did' ? '0x22' : '0x01'}{' '}
+                {entry.requestHex} → {entry.targetAddressHex}
                 {entry.roundTripMs === undefined ? '' : ` · ${entry.roundTripMs}ms`}
               </Text>
               <Text
-                style={[styles.logDetail, !entry.ok && styles.logDetailError]}
+                style={[
+                  styles.logDetail,
+                  entry.status === 'error' && styles.logDetailError,
+                  entry.status === 'unmatched' && styles.logDetailUnmatched,
+                ]}
                 maxFontSizeMultiplier={1.3}
               >
                 {entry.detail}
@@ -351,6 +417,13 @@ const styles = StyleSheet.create({
   title: { ...typography.title, color: colors.textPrimary },
   helperText: { ...typography.caption, color: colors.textMuted, lineHeight: 18 },
   sectionLabel: { ...typography.label, color: colors.textMuted, marginTop: spacing.sm },
+  disabledCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.warning,
+    padding: spacing.md,
+  },
   card: {
     backgroundColor: colors.surface,
     borderRadius: radii.md,
@@ -408,4 +481,5 @@ const styles = StyleSheet.create({
   logHeader: { ...typography.caption, color: colors.textMuted, fontFamily: fontFamily.monoSemibold },
   logDetail: { ...typography.caption, color: colors.textSecondary },
   logDetailError: { color: colors.danger },
+  logDetailUnmatched: { color: colors.warning },
 });
