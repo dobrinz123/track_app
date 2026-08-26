@@ -42,6 +42,8 @@ export class RealSessionFacade implements SessionFacade {
   private readonly listeners = new Set<(s: FacadeState) => void>();
   private latest: FacadeState;
   private lastError: string | null = null;
+  /** The most recent guarded command's already-error-handled promise (CN-FIX4) -- see `whenCommandsSettled()` below. */
+  private pendingCommand: Promise<void> = Promise.resolve();
   /** Unsubscribes from `controller` -- retained (C6 fix) so `dispose()` can detach this facade instead of leaking a subscription past the point composition.ts stops using it (e.g. a DevReplay swap). */
   private readonly controllerUnsubscribe: () => void;
 
@@ -110,11 +112,23 @@ export class RealSessionFacade implements SessionFacade {
    * flashes the old message away first.
    */
   private guard(name: string, work: () => Promise<void>): void {
-    work().catch((error: unknown) => {
+    // CN-FIX4 (facade boundary amendment, binding): the settled promise is
+    // RETAINED (`pendingCommand`) as well as error-handled, so
+    // `SwappableFacade` can hold `lifecycleLock` across the command's real
+    // async work -- the provider start/stop and persistence that happen long
+    // after this `void` method has returned. Already `.catch()`-ed here, so
+    // `pendingCommand` never rejects and never becomes an unhandled
+    // rejection for the lock section that awaits it.
+    this.pendingCommand = work().catch((error: unknown) => {
       this.lastError = errorMessage(name, error);
       this.latest = { ...this.latest, lastError: this.lastError };
       this.emitLatest();
     });
+  }
+
+  /** See `SessionFacade.whenCommandsSettled`. Resolves immediately when no command's async work is outstanding. */
+  whenCommandsSettled(): Promise<void> {
+    return this.pendingCommand;
   }
 
   startPreflight(): void {

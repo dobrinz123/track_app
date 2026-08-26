@@ -89,6 +89,22 @@ function gateErrorMessage(error: unknown): string {
 const SESSION_COMPLETE_BARRIER_CAP_MS = 2_000;
 
 /**
+ * THE single ordering boundary for session-lifecycle work (contracts.md's
+ * "Multi-circuit selection — lifecycle lock amendment" + "facade boundary
+ * amendment", both binding) -- see `lifecycleLock.ts`'s own module doc
+ * comment for the mutex semantics, and `unlockedRebuildProductionController()`
+ * further down for the composition-level rules every section follows.
+ *
+ * Declared HERE, above `SwappableFacade`, because the facade wrapper itself
+ * is now one of its users: `beginCalibration()`/`endSession()` acquire it
+ * around the inner command AND the asynchronous work that command starts
+ * (provider start/stop, persistence), so a controller can never be `idle` on
+ * paper while genuinely starting, and a delete-all can never outrun an
+ * in-flight session end.
+ */
+const lifecycleLock = createLifecycleLock();
+
+/**
  * Telemetry addendum — P4b amendment (binding): generic settle-or-cap relay
  * for facade-state broadcasts. Every state EXCEPT `'sessionComplete'` passes
  * through to `emit` immediately, unchanged. `'sessionComplete'` is held
@@ -286,8 +302,45 @@ class SwappableFacade implements SessionFacade {
         for (const listener of this.listeners) listener(next);
       });
   }
+  /**
+   * A/N3 fix (contracts.md's facade boundary amendment, binding, ticket
+   * CN-FIX4): dispatches `command` to `inner` and holds `lifecycleLock`
+   * until the asynchronous work that command started has SETTLED
+   * (`SessionFacade.whenCommandsSettled`), not merely until the synchronous
+   * dispatch returned.
+   *
+   * Without this, `beginCalibration()` left `SessionController.start()`
+   * awaiting provider startup while the controller still reported `idle`:
+   * a `selectCircuit()` issued in that window passed the idle allow-list,
+   * persisted the other circuit, and disposed the controller that was still
+   * starting. Now the selection queues behind this section and is refused.
+   *
+   * Errors never reach here (a `RealSessionFacade` command settles through
+   * its own `guard`, surfacing in `FacadeState.lastError`); a rejection from
+   * anywhere else is surfaced the same way the preflight gate's is, so it
+   * can never become an unhandled rejection or wedge the lock.
+   */
+  private runLockedCommand(name: string, command: () => void): void {
+    void lifecycleLock
+      .run(async () => {
+        // Captured INSIDE the section: `inner` may have been swapped by
+        // whatever ran before us (a rebuild, a DevReplay transition), and
+        // the command must be dispatched to -- and awaited on -- the facade
+        // that is current NOW.
+        const target = this.inner;
+        command();
+        await target.whenCommandsSettled?.();
+      })
+      .catch((error: unknown) => {
+        if (this.current === undefined) return;
+        const next = { ...this.current, lastError: `${name} failed: ${error instanceof Error ? error.message : String(error)}` };
+        this.current = next;
+        for (const listener of this.listeners) listener(next);
+      });
+  }
+
   beginCalibration(): void {
-    this.inner.beginCalibration();
+    this.runLockedCommand('beginCalibration', () => this.inner.beginCalibration());
   }
   acceptCalibration(): void {
     this.inner.acceptCalibration();
@@ -299,8 +352,15 @@ class SwappableFacade implements SessionFacade {
     this.inner.arm();
   }
   endSession(): void {
+    // The telemetry-shutdown hook still fires SYNCHRONOUSLY here, before the
+    // lock is even acquired (F2 fix, WPT3, binding: shutdown starts at the
+    // earliest point this wrapper can act, independent of the controller's
+    // own persistence) -- telemetry never gates, and is never gated by, lap
+    // timing. Only the controller-side end is serialized, so a delete-all
+    // queued behind it observes its session/checkpoint persistence complete
+    // (CN-FIX4 item C).
     this.endSessionSideEffect?.();
-    this.inner.endSession();
+    this.runLockedCommand('endSession', () => this.inner.endSession());
   }
   pause(): void {
     this.inner.pause();
@@ -788,7 +848,19 @@ let replayController: SessionController | null = null;
 // ---------------------------------------------------------------------------
 startLifecycleListener({
   onBackground: () => {
-    activeController?.checkpointNow().catch((error: unknown) => {
+    // C fix (contracts.md's facade boundary amendment, binding, ticket
+    // CN-FIX4): checkpoint ONLY a controller that is genuinely mid-session.
+    // `SessionController.checkpointNow()` writes whenever its `sessionId` is
+    // non-null -- including a controller sitting in `sessionComplete` -- so
+    // a background transition after a completed session (or after
+    // `deleteAllStoredUserData()` reported success) used to re-create a
+    // checkpoint row for data the user had just deleted. An idle/terminal
+    // controller has nothing worth checkpointing by definition: its laps are
+    // already persisted by `endSession()`.
+    const ctrl = activeController;
+    if (ctrl === null) return;
+    if (!MID_SESSION_STATES.has(currentControllerState(ctrl))) return;
+    ctrl.checkpointNow().catch((error: unknown) => {
       console.warn('[composition] background checkpoint failed', error);
     });
   },
@@ -1003,15 +1075,14 @@ function installProductionController(): void {
   activateProductionFacade();
 }
 
-/**
- * THE single ordering boundary (contracts.md's "Multi-circuit selection —
- * lifecycle lock amendment", binding, ticket CN-FIX3) -- see
- * `lifecycleLock.ts`'s own module doc comment. Replaces the three separate
- * mechanisms this module used to run (`selectionChain`, `rebuildInFlight`,
- * `withDevReplayLock`): every operation that reads or replaces the production
- * controller now runs ENTIRELY inside one `lifecycleLock.run(...)` section,
- * so a controller captured by one operation can never be disposed by another
- * mid-flight, and no two operations can commit different circuits.
+/*
+ * `lifecycleLock` (declared near the top of this file, above `SwappableFacade`)
+ * replaces the three separate mechanisms this module used to run
+ * (`selectionChain`, `rebuildInFlight`, `withDevReplayLock`): every operation
+ * that reads or replaces the production controller runs ENTIRELY inside one
+ * `lifecycleLock.run(...)` section, so a controller captured by one operation
+ * can never be disposed by another mid-flight, and no two operations can
+ * commit different circuits.
  *
  * Call rule (enforced by construction throughout this file): code already
  * INSIDE a section calls the `unlocked*` routines below, never the locked
@@ -1025,7 +1096,6 @@ function installProductionController(): void {
  * bootstrap does needs it -- until `ready()` resolves, `facade` is still the
  * inert `PendingFacade` and every locked operation is parked on `ready()`.
  */
-const lifecycleLock = createLifecycleLock();
 
 /**
  * Disposes the current production controller/facade and installs a fresh one.
@@ -1173,6 +1243,15 @@ export interface SelectCircuitResult {
  * rebuild treats as "safe to replace the controller") still pass.
  */
 const SELECTABLE_STATES = new Set<SessionState>(['idle', 'sessionComplete', 'error']);
+
+/**
+ * Genuinely mid-session (a drive is under way): the states in which tearing
+ * anything down under the driver is unacceptable. Used by the app-background
+ * checkpoint hook (checkpoint ONLY these) and by `deleteAllStoredUserData()`
+ * (refuse for these) -- contracts.md's facade boundary amendment, binding.
+ * `'paused'` counts unconditionally, as it does everywhere else in this file.
+ */
+const MID_SESSION_STATES = new Set<SessionState>(['outLap', 'timing', 'inPit', 'paused']);
 
 /** Applies a validated circuit selection to the persisted settings ONLY -- no bootstrap-await, no session-active refusal, no serialization. Shared by the public `selectCircuit()` below and `runBootstrap()`'s own recovery-circuit switch, which CANNOT go through `selectCircuit()` itself: that function awaits `ready()` (i.e. `bootstrapPromise`), and calling it from inside `runBootstrap()` -- the very function that promise is for -- would deadlock forever. */
 function applySelectedCircuit(entry: BundledCircuit): void {
@@ -1631,16 +1710,26 @@ export async function resumeRecovery(): Promise<boolean> {
       // section already holds.
       const recoveryEntry = circuitCatalog.get(info.circuitId);
       if (recoveryEntry === null) {
-        // Defensive only: bootstrap validated this id against the catalog
-        // before ever offering the recovery.
+        // E fix (contracts.md's facade boundary amendment, binding, ticket
+        // CN-FIX4): an unbundled recovery circuit is DISCARDED -- never
+        // resumed on whatever happens to be selected instead. Restoring a
+        // checkpoint into another circuit's geometry would produce
+        // meaningless (and silently wrong) lap timing. Bootstrap already
+        // refuses to offer such a recovery, so this is the defensive path
+        // for a catalog that changed underneath a live banner; it clears
+        // both keys exactly like `discardRecovery()` does.
         console.warn(
-          `[composition] resumeRecovery: recovery circuit "${info.circuitId}" is not bundled -- resuming on the current selection`,
+          `[composition] resumeRecovery: recovery circuit "${info.circuitId}" is not bundled -- discarding the recovery instead of resuming on another circuit`,
         );
-      } else if (recoveryEntry.profile.circuitId !== settingsStore.getSettings().selectedCircuitId) {
+        setPendingRecovery(null);
+        setRecoveryNotice('The recovered session was recorded on a circuit this app no longer bundles, so it was discarded.');
+        if (database !== null) await setActiveSession(database, null);
+        return false;
+      }
+      if (recoveryEntry.profile.circuitId !== settingsStore.getSettings().selectedCircuitId) {
         await unlockedApplySelection(recoveryEntry);
       }
-      const recoveryCircuitId =
-        recoveryEntry?.profile.circuitId ?? resolveSelectedCircuit(settingsStore.getSettings()).profile.circuitId;
+      const recoveryCircuitId = recoveryEntry.profile.circuitId;
       // Rebuild if the built controller isn't already configured for the
       // recovery circuit (L1 fix: compared against the RESOLVED id). Inside
       // the lock, so the controller read immediately below is the one this
@@ -1717,6 +1806,8 @@ export interface AggregatedDeleteUserDataResult extends DeleteUserDataResult {
   /** Bundled circuit ids whose `deleteAllUserData()` call REJECTED (not just returned `ok: false`) -- empty unless a per-circuit delete actually threw. */
   failedCircuitIds: string[];
   errorText: string | null;
+  /** `'SESSION_ACTIVE'` when the wipe was REFUSED outright because a session is genuinely mid-drive (CN-FIX4, facade boundary amendment) -- nothing was read, deleted, or verified on that path. */
+  reason?: 'SESSION_ACTIVE';
 }
 
 export async function deleteAllStoredUserData(): Promise<AggregatedDeleteUserDataResult> {
@@ -1729,6 +1820,37 @@ export async function deleteAllStoredUserData(): Promise<AggregatedDeleteUserDat
 
 async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDataResult> {
   const { repository: repo } = await ready();
+  // C fix (contracts.md's facade boundary amendment, binding, ticket
+  // CN-FIX4): durability. Two things had to change for "delete-all means
+  // deleted" to actually hold.
+  //
+  // 1. REFUSE while a session is genuinely mid-drive. A live controller goes
+  //    on writing checkpoints/laps/PBs by design, so a wipe underneath it
+  //    would be re-populated moments later -- and silently tearing the
+  //    driver's session down instead is not this action's job.
+  if (activeController !== null && MID_SESSION_STATES.has(currentControllerState(activeController))) {
+    return {
+      ok: false,
+      remainingSessionCount: 0,
+      referenceLapCleared: false,
+      failedCircuitIds: [],
+      reason: 'SESSION_ACTIVE',
+      errorText: 'a session is currently active -- end it before deleting all data',
+    };
+  }
+  // 2. Otherwise: drop any pending recovery and REPLACE the production
+  //    controller with a fresh, idle one BEFORE deleting anything. A
+  //    terminal (`sessionComplete`) controller still holds a `sessionId`
+  //    and a full lap set, so anything that later touches it --
+  //    `checkpointNow()` from a background transition, a straggler
+  //    `endSession()` persistence path -- would re-create rows this wipe
+  //    just removed. A fresh controller has no session identity at all, so
+  //    there is nothing left to re-persist. (`endSession()` itself is now
+  //    serialized on this same lock, so an in-flight one has already
+  //    completed by the time this section runs.)
+  setPendingRecovery(null);
+  setRecoveryNotice(null);
+  await unlockedRebuildProductionController();
   // Multi-circuit selection addendum (ticket CN-W3): delete-all spans EVERY
   // bundled circuit, not just the currently selected one -- `deleteUserData`
   // itself is a single per-userId wipe (not circuit-scoped), so this loop's
@@ -2050,7 +2172,16 @@ export async function runDevReplayScenario(
   return lifecycleLock.run(async (): Promise<DevReplayScenarioResult> => {
     const entry = circuitCatalog.get(scenario.circuitId);
     if (entry === null) return { ok: false, reason: 'UNKNOWN_CIRCUIT' };
+    // D fix (contracts.md's facade boundary amendment, binding, ticket
+    // CN-FIX4): `CANCELLED` means NO side effects -- checked at section
+    // entry (this run may have waited behind other lifecycle work and be
+    // stale before it even begins), again before the selection write, and
+    // again before/after the install below. Previously the first check came
+    // after the restore, the selection write and the controller rebuild, so
+    // a cancelled run still left the fixture's circuit selected.
+    if (isCancelled()) return { ok: false, reason: 'CANCELLED' };
     await ready();
+    if (isCancelled()) return { ok: false, reason: 'CANCELLED' };
 
     // C6 fix: restore production (disposing any still-active replay
     // controller) before building a new one, every time -- so switching
@@ -2065,6 +2196,10 @@ export async function runDevReplayScenario(
     // History/PB and Detail all agree with the replay being driven.
     const refusal = refuseSelectionIfSessionActive();
     if (refusal !== null) return { ok: false, reason: 'SESSION_ACTIVE' };
+    // The last point at which nothing has been written yet: the selection
+    // write (settings + history store + controller rebuild) is the first
+    // real side effect this function has.
+    if (isCancelled()) return { ok: false, reason: 'CANCELLED' };
     await unlockedApplySelection(entry);
 
     const samples = scenario.build(entry.profile);

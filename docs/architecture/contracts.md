@@ -488,3 +488,22 @@ left ordering holes. Replaced by ONE ordering boundary:
   the same lock, after any in-flight scenario.
 - Status labels never render the bare word "official" for any schema-permitted status value:
   `official` maps to the neutral label "source-declared" (it is still not verified by the app).
+
+### Multi-circuit selection — facade boundary amendment (2026-08-26, binding, after Codex CN-REV4)
+- Every facade command that can move the controller — `beginCalibration`, `startSession`,
+  `endSession`, recovery resume/discard — runs INSIDE `lifecycleLock` (the wrapper acquires it
+  around the inner call, including the provider start/stop awaits). A selection queued behind a
+  start therefore observes a non-idle controller and is refused; a delete-all queued behind an
+  `endSession` observes its persistence completed.
+- `SessionController.start()` re-checks `disposed` after every await and aborts without
+  subscribing, starting a session, or persisting if the controller was disposed meanwhile
+  (`@circuit/core`, minimal change, pinned by a test).
+- Delete-all: refused with `SESSION_ACTIVE` while the controller is mid-session; otherwise, inside
+  the lock, it clears pending recovery, disposes the production controller and installs a fresh
+  idle one BEFORE deleting, so no terminal controller can later re-persist a session/checkpoint.
+- The app-background checkpoint hook checkpoints only a controller that is mid-session
+  (`outLap`/`timing`/`inPit`/`paused`) — never idle, `sessionComplete` or `error`.
+- DevReplay: a cancelled run has NO side effects — cancellation is checked before restore, before
+  the selection write and before install; `CANCELLED` means settings/history/controller untouched.
+- Recovery whose circuit is not bundled is discarded (both keys cleared, banner cleared) — no
+  fallback to the selection.

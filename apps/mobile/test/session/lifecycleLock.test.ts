@@ -49,6 +49,46 @@ describe('lifecycleLock (ticket CN-FIX3)', () => {
     await expect(lock.run(async () => 'after')).resolves.toBe('after');
   });
 
+  /**
+   * ticket CN-FIX4 (item F) -- pins the DOCUMENTED limit of the re-entrancy
+   * guard, so nobody later assumes `run()` protects them everywhere.
+   *
+   * A `run()` issued from a section's POST-`await` continuation is
+   * indistinguishable, in JavaScript, from a legitimate concurrent call that
+   * must queue: both observe `isHeld() === true` from an unrelated task, and
+   * there is no async-context propagation under Hermes to tell them apart.
+   * Refusing on `isHeld()` alone would break the queueing this lock exists
+   * for, so it is NOT refused -- it queues behind the caller itself and never
+   * runs. That is why the composition-level rule is structural: a section
+   * calls `unlocked*` routines, never a locked wrapper. This test asserts the
+   * hazard is real (the nested section never runs, the outer never settles),
+   * which is exactly why the rule must be followed.
+   */
+  it('a POST-await re-entrant run() is NOT refused -- it self-deadlocks, which is why sections must call unlocked* routines instead', async () => {
+    const lock = createLifecycleLock();
+    let innerRan = false;
+    let outerSettled = false;
+
+    // Deliberately not awaited: this promise never settles, by design.
+    void lock
+      .run(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        // By here the section's synchronous body is long gone, so the
+        // sync-re-entry guard cannot see this call.
+        await lock.run(async () => {
+          innerRan = true;
+        });
+      })
+      .then(() => {
+        outerSettled = true;
+      });
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(innerRan).toBe(false);
+    expect(outerSettled).toBe(false);
+    expect(lock.isHeld()).toBe(true);
+  });
+
   it('a rejected section propagates its error AND releases the lock for the next queued section', async () => {
     const lock = createLifecycleLock();
     const order: string[] = [];

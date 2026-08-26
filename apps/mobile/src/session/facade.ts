@@ -93,4 +93,22 @@ export interface SessionFacade {
   pause(): void;
   /** Resumes a paused session. */
   resume(): void;
+
+  /**
+   * Resolves once the asynchronous work started by the most recent command
+   * has settled (succeeded OR failed) -- contracts.md's "Multi-circuit
+   * selection — facade boundary amendment" (binding, ticket CN-FIX4).
+   *
+   * `SessionFacade`'s commands are deliberately fire-and-forget `void`
+   * methods (screens dispatch and observe state, they never await), but the
+   * work behind `beginCalibration()`/`endSession()` is genuinely async
+   * (provider start/stop, persistence) and the controller reports a
+   * pre-command state for its whole duration. `composition.ts`'s
+   * `SwappableFacade` needs to hold `lifecycleLock` across that window, so
+   * an implementation that HAS such work exposes it here. Never rejects.
+   *
+   * Optional: implementations whose commands are fully synchronous (the
+   * scripted mock, the inert pending placeholder) simply omit it.
+   */
+  whenCommandsSettled?(): Promise<void>;
 }

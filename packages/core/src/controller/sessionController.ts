@@ -429,10 +429,32 @@ export class SessionController {
    * guard.
    */
   async start(phase: 'calibration' | 'session'): Promise<void> {
-    if (this.sessionId === null) {
+    // CN-FIX4 (contracts.md's "Multi-circuit selection — facade boundary
+    // amendment", binding): `disposed` is re-checked after EVERY await
+    // below. A start is not instantaneous -- it awaits reference-lap I/O
+    // and, above all, `locationProvider.start()` -- and the controller
+    // still reports `idle` for that whole window, so an app-side lifecycle
+    // operation (circuit change, coaching rebuild, delete-all) can legally
+    // `dispose()` it mid-start. Before this guard the awaited start then
+    // resumed and installed a sample subscription on the SHARED provider
+    // that `dispose()` had just detached from, moved a disposed controller
+    // into calibration, started its watchdog, and persisted a session
+    // pointer for a session nothing was driving. Each check below aborts
+    // cleanly: no subscription, no session, no persistence.
+    if (this.disposed) return;
+    const assignedSessionIdHere = this.sessionId === null;
+    if (assignedSessionIdHere) {
       this.sessionId = `${this.deps.userId}--${randomToken()}`;
       this.sessionStartedAtUtc = new Date().toISOString();
     }
+
+    /** Undoes the session identity THIS call minted, so an aborted start leaves nothing for `checkpointNow()`/`endSession()` to persist later. A session id restored from a checkpoint (recovery) is never touched. */
+    const abortStart = (): void => {
+      if (assignedSessionIdHere) {
+        this.sessionId = null;
+        this.sessionStartedAtUtc = null;
+      }
+    };
 
     if (phase === 'session') {
       // Pure repository I/O -- doesn't touch `core.state`/`mode`, so its
@@ -440,9 +462,20 @@ export class SessionController {
       // done here so `this.currentReference`/`this.pbMs` are ready by the
       // time the CALIBRATION_ACCEPTED dispatch below runs.
       await this.loadReferenceForSession();
+      if (this.disposed) {
+        abortStart();
+        return;
+      }
     }
 
     await this.ensureProviderRunning();
+    if (this.disposed) {
+      // `ensureProviderRunning()` itself already declined to subscribe (see
+      // its own disposed guard) and stopped whatever it started, so there is
+      // nothing to unwind here beyond the session identity.
+      abortStart();
+      return;
+    }
 
     this.core.dispatch({ type: 'START_PREFLIGHT' });
     this.core.dispatch({ type: 'PREFLIGHT_PASSED' });
@@ -709,6 +742,15 @@ export class SessionController {
   private async ensureProviderRunning(): Promise<void> {
     if (!this.providerRunning) {
       await this.deps.locationProvider.start();
+      // CN-FIX4 (facade boundary amendment, binding): disposed WHILE the
+      // provider was starting. `dispose()` has already run its own
+      // stop/detach against a provider that was not yet running, so stop the
+      // one this call just started and never install a subscription -- a
+      // disposed controller must not receive another sample.
+      if (this.disposed) {
+        await this.deps.locationProvider.stop().catch(() => undefined);
+        return;
+      }
       if (this.providerUnsubscribe !== null) {
         this.providerUnsubscribe();
         this.providerUnsubscribe = null;
