@@ -194,6 +194,7 @@ fabrication + bench tests.
   this playbook supersedes it where they disagree.
 - `graphify-out/` — knowledge graph of the whole codebase
   (`/graphify query "<question>"` answers architecture questions cheaply).
+- `docs/roadmap/phase-5-llm-corner-analysis.md` — WHY telemetry exists and what to build on it (corner metrics → car envelope → opt-in LLM analysis); read before telemetry/coaching/export work.
 - Memory (`~/.claude/projects/.../memory/`) — cross-session facts incl. hard
   constraints (offline mandate, bundle id `app.circuittimer.tmr`, nothing
   labeled "official", ODbL attribution never deleted).
