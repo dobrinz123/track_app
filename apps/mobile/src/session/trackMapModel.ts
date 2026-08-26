@@ -109,3 +109,175 @@ export function fitCenterline(points: readonly LocalPoint[], containerAspect: nu
     },
   };
 }
+
+/** Rotates a local-frame point 90 degrees ((e, n) -> (n, -e)) -- the F1 auto-rotate
+ * transform. Pure. */
+export function rotatePoint90(point: LocalPoint): LocalPoint {
+  return { e: point.n, n: -point.e };
+}
+
+/** `fitCenterline`'s result, plus whether every point `project` accepts is first
+ * rotated 90 degrees (F1 auto-rotate to fit). */
+export interface AutoRotatedCenterlineFit extends CenterlineFit {
+  rotated: boolean;
+}
+
+/**
+ * F1 auto-rotate to fit: wraps `fitCenterline` so a PORTRAIT track (bounding-box
+ * `spanN > spanE`) is rotated 90 degrees before fitting -- its long axis then lies
+ * along the container's long axis instead of being letterboxed into a thin band.
+ * `project` transparently rotates its input the same way, so callers always pass
+ * ORIGINAL local-frame points and never need to know rotation happened. A LANDSCAPE
+ * (or square) track (`spanN <= spanE`) is fit unrotated, exactly as `fitCenterline`
+ * already does -- `fitCenterline` itself is untouched (its own pinned tests keep
+ * passing unchanged). Pure.
+ */
+export function fitCenterlineAutoRotated(
+  points: readonly LocalPoint[],
+  containerAspect: number,
+): AutoRotatedCenterlineFit {
+  const rawBounds = computeBounds(points);
+  const rotated = rawBounds.maxN - rawBounds.minN > rawBounds.maxE - rawBounds.minE;
+  const framePoints = rotated ? points.map(rotatePoint90) : points;
+  const innerFit = fitCenterline(framePoints, containerAspect);
+  return {
+    bounds: innerFit.bounds,
+    rotated,
+    project(point: LocalPoint): ContainerFraction {
+      return innerFit.project(rotated ? rotatePoint90(point) : point);
+    },
+  };
+}
+
+/**
+ * F3 densify: linearly interpolates `centerline` to ~2x its point count (inserting one
+ * midpoint between every consecutive pair) when it has fewer than `minPoints` points --
+ * makes segments short so a decimated/connected outline (`buildOutlineSegments`) looks
+ * smooth through curves instead of faceted. A no-op (copied) once `centerline` already
+ * has `minPoints` or more points, or has fewer than 2 (nothing to interpolate between).
+ * Pure -- total path length (sum of consecutive-point distances) is preserved exactly,
+ * since each inserted point sits precisely halfway along its original segment.
+ */
+export function densifyCenterline(centerline: readonly LocalPoint[], minPoints = 250): LocalPoint[] {
+  if (centerline.length < 2 || centerline.length >= minPoints) return [...centerline];
+  const result: LocalPoint[] = [];
+  for (let index = 0; index < centerline.length - 1; index += 1) {
+    const a = centerline[index];
+    const b = centerline[index + 1];
+    if (a === undefined || b === undefined) continue;
+    result.push(a);
+    result.push({ e: (a.e + b.e) / 2, n: (a.n + b.n) / 2 });
+  }
+  const last = centerline[centerline.length - 1];
+  if (last !== undefined) result.push(last);
+  return result;
+}
+
+/** A drawable segment of the connected circuit outline (F2), in container pixels: a
+ * thin line `lengthPx` long, starting at `(x, y)`, rotated `angleDeg` degrees around its
+ * left-center origin (screen convention: `angleDeg` grows clockwise from the positive-x
+ * axis, since `y` grows downward). */
+export interface OutlineSegment {
+  x: number;
+  y: number;
+  lengthPx: number;
+  angleDeg: number;
+}
+
+/** Angle (screen-space degrees, `atan2` convention) from container-fraction point `a`
+ * to `b`, given the container's pixel size -- shared by `buildOutlineSegments` and the
+ * F5 direction chevron so both compute on-screen direction the same way. Pure. */
+export function segmentAngleDeg(a: ContainerFraction, b: ContainerFraction, containerW: number, containerH: number): number {
+  const dx = (b.xFrac - a.xFrac) * containerW;
+  const dy = (b.yFrac - a.yFrac) * containerH;
+  return (Math.atan2(dy, dx) * 180) / Math.PI;
+}
+
+/**
+ * F2 connected outline: turns already-fitted (container-fraction) points into thin
+ * line segments joining each consecutive pair -- replaces the old dot-cloud outline.
+ * `containerW`/`containerH` are the map container's actual pixel size (segment lengths
+ * are pixel lengths, positioned absolutely). Pure; `fittedPoints.length - 1` segments
+ * (0 for fewer than 2 points).
+ */
+export function buildOutlineSegments(
+  fittedPoints: readonly ContainerFraction[],
+  containerW: number,
+  containerH: number,
+): OutlineSegment[] {
+  const segments: OutlineSegment[] = [];
+  for (let index = 0; index < fittedPoints.length - 1; index += 1) {
+    const a = fittedPoints[index];
+    const b = fittedPoints[index + 1];
+    if (a === undefined || b === undefined) continue;
+    const ax = a.xFrac * containerW;
+    const ay = a.yFrac * containerH;
+    const bx = b.xFrac * containerW;
+    const by = b.yFrac * containerH;
+    segments.push({
+      x: ax,
+      y: ay,
+      lengthPx: Math.hypot(bx - ax, by - ay),
+      angleDeg: segmentAngleDeg(a, b, containerW, containerH),
+    });
+  }
+  return segments;
+}
+
+/** How far ahead (as a fraction of total lap distance) `pointAtLapFraction` samples a
+ * second point to derive a direction, for the F5 chevron. */
+const CHEVRON_AHEAD_FRACTION = 0.005;
+
+/** A point along `centerline` at a given fraction of its total path length, plus a
+ * second point a little further along the same path -- a caller projects both through
+ * a `CenterlineFit`/`AutoRotatedCenterlineFit` and feeds them to `segmentAngleDeg` to
+ * get the ON-SCREEN travel-direction angle (F5's chevron): computing the angle from the
+ * PROJECTED pair, rather than from `e`/`n` directly, is what keeps it correct under
+ * `fitCenterlineAutoRotated`'s rotation. */
+export interface LapFractionPoint {
+  point: LocalPoint;
+  aheadPoint: LocalPoint;
+}
+
+function interpolateAtFraction(centerline: readonly LocalPoint[], fraction: number): LocalPoint | undefined {
+  if (centerline.length === 0) return undefined;
+  if (centerline.length === 1) return centerline[0];
+  const clamped = Math.min(1, Math.max(0, fraction));
+  const cumulative: number[] = [0];
+  for (let index = 1; index < centerline.length; index += 1) {
+    const a = centerline[index - 1];
+    const b = centerline[index];
+    const prev = cumulative[cumulative.length - 1] ?? 0;
+    cumulative.push(a === undefined || b === undefined ? prev : prev + Math.hypot(b.e - a.e, b.n - a.n));
+  }
+  const totalLength = cumulative[cumulative.length - 1] ?? 0;
+  const targetLength = totalLength * clamped;
+  let segmentIndex = centerline.length - 2;
+  for (let index = 1; index < cumulative.length; index += 1) {
+    if ((cumulative[index] ?? 0) >= targetLength) {
+      segmentIndex = index - 1;
+      break;
+    }
+  }
+  const a = centerline[segmentIndex];
+  const b = centerline[segmentIndex + 1];
+  if (a === undefined || b === undefined) return a ?? b;
+  const segStart = cumulative[segmentIndex] ?? 0;
+  const segLen = (cumulative[segmentIndex + 1] ?? segStart) - segStart;
+  const t = segLen <= 0 ? 0 : (targetLength - segStart) / segLen;
+  return { e: a.e + (b.e - a.e) * t, n: a.n + (b.n - a.n) * t };
+}
+
+/**
+ * F5 direction chevron: locates the point on `centerline` at `fraction` (0-1, clamped)
+ * of its total path length, together with a second point `CHEVRON_AHEAD_FRACTION`
+ * further along -- see `LapFractionPoint`'s doc comment for why both are returned.
+ * Pure; `undefined` for a centerline with fewer than 2 points.
+ */
+export function pointAtLapFraction(centerline: readonly LocalPoint[], fraction: number): LapFractionPoint | undefined {
+  if (centerline.length < 2) return undefined;
+  const point = interpolateAtFraction(centerline, fraction);
+  const aheadPoint = interpolateAtFraction(centerline, Math.min(1, fraction + CHEVRON_AHEAD_FRACTION));
+  if (point === undefined || aheadPoint === undefined) return undefined;
+  return { point, aheadPoint };
+}
