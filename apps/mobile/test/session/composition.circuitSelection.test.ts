@@ -7,6 +7,7 @@ import {
   type LapRecord,
   type LocationSample,
   type SessionMachineSnapshot,
+  type SqlDatabase,
 } from '@circuit/core';
 import { createSqlJsDatabase } from '../support/sqlJsDatabase';
 import { migrateTelemetrySchema } from '../../src/persistence/telemetrySchema';
@@ -171,7 +172,7 @@ describe('composition.ts preflight-gate circuit-change rebuild (ticket CN-W3)', 
     expect(state.calibrationResult?.accepted).toBe(true);
   });
 
-  it('a circuit switch mid-session does NOT rebuild until the session ends (never during outLap/timing/inPit/paused)', async () => {
+  it('H2 fix (ticket CN-FIX2): a circuit switch mid-session is REFUSED -- {ok:false, reason:SESSION_ACTIVE}, settings/history untouched -- and the LIVE controller keeps driving TMR to completion', async () => {
     const composition = await bootFresh();
     const gnss = tracked.gnssProviders[0]!;
 
@@ -185,26 +186,139 @@ describe('composition.ts preflight-gate circuit-change rebuild (ticket CN-W3)', 
     await flushBootstrap();
     composition.facade.arm();
     await flushBootstrap();
-
-    const stateBeforeSwitch = latestFacadeState(composition) as { sessionState: string };
-    expect(['outLap', 'timing', 'armed']).toContain(stateBeforeSwitch.sessionState);
-
-    // Selection change mid-session: must not tear down the LIVE TMR controller.
-    await composition.selectCircuit(MOTORPARK_CIRCUIT_PROFILE.circuitId);
-    await flushBootstrap();
-
-    // The SAME (still TMR-configured) controller keeps driving this session
-    // to completion -- if a rebuild had happened here, these TMR samples fed
-    // into a fresh, freshly-idle MotorPark controller would never produce a
-    // completed, valid lap.
+    // Drive the session into an unambiguous mid-session state (outLap/timing)
+    // -- immediately after arm() the state can still just be 'armed' (not
+    // yet refused by H2's design, which lists only outLap/timing/inPit/paused),
+    // so feed real samples first rather than relying on 'armed' alone.
     feed(gnss, multiLapSession(TMR_CIRCUIT_PROFILE, 1, 700_002));
     await flushBootstrap();
+
+    const midState = latestFacadeState(composition) as { sessionState: string };
+    expect(['outLap', 'timing', 'inPit', 'paused']).toContain(midState.sessionState);
+
+    const sessionsBefore = composition.sessionHistoryStore.listSessions();
+    const result = await composition.selectCircuit(MOTORPARK_CIRCUIT_PROFILE.circuitId);
+
+    // H2 fix: refused -- settings AND history left completely untouched.
+    expect(result).toEqual({ ok: false, reason: 'SESSION_ACTIVE' });
+    expect(composition.settingsStore.getSettings().selectedCircuitId).toBe(TMR_CIRCUIT_PROFILE.circuitId);
+    expect(composition.sessionHistoryStore.listSessions()).toEqual(sessionsBefore);
+
     composition.facade.endSession();
     await flushBootstrap();
 
     const finalState = latestFacadeState(composition) as { sessionState: string; laps: unknown[] };
     expect(finalState.sessionState).toBe('sessionComplete');
     expect(finalState.laps.length).toBeGreaterThan(0);
+  });
+
+  it('H1 fix (ticket CN-FIX2): a selection made DURING bootstrap is not lost -- settings, history, and (once startPreflight runs) the controller all end up on the selected circuit', async () => {
+    const db = await createSqlJsDatabase();
+    await migrateTelemetrySchema(db);
+    const repository = await SqlSessionRepository.create(db);
+    seeded.db = db;
+    seeded.repository = repository;
+    tracked.gnssProviders.length = 0;
+
+    vi.resetModules();
+    const composition = await import('../../src/session/composition');
+    // Call selectCircuit() IMMEDIATELY -- before bootstrap's own async
+    // openAppDatabase()/SqlSettingsStore.create() microtasks have had any
+    // chance to settle (this is the exact race H1 fixes: a tap during
+    // cold-launch bootstrap previously updated only the temporary in-memory
+    // settings store, silently overwritten once the real store came online).
+    const selectPromise = composition.selectCircuit(MOTORPARK_CIRCUIT_PROFILE.circuitId);
+    await flushBootstrap();
+    const result = await selectPromise;
+    expect(result).toEqual({ ok: true });
+
+    expect(composition.settingsStore.getSettings().selectedCircuitId).toBe(MOTORPARK_CIRCUIT_PROFILE.circuitId);
+
+    // The next startPreflight() rebuilds the production controller for the
+    // now-selected circuit (the pre-existing idle-circuit-change gate, L1
+    // fixed) -- only reachable if MotorPark samples produce a valid,
+    // accepted calibration against a controller actually built for
+    // MotorPark's own centerline.
+    composition.facade.startPreflight();
+    await flushBootstrap();
+    composition.facade.beginCalibration();
+    await flushBootstrap();
+    const gnss = tracked.gnssProviders.at(-1)!;
+    feed(gnss, motorparkCleanRecognitionLap(MOTORPARK_CIRCUIT_PROFILE));
+    await flushBootstrap();
+
+    const state = latestFacadeState(composition) as {
+      sessionState: string;
+      calibrationResult: { accepted: boolean } | null;
+    };
+    expect(state.sessionState).toBe('calibrationReview');
+    expect(state.calibrationResult?.accepted).toBe(true);
+  });
+
+  it("M1 fix (ticket CN-FIX2): two rapid selectCircuit calls apply IN ORDER -- the LAST call wins for both settings and the history store, even when the FIRST call's history refresh resolves slower", async () => {
+    const composition = await bootFresh();
+    const repo = seeded.repository as SqlSessionRepository;
+    await repo.saveSession({
+      sessionId: 'driver-1--m1-tmr',
+      circuitId: TMR_CIRCUIT_PROFILE.circuitId,
+      layoutId: TMR_CIRCUIT_PROFILE.layoutId,
+      layoutVersion: TMR_CIRCUIT_PROFILE.layoutVersion,
+      startedAtUtc: new Date().toISOString(),
+      laps: [lap(1, 90_000)],
+      userId: 'local-driver',
+    });
+    await repo.saveSession({
+      sessionId: 'driver-1--m1-mp',
+      circuitId: MOTORPARK_CIRCUIT_PROFILE.circuitId,
+      layoutId: MOTORPARK_CIRCUIT_PROFILE.layoutId,
+      layoutVersion: MOTORPARK_CIRCUIT_PROFILE.layoutVersion,
+      startedAtUtc: new Date().toISOString(),
+      laps: [lap(1, 90_000)],
+      userId: 'local-driver',
+    });
+
+    const originalListSessions = repo.listSessions.bind(repo);
+    let slowedOnce = false;
+    repo.listSessions = async (userId: string, circuitId: string) => {
+      if (!slowedOnce && circuitId === MOTORPARK_CIRCUIT_PROFILE.circuitId) {
+        slowedOnce = true;
+        // Simulate the FIRST call's (MotorPark) history refresh being slow.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      return originalListSessions(userId, circuitId);
+    };
+
+    const first = composition.selectCircuit(MOTORPARK_CIRCUIT_PROFILE.circuitId);
+    const second = composition.selectCircuit(TMR_CIRCUIT_PROFILE.circuitId);
+    const [r1, r2] = await Promise.all([first, second]);
+    expect(r1).toEqual({ ok: true });
+    expect(r2).toEqual({ ok: true });
+
+    // Without M1's serialization, the second (fast, TMR) call's history-store
+    // swap would land BEFORE the first (slow, MotorPark) call's -- the
+    // MotorPark store finishing last and clobbering the settings/history
+    // agreement. With it, the LAST call (TMR) wins for both.
+    expect(composition.settingsStore.getSettings().selectedCircuitId).toBe(TMR_CIRCUIT_PROFILE.circuitId);
+    const sessions = composition.sessionHistoryStore.listSessions();
+    expect(sessions.map((s) => s.sessionId)).toEqual(['driver-1--m1-tmr']);
+  });
+
+  it('L1 fix (ticket CN-FIX2): an unknown persisted selectedCircuitId does not trigger a rebuild on every idle preflight -- the gate compares against the RESOLVED circuit, not the raw setting', async () => {
+    const composition = await bootFresh();
+    expect(tracked.gnssProviders.length).toBe(1);
+
+    // Bypasses selectCircuit()'s own catalog validation -- simulates a
+    // stale/corrupt persisted value from an older catalog build.
+    composition.settingsStore.update({ selectedCircuitId: 'unknown-circuit-xyz' });
+
+    composition.facade.startPreflight();
+    await flushBootstrap();
+
+    // Without the L1 fix, 'unknown-circuit-xyz' (raw) never equals
+    // `productionControllerCircuitId` (TMR) -- the gate would rebuild (a
+    // fresh GnssLocationProvider) on this call even though the controller
+    // was ALREADY built for the resolved default.
+    expect(tracked.gnssProviders.length).toBe(1);
   });
 });
 
@@ -256,6 +370,53 @@ describe('composition.ts deleteAllStoredUserData spans every bundled circuit (ti
 
     const result = await composition.deleteAllStoredUserData();
     expect(result.ok).toBe(false);
+  });
+
+  it('M3 fix (ticket CN-FIX2): a REJECTED per-circuit delete does not abort the loop -- the remaining circuit is still attempted, aggregate ok:false, failed id named in errorText', async () => {
+    const composition = await bootFresh();
+    const repo = seeded.repository as SqlSessionRepository;
+    const originalDeleteUserData = repo.deleteUserData.bind(repo);
+    let callCount = 0;
+    repo.deleteUserData = async (userId: string) => {
+      callCount += 1;
+      // First circuit in catalog order (TMR) rejects -- MotorPark must still
+      // be attempted afterward.
+      if (callCount === 1) throw new Error('simulated rejection');
+      return originalDeleteUserData(userId);
+    };
+
+    const result = await composition.deleteAllStoredUserData();
+
+    expect(callCount).toBe(2);
+    expect(result.ok).toBe(false);
+    expect(result.failedCircuitIds).toEqual([TMR_CIRCUIT_PROFILE.circuitId]);
+    expect(result.errorText).not.toBeNull();
+    expect(result.errorText as string).toContain(TMR_CIRCUIT_PROFILE.circuitId);
+  });
+
+  it('M4 fix (ticket CN-FIX2): deleteAllStoredUserData clears a leftover active-session pointer (BOTH keys) too', async () => {
+    const composition = await bootFresh();
+    const db = seeded.db as SqlDatabase;
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'activeSessionId',
+      'driver-1--leftover',
+    ]);
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'activeSessionCircuitId',
+      TMR_CIRCUIT_PROFILE.circuitId,
+    ]);
+
+    const result = await composition.deleteAllStoredUserData();
+    expect(result.ok).toBe(true);
+
+    const idRows = await db.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
+      'activeSessionId',
+    ]);
+    const circuitRows = await db.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
+      'activeSessionCircuitId',
+    ]);
+    expect(idRows.length).toBe(0);
+    expect(circuitRows.length).toBe(0);
   });
 });
 
@@ -338,5 +499,175 @@ describe("composition.ts recovery's circuit resolution via listSessions (ticket 
       recovery = r;
     });
     expect(recovery).toEqual({ sessionId, lapCount: 2 });
+  });
+});
+
+const ACTIVE_SESSION_CIRCUIT_KEY = 'activeSessionCircuitId';
+
+describe('composition.ts M4 fix (ticket CN-FIX2) -- activeSessionCircuitId recovery (contracts.md recovery amendment)', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('a first-crash checkpoint (NO sessions-table row) resolves its circuit from the persisted activeSessionCircuitId -- even while a DIFFERENT circuit is currently selected -- and resumeRecovery() reasserts BOTH keys', async () => {
+    const db = await createSqlJsDatabase();
+    await migrateTelemetrySchema(db);
+    const repository = await SqlSessionRepository.create(db);
+    const sessionId = 'driver-1--crash-motorpark';
+
+    // Selection currently reads the default (TMR) -- unrelated to the
+    // crashed session; no `sessions` row exists yet (a genuine first crash,
+    // by construction -- see `resolveRecoveryCircuitId`'s own doc comment
+    // for why the OLD listSessions-scan mechanism alone could never resolve
+    // this case).
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [ACTIVE_SESSION_KEY, sessionId]);
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      ACTIVE_SESSION_CIRCUIT_KEY,
+      MOTORPARK_CIRCUIT_PROFILE.circuitId,
+    ]);
+    await repository.saveCheckpoint(sessionId, { state: 'armed', lapNumber: 0, context: {} }, [lap(1, 90_000)]);
+
+    seeded.db = db;
+    seeded.repository = repository;
+    tracked.gnssProviders.length = 0;
+
+    vi.resetModules();
+    const composition = await import('../../src/session/composition');
+    await flushBootstrap();
+
+    // Selection switched to MotorPark BEFORE recovery was offered -- resolved
+    // from the persisted activeSessionCircuitId, not the (necessarily empty,
+    // for a first crash) listSessions scan.
+    expect(composition.settingsStore.getSettings().selectedCircuitId).toBe(MOTORPARK_CIRCUIT_PROFILE.circuitId);
+
+    let recovery: unknown = 'unset';
+    composition.subscribeRecovery((r) => {
+      recovery = r;
+    });
+    expect(recovery).toEqual({ sessionId, lapCount: 1 });
+
+    const resumed = await composition.resumeRecovery();
+    expect(resumed).toBe(true);
+
+    // Both keys reasserted after resume -- read them back directly.
+    const idRows = await db.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
+      ACTIVE_SESSION_KEY,
+    ]);
+    const circuitRows = await db.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
+      ACTIVE_SESSION_CIRCUIT_KEY,
+    ]);
+    expect(idRows[0]?.value).toBe(sessionId);
+    expect(circuitRows[0]?.value).toBe(MOTORPARK_CIRCUIT_PROFILE.circuitId);
+  });
+
+  it('a persisted activeSessionCircuitId naming a circuit OUTSIDE the bundled catalog discards the checkpoint (with a warning) instead of offering an unresolvable recovery', async () => {
+    const db = await createSqlJsDatabase();
+    await migrateTelemetrySchema(db);
+    const repository = await SqlSessionRepository.create(db);
+    const sessionId = 'driver-1--crash-unbundled';
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [ACTIVE_SESSION_KEY, sessionId]);
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      ACTIVE_SESSION_CIRCUIT_KEY,
+      'not-a-real-circuit',
+    ]);
+    await repository.saveCheckpoint(sessionId, { state: 'armed', lapNumber: 0, context: {} }, [lap(1, 90_000)]);
+
+    seeded.db = db;
+    seeded.repository = repository;
+    tracked.gnssProviders.length = 0;
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.resetModules();
+    const composition = await import('../../src/session/composition');
+    await flushBootstrap();
+
+    let recovery: unknown = 'unset';
+    composition.subscribeRecovery((r) => {
+      recovery = r;
+    });
+    expect(recovery).toBeNull();
+    expect(warn).toHaveBeenCalled();
+
+    const idRows = await db.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
+      ACTIVE_SESSION_KEY,
+    ]);
+    const circuitRows = await db.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
+      ACTIVE_SESSION_CIRCUIT_KEY,
+    ]);
+    expect(idRows.length).toBe(0);
+    expect(circuitRows.length).toBe(0);
+    warn.mockRestore();
+  });
+
+  it('discardRecovery() clears BOTH keys together', async () => {
+    const db = await createSqlJsDatabase();
+    await migrateTelemetrySchema(db);
+    const repository = await SqlSessionRepository.create(db);
+    const sessionId = 'driver-1--discard-both';
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [ACTIVE_SESSION_KEY, sessionId]);
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      ACTIVE_SESSION_CIRCUIT_KEY,
+      TMR_CIRCUIT_PROFILE.circuitId,
+    ]);
+    await repository.saveCheckpoint(sessionId, { state: 'armed', lapNumber: 0, context: {} }, []);
+
+    seeded.db = db;
+    seeded.repository = repository;
+    tracked.gnssProviders.length = 0;
+
+    vi.resetModules();
+    const composition = await import('../../src/session/composition');
+    await flushBootstrap();
+
+    await composition.discardRecovery();
+
+    const idRows = await db.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
+      ACTIVE_SESSION_KEY,
+    ]);
+    const circuitRows = await db.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
+      ACTIVE_SESSION_CIRCUIT_KEY,
+    ]);
+    expect(idRows.length).toBe(0);
+    expect(circuitRows.length).toBe(0);
+  });
+
+  it('a normal session start persists BOTH keys transactionally, matching the circuit it actually started on -- cleared together on session end', async () => {
+    const composition = await bootFresh();
+    const db = seeded.db as SqlDatabase;
+    const gnss = tracked.gnssProviders[0]!;
+
+    composition.facade.startPreflight();
+    await flushBootstrap();
+    composition.facade.beginCalibration();
+    await flushBootstrap();
+    feed(gnss, cleanRecognitionLap(TMR_CIRCUIT_PROFILE, 700_101));
+    await flushBootstrap();
+    composition.facade.acceptCalibration();
+    await flushBootstrap();
+    composition.facade.arm();
+    await flushBootstrap();
+    feed(gnss, multiLapSession(TMR_CIRCUIT_PROFILE, 1, 700_102));
+    await flushBootstrap();
+
+    const idDuring = await db.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
+      ACTIVE_SESSION_KEY,
+    ]);
+    const circuitDuring = await db.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
+      ACTIVE_SESSION_CIRCUIT_KEY,
+    ]);
+    expect(idDuring.length).toBe(1);
+    expect(circuitDuring[0]?.value).toBe(TMR_CIRCUIT_PROFILE.circuitId);
+
+    composition.facade.endSession();
+    await flushBootstrap();
+
+    const idAfter = await db.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
+      ACTIVE_SESSION_KEY,
+    ]);
+    const circuitAfter = await db.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
+      ACTIVE_SESSION_CIRCUIT_KEY,
+    ]);
+    expect(idAfter.length).toBe(0);
+    expect(circuitAfter.length).toBe(0);
   });
 });

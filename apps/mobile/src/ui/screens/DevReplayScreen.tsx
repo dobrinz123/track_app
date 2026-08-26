@@ -9,6 +9,7 @@ import {
   estimateObservedRateHz,
   getLiveDiagnostics,
   restoreProductionFacade,
+  selectCircuit,
   startDevReplaySession,
   useMockFacadeForDevReplay,
   type LiveDiagnosticsSnapshot,
@@ -69,8 +70,32 @@ export function DevReplayScreen({ navigation }: Props): React.JSX.Element {
       // C6 fix: restore production (disposing any still-active replay
       // controller) before building a new one, every time -- not just on
       // unmount -- so switching straight from one fixture to another never
-      // leaves the previous replay's provider/watchdog running.
+      // leaves the previous replay's provider/watchdog running. Run BEFORE
+      // `selectCircuit()` below so its own H2 session-active check reads the
+      // (by-then idle/terminal) production controller, not a still-live
+      // PREVIOUS replay controller mid-transition.
       await restoreProductionFacade();
+      // M2 fix (ticket CN-FIX2, binding, dev-only path): select the
+      // fixture's OWN circuit through the real `selectCircuit()` before
+      // starting the replay -- previously this screen built a
+      // scenario-matched replay `SessionController` without ever updating
+      // the app's selected circuit, so `ActiveCalibrationScreen`'s track map
+      // (which derives centerline/S-F/corridor width from the SELECTION, not
+      // the replay controller) kept showing whichever circuit was selected
+      // before, while History/PB/Detail also disagreed with the replay. A
+      // refusal (`SESSION_ACTIVE` -- a genuine live session is running,
+      // vanishingly rare for this dev-only screen but not impossible) aborts
+      // the run with a visible alert instead of silently driving a replay
+      // controller the rest of the app's selection-derived UI won't agree
+      // with.
+      const selection = await selectCircuit(scenario.circuitId);
+      if (!selection.ok) {
+        Alert.alert(
+          'Replay blocked',
+          'A session is currently active on the selected circuit -- cannot switch circuits until it ends.',
+        );
+        return;
+      }
       const samples = scenario.build(circuit.profile);
       await startDevReplaySession(samples, {
         circuitProfile: circuit.profile,

@@ -41,7 +41,7 @@ import { InMemorySettingsStore } from './settingsStore';
 import { RealSessionFacade, type RealSessionFacadeCallbacks } from './realFacade';
 import { ReplayTimeSource, ReplayTimestampedLocationProvider, ScaledReplayClock } from './liveTimestampedProvider';
 import { TMR_CIRCUIT_PROFILE, TMR_CORNERS, TMR_RUNTIME_PROFILE } from './tmrProfile';
-import { circuitCatalog, resolveSelectedCircuit } from './circuitCatalog';
+import { circuitCatalog, resolveSelectedCircuit, type BundledCircuit } from './circuitCatalog';
 import { startVoiceCoach } from './voiceCoach';
 import { createTelemetryProvider, type TelemetryProvider } from './telemetryProvider';
 import { createGForceProvider, type GForceProvider } from './gforceProvider';
@@ -52,6 +52,8 @@ const DB_NAME = 'circuit-timer.db';
 /** Single-user local app -- no auth/account system exists (MVP scope, ADR-0001/0004). Stable so `sessionId` (`${userId}--<random>`) and stored data survive across launches. */
 const LOCAL_USER_ID = 'local-driver';
 const ACTIVE_SESSION_SETTINGS_KEY = 'activeSessionId';
+/** M4 fix (contracts.md's "Multi-circuit selection — recovery amendment", binding): the circuit the session named by `ACTIVE_SESSION_SETTINGS_KEY` actually started on -- written/cleared in the SAME transaction as the session id (`setActiveSession` below), so bootstrap recovery never has to guess which bundled circuit a crashed, never-`endSession()`'d checkpoint belongs to. */
+const ACTIVE_SESSION_CIRCUIT_SETTINGS_KEY = 'activeSessionCircuitId';
 const ALGORITHM_VERSION = 1;
 
 function appVersion(): string {
@@ -771,15 +773,46 @@ async function getActiveSessionId(database: SqlDatabase): Promise<string | null>
   return rows[0]?.value ?? null;
 }
 
-async function setActiveSessionId(database: SqlDatabase, sessionId: string | null): Promise<void> {
-  if (sessionId === null) {
-    await database.runAsync('DELETE FROM settings WHERE key = ?', [ACTIVE_SESSION_SETTINGS_KEY]);
-  } else {
-    await database.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
-      ACTIVE_SESSION_SETTINGS_KEY,
-      sessionId,
-    ]);
-  }
+/** M4 fix: companion read for `ACTIVE_SESSION_CIRCUIT_SETTINGS_KEY` -- `null` when absent (a legacy checkpoint written before this key existed, or nothing active). */
+async function getActiveSessionCircuitId(database: SqlDatabase): Promise<string | null> {
+  const rows = await database.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
+    ACTIVE_SESSION_CIRCUIT_SETTINGS_KEY,
+  ]);
+  return rows[0]?.value ?? null;
+}
+
+/**
+ * M4 fix (contracts.md's "Multi-circuit selection — recovery amendment",
+ * binding): `activeSessionId` and `activeSessionCircuitId` are written OR
+ * cleared TOGETHER, in one SQLite transaction -- two independent
+ * fire-and-forget writes could otherwise leave a NEW `activeSessionId`
+ * paired with a PRIOR session's stale circuit id if the process died between
+ * them (or if they simply resolved out of order), which would make bootstrap
+ * recovery resume the wrong circuit's geometry. `withTransactionAsync`
+ * acquires the SAME shared write gate as every other repository transaction
+ * (`openAppDatabase`'s own doc comment) -- this never interleaves with a
+ * concurrent `SqlSessionRepository` transaction or a `TelemetryRecorder`
+ * batch either.
+ */
+async function setActiveSession(
+  database: SqlDatabase,
+  session: { sessionId: string; circuitId: string } | null,
+): Promise<void> {
+  await database.withTransactionAsync(async () => {
+    if (session === null) {
+      await database.runAsync('DELETE FROM settings WHERE key = ?', [ACTIVE_SESSION_SETTINGS_KEY]);
+      await database.runAsync('DELETE FROM settings WHERE key = ?', [ACTIVE_SESSION_CIRCUIT_SETTINGS_KEY]);
+    } else {
+      await database.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+        ACTIVE_SESSION_SETTINGS_KEY,
+        session.sessionId,
+      ]);
+      await database.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+        ACTIVE_SESSION_CIRCUIT_SETTINGS_KEY,
+        session.circuitId,
+      ]);
+    }
+  });
 }
 
 function midSessionState(snapshot: SessionMachineSnapshot): boolean {
@@ -854,11 +887,20 @@ function createProductionController(): SessionController {
   });
 }
 
-/** Callbacks shared by every production `RealSessionFacade` (initial bootstrap AND any later C1 terminal-state rebuild), so the active-session-pointer/history-refresh wiring can never drift between them. */
-function productionFacadeCallbacks(): RealSessionFacadeCallbacks {
+/**
+ * Callbacks shared by every production `RealSessionFacade` (initial
+ * bootstrap AND any later C1 terminal-state rebuild), so the
+ * active-session-pointer/history-refresh wiring can never drift between
+ * them. `circuitId` (M4 fix) is the circuit THIS specific controller was
+ * built for -- captured by the caller (`buildProductionController()`) at the
+ * exact moment it's known, so `onSessionStarted` persists the RIGHT circuit
+ * alongside the session id it starts, even if the selection changes again
+ * later (never mid-session, per H2, but defense in depth regardless).
+ */
+function productionFacadeCallbacks(circuitId: string): RealSessionFacadeCallbacks {
   return {
     onSessionStarted: (sessionId) => {
-      if (db !== null) void setActiveSessionId(db, sessionId);
+      if (db !== null) void setActiveSession(db, { sessionId, circuitId });
       startTelemetryRecording(sessionId);
     },
     onSessionEnded: () => {
@@ -874,7 +916,7 @@ function productionFacadeCallbacks(): RealSessionFacadeCallbacks {
       // again here is a defensive, idempotent no-op in the common case, and
       // matters only if that hook were ever bypassed.
       const controllerPersistence = (async () => {
-        if (db !== null) await setActiveSessionId(db, null);
+        if (db !== null) await setActiveSession(db, null);
         await historyStore?.refresh();
       })();
       const telemetryFinalFlush = stopTelemetryRecording();
@@ -901,7 +943,18 @@ function buildProductionController(): void {
   const freshController = createProductionController();
   controller = freshController;
   activeController = freshController;
-  productionFacade = new RealSessionFacade(freshController, productionFacadeCallbacks());
+  // M4 fix: `createProductionController()` (just above, inside this same
+  // call) always sets `productionControllerCircuitId` before returning --
+  // capture it NOW so `onSessionStarted` persists the circuit THIS
+  // controller actually runs, not whatever `selectedCircuitId` reads at the
+  // moment a session happens to start (which -- while never reachable
+  // mid-session, per H2 -- is a strictly weaker guarantee than closing over
+  // the value already fixed for this controller's whole lifetime).
+  const circuitId = productionControllerCircuitId;
+  if (circuitId === null) {
+    throw new Error('composition: productionControllerCircuitId not set after createProductionController()');
+  }
+  productionFacade = new RealSessionFacade(freshController, productionFacadeCallbacks(circuitId));
 }
 
 /**
@@ -1030,6 +1083,12 @@ settingsStore.subscribe((settings) => {
  * switched to when found -- e.g. an active-session pointer left lingering
  * after a session that actually completed (and so has a real `sessions`
  * row) under a DIFFERENT circuit than the one currently selected.
+ *
+ * M4 fix (recovery amendment, ticket CN-FIX2): this scan is now only the
+ * SECOND priority, behind the persisted `activeSessionCircuitId` (see
+ * `runBootstrap()`'s recovery block below) -- it stays exactly as it was for
+ * a LEGACY checkpoint written before that key existed (or the web/in-memory
+ * preview, which has no persistent key at all).
  */
 async function resolveRecoveryCircuitId(repo: LocalSessionRepository, sessionId: string): Promise<string | null> {
   for (const summary of circuitCatalog.list()) {
@@ -1039,29 +1098,22 @@ async function resolveRecoveryCircuitId(repo: LocalSessionRepository, sessionId:
   return null;
 }
 
-/**
- * Selects the app's ONE active circuit (contracts.md's Multi-circuit
- * selection addendum, ticket CN-W3): validates `circuitId` against the
- * bundled catalog (an unknown id is a warned no-op, never a crash),
- * persists the choice, and rebuilds/refreshes `SqlSessionHistoryStore` for
- * it -- the SAME `historyWrapper.setInner()` + `refresh()` sequence
- * bootstrap itself uses -- so History/PB immediately reflect the newly
- * selected circuit. Does NOT touch the production controller itself; the
- * preflight gate (`setPreflightGate` above) is what rebuilds that, lazily,
- * the next time it is genuinely idle.
- */
-export async function selectCircuit(circuitId: string): Promise<void> {
-  const entry = circuitCatalog.get(circuitId);
-  if (entry === null) {
-    console.warn(`[composition] selectCircuit: unknown circuitId "${circuitId}" -- ignoring`);
-    return;
-  }
-  settingsStore.update({ selectedCircuitId: circuitId });
-  // Bootstrap not finished yet (repository not ready): the history store is
-  // built for whichever circuit is persisted at that point anyway
-  // (`runBootstrap()`'s own `bootSelected` read), so there is nothing further
-  // to rebuild here yet -- Start Session stays disabled until bootstrap is
-  // 'ready' regardless (`CircuitDetailScreen`'s own gate).
+/** Result of `selectCircuit()` (H2 fix, binding): `{ ok: false, reason: 'SESSION_ACTIVE' }` when refused -- settings/history are left completely untouched on that path. */
+export interface SelectCircuitResult {
+  ok: boolean;
+  reason?: 'SESSION_ACTIVE';
+}
+
+/** H2 fix (binding): a selection is refused -- never applied -- while the controller currently driving `facade` is genuinely mid-session. `'paused'` counts unconditionally here (unlike `midSessionState()`'s own recovery-lapCount math, which only counts it when its `priorState` was itself mid-session) -- the contracts amendment lists it directly alongside outLap/timing/inPit. */
+const SESSION_ACTIVE_STATES = new Set<SessionState>(['outLap', 'timing', 'inPit', 'paused']);
+
+/** Applies a validated circuit selection to the persisted settings ONLY -- no bootstrap-await, no session-active refusal, no serialization. Shared by the public `selectCircuit()` below and `runBootstrap()`'s own recovery-circuit switch, which CANNOT go through `selectCircuit()` itself: that function awaits `ready()` (i.e. `bootstrapPromise`), and calling it from inside `runBootstrap()` -- the very function that promise is for -- would deadlock forever. */
+function applySelectedCircuit(entry: BundledCircuit): void {
+  settingsStore.update({ selectedCircuitId: entry.profile.circuitId });
+}
+
+/** Rebuilds/refreshes `SqlSessionHistoryStore` for `entry` and swaps it into `historyWrapper` -- the same no-op-if-bootstrap-incomplete guard `runBootstrap()`'s own initial build and `selectCircuit()` share. Split out from `applySelectedCircuit()` (rather than always paired) so `runBootstrap()`'s recovery block can call both in sequence exactly once, without a second, redundant history rebuild layered on top via a full `selectCircuit()` call. */
+async function rebuildHistoryForSelection(entry: BundledCircuit): Promise<void> {
   if (repository === null) return;
   const history = new SqlSessionHistoryStore(
     repository,
@@ -1073,6 +1125,75 @@ export async function selectCircuit(circuitId: string): Promise<void> {
   await history.refresh();
   historyWrapper.setInner(history);
   historyStore = history;
+}
+
+/**
+ * M1 fix (binding): shared tail every `selectCircuit()` call chains onto --
+ * guarantees concurrent calls apply their settings + history-store writes in
+ * the SAME order they were issued (the last call in program order is also
+ * the last to actually run and "wins"), instead of two overlapping attempts
+ * racing each other's completion order (a slow first call's history refresh
+ * finishing AFTER a fast second call's, clobbering the second call's result).
+ */
+let selectionChain: Promise<void> = Promise.resolve();
+
+/**
+ * Selects the app's ONE active circuit (contracts.md's Multi-circuit
+ * selection addendum, ticket CN-W3, extended by the "recovery amendment",
+ * ticket CN-FIX2): validates `circuitId` against the bundled catalog (an
+ * unknown id is a warned no-op, never a crash/rejection), then --
+ *
+ *  - H1 fix: awaits `ready()` (bootstrap) FIRST, so a selection tapped
+ *    during cold-launch bootstrap is never silently lost to the settings
+ *    hydration that follows it (the temporary in-memory settings store
+ *    being overwritten by the just-loaded persisted one).
+ *  - H3 fix: awaits any in-flight controller rebuild before reading
+ *    controller state.
+ *  - H2 fix: is REFUSED -- `{ ok: false, reason: 'SESSION_ACTIVE' }`,
+ *    settings/history untouched -- while `activeController` is genuinely
+ *    mid-session (`SESSION_ACTIVE_STATES`).
+ *  - M1 fix: serialized against every other concurrent `selectCircuit()`
+ *    call via `selectionChain`.
+ *
+ * Persists the choice and rebuilds/refreshes `SqlSessionHistoryStore` for it
+ * -- the SAME `historyWrapper.setInner()` + `refresh()` sequence bootstrap
+ * itself uses -- so History/PB immediately reflect the newly selected
+ * circuit. Does NOT touch the production controller itself; the preflight
+ * gate (`setPreflightGate` above) is what rebuilds that, lazily, the next
+ * time it is genuinely idle (L1 fix: comparing the RESOLVED selection).
+ */
+export function selectCircuit(circuitId: string): Promise<SelectCircuitResult> {
+  const entry = circuitCatalog.get(circuitId);
+  if (entry === null) {
+    console.warn(`[composition] selectCircuit: unknown circuitId "${circuitId}" -- ignoring`);
+    return Promise.resolve({ ok: true });
+  }
+
+  let result: SelectCircuitResult = { ok: true };
+  const run = async (): Promise<void> => {
+    // H1 fix: bootstrap must be fully done (settings hydrated, production
+    // controller built) before anything below runs.
+    await ready();
+    // H3 fix: never evaluate controller state mid-rebuild.
+    while (rebuildInFlight !== null) await rebuildInFlight.catch(() => undefined);
+    // H2 fix: refuse while genuinely mid-session.
+    if (activeController !== null && SESSION_ACTIVE_STATES.has(currentControllerState(activeController))) {
+      result = { ok: false, reason: 'SESSION_ACTIVE' };
+      return;
+    }
+    applySelectedCircuit(entry);
+    await rebuildHistoryForSelection(entry);
+    result = { ok: true };
+  };
+
+  // M1 fix: chain onto the shared tail -- `run` for THIS call only starts
+  // once every earlier queued call has fully settled.
+  const chained = selectionChain.then(run, run);
+  selectionChain = chained.then(
+    () => undefined,
+    () => undefined,
+  );
+  return chained.then(() => result);
 }
 
 /**
@@ -1144,6 +1265,14 @@ async function runBootstrap(): Promise<void> {
     // (`activeController !== controller`) -- that swap is `restoreProductionFacade()`'s
     // job, not this gate's.
     facadeWrapper.setPreflightGate(async () => {
+      // H3 fix (contracts.md's recovery amendment, binding): await any
+      // ALREADY-RUNNING rebuild (e.g. the coaching-settings rebuild below)
+      // to completion BEFORE reading controller state -- otherwise this
+      // gate could read/act on a controller that a concurrent rebuild is
+      // about to dispose out from under it. Looped (not a single await) so
+      // a rebuild that starts again right after this one finishes is still
+      // caught.
+      while (rebuildInFlight !== null) await rebuildInFlight.catch(() => undefined);
       if (controller === null || activeController !== controller) return;
       const state = currentControllerState(controller);
       const terminal = state === 'sessionComplete' || state === 'error';
@@ -1152,8 +1281,13 @@ async function runBootstrap(): Promise<void> {
       // selection AND the controller is genuinely idle -- NEVER during
       // outLap/timing/inPit/paused (a circuit switch mid-session is
       // unreachable from the UI and must never tear down a live session).
-      const circuitChanged =
-        state === 'idle' && productionControllerCircuitId !== settingsStore.getSettings().selectedCircuitId;
+      // L1 fix (binding): compared against the RESOLVED selection (an
+      // unknown persisted id falls back to the default, with a warning),
+      // never the raw setting -- otherwise a stale/unbundled
+      // `selectedCircuitId` would never equal `productionControllerCircuitId`
+      // and this gate would rebuild on every single idle preflight.
+      const resolvedCircuitId = resolveSelectedCircuit(settingsStore.getSettings()).profile.circuitId;
+      const circuitChanged = state === 'idle' && productionControllerCircuitId !== resolvedCircuitId;
       if (!terminal && !circuitChanged) return;
       await rebuildProductionController();
     });
@@ -1178,28 +1312,73 @@ async function runBootstrap(): Promise<void> {
     if (activeSessionId !== null) {
       const checkpoint = await repository.loadCheckpoint(activeSessionId);
       if (checkpoint !== null && checkpoint.snapshot.state !== 'sessionComplete') {
-        // Multi-circuit selection addendum (ticket CN-W3): resolve which
-        // bundled circuit this checkpoint belongs to (see
-        // `resolveRecoveryCircuitId`'s own doc comment for the exact
-        // mechanism and its documented limitation) and switch the selection
-        // to it BEFORE the controller is (re)built -- otherwise a recovered
-        // MotorPark session would resume against a TMR-configured controller.
-        const resolvedCircuitId = await resolveRecoveryCircuitId(repository, activeSessionId);
-        if (resolvedCircuitId !== null && resolvedCircuitId !== settingsStore.getSettings().selectedCircuitId) {
-          await selectCircuit(resolvedCircuitId);
+        // M4 fix (recovery amendment, ticket CN-FIX2): resolve which bundled
+        // circuit this checkpoint belongs to, in the BINDING priority order:
+        //   1. the persisted `activeSessionCircuitId` (the exact circuit the
+        //      crashed session started under -- written transactionally
+        //      alongside `activeSessionId` by `onSessionStarted`/`setActiveSession`)
+        //   2. the pre-existing `listSessions` scan (a legacy checkpoint
+        //      written before that key existed -- see
+        //      `resolveRecoveryCircuitId`'s own doc comment)
+        //   3. the currently persisted selection (unchanged), with a warning
+        // A persisted `activeSessionCircuitId` naming a circuit that ISN'T
+        // bundled is a hard discard (with a warning) -- unlike (2)/(3), which
+        // fall through, an explicit-but-invalid pointer is never trusted as
+        // "keep the current selection" (that would silently offer recovery
+        // against the WRONG circuit's geometry, not just a lost pointer).
+        const persistedCircuitId = db !== null ? await getActiveSessionCircuitId(db) : null;
+        let discardUnbundled = false;
+        let resolvedCircuitId: string | null = null;
+        if (persistedCircuitId !== null) {
+          if (circuitCatalog.get(persistedCircuitId) !== null) {
+            resolvedCircuitId = persistedCircuitId;
+          } else {
+            console.warn(
+              `[composition] recovery: persisted activeSessionCircuitId "${persistedCircuitId}" is not a bundled circuit -- discarding the checkpoint for session "${activeSessionId}"`,
+            );
+            discardUnbundled = true;
+          }
+        } else {
+          resolvedCircuitId = await resolveRecoveryCircuitId(repository, activeSessionId);
+          if (resolvedCircuitId === null) {
+            console.warn(
+              `[composition] recovery: could not resolve a bundled circuit for session "${activeSessionId}" -- keeping the currently selected circuit "${settingsStore.getSettings().selectedCircuitId}"`,
+            );
+          }
         }
-        // The production controller was already built above (`buildProductionController()`),
-        // possibly for the PRE-switch selection -- rebuild now, before
-        // activation/recovery, if the selection just changed underneath it.
-        // No dispose needed: nothing has subscribed to or started this
-        // not-yet-activated controller/provider yet.
-        if (controller !== null && productionControllerCircuitId !== settingsStore.getSettings().selectedCircuitId) {
-          buildProductionController();
+
+        if (discardUnbundled) {
+          if (db !== null) await setActiveSession(db, null);
+        } else {
+          // Switch the selection to the resolved circuit BEFORE the
+          // controller is (re)built -- otherwise a recovered MotorPark
+          // session would resume against a TMR-configured controller.
+          // Applied directly (not through `selectCircuit()`, which awaits
+          // `ready()`/`bootstrapPromise` -- itself still in flight here,
+          // which would deadlock) via the SAME apply+rebuild-history helpers
+          // `selectCircuit()` itself uses.
+          if (resolvedCircuitId !== null && resolvedCircuitId !== settingsStore.getSettings().selectedCircuitId) {
+            const resolvedEntry = circuitCatalog.get(resolvedCircuitId)!;
+            applySelectedCircuit(resolvedEntry);
+            await rebuildHistoryForSelection(resolvedEntry);
+          }
+          // The production controller was already built above (`buildProductionController()`),
+          // possibly for the PRE-switch selection -- rebuild now, before
+          // activation/recovery, if the selection just changed underneath it.
+          // No dispose needed: nothing has subscribed to or started this
+          // not-yet-activated controller/provider yet. L1 fix: compared
+          // against the RESOLVED selection, same as the preflight gate.
+          if (
+            controller !== null &&
+            productionControllerCircuitId !== resolveSelectedCircuit(settingsStore.getSettings()).profile.circuitId
+          ) {
+            buildProductionController();
+          }
+          const recoveryLapCount = checkpoint.laps.length + (midSessionState(checkpoint.snapshot) ? 1 : 0);
+          setPendingRecovery({ sessionId: activeSessionId, lapCount: recoveryLapCount });
         }
-        const recoveryLapCount = checkpoint.laps.length + (midSessionState(checkpoint.snapshot) ? 1 : 0);
-        setPendingRecovery({ sessionId: activeSessionId, lapCount: recoveryLapCount });
       } else if (db !== null) {
-        await setActiveSessionId(db, null);
+        await setActiveSession(db, null);
       }
     }
 
@@ -1299,6 +1478,11 @@ export async function resumeRecovery(): Promise<boolean> {
     const info = pendingRecovery;
     if (info === null) return false;
     setRecoveryNotice(null);
+    // H3 fix (contracts.md's recovery amendment, binding): await any
+    // already-running rebuild BEFORE reading/using controller state below --
+    // otherwise this could act on a controller a concurrent rebuild is about
+    // to dispose.
+    while (rebuildInFlight !== null) await rebuildInFlight.catch(() => undefined);
     // Multi-circuit selection addendum (ticket CN-W3): defensive guard --
     // bootstrap's own recovery resolution already rebuilds the production
     // controller for the right circuit BEFORE offering this recovery (see
@@ -1306,8 +1490,11 @@ export async function resumeRecovery(): Promise<boolean> {
     // principle have run in between. Rebuild once more here if the currently
     // built controller's circuit still doesn't match the selection, so this
     // resume is NEVER driven by a controller configured for the wrong
-    // circuit's geometry.
-    if (controller !== null && productionControllerCircuitId !== settingsStore.getSettings().selectedCircuitId) {
+    // circuit's geometry. L1 fix: compared against the RESOLVED selection.
+    if (
+      controller !== null &&
+      productionControllerCircuitId !== resolveSelectedCircuit(settingsStore.getSettings()).profile.circuitId
+    ) {
       await rebuildProductionController();
     }
     const { db: database, repository: repo, controller: ctrl } = await ready();
@@ -1326,7 +1513,7 @@ export async function resumeRecovery(): Promise<boolean> {
       // session here at all.
       setPendingRecovery(null);
       setRecoveryNotice('The recovered session could not be found and was discarded.');
-      if (database !== null) await setActiveSessionId(database, null);
+      if (database !== null) await setActiveSession(database, null);
       return false;
     }
     ctrl.restoreFromCheckpoint(info.sessionId, checkpoint.snapshot, checkpoint.laps);
@@ -1346,8 +1533,14 @@ export async function resumeRecovery(): Promise<boolean> {
     // it. It is cleared only by the existing `onSessionEnded` callback once
     // this session actually finishes; clearing it here meant a SECOND process
     // death mid-resume left no pointer for the next launch to discover, so
-    // recovery was silently never offered again.
-    if (database !== null) await setActiveSessionId(database, info.sessionId);
+    // recovery was silently never offered again. M4 fix: reasserts
+    // `activeSessionCircuitId` alongside it, from `productionControllerCircuitId`
+    // -- the circuit `ctrl` (just possibly rebuilt above) is actually
+    // configured for -- so a second crash mid-resume still recovers the
+    // right circuit.
+    if (database !== null && productionControllerCircuitId !== null) {
+      await setActiveSession(database, { sessionId: info.sessionId, circuitId: productionControllerCircuitId });
+    }
     return true;
   });
 }
@@ -1365,7 +1558,8 @@ export async function discardRecovery(): Promise<void> {
       [],
     );
     setPendingRecovery(null);
-    if (database !== null) await setActiveSessionId(database, null);
+    // M4 fix: clears BOTH keys together (setActiveSession(database, null)).
+    if (database !== null) await setActiveSession(database, null);
   });
 }
 
@@ -1378,23 +1572,45 @@ export async function discardRecovery(): Promise<void> {
 // `SessionHistoryScreen` reflects the deletion without a manual reload.
 // ---------------------------------------------------------------------------
 
-export async function deleteAllStoredUserData(): Promise<DeleteUserDataResult> {
+/** M3 fix: `deleteAllStoredUserData()`'s own return shape, layered on top of `@circuit/core`'s `DeleteUserDataResult` -- `failedCircuitIds`/`errorText` cannot live on that type itself (`packages/core/**` is out of this ticket's write set). `errorText` is `null` whenever `ok` is `true`. */
+export interface AggregatedDeleteUserDataResult extends DeleteUserDataResult {
+  /** Bundled circuit ids whose `deleteAllUserData()` call REJECTED (not just returned `ok: false`) -- empty unless a per-circuit delete actually threw. */
+  failedCircuitIds: string[];
+  errorText: string | null;
+}
+
+export async function deleteAllStoredUserData(): Promise<AggregatedDeleteUserDataResult> {
   const { repository: repo } = await ready();
   // Multi-circuit selection addendum (ticket CN-W3): delete-all spans EVERY
   // bundled circuit, not just the currently selected one -- `deleteUserData`
   // itself is a single per-userId wipe (not circuit-scoped), so this loop's
   // real job is the per-circuit VERIFY-EMPTY check; success requires every
   // bundled circuit to come back empty.
+  //
+  // M3 fix (binding): each circuit's call is its own try/catch -- a REJECTED
+  // per-circuit `deleteAllUserData()` (e.g. a transient SQLite error) no
+  // longer aborts the loop; every remaining bundled circuit is still
+  // attempted, and the rejection is reflected in the aggregate `ok: false`
+  // plus `failedCircuitIds`/`errorText` instead of silently stopping partway
+  // through (previously leaving later circuits' data untouched with no
+  // indication why).
   const perCircuitResults: DeleteUserDataResult[] = [];
+  const failedCircuitIds: string[] = [];
   for (const summary of circuitCatalog.list()) {
-    perCircuitResults.push(
-      await deleteAllUserData(repo, LOCAL_USER_ID, summary.circuitId, summary.layoutId, summary.layoutVersion),
-    );
+    try {
+      perCircuitResults.push(
+        await deleteAllUserData(repo, LOCAL_USER_ID, summary.circuitId, summary.layoutId, summary.layoutVersion),
+      );
+    } catch (error) {
+      console.warn(`[composition] deleteAllStoredUserData: circuit "${summary.circuitId}" failed`, error);
+      failedCircuitIds.push(summary.circuitId);
+    }
   }
+  const perCircuitOk = failedCircuitIds.length === 0 && perCircuitResults.every((r) => r.ok);
   const result: DeleteUserDataResult = {
-    ok: perCircuitResults.every((r) => r.ok),
+    ok: perCircuitOk,
     remainingSessionCount: perCircuitResults.reduce((sum, r) => sum + r.remainingSessionCount, 0),
-    referenceLapCleared: perCircuitResults.every((r) => r.referenceLapCleared),
+    referenceLapCleared: perCircuitResults.length > 0 && perCircuitResults.every((r) => r.referenceLapCleared),
   };
   // F7 fix (WPT3, binding): `telemetry_samples` (Telemetry addendum) is a
   // mobile-owned table (`persistence/telemetrySchema.ts`) that
@@ -1420,8 +1636,23 @@ export async function deleteAllStoredUserData(): Promise<DeleteUserDataResult> {
     });
   }
   const finalResult: DeleteUserDataResult = { ...result, ok: result.ok && telemetryOk };
+  // M4 fix (binding): a leftover active-session pointer is meaningless once
+  // all stored data is gone -- cleared together, the SAME way session
+  // end/discard/vanished-checkpoint do (`setActiveSession(db, null)`).
+  if (finalResult.ok && db !== null) await setActiveSession(db, null);
   if (finalResult.ok && historyStore !== null) await historyStore.refresh();
-  return finalResult;
+
+  const errorText = finalResult.ok
+    ? null
+    : [
+        failedCircuitIds.length > 0 ? `circuits rejected: ${failedCircuitIds.join(', ')}` : null,
+        !perCircuitOk && failedCircuitIds.length === 0 ? 'one or more circuits did not verify empty' : null,
+        !telemetryOk ? 'telemetry rows remained' : null,
+      ]
+        .filter((part): part is string => part !== null)
+        .join('; ') || 'delete-all failed';
+
+  return { ...finalResult, failedCircuitIds, errorText };
 }
 
 // ---------------------------------------------------------------------------

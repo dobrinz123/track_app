@@ -133,6 +133,10 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
   const [confirmingDelete, setConfirmingDelete] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
   const [deleteBanner, setDeleteBanner] = React.useState<'success' | 'error' | null>(null);
+  // M3 fix (ticket CN-FIX2): `deleteAllStoredUserData()`'s aggregate error
+  // text (which bundled circuits rejected, if any) -- `null` on success or
+  // when the call itself threw before producing a result.
+  const [deleteErrorText, setDeleteErrorText] = React.useState<string | null>(null);
   const [diagnostics, setDiagnostics] = React.useState<LiveDiagnosticsSnapshot | null>(null);
 
   // F11 fix (WPT3): a local string draft, distinct from the committed
@@ -225,8 +229,10 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
     try {
       const result = await deleteAllStoredUserData();
       setDeleteBanner(result.ok ? 'success' : 'error');
+      setDeleteErrorText(result.ok ? null : result.errorText);
     } catch {
       setDeleteBanner('error');
+      setDeleteErrorText(null);
     } finally {
       setDeleting(false);
       setConfirmingDelete(false);
@@ -570,7 +576,9 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
             ) : null}
             {deleteBanner === 'error' ? (
               <Text style={styles.errorBanner} maxFontSizeMultiplier={1.3} accessibilityLiveRegion="polite">
-                Could not delete data. Please try again.
+                {deleteErrorText !== null
+                  ? `Could not delete all data (${deleteErrorText}). Please try again.`
+                  : 'Could not delete data. Please try again.'}
               </Text>
             ) : null}
           </View>

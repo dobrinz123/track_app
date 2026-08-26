@@ -444,3 +444,26 @@ circuit (MotorPark România, `motorpark-romania`) the app has ONE selected circu
   from a per-circuit constant. Nothing is ever labeled "official".
 - Circuit-independent surfaces (dashboard, voice, telemetry, track-map
   renderer) stay circuit-independent; only their inputs come from the selection.
+
+### Multi-circuit selection — recovery amendment (2026-08-26, binding, after Codex CN-REV2)
+`@circuit/core` writes the `sessions` row only at `endSession()`, so a crashed in-progress
+session is never discoverable through `listSessions`. The recovery rule is therefore:
+- `onSessionStarted` persists `activeSessionId` AND `activeSessionCircuitId` (the circuit of the
+  controller that started the session) in ONE SQLite transaction. Both are cleared together on
+  session end, discard, vanished-checkpoint cleanup and delete-all. `resumeRecovery()` reasserts
+  both after resuming.
+- Bootstrap recovery resolves the circuit in this order: persisted `activeSessionCircuitId` →
+  `listSessions` scan across the bundled catalog → the persisted selection (with a warning). A
+  circuit id that is not bundled discards the checkpoint with a warning.
+- `selectCircuit()` awaits bootstrap (`ready()`), is serialized (concurrent calls apply in order,
+  last one wins for settings AND history store), and is REFUSED — returns `{ ok: false,
+  reason: 'SESSION_ACTIVE' }`, changes nothing — while the active controller is in
+  `outLap`/`timing`/`inPit`/`paused`.
+- Every controller-consuming entry point (preflight gate, recovery resume) first awaits any
+  in-flight rebuild (`rebuildInFlight`) before evaluating state.
+- DevReplay selects the scenario's circuit (through `selectCircuit`) before starting the replay,
+  so calibration map, history and detail screens agree with the replay controller.
+- The gate compares the built controller's circuit against the RESOLVED selection (unknown ids
+  resolve to the default), never against the raw setting.
+- UI copy: the word "official" may appear only inside a negation ("not an official …"); no
+  render branch may ever display "Official" as a status.

@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
-import { ADVISORY_NOTICE, circuitDisplayData } from '../data/circuit';
+import { ADVISORY_NOTICE, circuitDisplayData, statusLabel } from '../data/circuit';
 import { StatusBanner } from '../components/StatusBanner';
 import { CornersList } from '../components/CornersList';
 import { circuitCatalog } from '../../session/circuitCatalog';
@@ -183,8 +183,12 @@ export function CircuitDetailScreen({ navigation, route }: Props): React.JSX.Ele
           <MetaRow label="Length" value={`${circuit.lengthKm.toFixed(3)} km`} />
           <MetaRow label="Layout" value={circuit.layoutId} />
           <MetaRow label="Direction" value={circuit.direction === 'clockwise' ? 'Clockwise' : 'Counter-clockwise'} />
-          <MetaRow label="Geometry" value={circuit.geometryStatus === 'official' ? 'Official' : 'Community-derived'} />
-          <MetaRow label="Sectors" value={circuit.sectorStatus === 'official' ? 'Official' : 'App-defined'} />
+          {/* L2 fix (ticket CN-FIX2, binding): renders the raw status via the
+              neutral `statusLabel()` helper -- never a bespoke "Official"
+              label (contracts.md: no render branch may ever display
+              "Official" as a status). */}
+          <MetaRow label="Geometry" value={statusLabel(circuit.geometryStatus)} />
+          <MetaRow label="Sectors" value={statusLabel(circuit.sectorStatus)} />
           {circuit.extras.openedYear !== undefined ? (
             <MetaRow label="Opened" value={String(circuit.extras.openedYear)} />
           ) : null}
