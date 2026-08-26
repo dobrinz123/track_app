@@ -1,0 +1,49 @@
+# BMW ENET/HSFZ Protocol Research — for MHD Adapter Transport (2026 GR Supra A90, B58, ZF 8HP)
+
+**Date:** 2026-08-27 | **Status:** DONE_WITH_CONCERNS
+**Prior reading:** mhd-adapter-research.md, mhd-adapter-research-2.md (MHD WiFi specifics, S55/B58 oil-temp DIDs — mostly NOT FOUND there; not repeated here).
+
+## Summary Table
+
+| # | Question | Finding | Confidence | Source |
+|---|---|---|---|---|
+| 1a | HSFZ header layout | 4-byte length (payload+addr, network order) + 2-byte control word + 1-byte source + 1-byte target; extra `expected`/`received` bytes only in error frames (0x40 range); `identification_string` field only for control 0x11 | **High** (read from source) | [scapy hsfz.py](https://github.com/secdev/scapy/blob/master/scapy/contrib/automotive/bmw/hsfz.py) |
+| 1b | Control word values | 0x01 diagnostic_req_res, 0x02 acknowledge_transfer, 0x10 terminal15, 0x11 vehicle_ident_data, 0x12 alive_check, 0x13 status_data_inquiry, 0x40–0x45 errors (tester-addr/control-word/format/dest-addr/too-large/app-not-ready), 0xFF out_of_memory | **High** | same |
+| 1c | TCP port | **6801** (0x1A91) — matches user's assumption | **High**, 2 independent sources | [scapy hsfz.py](https://github.com/secdev/scapy/blob/master/scapy/contrib/automotive/bmw/hsfz.py) (HSFZSocket default), [munich.dissec.to HSFZ/DoIP kb](https://munich.dissec.to/kb/chapters/doip/doip.html) |
+| 1d | UDP discovery port | **6811** — vehicle-ident broadcast, returns VIN/logical-addr/IP/MAC list | **High** | scapy `hsfz_scan()`; corroborated by search of the same page |
+| 1e | Keep-alive | Control word 0x12 = "alive_check" exists in the protocol; exact required interval / whether ECU drops idle sessions **NOT FOUND** in any fetched source | **Low** | inferred from control-word table only |
+| 1f | Default tester (source) addr | scapy defaults to **0xF4**; a separate BimmerFest ENET thread (via search snippet, page itself returned 403 on direct fetch) shows **0xF1** used as tester/sender byte | **Medium — variance noted, not a hard conflict** (UDS tester address is often tool-configurable) | scapy hsfz.py; [BimmerFest ENET-CAN thread](https://www.bimmerfest.com/threads/enet-can-diagnostic-messages-for-bench-coding.1398888/) (search-snippet only, page blocked direct fetch) |
+| 1g | Repo licenses | ediabaslib = **GPL-3.0**; scapy = **GPL-2.0** — both copyleft; safe to read/reimplement from documented protocol knowledge, do not vendor code verbatim into a proprietary RN app | **High** (verified via `gh api`) | github.com/uholeschak/ediabaslib, github.com/secdev/scapy |
+| 1h | HSFZ vs DoIP | ediabaslib groups "F series or higher" under "HSFZ or DoIP" without stating a hard cutover generation; A90 Supra shares G29 platform lineage — **which protocol the Supra's gateway actually speaks is NOT independently confirmed** here (MHD marketing implies HSFZ/ENET-style, consistent with F/G series, but not proven for A90 specifically) | **Low-Medium** | [ediabaslib AdapterTypes.md](https://github.com/uholeschak/ediabaslib/blob/master/docs/AdapterTypes.md); [munich.dissec.to](https://munich.dissec.to/kb/chapters/doip/doip.html) |
+| 2 | DME address | **0x12** — repeated across BimmerPost coding threads ("DME2_12_ETHERNET") and a BimmerFest ENET thread snippet ("DME_ID is identified as 0x12") | **Medium** (consistent but no single primary spec doc directly fetched — forum pages 403'd on direct fetch) | [BimmerPost DME coding thread](https://f15.bimmerpost.com/forums/showthread/1961672/stuck-coding-dme-dme2-12-ethernet); ENET-CAN thread above |
+| 2 | DSC / EGS / SZL / CAS addresses | **NOT FOUND** as confirmed hex values in any source actually fetched. Notably: SZL has **no ECU address of its own** — steering-angle-related coding is done *through* the DSC, per BimmerPost G20 coding thread | **Low** for hex bytes; **Medium** for the "SZL has no own address" claim | [G20 "Coding new SZL" thread](https://g20.bimmerpost.com/forums/showthread/2239349/coding-new-szl) (search snippet) |
+| 2 | OBD broadcast/gateway bytes | Search-snippet only (page 403'd direct): destination **0xDF** used for "broadcast", sender **0xF1** as tester byte, GWS (gateway) destination **0x5E** | **Low-Medium**, unverified by direct fetch | BimmerFest ENET-CAN thread (snippet) |
+| 3 | Mode-01 PIDs over ENET to DME address | **NOT FOUND / inconclusive.** No source confirms or denies whether sending UDS-wrapped Service 0x01 PID requests directly to target 0x12 over HSFZ works, vs. requiring the legacy functional OBD broadcast (0x7DF-style) via the gateway. Prior research already established BMW-proprietary values (oil temp) do NOT come back on Mode-01; legislated PIDs' behavior over ENET-direct-to-DME specifically is untested in any source found | **Low** | (no reliable source found this session) |
+| 4 | Public DID tables for B58 (rpm/throttle/oil-temp/boost), DSC brake pressure, SZL steering angle | **NOT FOUND** as hex/byte tables for B58/DSC 0x22 DIDs. One partial exception: A90 Supra steering angle is observed broadcasting on **raw CAN ID 769 (0x301)** — a PT-CAN frame ID, NOT a UDS DID — per SupraMKV thread (403 on direct fetch; WebSearch snippet only) | **Low** overall; **Medium** for the CAN-ID-769 claim specifically | [SupraMKV "OBD2 PIDs of steering angle and brake pressure"](https://www.supramkv.com/threads/obd2-pids-of-steering-angle-and-brake-pressure.9160/); [SupraMKV "Steering Angle" thread](https://www.supramkv.com/threads/steering-angle-is-there-a-sensor-value-for-this.16056/) |
+| 5 | Single-ECU-client rule | Already confirmed in prior research (SpoolStreet forum): only one ECU connection at a time on MHD adapter. New this session: BimmerFest thread reports the MHD WiFi "randomly disconnects itself entirely, sometimes dropping 3 times within a minute," and one user had to disconnect CarPlay/other WiFi clients to keep BimmerLink connected | **Medium** (anecdotal forum reports, consistent direction) | [BimmerFest "issues with Bimmerlink disconnecting" thread](https://www.bimmerfest.com/threads/anyone-every-had-issues-with-bimmerlink-disconnecting-from-their-wireless-obd2.1463126/) (search snippet, not directly fetched) |
+| 5 | Achievable Hz / MTU / latency | **NOT FOUND.** No forum report with actual measured Hz for multi-channel polling over MHD WiFi located this session. One unverified claim: ENET-over-WiFi via the car's gateway (ZGW) runs "~100 Mbps" vs Bluetooth D-CAN "~0.5 Mbps" — link-layer bandwidth only, says nothing about diagnostic-session polling rate achievable in practice | **Low** | search snippet (bimmer-connect.com product copy, not primary/technical) |
+| 6 | Does A90 Supra expose brake/steering via plain OBD? | **NO — explicitly confirmed.** SupraMKV thread states steering angle and brake pressure (front/rear) are **not** available via standard Service 0x01; they require **PT-CAN sniffing or UDS Service 0x22** enhanced DIDs. Throttle position (TPS) is the one chassis-dynamics-adjacent channel confirmed on Service 0x01 | **Medium** (single forum thread, snippet-only, but directly on-point and unambiguous in wording) | [SupraMKV OBD2 PIDs thread](https://www.supramkv.com/threads/obd2-pids-of-steering-angle-and-brake-pressure.9160/) |
+
+## Notes on fetch limitations this session
+
+BimmerFest and BimmerPost/SupraMKV (all XenForo-based forums) returned **HTTP 403** on direct WebFetch for every thread URL tried (a `tollbit.bimmerfest.com` redirect was offered for one bimmerfest URL but not pursued further — read-only constraint, not worth a second fetch given time budget). All forum content above therefore comes from **WebSearch's own indexed-snippet summaries** of those pages, not a verified direct read of the full thread. This is a materially weaker evidence tier than the scapy/ediabaslib GitHub sources (which were fetched directly and, for licenses, additionally verified via `gh api`). Treat all forum-sourced rows above as **corroborating, not authoritative**.
+
+## What is VERIFIED vs. still UNKNOWN
+
+**Verified (directly fetched, primary source):**
+- HSFZ header structure and full control-word table (scapy source code)
+- TCP 6801 / UDP 6811 as the HSFZ diagnostic and discovery ports
+- ediabaslib = GPL-3.0, scapy = GPL-2.0 (via `gh api`, not scraped)
+- A90 Supra does not expose steering angle / brake pressure via standard Mode-01 OBD (per SupraMKV, though only as a search snippet)
+
+**Still unknown / NOT FOUND anywhere this session:**
+- Exact hex diagnostic addresses for DSC, EGS, SZL, CAS (only DME=0x12 has repeated-but-unverified support)
+- Any public Service-0x22 DID number + decode formula for B58 rpm/throttle/oil-temp/boost, DSC brake pressure, or SZL/steering angle
+- Whether Mode-01 PIDs work at all when addressed directly to the DME (0x12) over HSFZ vs. only via legacy OBD-gateway broadcast
+- Required keep-alive/tester-present interval before the MHD adapter or ECU drops an idle HSFZ session
+- Any concrete, measured achievable sample rate (Hz) for multi-channel logging over the MHD WiFi adapter — no forum report with real numbers was located
+- Confirmation of which protocol (HSFZ vs. DoIP) the 2026 A90 Supra's gateway actually answers on — inferred only, not confirmed for this specific vehicle
+
+## Recommendation for implementation
+
+Given the above, the HSFZ transport layer (header, ports, control words) is solid enough to implement directly from the verified scapy findings above (reimplement from protocol knowledge, do not copy GPL code). The DID/PID layer for anything beyond DME address discovery is **not safely implementable from public sources alone** — plan for either (a) empirical reverse-engineering with a packet capture while MHD/BimmerLink is running against the actual car, or (b) scoping v1 to whatever channels are confirmed to work via standard Mode-01 once addressed to the DME, with DSC/SZL channels (brake, steering) deferred pending real hardware testing.

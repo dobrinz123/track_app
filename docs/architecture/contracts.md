@@ -528,3 +528,57 @@ left ordering holes. Replaced by ONE ordering boundary:
   failures logged, never thrown). A controller that later starts a session restarts it through
   `ensureProviderRunning()` as before. Consequence: no session-less GNSS watcher can outlive a
   rebuild — the "orphaned provider" residual is closed at the owner, not in core.
+
+## ENET telemetry addendum (2026-08-27, binding — Phase 4e, MHD WiFi Adapter)
+
+Second OBD transport next to ELM327: BMW ENET = HSFZ framing over TCP carrying UDS PDUs.
+Facts verified from primary sources (scapy `hsfz.py`, dissec.to HSFZ write-up — see
+`.foreman/scratch/enet-protocol-research.md`); everything marked EMPIRICAL is configurable and
+must be confirmed in the car.
+
+```ts
+// Settings (apps/mobile): adapterType 'elm327' | 'enet' (default 'elm327' — existing behavior
+// byte-identical); enetHost (string, adapter IP from its web UI), enetPort (default 6801),
+// enetTesterAddress (default 0xF4, EMPIRICAL alt 0xF1), enetTargetAddress (default 0x12 = DME,
+// EMPIRICAL), enetChannelSpecs (JSON list, see below), telemetrySimulate applies to both types.
+
+// HSFZ frame (verified): [len u32 BE = payload bytes incl. src+tgt][control u16 BE][src u8][tgt u8][UDS PDU]
+// control words: 0x0001 diagnostic req/res, 0x0002 acknowledge (adapter echoes the request head),
+// 0x0010 terminal15, 0x0011 vehicle ident, 0x0012 alive check, 0x0013 status, 0x0040-0x0045 error
+// frames (tester addr / control word / format / dest addr / too large / app not ready), 0x00FF OOM.
+// TCP 6801 (verified). UDP 6811 discovery (verified) — NOT used in v1 (no UDP dep).
+
+// UDS client (packages/core, pure): ReadDataByIdentifier 0x22 (+0x62), OBD legacy service 0x01
+// wrapped as a UDS PDU to the target (+0x41) — EMPIRICAL whether the DME answers it over ENET,
+// TesterPresent 0x3E 0x80 every 2 s while polling (interval configurable), negative response 0x7F
+// with NRC; 0x78 responsePending extends the wait; NRC 0x11/0x12/0x31 on a channel marks it
+// UNSUPPORTED and removes it from the poll plan (recorded in diagnostics, never retried in-session).
+// Alive check (0x0012) from the adapter is answered with an alive-check frame carrying the tester
+// address (EMPIRICAL — recorded in diagnostics either way).
+
+// READ-ONLY WHITELIST (hard, enforced in the core codec before framing, same model as
+// customPidValidation): request SIDs allowed = {0x01, 0x22, 0x3E}. No 0x10 DiagnosticSessionControl,
+// no 0x27, 0x2E, 0x31, 0x34-0x37, 0x3D, 0x85 — ever. Target address is a free byte (DSC/EGS later).
+
+export interface EnetChannelSpec {
+  channel: TelemetryChannelId;           // rpm | speedKph | throttlePct | coolantC | engineOilC | ... (no latG/longG)
+  mode: 'obd01' | 'did';                 // obd01: PID via service 0x01 (decoded by pidCodec); did: 0x22 DID
+  requestHex: string;                    // obd01: 2 hex chars PID; did: 4 hex chars DID
+  targetAddress?: number;                // default = enetTargetAddress
+  decode?: { byteOffset: number; byteLength: 1 | 2; signed?: boolean; scale: number; offset: number }; // did only
+  provenance: string;                    // REQUIRED for did specs: where the DID/decode came from
+}
+// Built-in default specs: obd01 for rpm 0C, speedKph 0D, throttlePct 11, coolantC 05, engineOilC 5C
+// (all EMPIRICAL on the A90). DID specs default to NONE — no public B58/DSC DID table exists.
+
+// Poll plan: same channel rates as the ELM path (rpm/speed/throttle 5 Hz, temps 0.2-0.5 Hz);
+// scheduler = weighted round-robin as in Elm327SessionEngine; one request in flight at a time.
+// Samples flow through the SAME TelemetrySample/recorder path (tMonoMs, retention cap 200k).
+// Diagnostics: per-channel supported/unsupported + last NRC, frames tx/rx, ack latency p50/p95,
+// last raw frame hex (for the dev DID-probe screen).
+// Single-client rule (MHD): documented in settings copy — the MHD app must be closed.
+// Dev-only "DID probe" screen: send one 0x22 DID (or 0x01 PID) to a target, show raw response hex —
+// the empirical tool for discovering B58/DSC identifiers; whitelist applies there too.
+// Simulator: SimulatedEnetTransport = scripted ECU over HSFZ (acks, responses, alive checks, NRC,
+// disconnect and TCP fragmentation injection) — the hardware-free proof for tests and preview E2E.
+```
