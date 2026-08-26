@@ -6,43 +6,61 @@ import { colors, radii } from '../theme';
 import {
   buildOutlineSegments,
   decimateCenterline,
-  densifyCenterline,
+  densifyToSpacing,
   fitCenterlineAutoRotated,
   pointAtLapFraction,
   segmentAngleDeg,
   type ContainerFraction,
+  type OutlineJoint,
   type OutlineSegment,
 } from '../../session/trackMapModel';
 
 /**
- * Width : height ratio of the map container -- fixed at ~55% height of width (V3
- * binding design, `ActiveCalibrationScreen`'s "map goes in the empty lower area, fixed
- * height ~55% of width"). Applied via RN's `aspectRatio` style, so the container's
- * height always tracks its own (100%-of-parent) width with no LAYOUT dependency for
- * SIZING. `TrackMapView` still reads its own measured width via `onLayout` (F2) --
- * purely to turn `ContainerFraction`s into pixel-precise outline-segment lengths, never
- * to size the container itself.
+ * Pre-layout fallback width:height ratio for the map container -- used only for the
+ * very first render, before `onLayout` (F2) has measured the container's real,
+ * parent-given pixel size. The container's ACTUAL on-screen aspect is now decided by
+ * `ActiveCalibrationScreen` (P1 fix: content-aspect-driven sizing, clamped to [0.4,
+ * 0.75] of width, so the outline's corners stay off the container edges on a narrow
+ * phone) -- `TrackMapView` itself just fills whatever box its parent gives it and
+ * measures that box's real aspect via `onLayout` for its own `fitCenterlineAutoRotated`
+ * call, rather than assuming this fixed ratio.
  */
 export const TRACK_MAP_ASPECT_RATIO = 1 / 0.55;
 
 const START_FINISH_TICK_SIZE = 6;
 const MARKER_DOT_SIZE = 8;
 const CHEVRON_SIZE = 8;
-const OUTLINE_SEGMENT_HEIGHT = 2;
+// P2 fix ("choppy" line, user field report): thicker at phone DPI, plus the joint
+// dots below round over what used to be a visible notch at every rotated segment's
+// join.
+const OUTLINE_SEGMENT_HEIGHT = 2.5;
 
-/** F3 densify + F2 decimate targets: the pipeline densifies a sparse (<250-point)
- * source centerline to ~2x its point count BEFORE decimating down to at most this many
- * points -- keeps segments short (smooth curves) while capping the connected-outline
- * segment count (`buildOutlineSegments` emits one segment per consecutive pair, so at
- * most `OUTLINE_POINT_TARGET - 1`). */
-const OUTLINE_POINT_TARGET = 250;
+/** F3 densify (to spacing) + F2 decimate targets: the pipeline densifies the source
+ * centerline so no segment exceeds `DENSIFY_TARGET_SPACING_M` BEFORE decimating down to
+ * at most `OUTLINE_POINT_TARGET` points -- keeps segments short (smooth curves) while
+ * capping the connected-outline segment count (`buildOutlineSegments` emits one segment
+ * per consecutive pair, so at most `OUTLINE_POINT_TARGET`). */
+const DENSIFY_TARGET_SPACING_M = 12;
+const OUTLINE_POINT_TARGET = 400;
 
 /** F5: the direction chevron sits at this fraction of the lap's total distance. */
 const CHEVRON_LAP_FRACTION = 0.1;
 
+/** Insets `frac` (a `[0,1]` axis fraction) by `radiusPx` of `containerPx`, so a
+ * `radiusPx`-radius dot centered on the result never renders past the `[0, containerPx]`
+ * boundary (P1 fix: "marker/dot positions subtract their own radius") -- a no-op while
+ * `containerPx` is still 0 (pre-`onLayout`; nothing meaningful to clamp against yet). */
+function insetFractionByRadius(frac: number, radiusPx: number, containerPx: number): number {
+  if (containerPx <= 0) return frac;
+  const radiusFrac = radiusPx / containerPx;
+  return Math.min(1 - radiusFrac, Math.max(radiusFrac, frac));
+}
+
 /** Centers a `size`x`size` square dot on `fraction`, via percentage `left`/`top` plus a
- * matching negative margin (RN has no percentage-based `transform: translate`). */
-function dotPosition(fraction: ContainerFraction, size: number): {
+ * matching negative margin (RN has no percentage-based `transform: translate`) --
+ * `fraction` is first inset by the dot's own radius (P1 fix) so an edge marker's drawn
+ * circle never renders past `containerW`/`containerH`. */
+function dotPosition(fraction: ContainerFraction, size: number, containerW: number, containerH: number): {
   position: 'absolute';
   left: `${number}%`;
   top: `${number}%`;
@@ -52,10 +70,13 @@ function dotPosition(fraction: ContainerFraction, size: number): {
   marginLeft: number;
   marginTop: number;
 } {
+  const radius = size / 2;
+  const xFrac = insetFractionByRadius(fraction.xFrac, radius, containerW);
+  const yFrac = insetFractionByRadius(fraction.yFrac, radius, containerH);
   return {
     position: 'absolute',
-    left: `${fraction.xFrac * 100}%`,
-    top: `${fraction.yFrac * 100}%`,
+    left: `${xFrac * 100}%`,
+    top: `${yFrac * 100}%`,
     width: size,
     height: size,
     borderRadius: size / 2,
@@ -86,8 +107,9 @@ function centerPosition(fraction: ContainerFraction, size: number): {
 
 /** Positions a thin, `lengthPx`-long segment `View` per F2's design: absolute
  * `left`/`top` at the segment's start (container pixels, not percent -- segment length
- * is itself pixel-precise), `width = lengthPx`, `height = 2`, rotated `angleDeg` around
- * its LEFT-CENTER origin so it sweeps from `(x, y)` toward the next point. */
+ * is itself pixel-precise), `width = lengthPx`, `height = OUTLINE_SEGMENT_HEIGHT`,
+ * rotated `angleDeg` around its LEFT-CENTER origin so it sweeps from `(x, y)` toward
+ * the next point. */
 function segmentStyle(segment: OutlineSegment): {
   position: 'absolute';
   left: number;
@@ -130,6 +152,46 @@ const CenterlineOutline = React.memo(function CenterlineOutline({
   );
 });
 
+/** Positions a `size`x`size` filled circle centered on a joint's container-pixel
+ * `(x, y)` (P2 fix: absolute pixel `left`/`top`, matching `segmentStyle`'s own
+ * pixel-not-percent positioning, since joints come from the same pixel-space
+ * `buildOutlineSegments` output as the segments they round over). */
+function jointStyle(joint: OutlineJoint, size: number): {
+  position: 'absolute';
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  borderRadius: number;
+} {
+  return {
+    position: 'absolute',
+    left: joint.x - size / 2,
+    top: joint.y - size / 2,
+    width: size,
+    height: size,
+    borderRadius: size / 2,
+  };
+}
+
+/**
+ * P2 fix ("choppy" line, user field report): a filled circle at every outline vertex,
+ * the same diameter as the outline's own line thickness -- rounds over the notch a
+ * rotated `OutlineSegment` otherwise leaves at each join, so the connected outline
+ * reads as one smooth continuous line instead of faceted 2px segments. Wrapped in
+ * `React.memo` and memoized by `TrackMapView` alongside `CenterlineOutline` (same
+ * source data, same re-render conditions).
+ */
+const JointDots = React.memo(function JointDots({ joints }: { joints: OutlineJoint[] }): React.JSX.Element {
+  return (
+    <>
+      {joints.map((joint, index) => (
+        <View key={index} pointerEvents="none" style={[styles.outlineSegment, jointStyle(joint, OUTLINE_SEGMENT_HEIGHT)]} />
+      ))}
+    </>
+  );
+});
+
 export interface TrackMapViewProps {
   /** Full (undecimated) local-frame centerline -- a stable module-level reference for
    * the app's one bundled circuit, so decimating/fitting it below only ever runs once. */
@@ -162,31 +224,36 @@ export function TrackMapView({
   matchedLocal,
   onTrack,
 }: TrackMapViewProps): React.JSX.Element {
-  // Container pixel width, from a ONE-TIME-per-size `onLayout` measurement (F2 needs it:
-  // connected-outline segment lengths are pixel lengths, not percentages). Height always
-  // derives from it via the fixed `TRACK_MAP_ASPECT_RATIO`, so a resize (rare -- device
-  // rotation) still updates both together. Starts at 0 (nothing measured yet); every
-  // pixel-dependent memo below is empty/undefined until the first layout fires.
-  const [containerW, setContainerW] = useState(0);
-  const containerH = containerW / TRACK_MAP_ASPECT_RATIO;
+  // Container pixel size, from a ONE-TIME-per-size `onLayout` measurement -- both
+  // dimensions now, not just width (F2 needs pixel lengths for segments; P1 needs the
+  // REAL measured aspect for `fitCenterlineAutoRotated` below, since `ActiveCalibrationScreen`
+  // -- not a fixed constant -- now decides the container's actual on-screen height).
+  // Starts at {0, 0} (nothing measured yet); every pixel-dependent memo below is
+  // empty/undefined, and `containerAspect` falls back to `TRACK_MAP_ASPECT_RATIO`,
+  // until the first layout fires.
+  const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
+  const { width: containerW, height: containerH } = containerSize;
+  const containerAspect = containerH > 0 ? containerW / containerH : TRACK_MAP_ASPECT_RATIO;
   const handleLayout = (event: LayoutChangeEvent): void => {
-    const width = event.nativeEvent.layout.width;
-    setContainerW((prev) => (prev === width ? prev : width));
+    const { width, height } = event.nativeEvent.layout;
+    setContainerSize((prev) => (prev.width === width && prev.height === height ? prev : { width, height }));
   };
 
-  // Fit: F3 densify (short segments through curves) -> F2 decimate (cap the segment
-  // count) -> F1 auto-rotate to fit (portrait tracks get their long axis aligned with
-  // the container's), computed once per `centerline` identity (V1 binding design) --
-  // close enough to the full centerline's true extent for this diagnostic view, and
-  // keeps this a single memoized pipeline.
+  // Fit: F3 densify (to spacing -- short segments through curves) -> F2 decimate (cap
+  // the segment count) -> F1 auto-rotate to fit (portrait tracks get their long axis
+  // aligned with the container's) against the container's OWN measured aspect (P1 fix).
+  // `decimated`/`fit` are recomputed whenever `centerline` OR `containerAspect` changes
+  // (V1 binding design keeps this a single memoized pipeline; `containerAspect` is
+  // stable across the vast majority of renders since it only changes on a real layout
+  // event).
   const { decimated, fit } = useMemo(() => {
-    const densified = densifyCenterline(centerline, OUTLINE_POINT_TARGET);
+    const densified = densifyToSpacing(centerline, DENSIFY_TARGET_SPACING_M);
     const decimatedPoints = decimateCenterline(densified, OUTLINE_POINT_TARGET);
-    return { decimated: decimatedPoints, fit: fitCenterlineAutoRotated(decimatedPoints, TRACK_MAP_ASPECT_RATIO) };
-  }, [centerline]);
+    return { decimated: decimatedPoints, fit: fitCenterlineAutoRotated(decimatedPoints, containerAspect) };
+  }, [centerline, containerAspect]);
 
-  const outlineSegments = useMemo(() => {
-    if (containerW === 0) return [];
+  const { segments: outlineSegments, joints: outlineJoints } = useMemo(() => {
+    if (containerW === 0) return { segments: [], joints: [] };
     const fractions = decimated.map((point) => fit.project(point));
     return buildOutlineSegments(fractions, containerW, containerH);
   }, [decimated, fit, containerW, containerH]);
@@ -211,7 +278,11 @@ export function TrackMapView({
   return (
     <View style={styles.container} accessibilityLabel="Live position on the circuit map" onLayout={handleLayout}>
       <CenterlineOutline segments={outlineSegments} />
-      <View pointerEvents="none" style={[styles.startFinishTick, dotPosition(startFinishFraction, START_FINISH_TICK_SIZE)]} />
+      <JointDots joints={outlineJoints} />
+      <View
+        pointerEvents="none"
+        style={[styles.startFinishTick, dotPosition(startFinishFraction, START_FINISH_TICK_SIZE, containerW, containerH)]}
+      />
       {chevron === undefined ? null : (
         <View
           pointerEvents="none"
@@ -231,7 +302,7 @@ export function TrackMapView({
           pointerEvents="none"
           testID="trackmap-raw-dot"
           accessibilityLabel="trackmap-raw-dot"
-          style={[styles.rawDot, dotPosition(rawFraction, MARKER_DOT_SIZE)]}
+          style={[styles.rawDot, dotPosition(rawFraction, MARKER_DOT_SIZE, containerW, containerH)]}
         />
       )}
       {matchedFraction === undefined ? null : (
@@ -241,7 +312,7 @@ export function TrackMapView({
           accessibilityLabel="trackmap-matched-dot"
           style={[
             styles.matchedDot,
-            dotPosition(matchedFraction, MARKER_DOT_SIZE),
+            dotPosition(matchedFraction, MARKER_DOT_SIZE, containerW, containerH),
             { backgroundColor: onTrack ? colors.success : colors.danger },
           ]}
         />
@@ -252,8 +323,12 @@ export function TrackMapView({
 
 const styles = StyleSheet.create({
   container: {
+    // P1 fix: sizing (both dimensions) now comes entirely from the parent
+    // (`ActiveCalibrationScreen`'s `mapWrap`, content-aspect-driven) -- this `View`
+    // just fills whatever box it's given; `TrackMapView` measures that box's real
+    // aspect via `onLayout` instead of assuming a fixed ratio.
     width: '100%',
-    aspectRatio: TRACK_MAP_ASPECT_RATIO,
+    height: '100%',
     backgroundColor: colors.surface,
     borderRadius: radii.sm,
     borderWidth: 1,

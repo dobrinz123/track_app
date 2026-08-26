@@ -4,7 +4,7 @@ import {
   buildOutlineSegments,
   computeBounds,
   decimateCenterline,
-  densifyCenterline,
+  densifyToSpacing,
   fitCenterline,
   fitCenterlineAutoRotated,
   pointAtLapFraction,
@@ -70,29 +70,31 @@ describe('fitCenterline', () => {
   it('maps a known centerline + known sample to the expected container coordinates, preserving aspect (wider-than-container box)', () => {
     // A 200m (E) x 100m (N) box -- box aspect (2.0) is WIDER than a 1:1 container, so
     // width is the binding constraint: the box fills the container's full width and is
-    // centered (letterboxed) vertically.
+    // centered (letterboxed) vertically. marginFrac=0 reproduces the original
+    // edge-to-edge fit exactly (P1 fix: pinned tests updated to pass it explicitly).
     const points: LocalPoint[] = [
       { e: 0, n: 0 },
       { e: 200, n: 100 },
     ];
-    const fit = fitCenterline(points, 1); // square container (aspect = width/height = 1)
+    const fit = fitCenterline(points, 1, 0); // square container (aspect = width/height = 1)
 
     // scale = min(1/200, 1/100) = 1/200 -> usedWidthUnits=1 (fills width),
     // usedHeightUnits=100/200=0.5 -> padYUnits=(1-0.5)/2=0.25.
     expect(fit.project({ e: 0, n: 0 })).toEqual({ xFrac: 0, yFrac: 0.75 }); // bottom-left of the box: y measured from the bottom, flipped to screen-down
     expect(fit.project({ e: 200, n: 100 })).toEqual({ xFrac: 1, yFrac: 0.25 }); // top-right of the box
     expect(fit.project({ e: 100, n: 50 })).toEqual({ xFrac: 0.5, yFrac: 0.5 }); // box center maps to container center on both axes
+    expect(fit.contentAspect).toBeCloseTo(2, 5); // 200/100
   });
 
   it('preserves aspect for a container wider than the bounding box (taller-than-container box)', () => {
     // A 50m (E) x 100m (N) box in a 2:1 (wide) container -- height is now the binding
     // constraint: the box fills the container's full height and is centered
-    // horizontally.
+    // horizontally. marginFrac=0 reproduces the original edge-to-edge fit exactly.
     const points: LocalPoint[] = [
       { e: 0, n: 0 },
       { e: 50, n: 100 },
     ];
-    const fit = fitCenterline(points, 2);
+    const fit = fitCenterline(points, 2, 0);
 
     // scale = min(2/50, 1/100) = 1/100 -> usedHeightUnits=1 (fills height),
     // usedWidthUnits=50/100=0.5 -> padXUnits=(2-0.5)/2=0.75 -> xFrac pad = 0.75/2=0.375.
@@ -106,10 +108,47 @@ describe('fitCenterline', () => {
       { e: 0, n: 0 },
       { e: 10, n: 10 },
     ];
-    const fit = fitCenterline(points, 1);
+    const fit = fitCenterline(points, 1, 0);
     const south = fit.project({ e: 5, n: 0 });
     const north = fit.project({ e: 5, n: 10 });
     expect(north.yFrac).toBeLessThan(south.yFrac);
+  });
+
+  it('P1 fix: with the default marginFrac, every projected fraction stays within [marginFrac - epsilon, 1 - marginFrac + epsilon] on both axes', () => {
+    const marginFrac = 0.06;
+    const epsilon = 1e-9;
+    const points: LocalPoint[] = [
+      { e: 0, n: 0 },
+      { e: 200, n: 100 },
+    ];
+    // A wider-than-container box (binds on width) and a container-matching-ish
+    // aspect are both covered by testing several containerAspect values against
+    // the same box's corners and center.
+    for (const containerAspect of [0.5, 1, 2]) {
+      const fit = fitCenterline(points, containerAspect, marginFrac);
+      for (const point of [
+        { e: 0, n: 0 },
+        { e: 200, n: 100 },
+        { e: 100, n: 50 },
+        { e: 0, n: 100 },
+        { e: 200, n: 0 },
+      ]) {
+        const { xFrac, yFrac } = fit.project(point);
+        expect(xFrac).toBeGreaterThanOrEqual(marginFrac - epsilon);
+        expect(xFrac).toBeLessThanOrEqual(1 - marginFrac + epsilon);
+        expect(yFrac).toBeGreaterThanOrEqual(marginFrac - epsilon);
+        expect(yFrac).toBeLessThanOrEqual(1 - marginFrac + epsilon);
+      }
+    }
+  });
+
+  it('contentAspect is the input frame\'s own span ratio, independent of containerAspect and marginFrac', () => {
+    const points: LocalPoint[] = [
+      { e: 0, n: 0 },
+      { e: 50, n: 100 },
+    ];
+    expect(fitCenterline(points, 2, 0).contentAspect).toBeCloseTo(0.5, 5); // 50/100
+    expect(fitCenterline(points, 1, 0.06).contentAspect).toBeCloseTo(0.5, 5);
   });
 });
 
@@ -149,10 +188,21 @@ describe('fitCenterlineAutoRotated (F1 auto-rotate to fit)', () => {
     ];
     expect(fitCenterlineAutoRotated(points, 1).rotated).toBe(false);
   });
+
+  it('contentAspect reflects the POST-rotation frame for a portrait track', () => {
+    const points: LocalPoint[] = [
+      { e: 0, n: 0 },
+      { e: 704, n: 1538 },
+    ];
+    const fit = fitCenterlineAutoRotated(points, 1 / 0.55);
+    expect(fit.rotated).toBe(true);
+    // Rotated frame: spanE' = old spanN = 1538, spanN' = old spanE = 704.
+    expect(fit.contentAspect).toBeCloseTo(1538 / 704, 5);
+  });
 });
 
-describe('buildOutlineSegments (F2 connected outline)', () => {
-  it('builds 4 right-angled, correctly-lengthed segments for a known square', () => {
+describe('buildOutlineSegments (F2 connected outline + P2 joint dots)', () => {
+  it('builds 4 right-angled, correctly-lengthed segments for a known square, plus one joint per vertex', () => {
     const square = [
       { xFrac: 0, yFrac: 0 },
       { xFrac: 1, yFrac: 0 },
@@ -160,7 +210,7 @@ describe('buildOutlineSegments (F2 connected outline)', () => {
       { xFrac: 0, yFrac: 1 },
       { xFrac: 0, yFrac: 0 },
     ];
-    const segments = buildOutlineSegments(square, 100, 100);
+    const { segments, joints } = buildOutlineSegments(square, 100, 100);
     // 4 sides + the loop-closing segment (degenerate here: last point already
     // repeats the first, so the closer has ~0 length).
     expect(segments).toHaveLength(5);
@@ -172,11 +222,18 @@ describe('buildOutlineSegments (F2 connected outline)', () => {
     expect(angles[1]).toBeCloseTo(90, 5); // down (screen y grows downward)
     expect(angles[2]).toBeCloseTo(180, 5); // left
     expect(angles[3]).toBeCloseTo(-90, 5); // up
+
+    // One joint per vertex, in container pixels, matching each segment's own start.
+    expect(joints).toHaveLength(5);
+    expect(joints[0]).toEqual({ x: 0, y: 0 });
+    expect(joints[1]).toEqual({ x: 100, y: 0 });
+    expect(joints[2]).toEqual({ x: 100, y: 100 });
+    expect(joints[3]).toEqual({ x: 0, y: 100 });
   });
 
-  it('returns no segments for fewer than 3 points', () => {
-    expect(buildOutlineSegments([{ xFrac: 0, yFrac: 0 }], 100, 100)).toEqual([]);
-    expect(buildOutlineSegments([], 100, 100)).toEqual([]);
+  it('returns no segments or joints for fewer than 3 points', () => {
+    expect(buildOutlineSegments([{ xFrac: 0, yFrac: 0 }], 100, 100)).toEqual({ segments: [], joints: [] });
+    expect(buildOutlineSegments([], 100, 100)).toEqual({ segments: [], joints: [] });
   });
 
   it('closes an OPEN loop with a real closing segment (the user-reported missing last piece)', () => {
@@ -186,7 +243,7 @@ describe('buildOutlineSegments (F2 connected outline)', () => {
       { xFrac: 1, yFrac: 1 },
       { xFrac: 0, yFrac: 1 },
     ];
-    const segments = buildOutlineSegments(openSquare, 100, 100);
+    const { segments } = buildOutlineSegments(openSquare, 100, 100);
     expect(segments).toHaveLength(4);
     expect(segments[3]!.lengthPx).toBeCloseTo(100, 5); // (0,1) back to (0,0)
     expect(segments[3]!.angleDeg).toBeCloseTo(-90, 5);
@@ -212,29 +269,36 @@ function pathLength(points: readonly LocalPoint[]): number {
   return sum;
 }
 
-describe('densifyCenterline (F3 densify)', () => {
-  it('roughly doubles the point count and preserves total path length within 0.1%', () => {
-    const centerline = square(400, 40); // 160 points -- under the 250-point densify threshold
+describe('densifyToSpacing (F3 densify to target spacing)', () => {
+  it('subdivides every segment so no gap exceeds the target spacing (max segment length <= target within tolerance)', () => {
+    const centerline = square(400, 4); // 16 points, 100m sides -- far coarser than the 12m target
+    const densified = densifyToSpacing(centerline, 12);
+    expect(densified.length).toBeGreaterThan(centerline.length);
+    for (let index = 1; index < densified.length; index += 1) {
+      const a = densified[index - 1] as LocalPoint;
+      const b = densified[index] as LocalPoint;
+      expect(Math.hypot(b.e - a.e, b.n - a.n)).toBeLessThanOrEqual(12 + 1e-9);
+    }
+  });
+
+  it('preserves total path length within 0.1%', () => {
+    const centerline = square(400, 4);
     const before = pathLength(centerline);
-
-    const densified = densifyCenterline(centerline, 250);
-    expect(densified.length).toBeGreaterThan(centerline.length * 1.8);
-    expect(densified.length).toBeLessThanOrEqual(centerline.length * 2);
-
+    const densified = densifyToSpacing(centerline, 12);
     const after = pathLength(densified);
     expect(Math.abs(after - before) / before).toBeLessThan(0.001);
   });
 
-  it('is a no-op (copied) once the centerline already has minPoints or more', () => {
-    const centerline = square(400, 100); // 400 points -- over the 250-point threshold
-    const densified = densifyCenterline(centerline, 250);
+  it('is a no-op (copied) once every existing segment is already within the target spacing', () => {
+    const centerline = square(400, 100); // 4m per step -- well under the 12m target
+    const densified = densifyToSpacing(centerline, 12);
     expect(densified).toEqual(centerline);
     expect(densified).not.toBe(centerline);
   });
 
   it('handles an empty and a single-point centerline', () => {
-    expect(densifyCenterline([], 250)).toEqual([]);
-    expect(densifyCenterline([{ e: 1, n: 2 }], 250)).toEqual([{ e: 1, n: 2 }]);
+    expect(densifyToSpacing([], 12)).toEqual([]);
+    expect(densifyToSpacing([{ e: 1, n: 2 }], 12)).toEqual([{ e: 1, n: 2 }]);
   });
 });
 

@@ -1,5 +1,5 @@
-import React, { useEffect, useRef } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import React, { useEffect, useMemo, useRef } from 'react';
+import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useKeepAwake } from 'expo-keep-awake';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -12,8 +12,16 @@ import { facade } from '../../session/composition';
 import { TMR_CIRCUIT_PROFILE, TMR_RUNTIME_PROFILE } from '../../session/tmrProfile';
 import { useFacadeState } from '../hooks/useFacadeState';
 import { TrackMapView } from '../components/TrackMapView';
+import { fitCenterlineAutoRotated } from '../../session/trackMapModel';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'ActiveCalibration'>;
+
+/** P1 fix (map container containment): the fraction of the map container's own WIDTH
+ * its height is clamped to -- prevents an extreme track aspect (near-square, or very
+ * elongated even after F1 auto-rotation) from producing a container so tall or so short
+ * it clips against other screen content or reads as a sliver. */
+const MAP_HEIGHT_MIN_FRACTION_OF_WIDTH = 0.4;
+const MAP_HEIGHT_MAX_FRACTION_OF_WIDTH = 0.75;
 
 /** S5 — live coverage progress ring + on-track indicator; navigates to S6 once a calibration result arrives. */
 export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Element {
@@ -48,6 +56,26 @@ export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Elemen
       ? { e: state.calibration.matchedLocalX, n: state.calibration.matchedLocalY }
       : undefined;
   const offsetOverCorridor = lateralM !== undefined && Math.abs(lateralM) > TMR_CIRCUIT_PROFILE.corridorWidthM;
+
+  // P1 fix (map containment on a phone screen): size the map container itself, rather
+  // than letting `TrackMapView` assume a fixed width:height ratio -- width is the
+  // screen width minus this screen's own standard horizontal padding (`spacing.lg` on
+  // both sides via `styles.container`, as today), height is derived from the circuit's
+  // own post-auto-rotate content aspect (`contentAspect`, P1 fix on `trackMapModel`)
+  // so a portrait-after-rotation-to-landscape track fits without cropping, clamped to
+  // [0.4, 0.75] of the width as a sane floor/ceiling for an extreme aspect. The
+  // `containerAspect` passed in here (1) is a placeholder -- `contentAspect` is the
+  // input points' own natural aspect and does not depend on it.
+  const mapContentAspect = useMemo(
+    () => fitCenterlineAutoRotated(TMR_RUNTIME_PROFILE.centerline, 1).contentAspect,
+    [],
+  );
+  const windowWidth = useWindowDimensions().width;
+  const mapWidth = windowWidth - spacing.lg * 2;
+  const mapHeight = Math.min(
+    MAP_HEIGHT_MAX_FRACTION_OF_WIDTH * mapWidth,
+    Math.max(MAP_HEIGHT_MIN_FRACTION_OF_WIDTH * mapWidth, mapWidth / mapContentAspect),
+  );
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -105,7 +133,7 @@ export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Elemen
             {distanceM === undefined ? 'Position: — km' : `Position: ${(distanceM / 1_000).toFixed(1)} km`}
           </Text>
         </View>
-        <View style={styles.mapWrap}>
+        <View style={[styles.mapWrap, { width: mapWidth, height: mapHeight }]}>
           <TrackMapView
             centerline={TMR_RUNTIME_PROFILE.centerline}
             startFinishLocal={TMR_RUNTIME_PROFILE.startFinishGate.a}
@@ -156,6 +184,8 @@ const styles = StyleSheet.create({
   infoRow: { flexDirection: 'row', justifyContent: 'space-between', width: '100%' },
   infoText: { ...typography.caption, color: colors.textSecondary },
   infoTextAlert: { color: colors.danger },
+  // Explicit pixel size set inline per-render (P1 fix, above) -- `width: '100%'` here
+  // is just the pre-computation fallback for the very first paint.
   mapWrap: { width: '100%' },
   cancelWrap: { marginTop: spacing.xl, width: '100%' },
 });

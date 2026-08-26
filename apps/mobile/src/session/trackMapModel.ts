@@ -80,18 +80,39 @@ const MIN_SPAN_M = 1;
  */
 export interface CenterlineFit {
   bounds: Bounds;
+  /** The content's own natural aspect ratio (`spanE / spanN` of the frame actually
+   * passed in -- e.g. already rotated when called from `fitCenterlineAutoRotated`),
+   * independent of `containerAspect`/`marginFrac`: letterboxing can never change it,
+   * since both axes are always scaled by the same factor. Lets a caller
+   * (`ActiveCalibrationScreen`, P1 fix) size its container to match the content
+   * instead of assuming a fixed ratio. */
+  contentAspect: number;
   project(point: LocalPoint): ContainerFraction;
 }
 
-export function fitCenterline(points: readonly LocalPoint[], containerAspect: number): CenterlineFit {
+/**
+ * @param marginFrac Inner margin, as a fraction of each axis, kept clear of the
+ * fitted content on every side (P1 fix: "outline corners touch/exceed the map
+ * container edges" -- a phone-screen field report). The fitted content occupies
+ * only the central `(1 - 2*marginFrac)` of each axis; `0` reproduces the original
+ * edge-to-edge letterbox fit exactly.
+ */
+export function fitCenterline(points: readonly LocalPoint[], containerAspect: number, marginFrac = 0.06): CenterlineFit {
   const bounds = computeBounds(points);
   const spanE = Math.max(bounds.maxE - bounds.minE, MIN_SPAN_M);
   const spanN = Math.max(bounds.maxN - bounds.minN, MIN_SPAN_M);
 
-  // Letterbox fit: a single scale (same on both axes) is what preserves aspect: pick
-  // the axis that is the tighter constraint, exactly like fitting an image inside a
-  // frame of a different aspect ratio ("contain", not "cover" or "stretch").
-  const scale = Math.min(containerAspect / spanE, 1 / spanN);
+  // Letterbox fit, inset by `marginFrac` on each axis: fit into a virtual box
+  // shrunk to (1 - 2*marginFrac) of the real container on both axes (still at
+  // `containerAspect`, since scaling both axes by the same factor leaves the box's
+  // own aspect ratio unchanged), then center that smaller box within the full
+  // container -- this is what keeps the fitted content off the edges. A single
+  // scale (same on both axes) is what preserves aspect: pick the axis that is the
+  // tighter constraint, exactly like fitting an image inside a frame of a
+  // different aspect ratio ("contain", not "cover" or "stretch").
+  const innerAspectWidthUnits = containerAspect * (1 - 2 * marginFrac);
+  const innerHeightUnits = 1 - 2 * marginFrac;
+  const scale = Math.min(innerAspectWidthUnits / spanE, innerHeightUnits / spanN);
   const usedWidthUnits = spanE * scale;
   const usedHeightUnits = spanN * scale;
   const padXUnits = (containerAspect - usedWidthUnits) / 2;
@@ -99,6 +120,7 @@ export function fitCenterline(points: readonly LocalPoint[], containerAspect: nu
 
   return {
     bounds,
+    contentAspect: spanE / spanN,
     project(point: LocalPoint): ContainerFraction {
       const xUnits = padXUnits + (point.e - bounds.minE) * scale;
       const yUnitsFromBottom = padYUnits + (point.n - bounds.minN) * scale;
@@ -130,18 +152,21 @@ export interface AutoRotatedCenterlineFit extends CenterlineFit {
  * ORIGINAL local-frame points and never need to know rotation happened. A LANDSCAPE
  * (or square) track (`spanN <= spanE`) is fit unrotated, exactly as `fitCenterline`
  * already does -- `fitCenterline` itself is untouched (its own pinned tests keep
- * passing unchanged). Pure.
+ * passing unchanged). `marginFrac` forwards straight to the inner `fitCenterline`
+ * call (P1 fix). Pure.
  */
 export function fitCenterlineAutoRotated(
   points: readonly LocalPoint[],
   containerAspect: number,
+  marginFrac = 0.06,
 ): AutoRotatedCenterlineFit {
   const rawBounds = computeBounds(points);
   const rotated = rawBounds.maxN - rawBounds.minN > rawBounds.maxE - rawBounds.minE;
   const framePoints = rotated ? points.map(rotatePoint90) : points;
-  const innerFit = fitCenterline(framePoints, containerAspect);
+  const innerFit = fitCenterline(framePoints, containerAspect, marginFrac);
   return {
     bounds: innerFit.bounds,
+    contentAspect: innerFit.contentAspect,
     rotated,
     project(point: LocalPoint): ContainerFraction {
       return innerFit.project(rotated ? rotatePoint90(point) : point);
@@ -150,23 +175,31 @@ export function fitCenterlineAutoRotated(
 }
 
 /**
- * F3 densify: linearly interpolates `centerline` to ~2x its point count (inserting one
- * midpoint between every consecutive pair) when it has fewer than `minPoints` points --
- * makes segments short so a decimated/connected outline (`buildOutlineSegments`) looks
- * smooth through curves instead of faceted. A no-op (copied) once `centerline` already
- * has `minPoints` or more points, or has fewer than 2 (nothing to interpolate between).
- * Pure -- total path length (sum of consecutive-point distances) is preserved exactly,
- * since each inserted point sits precisely halfway along its original segment.
+ * F3 densify to spacing: subdivides every consecutive pair in `centerline` with evenly
+ * spaced interior points so no resulting segment exceeds `targetSpacingM` -- replaces
+ * the old fixed ~2x densification (P2 fix: "choppy" line -- a segment far longer than
+ * its neighbors reads as a visible facet/notch once drawn as a straight
+ * `OutlineSegment`, whatever the pipeline's total point count ends up being). A segment
+ * already at or under the target is left untouched (0 interior points inserted) -- a
+ * no-op (copied) once every segment already qualifies, or `centerline` has fewer than 2
+ * points (nothing to interpolate between). Pure -- total path length (sum of
+ * consecutive-point distances) is preserved exactly, since every inserted point sits on
+ * its original segment's straight line.
  */
-export function densifyCenterline(centerline: readonly LocalPoint[], minPoints = 250): LocalPoint[] {
-  if (centerline.length < 2 || centerline.length >= minPoints) return [...centerline];
+export function densifyToSpacing(centerline: readonly LocalPoint[], targetSpacingM = 12): LocalPoint[] {
+  if (centerline.length < 2) return [...centerline];
   const result: LocalPoint[] = [];
   for (let index = 0; index < centerline.length - 1; index += 1) {
     const a = centerline[index];
     const b = centerline[index + 1];
     if (a === undefined || b === undefined) continue;
     result.push(a);
-    result.push({ e: (a.e + b.e) / 2, n: (a.n + b.n) / 2 });
+    const segmentLengthM = Math.hypot(b.e - a.e, b.n - a.n);
+    const subdivisions = Math.ceil(segmentLengthM / targetSpacingM);
+    for (let step = 1; step < subdivisions; step += 1) {
+      const t = step / subdivisions;
+      result.push({ e: a.e + (b.e - a.e) * t, n: a.n + (b.n - a.n) * t });
+    }
   }
   const last = centerline[centerline.length - 1];
   if (last !== undefined) result.push(last);
@@ -193,19 +226,38 @@ export function segmentAngleDeg(a: ContainerFraction, b: ContainerFraction, cont
   return (Math.atan2(dy, dx) * 180) / Math.PI;
 }
 
+/** A joint (vertex) of the connected circuit outline, in container pixels -- P2 fix:
+ * `TrackMapView` draws a filled circle here, the same diameter as the outline's line
+ * thickness, to round over the notch a rotated `OutlineSegment` otherwise leaves at
+ * every join ("choppy" line, user field report). */
+export interface OutlineJoint {
+  x: number;
+  y: number;
+}
+
+/** `buildOutlineSegments`'s result: the connected outline's segments, plus one joint
+ * per vertex (P2 fix -- see `OutlineJoint`). Both arrays are empty together for fewer
+ * than 3 fitted points. */
+export interface OutlineBuild {
+  segments: OutlineSegment[];
+  joints: OutlineJoint[];
+}
+
 /**
  * F2 connected outline: turns already-fitted (container-fraction) points into thin
  * line segments joining each consecutive pair -- replaces the old dot-cloud outline.
  * `containerW`/`containerH` are the map container's actual pixel size (segment lengths
- * are pixel lengths, positioned absolutely). Pure; `fittedPoints.length - 1` segments
- * (0 for fewer than 2 points).
+ * are pixel lengths, positioned absolutely). Pure; `fittedPoints.length` segments (and
+ * joints), 0 for fewer than 3 points.
  */
 export function buildOutlineSegments(
   fittedPoints: readonly ContainerFraction[],
   containerW: number,
   containerH: number,
-): OutlineSegment[] {
+): OutlineBuild {
   const segments: OutlineSegment[] = [];
+  const joints: OutlineJoint[] = [];
+  if (fittedPoints.length < 3) return { segments, joints };
   // A circuit is a closed loop, but the OSM-derived centerline's endpoints sit
   // ~179 m apart (the start/finish straight) -- without an explicit closing
   // segment the drawn outline has a visible gap there (user field report).
@@ -215,11 +267,12 @@ export function buildOutlineSegments(
   for (let index = 0; index < fittedPoints.length; index += 1) {
     const a = fittedPoints[index];
     const b = fittedPoints[(index + 1) % fittedPoints.length];
-    if (a === undefined || b === undefined || fittedPoints.length < 3) continue;
+    if (a === undefined || b === undefined) continue;
     const ax = a.xFrac * containerW;
     const ay = a.yFrac * containerH;
     const bx = b.xFrac * containerW;
     const by = b.yFrac * containerH;
+    joints.push({ x: ax, y: ay });
     segments.push({
       x: ax,
       y: ay,
@@ -227,7 +280,7 @@ export function buildOutlineSegments(
       angleDeg: segmentAngleDeg(a, b, containerW, containerH),
     });
   }
-  return segments;
+  return { segments, joints };
 }
 
 /** How far ahead (as a fraction of total lap distance) `pointAtLapFraction` samples a
