@@ -8,6 +8,7 @@ import { TraceLogo } from '../components/TraceLogo';
 import { TraceWordmark } from '../components/TraceWordmark';
 import { circuitCatalog, type CircuitSummary } from '../../session/circuitCatalog';
 import { selectCircuit } from '../../session/composition';
+import { layoutLabel } from '../data/circuit';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'CircuitSelection'>;
 
@@ -102,6 +103,10 @@ function CircuitRow({
   onPress: () => void;
 }): React.JSX.Element {
   const lengthKm = (circuit.lengthM / 1000).toFixed(3);
+  // ticket CN-FIX3b: the chip and the spoken label both read the friendly
+  // layout label; `circuit.layoutId` itself (the catalog/storage key) is
+  // untouched.
+  const layout = layoutLabel(circuit.layoutId);
   return (
     <Pressable
       style={[styles.row, bordered && styles.rowBorder, disabled && styles.rowDisabled]}
@@ -109,7 +114,7 @@ function CircuitRow({
       disabled={disabled}
       accessibilityRole="button"
       accessibilityState={{ disabled, busy }}
-      accessibilityLabel={`${circuit.displayName}, ${circuit.locality}, ${circuit.country}, ${lengthKm} kilometers, ${circuit.layoutId} layout. View circuit details.`}
+      accessibilityLabel={`${circuit.displayName}, ${circuit.locality}, ${circuit.country}, ${lengthKm} kilometers, ${layout}. View circuit details.`}
     >
       <View style={styles.rowMain}>
         <Text style={styles.rowTitle} maxFontSizeMultiplier={1.3}>
@@ -124,7 +129,7 @@ function CircuitRow({
           </Text>
           <View style={styles.layoutChip}>
             <Text style={styles.layoutChipText} maxFontSizeMultiplier={1.3}>
-              {circuit.layoutId}
+              {layout}
             </Text>
           </View>
         </View>

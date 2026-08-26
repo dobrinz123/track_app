@@ -8,6 +8,7 @@ import { TimeDisplay } from '../components/TimeDisplay';
 import { formatDateUtc } from '../format';
 import { sessionHistoryStore, settingsStore } from '../../session/composition';
 import { resolveSelectedCircuit } from '../../session/circuitCatalog';
+import { layoutLabel } from '../data/circuit';
 import { useSettings } from '../hooks/useSettings';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'SessionHistory'>;
@@ -26,7 +27,9 @@ export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
           Session History
         </Text>
         <Text style={styles.circuit} maxFontSizeMultiplier={1.3}>
-          {selected.profile.displayName} · {selected.profile.layoutId}
+          {/* ticket CN-FIX3b: friendly layout label; the id itself still keys
+              this store's own per-circuit history/PB lookups. */}
+          {selected.profile.displayName} · {layoutLabel(selected.profile.layoutId)}
         </Text>
 
         {pb ? (

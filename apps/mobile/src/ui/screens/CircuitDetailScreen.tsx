@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
-import { ADVISORY_NOTICE, circuitDisplayData, statusLabel } from '../data/circuit';
+import { ADVISORY_NOTICE, circuitDisplayData, layoutLabel, statusLabel } from '../data/circuit';
 import { StatusBanner } from '../components/StatusBanner';
 import { CornersList } from '../components/CornersList';
 import { circuitCatalog } from '../../session/circuitCatalog';
@@ -193,7 +193,9 @@ export function CircuitDetailScreen({ navigation, route }: Props): React.JSX.Ele
 
         <View style={styles.metaCard}>
           <MetaRow label="Length" value={`${circuit.lengthKm.toFixed(3)} km`} />
-          <MetaRow label="Layout" value={circuit.layoutId} />
+          {/* ticket CN-FIX3b: the friendly label -- the raw `layoutId` stays
+              the storage/catalog key everywhere else (see `layoutLabel()`). */}
+          <MetaRow label="Layout" value={layoutLabel(circuit.layoutId)} />
           <MetaRow label="Direction" value={circuit.direction === 'clockwise' ? 'Clockwise' : 'Counter-clockwise'} />
           {/* L2 fix (ticket CN-FIX2, binding): renders the raw status via the
               neutral `statusLabel()` helper -- never a bespoke "Official"

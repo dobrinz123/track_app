@@ -88,6 +88,31 @@ export function statusLabel(status: string): string {
 }
 
 /**
+ * Friendly display label for a raw `layoutId` (ticket CN-FIX3b, user
+ * decision). The ID ITSELF is untouched everywhere it actually matters --
+ * bundled profile data, `circuitCatalog`/`summarize()`'s `CircuitSummary`,
+ * and every PB/history storage key (`SqlSessionHistoryStore` is keyed on
+ * `layoutId`+`layoutVersion`) -- this is purely how it READS on screen:
+ * "main" and "full" are internal slugs, not words a driver should be shown.
+ *
+ * `'main'` -> "Main layout"; `'full'` -> "Full circuit"; anything else keeps
+ * its own id with the first letter capitalized plus " layout"
+ * (`'ring-1'` -> "Ring-1 layout"), so a future bundled layout renders
+ * sensibly with no code change here.
+ */
+const LAYOUT_LABELS: Readonly<Record<string, string>> = {
+  main: 'Main layout',
+  full: 'Full circuit',
+};
+
+export function layoutLabel(layoutId: string): string {
+  const mapped = LAYOUT_LABELS[layoutId];
+  if (mapped !== undefined) return mapped;
+  if (layoutId.length === 0) return '';
+  return `${layoutId[0]!.toUpperCase()}${layoutId.slice(1)} layout`;
+}
+
+/**
  * Builds `CircuitDetailScreen`'s display metadata from a real bundled
  * `CircuitProfile` -- geometry, provenance, and status fields are all read
  * from the profile itself, never fabricated (ADR-0002/ADR-0004). Replaces

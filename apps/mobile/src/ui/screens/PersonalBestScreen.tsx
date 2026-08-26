@@ -9,6 +9,7 @@ import { QualityPill } from '../components/QualityPill';
 import { formatDateUtc } from '../format';
 import { sessionHistoryStore, settingsStore } from '../../session/composition';
 import { resolveSelectedCircuit } from '../../session/circuitCatalog';
+import { layoutLabel } from '../data/circuit';
 import { useSettings } from '../hooks/useSettings';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'PersonalBest'>;
@@ -29,7 +30,9 @@ export function PersonalBestScreen({ navigation }: Props): React.JSX.Element {
           Personal Best
         </Text>
         <Text style={styles.circuit} maxFontSizeMultiplier={1.3}>
-          {selected.profile.displayName} · {selected.profile.layoutId}
+          {/* ticket CN-FIX3b: friendly layout label; the id itself still keys
+              the PB lookup this screen reads. */}
+          {selected.profile.displayName} · {layoutLabel(selected.profile.layoutId)}
         </Text>
 
         {!pb ? (

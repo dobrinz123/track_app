@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ADVISORY_NOTICE, circuitDisplayData, statusLabel } from '../../../src/ui/data/circuit';
+import { ADVISORY_NOTICE, circuitDisplayData, layoutLabel, statusLabel } from '../../../src/ui/data/circuit';
 import { TMR_CIRCUIT_PROFILE } from '../../../src/session/tmrProfile';
 import { MOTORPARK_CIRCUIT_PROFILE } from '../../../src/session/circuitCatalog';
 
@@ -120,5 +120,36 @@ describe('circuitDisplayData (ticket CN-W3)', () => {
     expect(statusLabel('dev-only')).toBe('Dev-only');
     expect(statusLabel('surveyed-2027')).toBe('Surveyed-2027');
     expect(statusLabel('')).toBe('');
+  });
+});
+
+/**
+ * ticket CN-FIX3b (user decision): `layoutId` values themselves stay exactly
+ * as they are in the bundled data, the catalog, and every PB/history storage
+ * key -- `layoutLabel()` is a DISPLAY-ONLY mapping so the raw slugs ("main",
+ * "full") never reach the screen.
+ */
+describe('layoutLabel (ticket CN-FIX3b)', () => {
+  it("maps the two bundled layout ids to friendly labels -- 'main' -> Main layout, 'full' -> Full circuit", () => {
+    expect(layoutLabel('main')).toBe('Main layout');
+    expect(layoutLabel('full')).toBe('Full circuit');
+  });
+
+  it('an unknown layout id is capitalized and suffixed with " layout"', () => {
+    expect(layoutLabel('ring-1')).toBe('Ring-1 layout');
+    expect(layoutLabel('national')).toBe('National layout');
+    expect(layoutLabel('')).toBe('');
+  });
+
+  it('never renders either bundled circuit\'s raw layoutId verbatim', () => {
+    for (const profile of [TMR_CIRCUIT_PROFILE, MOTORPARK_CIRCUIT_PROFILE]) {
+      const label = layoutLabel(profile.layoutId);
+      expect(label).not.toBe(profile.layoutId);
+      // The id is still the storage/catalog key -- unchanged by this display
+      // helper (TMR = 'main', MotorPark = 'full').
+      expect(['main', 'full']).toContain(profile.layoutId);
+    }
+    expect(layoutLabel(TMR_CIRCUIT_PROFILE.layoutId)).toBe('Main layout');
+    expect(layoutLabel(MOTORPARK_CIRCUIT_PROFILE.layoutId)).toBe('Full circuit');
   });
 });
