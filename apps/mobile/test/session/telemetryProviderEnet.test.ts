@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TelemetrySample } from '@circuit/core';
 import { InMemorySettingsStore } from '../../src/session/settingsStore';
 import { createTelemetryProvider } from '../../src/session/telemetryProvider';
+import { createEnetAdapterReservation } from '../../src/session/enetAdapterReservation';
 
 /**
  * ENET telemetry addendum (P4e-T2, binding): `telemetryProvider.ts` chooses
@@ -445,5 +446,193 @@ describe('telemetryProvider: createEnetSession constructor assertion', () => {
     expect(createEnetSession).toHaveBeenCalledTimes(1);
 
     await provider.stop();
+  });
+});
+
+/**
+ * P4e-FIX3 H2 (binding, "poll plan, probe & robustness amendment", Codex
+ * P4e-REV3): the single-client ENET adapter reservation shared with the dev
+ * DID-probe screen. Every test here injects its OWN fresh
+ * `createEnetAdapterReservation()` instance (never the real shared
+ * singleton) so these tests can drive the reservation directly, standing in
+ * for the probe screen without needing to render it.
+ */
+describe('telemetryProvider: ENET adapter reservation (P4e-FIX3 H2, binding)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    tracker.connectCalls = 0;
+    tracker.holdConnect = false;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * The review's EXACT race (P4e-REV3, Part B H2 residual): "provider enters
+   * 'failed' and schedules its retry; the probe is allowed in ('failed' is
+   * one of the gating's own allowed states) and acquires the adapter; the
+   * provider's own scheduled retry fires moments later and opens a SECOND
+   * client on the same adapter." The reservation closes this window: the
+   * provider releases on 'failed', the probe acquires, and the retry's
+   * re-check of the SAME reservation refuses to open a socket.
+   */
+  it("the review's exact race: provider fails and releases -> probe acquires -> the scheduled retry does NOT open a socket", async () => {
+    const reservation = createEnetAdapterReservation();
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet' });
+
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: monotonicCounter(),
+      isDev: true,
+      enetAdapterReservation: reservation,
+    });
+    const states: string[] = [];
+    provider.onStateChange((s) => states.push(s));
+
+    provider.start();
+    await flushMicrotasks();
+    expect(tracker.connectCalls).toBe(1);
+    expect(states.at(-1)).toBe('failed');
+    // Provider released the reservation as soon as it reached 'failed'.
+    expect(reservation.holder()).toBeNull();
+
+    // The probe now acquires it -- standing in for the user pressing Send
+    // on the dev screen while the provider sits in 'failed'.
+    expect(reservation.tryAcquire('probe')).toBe(true);
+
+    // The scheduled retry fires 3s later.
+    await vi.advanceTimersByTimeAsync(3_000);
+    await flushMicrotasks();
+
+    // The provider did NOT open a second socket -- connectCalls unchanged --
+    // and stays 'idle' with the reservation-blocked diagnostics note.
+    expect(tracker.connectCalls).toBe(1);
+    expect(provider.getDiagnostics().state).toBe('idle');
+    expect(provider.getDiagnostics().lastError).toBe('adapter reserved by probe');
+
+    // No further attempt either, even given more time (the one retry budget
+    // is spent; nothing re-triggers launchSession() again on its own).
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flushMicrotasks();
+    expect(tracker.connectCalls).toBe(1);
+
+    reservation.release('probe');
+    await provider.stop();
+  });
+
+  it('the provider does not open a socket at all when the probe already holds the reservation at start()', async () => {
+    const reservation = createEnetAdapterReservation();
+    expect(reservation.tryAcquire('probe')).toBe(true);
+
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet' });
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: monotonicCounter(),
+      isDev: true,
+      enetAdapterReservation: reservation,
+    });
+
+    provider.start();
+    await flushMicrotasks();
+
+    expect(tracker.connectCalls).toBe(0);
+    expect(provider.getDiagnostics().state).toBe('idle');
+    expect(provider.getDiagnostics().lastError).toBe('adapter reserved by probe');
+
+    reservation.release('probe');
+    await provider.stop();
+  });
+
+  it('"probe refused while provider polling": tryAcquire(\'probe\') fails while the provider holds the reservation', async () => {
+    const reservation = createEnetAdapterReservation();
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'enet' });
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: monotonicCounter(),
+      isDev: true,
+      enetAdapterReservation: reservation,
+    });
+
+    provider.start();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushMicrotasks();
+    expect(provider.getDiagnostics().state).toBe('polling');
+    expect(reservation.holder()).toBe('provider');
+
+    expect(reservation.tryAcquire('probe')).toBe(false);
+
+    await provider.stop();
+  });
+
+  it('release on stop(): a polling ENET session releases the reservation when stop() is called', async () => {
+    const reservation = createEnetAdapterReservation();
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'enet' });
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: monotonicCounter(),
+      isDev: true,
+      enetAdapterReservation: reservation,
+    });
+
+    provider.start();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushMicrotasks();
+    expect(reservation.holder()).toBe('provider');
+
+    await provider.stop();
+    expect(reservation.holder()).toBeNull();
+  });
+
+  it('release on failed: a provider that reaches "failed" WITHOUT ever calling stop() still releases the reservation', async () => {
+    const reservation = createEnetAdapterReservation();
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet' });
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: monotonicCounter(),
+      isDev: true,
+      enetAdapterReservation: reservation,
+    });
+
+    provider.start();
+    await flushMicrotasks();
+    expect(provider.getDiagnostics().state).toBe('failed');
+    expect(reservation.holder()).toBeNull();
+
+    await provider.stop();
+  });
+
+  it('the ELM327 path never touches the reservation at all (harmless: nothing acquires it, nothing releases another owner\'s hold)', async () => {
+    const reservation = createEnetAdapterReservation();
+    reservation.tryAcquire('probe'); // pre-held by the probe.
+
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: true }); // adapterType defaults to 'elm327'.
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: monotonicCounter(),
+      isDev: true,
+      enetAdapterReservation: reservation,
+    });
+
+    provider.start();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushMicrotasks();
+
+    // The ELM327 path reaches 'polling' via its own SimulatedElm327Transport,
+    // completely independent of the reservation -- the probe's hold is
+    // untouched throughout.
+    expect(provider.getDiagnostics().state).toBe('polling');
+    expect(reservation.holder()).toBe('probe');
+
+    await provider.stop();
+    expect(reservation.holder()).toBe('probe'); // still untouched after stop().
   });
 });

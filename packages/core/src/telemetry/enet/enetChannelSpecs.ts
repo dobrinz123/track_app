@@ -11,6 +11,30 @@ import {
 const NON_ENET_CHANNELS: ReadonlySet<TelemetryChannelId> = new Set(['latG', 'longG']);
 
 /**
+ * P4e-FIX3 H1(a) fix (binding, Codex P4e-REV3): every channel a `did`/`obd01`
+ * ENET spec may legitimately name -- every `TelemetryChannelId` EXCEPT the
+ * device-sensor channels `latG`/`longG` (contracts.md ENET addendum: "no
+ * latG/longG"). Exported as the single source of truth for channel-membership
+ * checks BOTH here (`rejectionReason` below, additive: `latG`/`longG` keep
+ * their existing specific "device-sensor channel" message; anything else
+ * outside this set is newly rejected too) AND at the mobile layer's
+ * untrusted-JSON structural validation (`enetSettingsValidation.ts`), which
+ * previously only checked `channel` was a non-empty STRING -- an arbitrary
+ * unknown channel name (a typo, or a channel this app doesn't have at all)
+ * used to survive both layers and become a real poll entry/sample channel.
+ */
+export const ENET_SPEC_CHANNELS: ReadonlySet<TelemetryChannelId> = new Set([
+  'rpm',
+  'speedKph',
+  'throttlePct',
+  'coolantC',
+  'intakeC',
+  'engineLoadPct',
+  'engineOilC',
+  'transOilC',
+]);
+
+/**
  * Binding poll rate table (contracts.md "poll plan, probe & robustness
  * amendment"): the ENET poll plan is derived from the RESOLVED channel specs
  * (built-in defaults plus any user `did` specs), one rate per channel, rather
@@ -127,6 +151,15 @@ export function validateEnetChannelSpecs(specs: readonly EnetChannelSpec[]): Ene
 function rejectionReason(spec: EnetChannelSpec): string | null {
   if (NON_ENET_CHANNELS.has(spec.channel)) {
     return `channel ${spec.channel} is a device-sensor channel, never a valid ENET/OBD request target`;
+  }
+  // P4e-FIX3 H1(a) fix: a channel string that survived JSON parsing (or, at
+  // this pure-core layer, was constructed programmatically) but names
+  // nothing in `ENET_SPEC_CHANNELS` -- a typo, or a channel this app has no
+  // decoder/rate/UI for at all -- must be refused here too, the SAME way an
+  // out-of-range `requestHex` already is, rather than silently becoming a
+  // real poll entry.
+  if (!ENET_SPEC_CHANNELS.has(spec.channel)) {
+    return `channel "${spec.channel}" is not a recognized ENET/OBD telemetry channel`;
   }
   const compact = spec.requestHex.replace(/\s+/g, '');
   if (compact.length === 0 || !/^[0-9A-Fa-f]+$/.test(compact)) {

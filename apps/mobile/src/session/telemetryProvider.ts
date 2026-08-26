@@ -21,6 +21,10 @@ import { TcpObdTransport } from './tcpObdTransport';
 import { EnetTcpTransport } from './enetTcpTransport';
 import { CUSTOM_PID_VALIDATION_ERROR, isAllowedCustomPidRequest } from './customPidValidation';
 import { resolveEnetChannelSpecs } from './enetSettingsValidation';
+import { enetAdapterReservation as sharedEnetAdapterReservation, type EnetAdapterReservation } from './enetAdapterReservation';
+
+/** User-facing diagnostics note (binding, P4e-FIX3 H2) when the ENET adapter is held by the dev DID-probe screen -- the MHD adapter accepts one ECU client at a time. */
+export const ENET_ADAPTER_RESERVED_BY_PROBE_DETAIL = 'adapter reserved by probe';
 
 /**
  * Telemetry addendum — channel revision (2026-08-11, binding) poll plan:
@@ -110,6 +114,17 @@ export interface TelemetryProviderDeps {
    * mutates the persisted setting -- a non-dev build just ignores it.
    */
   isDev?: boolean;
+  /**
+   * P4e-FIX3 H2 (binding): the single-client ENET adapter reservation shared
+   * with the dev DID-probe screen. Test-only injection seam (mirrors
+   * `isDev` above) -- a test constructs its OWN fresh
+   * `createEnetAdapterReservation()` instance so multiple `it()` blocks in
+   * one file never leak reservation state into each other; production
+   * omits this and gets the real shared singleton
+   * (`enetAdapterReservation`, `./enetAdapterReservation`), the SAME
+   * instance `DidProbeScreen.tsx` imports directly.
+   */
+  enetAdapterReservation?: EnetAdapterReservation;
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +279,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   const { settingsStore, monotonicNow } = deps;
   // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
   const isDev = deps.isDev ?? (typeof __DEV__ !== 'undefined' ? __DEV__ : false);
+  const enetAdapterReservation = deps.enetAdapterReservation ?? sharedEnetAdapterReservation;
   const sampleListeners = new Set<(s: TelemetrySample) => void>();
   const stateListeners = new Set<(state: Elm327State, detail?: string) => void>();
 
@@ -278,6 +294,8 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   let retriesUsed = 0;
   let running = false;
   let generationCounter = 0;
+  /** P4e-FIX3 H2: set when `launchSession()`'s ENET branch was blocked by the adapter reservation (the probe holds it) -- surfaced via `getDiagnostics()` even though `current` stays `null` (no active generation to read diagnostics FROM). Cleared as soon as a session is actually launched. */
+  let reservationBlockedDetail: string | undefined;
 
   function buildTransport(): ObdTransport {
     const settings = settingsStore.getSettings();
@@ -359,7 +377,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   function launchSession(): void {
     generationCounter += 1;
     const id = generationCounter;
-    const transport = buildTransport();
+    reservationBlockedDetail = undefined; // reset -- re-set below only if THIS attempt is blocked.
     // F3 fix: every listener below checks `current?.id === id` before doing
     // anything -- once a NEWER generation has replaced `current` (a fresh
     // `start()`, or this generation's own `stop()`/retry teardown), a late
@@ -367,10 +385,24 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     // instead of forwarding a sample/state change for a session nothing
     // outside this closure should still believe is live.
     if (settingsStore.getSettings().adapterType === 'enet') {
+      // P4e-FIX3 H2 fix (binding): acquired BEFORE building any transport --
+      // the MHD adapter accepts one ECU client at a time, and the dev
+      // DID-probe screen (`DidProbeScreen.tsx`) shares this SAME reservation.
+      // A blocked acquire never opens a socket: no generation is installed,
+      // the provider stays 'idle' with a diagnostics note, and (when this
+      // call came from the scheduled retry) no further retry is scheduled --
+      // the one retry budget is already spent either way.
+      if (!enetAdapterReservation.tryAcquire('provider')) {
+        current = null;
+        reservationBlockedDetail = ENET_ADAPTER_RESERVED_BY_PROBE_DETAIL;
+        emitState('idle', ENET_ADAPTER_RESERVED_BY_PROBE_DETAIL);
+        return;
+      }
       // ENET telemetry addendum: a completely separate branch from the
       // ELM327 path below -- nothing here is reachable unless
       // `adapterType === 'enet'`, so the ELM327 path's own behavior (and the
       // tests pinning it) is untouched by this addition.
+      const transport = buildTransport();
       const config = buildEnetConfig();
       const next = createEnetSession(transport, config, monotonicNow);
       const gen: SessionGeneration = {
@@ -385,7 +417,13 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
           if (current?.id !== id) return;
           const mapped = ENET_STATE_TO_PROVIDER_STATE[state];
           emitState(mapped, detail);
-          if (mapped === 'failed' && running) scheduleRetry(id);
+          if (mapped === 'failed') {
+            // A failed session no longer legitimately holds the adapter
+            // (its transport already closed) -- release so the probe, or a
+            // future fresh start()/retry, can acquire it.
+            enetAdapterReservation.release('provider');
+            if (running) scheduleRetry(id);
+          }
         }),
       };
       current = gen;
@@ -398,6 +436,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     // `start()`, same freshness rule as `buildTransport()`'s own read above --
     // a `transOilPidHex` edit takes effect on the next session, matching
     // every other settings-gated telemetry field.
+    const transport = buildTransport();
     const transOilPidHex = settingsStore.getSettings().transOilPidHex;
     const config: Elm327Config = {
       pollPlan: buildPollPlan(transOilPidHex),
@@ -470,6 +509,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
 
     async stop(): Promise<void> {
       running = false;
+      reservationBlockedDetail = undefined;
       if (retryTimer !== null) {
         clearTimeout(retryTimer);
         retryTimer = null;
@@ -483,6 +523,11 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       await gen.session.stop();
       gen.unsubscribeSample();
       gen.unsubscribeState();
+      // P4e-FIX3 H2 (binding): "provider stop/failed releases" -- a graceful
+      // stop() also releases the adapter reservation this generation
+      // acquired (ELM327 never acquires it at all, so this is a harmless
+      // no-op for that kind).
+      if (gen.kind === 'enet') enetAdapterReservation.release('provider');
       // Only clear the shared `current` pointer if it's STILL this
       // generation -- a racing `start()` already replaced it with its own,
       // which this (now-finished) stop() must leave alone.
@@ -533,12 +578,18 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
         };
       }
       const base = current?.session.getDiagnostics() ?? { observedHzByChannel: {}, errorCount: 0 };
+      // P4e-FIX3 H2 (binding): "diagnostics note 'adapter reserved by
+      // probe'" -- surfaced here even with `current === null` (no active
+      // generation exists to read a `lastError` FROM in that case).
+      // `reservationBlockedDetail` is only ever set for the ENET path, so
+      // this never applies to (or changes) the ELM327 diagnostics shape.
+      const lastError = reservationBlockedDetail ?? base.lastError;
       return {
         state: currentState,
         retriesUsed,
         observedHzByChannel: base.observedHzByChannel,
         errorCount: base.errorCount,
-        ...(base.lastError === undefined ? {} : { lastError: base.lastError }),
+        ...(lastError === undefined ? {} : { lastError }),
         adapterType,
       };
     },

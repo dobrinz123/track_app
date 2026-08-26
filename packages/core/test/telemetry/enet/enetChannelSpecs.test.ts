@@ -4,6 +4,7 @@ import {
   DEFAULT_ENET_CHANNEL_SPECS,
   decodeEnetChannelValue,
   ENET_DEFAULT_CHANNEL_RATES_HZ,
+  ENET_SPEC_CHANNELS,
   validateEnetChannelSpecs,
   type EnetChannelSpec,
 } from '../../../src/telemetry/enet/enetChannelSpecs';
@@ -38,6 +39,49 @@ describe('validateEnetChannelSpecs', () => {
     expect(result.valid).toEqual([]);
     expect(result.warnings[0]).toContain('latG');
     expect(result.warnings[0]).toContain('device-sensor channel');
+  });
+
+  /**
+   * P4e-FIX3 H1(a) fix (binding, Codex P4e-REV3): a channel string outside
+   * `ENET_SPEC_CHANNELS` (a typo, or a channel this app has no decoder for at
+   * all) must be rejected too -- BEFORE this fix, a `did` spec naming e.g.
+   * `"bogus"` was validated purely on `requestHex`/`decode`/`provenance`
+   * shape and became a real poll entry/sample channel. `as EnetChannelSpec`
+   * below is the test's own cast to feed a runtime-only-invalid channel
+   * through a typed call, mirroring how an untrusted JSON value would arrive
+   * in practice (the mobile layer's own structural guard is tested
+   * separately, `enetSettingsValidation.test.ts`).
+   */
+  it('rejects a channel name outside ENET_SPEC_CHANNELS (unknown/typo channel) with a warning', () => {
+    const result = validateEnetChannelSpecs([
+      {
+        channel: 'bogus' as unknown as EnetChannelSpec['channel'],
+        mode: 'did',
+        requestHex: 'F190',
+        decode: { byteOffset: 0, byteLength: 1, scale: 1, offset: 0 },
+        provenance: 'x',
+      },
+    ]);
+    expect(result.valid).toEqual([]);
+    expect(result.warnings[0]).toContain('bogus');
+    expect(result.warnings[0]).toContain('not a recognized ENET/OBD telemetry channel');
+  });
+
+  it('ENET_SPEC_CHANNELS is every TelemetryChannelId except the device-sensor latG/longG', () => {
+    expect(ENET_SPEC_CHANNELS.has('latG')).toBe(false);
+    expect(ENET_SPEC_CHANNELS.has('longG')).toBe(false);
+    for (const channel of [
+      'rpm',
+      'speedKph',
+      'throttlePct',
+      'coolantC',
+      'intakeC',
+      'engineLoadPct',
+      'engineOilC',
+      'transOilC',
+    ] as const) {
+      expect(ENET_SPEC_CHANNELS.has(channel)).toBe(true);
+    }
   });
 
   it('rejects malformed hex requestHex', () => {

@@ -83,9 +83,7 @@ export class EnetTcpTransport implements ObdTransport {
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
-        const stale = this.socket;
-        this.socket = null;
-        stale?.destroy();
+        this.terminalizeConnectionPhaseFailure();
         reject(
           new Error(
             `EnetTcpTransport: connect to ${this.config.host}:${this.config.port} timed out after ${timeoutMs}ms`,
@@ -118,6 +116,7 @@ export class EnetTcpTransport implements ObdTransport {
         if (!settled) {
           settled = true;
           clearTimeout(timer);
+          this.terminalizeConnectionPhaseFailure();
           reject(err);
           return;
         }
@@ -128,6 +127,7 @@ export class EnetTcpTransport implements ObdTransport {
         clearTimeout(timer);
         if (!settled) {
           settled = true;
+          this.terminalizeConnectionPhaseFailure();
           reject(new Error('EnetTcpTransport: socket closed before connecting'));
           return;
         }
@@ -163,15 +163,15 @@ export class EnetTcpTransport implements ObdTransport {
   }
 
   /**
-   * P4e-FIX2 fix (binding, review finding): a REMOTE close/error must leave
-   * this transport in the SAME one-shot terminal state a local `close()`
-   * does -- `closed = true` and `socket = null` UNCONDITIONALLY (even on a
-   * repeat call, e.g. 'error' immediately followed by 'close'), so a
-   * `send()` after a remote close throws (`this.socket === null`) instead of
-   * writing to a dead socket, and a second `connect()` rejects via the
-   * `closed` check above -- instead of ONLY the single close-notification
-   * itself being deduplicated while the transport's own state silently kept
-   * claiming to be open.
+   * P4e-FIX2 fix (binding, review finding): a REMOTE close/error AFTER a
+   * successful `connect()` must leave this transport in the SAME one-shot
+   * terminal state a local `close()` does -- `closed = true` and `socket =
+   * null` UNCONDITIONALLY (even on a repeat call, e.g. 'error' immediately
+   * followed by 'close'), so a `send()` after a remote close throws
+   * (`this.socket === null`) instead of writing to a dead socket, and a
+   * second `connect()` rejects via the `closed` check above -- instead of
+   * ONLY the single close-notification itself being deduplicated while the
+   * transport's own state silently kept claiming to be open.
    */
   private notifyClose(err?: Error): void {
     this.closed = true;
@@ -179,5 +179,35 @@ export class EnetTcpTransport implements ObdTransport {
     if (this.closeEmitted) return;
     this.closeEmitted = true;
     for (const listener of [...this.closeListeners]) listener(err);
+  }
+
+  /**
+   * P4e-FIX3 M2 fix (binding, Codex P4e-REV3 residual): a `close/error`/the
+   * connect timeout arriving BEFORE `connect()`'s own callback ("connection
+   * phase") used to reject the `connect()` promise WITHOUT terminalizing the
+   * instance at all -- `closed` stayed `false` and `socket` stayed
+   * non-`null`, so `send()` would write to the failed socket and a second
+   * `connect()` would be allowed to create ANOTHER one on the same
+   * supposedly one-shot instance. This is the SAME terminal state
+   * `notifyClose` reaches after a successful connect (`closed = true`,
+   * socket destroyed and `null`), reached from all three connection-phase
+   * failure paths (timeout, pre-connect `error`, pre-connect `close`).
+   *
+   * Close-notification rule for THIS phase (deliberately chosen, documented
+   * here per the ticket's "pick one, document it, test it"): a socket that
+   * never successfully connected NEVER fires `onClose` -- a caller only
+   * ever learns of a connection-phase failure through the REJECTED
+   * `connect()` promise itself, never through `onClose` (which models "an
+   * established connection went away", not "never established at all").
+   * `closeEmitted` is set here too so a stray native double-fire (e.g. an
+   * 'error' immediately followed by 'close', both pre-connect) can never
+   * leak a delayed `onClose` call afterward either.
+   */
+  private terminalizeConnectionPhaseFailure(): void {
+    this.closed = true;
+    this.closeEmitted = true;
+    const stale = this.socket;
+    this.socket = null;
+    stale?.destroy();
   }
 }

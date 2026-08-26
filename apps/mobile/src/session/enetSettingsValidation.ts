@@ -14,6 +14,7 @@
  */
 import {
   DEFAULT_ENET_CHANNEL_SPECS,
+  ENET_SPEC_CHANNELS,
   validateEnetChannelSpecs,
   type EnetChannelSpec,
 } from '@circuit/core';
@@ -59,26 +60,40 @@ export function formatHexByte(value: number): string {
 export const ENET_CHANNEL_SPECS_JSON_ERROR = 'Not a valid JSON array of channel specs';
 
 export interface EnetChannelSpecsJsonValidation {
-  /** `false` only for malformed JSON or a non-array result -- an array of individually-invalid entries is still `ok: true` (each bad entry is dropped, not the whole draft rejected), matching `validateEnetChannelSpecs`'s own per-entry warnings model. */
+  /**
+   * `false` for malformed JSON, a non-array result, OR (P4e-FIX3 H1(b),
+   * binding, Codex P4e-REV3) ANY array member that fails STRUCTURAL
+   * validation (`isStructurallyValidChannelSpec` below, which now also
+   * checks `channel ∈ ENET_SPEC_CHANNELS`) -- `error` then names every bad
+   * index. A member that is structurally well-shaped but semantically
+   * rejected ONLY by `@circuit/core`'s `validateEnetChannelSpecs` (a
+   * channel<->PID mismatch, a duplicate channel) is a DIFFERENT, unchanged
+   * case: still dropped with a warning, `ok` stays `true` -- that is a
+   * legitimate partial-config choice, not a malformed draft.
+   */
   ok: boolean;
   /** Meaningful only when `ok` -- the specs that survived structural validation AND `validateEnetChannelSpecs`. Empty (`[]`) for an empty/whitespace-only draft ("use the built-in defaults" -- callers building an engine config substitute `DEFAULT_ENET_CHANNEL_SPECS` themselves via `resolveEnetChannelSpecs` below; this validator reports the draft's OWN content literally, so an explicit `"[]"` reads as "zero channels", not "defaults"). */
   specs: readonly EnetChannelSpec[];
-  /** Per-entry warnings -- a structurally-invalid array member (P4e-FIX2 fix, below) or anything `validateEnetChannelSpecs` itself rejects (duplicate channel, channel<->PID mismatch, ...) -- shown inline, non-blocking. */
+  /** Per-entry warnings from `@circuit/core`'s `validateEnetChannelSpecs` ONLY (duplicate channel, channel<->PID mismatch, ...) -- meaningful only when `ok`. Structural problems are never warnings any more (P4e-FIX3): they make the whole draft `ok: false` via `error` instead. */
   warnings: readonly string[];
   /** Non-null exactly when `!ok`. */
   error: string | null;
 }
 
 /**
- * P4e-FIX2 HIGH fix (binding, Codex P4e-REV2 Part B): structurally validates
- * ONE array member from the parsed JSON -- `object; channel string; mode
- * 'obd01'|'did'; requestHex string; optional targetAddress a byte 0-255;
- * decode (if present) an object shape; provenance string` -- BEFORE it is
- * ever handed to `@circuit/core`'s `validateEnetChannelSpecs`, which assumes
- * an already well-typed `EnetChannelSpec` and dereferences fields like
- * `spec.requestHex.replace(...)` without its own guard. `[null]`, `[{}]`,
- * `[1]`, and members with wrong-typed fields all fail here and are reported
- * as an inline warning string instead of ever reaching core (which would
+ * P4e-FIX2 HIGH fix (binding, Codex P4e-REV2 Part B), extended by P4e-FIX3
+ * H1(b): structurally validates ONE array member from the parsed JSON --
+ * `object; channel ∈ ENET_SPEC_CHANNELS; mode 'obd01'|'did'; requestHex
+ * string; optional targetAddress a byte 0-255; decode (if present) an object
+ * shape; provenance string` -- BEFORE it is ever handed to `@circuit/core`'s
+ * `validateEnetChannelSpecs`, which assumes an already well-typed
+ * `EnetChannelSpec` and dereferences fields like `spec.requestHex.replace(...)`
+ * without its own guard. `[null]`, `[{}]`, `[1]`, a `channel` outside
+ * `ENET_SPEC_CHANNELS` (a typo, or a channel this app doesn't have --
+ * P4e-FIX3 H1(b): channel membership moved INTO this structural stage,
+ * rather than being left for core's `validateEnetChannelSpecs` alone), and
+ * members with wrong-typed fields all fail here and are reported as an
+ * inline problem string instead of ever reaching core (which would
  * otherwise throw a raw `TypeError` -- "cannot read properties of null/undefined" --
  * out of `SettingsScreen`'s blur handler or `TelemetryScreen`'s render).
  * NEVER casts an unknown value to `EnetChannelSpec` -- this function IS the
@@ -93,6 +108,10 @@ function isStructurallyValidChannelSpec(value: unknown, index: number, problems:
 
   if (typeof record.channel !== 'string' || record.channel.trim() === '') {
     problems.push(`entry ${index}: "channel" must be a non-empty string`);
+    return false;
+  }
+  if (!ENET_SPEC_CHANNELS.has(record.channel as EnetChannelSpec['channel'])) {
+    problems.push(`entry ${index}: "channel" ("${record.channel}") is not a recognized ENET/OBD telemetry channel`);
     return false;
   }
   if (record.mode !== 'obd01' && record.mode !== 'did') {
@@ -140,12 +159,22 @@ function isStructurallyValidChannelSpec(value: unknown, index: number, problems:
  * empty/whitespace-only draft is valid (`specs: []`, meaning "built-in
  * defaults" -- see `resolveEnetChannelSpecs`). A non-empty draft must parse as
  * a JSON array; each element is FIRST structurally validated (never cast --
- * `isStructurallyValidChannelSpec` above), THEN the surviving,
- * well-typed members are run through `@circuit/core`'s
- * `validateEnetChannelSpecs` (device-sensor channels, malformed `requestHex`,
- * channel<->PID consistency, a `did` spec missing `decode`/`provenance`,
- * duplicate channels) -- both layers drop bad entries with a warning rather
- * than rejecting the whole draft.
+ * `isStructurallyValidChannelSpec` above, which also checks `channel ∈
+ * ENET_SPEC_CHANNELS`).
+ *
+ * P4e-FIX3 H1(b) fix (binding, Codex P4e-REV3): ANY structurally invalid
+ * member -- not just "every member is invalid" -- makes the WHOLE draft
+ * `ok: false`, with `error` naming every bad index (e.g. `[null, <valid rpm
+ * spec>]`, the review's own scenario, used to keep the valid `rpm` entry and
+ * merely warn about the `null` -- that is now a rejected draft, so
+ * `resolveEnetChannelSpecs` falls back to the built-in defaults rather than
+ * silently running on a half-parsed list the user never actually asked for).
+ * ONLY once every member is structurally well-shaped are the survivors run
+ * through `@circuit/core`'s `validateEnetChannelSpecs` (channel<->PID
+ * consistency, a `did` spec missing `decode`/`provenance`, duplicate
+ * channels) -- THAT layer's rejections are UNCHANGED: still per-entry
+ * warnings, `ok` stays `true` (a legitimate partial-config choice, not a
+ * malformed draft).
  */
 export function validateEnetChannelSpecsJson(text: string): EnetChannelSpecsJsonValidation {
   const trimmed = text.trim();
@@ -161,26 +190,20 @@ export function validateEnetChannelSpecsJson(text: string): EnetChannelSpecsJson
     return { ok: false, specs: [], warnings: [], error: ENET_CHANNEL_SPECS_JSON_ERROR };
   }
 
-  const structuralWarnings: string[] = [];
+  const structuralProblems: string[] = [];
   const structurallyValid: EnetChannelSpec[] = [];
   parsed.forEach((entry: unknown, index: number) => {
-    if (isStructurallyValidChannelSpec(entry, index, structuralWarnings)) {
+    if (isStructurallyValidChannelSpec(entry, index, structuralProblems)) {
       structurallyValid.push(entry);
     }
   });
 
-  // A NON-EMPTY array where every single member is structurally invalid
-  // (`[null]`, `[{}]`, `[1]`, ...) is a malformed draft, not a deliberate
-  // "zero channels" choice -- that distinction is reserved for a literal
-  // `"[]"` (`parsed.length === 0`, never reaches this branch). Reported as
-  // an ordinary `ok: false` error so `resolveEnetChannelSpecs` below falls
-  // back to the built-in defaults, exactly like unparsable JSON.
-  if (parsed.length > 0 && structurallyValid.length === 0) {
-    return { ok: false, specs: [], warnings: structuralWarnings, error: ENET_CHANNEL_SPECS_JSON_ERROR };
+  if (structuralProblems.length > 0) {
+    return { ok: false, specs: [], warnings: [], error: structuralProblems.join('; ') };
   }
 
   const { valid, warnings } = validateEnetChannelSpecs(structurallyValid);
-  return { ok: true, specs: valid, warnings: [...structuralWarnings, ...warnings], error: null };
+  return { ok: true, specs: valid, warnings, error: null };
 }
 
 /**

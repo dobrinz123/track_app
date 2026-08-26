@@ -61,15 +61,25 @@ describe('validateEnetChannelSpecsJson / resolveEnetChannelSpecs (enetChannelSpe
     expect(result.error).toBe(ENET_CHANNEL_SPECS_JSON_ERROR);
   });
 
-  it('a valid array with a bad entry keeps the good ones and reports a warning, still ok:true', () => {
+  /**
+   * P4e-FIX3 H1(b) (binding): a CORE-ONLY rejection (structurally
+   * well-shaped, but `@circuit/core`'s `validateEnetChannelSpecs` itself
+   * rejects it -- here, a channel<->PID mismatch: `0D` is speedKph's PID, not
+   * rpm's) is a DIFFERENT, unchanged case from a structurally invalid member
+   * -- still dropped with a warning, `ok` stays `true`. (A device-sensor
+   * channel like `latG` no longer belongs in this test: channel membership
+   * moved INTO the structural stage, see the tests below.)
+   */
+  it('a core-only rejection (channel<->PID mismatch) keeps the good entry and reports a warning, still ok:true', () => {
     const draft = JSON.stringify([
       { channel: 'rpm', mode: 'obd01', requestHex: '0C', provenance: 'standard PID' },
-      { channel: 'latG', mode: 'obd01', requestHex: '0D', provenance: 'bad: device-sensor channel' },
+      { channel: 'rpm', mode: 'obd01', requestHex: '0D', provenance: 'bad: 0D is speedKph\'s PID, not rpm\'s' },
     ]);
     const result = validateEnetChannelSpecsJson(draft);
     expect(result.ok).toBe(true);
     expect(result.specs).toHaveLength(1);
     expect(result.specs[0]!.channel).toBe('rpm');
+    expect(result.specs[0]!.requestHex).toBe('0C');
     expect(result.warnings.length).toBeGreaterThan(0);
   });
 
@@ -84,13 +94,12 @@ describe('validateEnetChannelSpecsJson / resolveEnetChannelSpecs (enetChannelSpe
    * array MEMBERS -- `[null]`, `[{}]`, `[1]` -- must never reach
    * `@circuit/core`'s `validateEnetChannelSpecs` (which would dereference
    * `spec.requestHex.replace(...)` on `undefined` and throw a raw
-   * `TypeError`). Each is caught here and reported as an error string
-   * instead -- and because EVERY member of a non-empty array failed
-   * structurally, the draft as a whole is `ok: false` (a malformed draft, not
-   * a deliberate "zero channels" choice -- that's reserved for a literal
-   * `"[]"`, covered separately above).
+   * `TypeError`). Each is caught here and reported as an error string naming
+   * its index instead -- the draft as a whole is `ok: false` (a malformed
+   * draft, not a deliberate "zero channels" choice -- that's reserved for a
+   * literal `"[]"`, covered separately above).
    */
-  it('never throws for structurally invalid array members: [null], [{}], [1] -- reported as ok:false, not a crash', () => {
+  it('never throws for structurally invalid array members: [null], [{}], [1] -- reported as ok:false, error names the index', () => {
     expect(() => validateEnetChannelSpecsJson('[null]')).not.toThrow();
     expect(() => validateEnetChannelSpecsJson('[{}]')).not.toThrow();
     expect(() => validateEnetChannelSpecsJson('[1]')).not.toThrow();
@@ -99,11 +108,11 @@ describe('validateEnetChannelSpecsJson / resolveEnetChannelSpecs (enetChannelSpe
       const result = validateEnetChannelSpecsJson(draft);
       expect(result.ok).toBe(false);
       expect(result.specs).toEqual([]);
-      expect(result.error).toBe(ENET_CHANNEL_SPECS_JSON_ERROR);
+      expect(result.error).toContain('entry 0');
     }
   });
 
-  it('rejects a well-typed-looking entry with a wrong-typed field (requestHex as a number, decode.byteLength invalid) -- both members structurally bad, so ok:false', () => {
+  it('rejects a well-typed-looking entry with a wrong-typed field (requestHex as a number, decode.byteLength invalid) -- both members structurally bad, so ok:false naming both indices', () => {
     const draft = JSON.stringify([
       { channel: 'rpm', mode: 'obd01', requestHex: 12, provenance: 'wrong type' },
       {
@@ -117,16 +126,53 @@ describe('validateEnetChannelSpecsJson / resolveEnetChannelSpecs (enetChannelSpe
     const result = validateEnetChannelSpecsJson(draft);
     expect(result.ok).toBe(false);
     expect(result.specs).toEqual([]);
-    expect(result.error).toBe(ENET_CHANNEL_SPECS_JSON_ERROR);
+    expect(result.error).toContain('entry 0');
+    expect(result.error).toContain('entry 1');
   });
 
-  it('a mix of one structurally-valid and several structurally-invalid members keeps only the valid one', () => {
+  /**
+   * The review's EXACT scenario (P4e-REV3, Part B H1 residual): `[null,
+   * <valid rpm spec>]` used to return `ok:true` with the valid rpm entry kept
+   * and the `null` merely warned about. P4e-FIX3 H1(b) (binding): ANY
+   * structurally invalid member now makes the WHOLE draft `ok:false`, error
+   * naming the bad index -- `specs` is empty, so `resolveEnetChannelSpecs`
+   * falls back to the built-in defaults rather than running on a
+   * half-parsed list.
+   */
+  it("the review's exact scenario: [null, <valid rpm spec>] is ok:false (not ok:true with rpm kept), error names index 0", () => {
+    const draft = JSON.stringify([null, { channel: 'rpm', mode: 'obd01', requestHex: '0C', provenance: 'ok' }]);
+    const result = validateEnetChannelSpecsJson(draft);
+    expect(result.ok).toBe(false);
+    expect(result.specs).toEqual([]);
+    expect(result.error).toContain('entry 0');
+  });
+
+  it('a mix of one structurally-valid and several structurally-invalid members is ok:false, naming every bad index', () => {
     const draft = JSON.stringify([null, {}, 1, { channel: 'rpm', mode: 'obd01', requestHex: '0C', provenance: 'ok' }]);
     const result = validateEnetChannelSpecsJson(draft);
-    expect(result.ok).toBe(true);
-    expect(result.specs).toHaveLength(1);
-    expect(result.specs[0]!.channel).toBe('rpm');
-    expect(result.warnings.length).toBeGreaterThanOrEqual(3);
+    expect(result.ok).toBe(false);
+    expect(result.specs).toEqual([]);
+    expect(result.error).toContain('entry 0');
+    expect(result.error).toContain('entry 1');
+    expect(result.error).toContain('entry 2');
+  });
+
+  /**
+   * P4e-FIX3 H1(b) (binding): channel membership moved INTO the structural
+   * stage -- a `channel` string outside `ENET_SPEC_CHANNELS` (a typo, or a
+   * channel this app has no decoder for, incl. the device-sensor `latG`/
+   * `longG`) is now a STRUCTURAL failure (`ok:false`, naming the index),
+   * not merely a core-level warning.
+   */
+  it('a channel outside ENET_SPEC_CHANNELS (a typo, or latG/longG) is a structural failure: ok:false, naming the index', () => {
+    for (const badChannel of ['bogus', 'latG', 'longG']) {
+      const draft = JSON.stringify([{ channel: badChannel, mode: 'obd01', requestHex: '0C', provenance: 'x' }]);
+      const result = validateEnetChannelSpecsJson(draft);
+      expect(result.ok).toBe(false);
+      expect(result.specs).toEqual([]);
+      expect(result.error).toContain('entry 0');
+      expect(result.error).toContain(badChannel);
+    }
   });
 
   it('resolveEnetChannelSpecs falls back to DEFAULT_ENET_CHANNEL_SPECS for an empty draft', () => {
@@ -156,7 +202,13 @@ describe('validateEnetChannelSpecsJson / resolveEnetChannelSpecs (enetChannelSpe
   it('resolveEnetChannelSpecs (the exact function TelemetryScreen calls during render) never throws for structurally invalid members, falling back to defaults', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
-      for (const draft of ['[null]', '[{}]', '[1]', '[null, {}, 1]']) {
+      for (const draft of [
+        '[null]',
+        '[{}]',
+        '[1]',
+        '[null, {}, 1]',
+        JSON.stringify([null, { channel: 'rpm', mode: 'obd01', requestHex: '0C', provenance: 'ok' }]), // the review's exact scenario.
+      ]) {
         let specs: ReturnType<typeof resolveEnetChannelSpecs> = [];
         expect(() => {
           specs = resolveEnetChannelSpecs(draft);
@@ -224,7 +276,7 @@ describe('repairPersistedEnetSettings (P4e-FIX2 L1, binding: settings hydration 
     expect(repairPersistedEnetSettings(persisted).enetChannelSpecsJson).toBe('');
   });
 
-  it('a valid enetChannelSpecsJson string is left untouched (even with per-entry warnings, e.g. a device-sensor channel)', () => {
+  it('a valid enetChannelSpecsJson string is left untouched by the repair pass', () => {
     const draft = JSON.stringify([{ channel: 'rpm', mode: 'obd01', requestHex: '0C', provenance: 'ok' }]);
     const persisted = { ...DEFAULT_SETTINGS, enetChannelSpecsJson: draft };
     expect(repairPersistedEnetSettings(persisted).enetChannelSpecsJson).toBe(draft);

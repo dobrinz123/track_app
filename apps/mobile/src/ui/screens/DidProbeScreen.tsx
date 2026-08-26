@@ -20,12 +20,14 @@ import { settingsStore, telemetryProvider } from '../../session/composition';
 import { useSettings } from '../hooks/useSettings';
 import { EnetTcpTransport } from '../../session/enetTcpTransport';
 import { formatHexByte, parseHexByteDraft } from '../../session/enetSettingsValidation';
+import { enetAdapterReservation } from '../../session/enetAdapterReservation';
 import {
   buildDidProbeRequest,
   correlateDidProbeResponse,
   evaluateDidProbeGating,
   pushDidProbeLogEntry,
   DID_PROBE_LOG_CAP,
+  DID_PROBE_STOP_TELEMETRY_MESSAGE,
   type DidProbeLogEntry,
   type DidProbeMode,
   type DidProbeSentRequest,
@@ -215,6 +217,24 @@ export function DidProbeScreen(_props: Props): React.JSX.Element {
       return;
     }
 
+    // P4e-FIX3 H2 fix (binding): the ATOMIC enforcement of the adapter's
+    // one-ECU-client rule -- `gating.allowed` above is a UI-level snapshot
+    // (the provider's state at last render) with a race window a provider
+    // retry can slip through; `tryAcquire` is the single arbiter both this
+    // screen and `telemetryProvider.ts` actually check right before opening
+    // a socket. Refused with the SAME message the state-based gating shows.
+    if (!enetAdapterReservation.tryAcquire('probe')) {
+      setErrorText(DID_PROBE_STOP_TELEMETRY_MESSAGE);
+      appendLog({
+        mode,
+        targetAddressHex: formatHexByte(targetAddress),
+        requestHex: requestHexDraft,
+        status: 'error',
+        detail: DID_PROBE_STOP_TELEMETRY_MESSAGE,
+      });
+      return;
+    }
+
     setSending(true);
     // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
     const isDev = typeof __DEV__ !== 'undefined' ? __DEV__ : false;
@@ -269,6 +289,10 @@ export function DidProbeScreen(_props: Props): React.JSX.Element {
         detail: message,
       });
     } finally {
+      // Held for the duration of ONE request (socket open -> close), per
+      // the binding spec -- released here regardless of outcome so the
+      // NEXT probe (or the provider) can acquire it immediately after.
+      enetAdapterReservation.release('probe');
       setSending(false);
     }
   }
