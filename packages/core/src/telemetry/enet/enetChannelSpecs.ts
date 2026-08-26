@@ -1,5 +1,11 @@
 import type { TelemetryChannelId } from '../contracts';
-import { decodeMode01Response, encodeMode01Request, isMode01TelemetryChannel, type Mode01TelemetryChannelId } from '../pidCodec';
+import {
+  channelForMode01Request,
+  decodeMode01Response,
+  encodeMode01Request,
+  isMode01TelemetryChannel,
+  type Mode01TelemetryChannelId,
+} from '../pidCodec';
 
 /** Channels that are never a valid ENET/OBD request target (device-sensor channels, per the ENET addendum: "no latG/longG"). */
 const NON_ENET_CHANNELS: ReadonlySet<TelemetryChannelId> = new Set(['latG', 'longG']);
@@ -108,6 +114,19 @@ function rejectionReason(spec: EnetChannelSpec): string | null {
     if (compact.length !== 2) {
       return `obd01 requestHex must be exactly 2 hex characters (one PID byte), got ${compact.length}`;
     }
+    // Channel<->PID consistency table: the requestHex must be the ONE
+    // standard mode-01 PID that decodes into THIS channel -- otherwise the
+    // response bytes get run through the wrong decode formula (e.g. RPM
+    // bytes decoded as speedKph). `channelForMode01Request` is the single
+    // source of truth for that mapping (see `pidCodec.ts`); a channel with
+    // no mode-01 decoder at all (e.g. transOilC) never matches any PID.
+    const matchedChannel = channelForMode01Request(`01${compact}`);
+    if (matchedChannel !== spec.channel) {
+      if (!isMode01TelemetryChannel(spec.channel)) {
+        return `no mode-01 decoder exists for channel ${spec.channel} (obd01 mode is not valid for this channel)`;
+      }
+      return `obd01 requestHex "${compact}" does not match the mode-01 PID for channel ${spec.channel} (expected ${encodeMode01Request(spec.channel).slice(2)})`;
+    }
     return null;
   }
   if (compact.length !== 4) {
@@ -115,6 +134,15 @@ function rejectionReason(spec: EnetChannelSpec): string | null {
   }
   if (spec.decode === undefined) {
     return 'did spec is missing a decode definition';
+  }
+  if (!Number.isInteger(spec.decode.byteOffset) || spec.decode.byteOffset < 0) {
+    return `did spec byteOffset must be a non-negative integer, got ${spec.decode.byteOffset}`;
+  }
+  if (spec.decode.byteLength !== 1 && spec.decode.byteLength !== 2) {
+    return `did spec byteLength must be 1 or 2, got ${spec.decode.byteLength}`;
+  }
+  if (!Number.isFinite(spec.decode.scale) || !Number.isFinite(spec.decode.offset)) {
+    return 'did spec scale/offset must be finite numbers';
   }
   if (spec.provenance.trim() === '') {
     return 'did spec is missing provenance';

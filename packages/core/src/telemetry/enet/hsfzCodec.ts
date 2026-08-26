@@ -5,16 +5,29 @@
  * `.foreman/scratch/enet-protocol-research.md` #1a/#1b; reimplemented from the
  * documented layout, NO code copied from scapy/ediabaslib -- both GPL):
  *
- *   [length  u32 BE][control u16 BE][source u8][target u8][UDS PDU bytes...]
+ *   [length  u32 BE][control u16 BE][body bytes, `length` of them...]
  *
- * `length` counts everything AFTER the control word: source + target + the
- * UDS PDU (i.e. `2 + pdu.length`). It does NOT include the control word or
- * itself. This is why a well-formed frame's minimum `length` is 2 (an empty
- * PDU, e.g. a bare alive-check-style exchange) -- so a declared `length < 2`
- * is already impossible for a real frame, and `length > 65535` is judged
- * unreasonable for a diagnostic session (contracts.md's addendum's own
- * bound). Total wire size of one frame is therefore `4 + 2 + length` bytes
- * (length field + control word + the `length`-counted tail).
+ * `length` counts everything AFTER the control word. Total wire size of one
+ * frame is therefore `4 + 2 + length` bytes.
+ *
+ * The BODY layout is CONTROL-SPECIFIC (contracts.md ENET addendum, "framing &
+ * correlation amendment"), not one universal `[source][target][payload]`
+ * shape:
+ *   - 0x0001 diagnostic req/res and 0x0002 acknowledge: `[source][target][UDS PDU / echoed head]`.
+ *   - 0x0012 alive check: EITHER the short addressed form `[source][target]`
+ *     (body length exactly 2) OR a long identification-string form (opaque
+ *     bytes, any other body length) -- there is no reliable way to tell them
+ *     apart except by length, per the cited scapy reference.
+ *   - 0x0040-0x0045 error frames: `[expected][received]` bytes -- NOT
+ *     addresses. No source/target exists for these.
+ *   - everything else (0x0010 terminal15, 0x0011 vehicle-ident, 0x0013
+ *     status, 0x00FF out-of-memory, and any unrecognized control word):
+ *     opaque payload, no source/target fabricated.
+ *
+ * `HsfzFrame` is therefore a discriminated union keyed by `kind` (with
+ * `control` kept on every variant so a caller can still switch/compare on the
+ * raw control word). The parser never invents source/target fields for a
+ * frame type that does not carry them.
  */
 
 export const HSFZ_CONTROL = {
@@ -35,16 +48,16 @@ export const HSFZ_CONTROL = {
 
 export type HsfzControlWord = (typeof HSFZ_CONTROL)[keyof typeof HSFZ_CONTROL];
 
-/** Inclusive bounds for a well-formed frame's `length` field (see module doc). */
+/**
+ * Inclusive bounds for a well-formed frame's `length` field (see module
+ * doc). The wire field itself is a u32; the binding amendment caps the
+ * APP-LEVEL accepted length at 4096 (not the u32's own ceiling) -- any
+ * diagnostic PDU this app sends or expects is far below that. A length below
+ * 2 is impossible for any real frame (the smallest body, a short alive-check
+ * address pair or a 2-byte error expected/received pair, is 2 bytes).
+ */
 export const HSFZ_MIN_LENGTH = 2;
-export const HSFZ_MAX_LENGTH = 65_535;
-
-export interface HsfzFrame {
-  control: number;
-  source: number;
-  target: number;
-  payload: Uint8Array;
-}
+export const HSFZ_MAX_LENGTH = 4_096;
 
 const ERROR_CONTROL_NAMES: Readonly<Record<number, string>> = {
   [HSFZ_CONTROL.ERROR_UNKNOWN_TESTER_ADDRESS]: 'UNKNOWN_TESTER_ADDRESS',
@@ -55,75 +68,230 @@ const ERROR_CONTROL_NAMES: Readonly<Record<number, string>> = {
   [HSFZ_CONTROL.ERROR_APPLICATION_NOT_READY]: 'APPLICATION_NOT_READY',
 };
 
-export interface HsfzErrorFrame {
-  control: number;
-  name: string;
-  source: number;
-  target: number;
-  /**
-   * Whatever bytes followed source/target in the error frame. The research
-   * notes an `expected`/`received` sub-structure exists in this range but its
-   * exact byte layout was NOT independently confirmed in any fetched source
-   * -- rather than guess a shape, this exposes the raw remainder so a caller
-   * (or a future, evidence-backed revision) can interpret it.
-   */
-  raw: Uint8Array;
-}
-
 export function isHsfzErrorControl(control: number): boolean {
   return (
     control >= HSFZ_CONTROL.ERROR_UNKNOWN_TESTER_ADDRESS && control <= HSFZ_CONTROL.ERROR_APPLICATION_NOT_READY
   );
 }
 
-/** Decodes a frame whose control word is in the 0x0040-0x0045 error range; `null` for any other control word. */
-export function decodeHsfzError(frame: HsfzFrame): HsfzErrorFrame | null {
-  const name = ERROR_CONTROL_NAMES[frame.control];
-  if (name === undefined) return null;
-  return { control: frame.control, name, source: frame.source, target: frame.target, raw: frame.payload };
+// ---------- Discriminated frame union ----------
+
+/**
+ * `control`'s type on each variant below is deliberately the SPECIFIC
+ * literal(s) that kind can carry (not a bare `number`) so the union
+ * discriminates on EITHER `kind` or `control` -- a caller that only ever
+ * checks `frame.control === HSFZ_CONTROL.DIAGNOSTIC_REQ_RES` (as an
+ * existing consumer does, comparing against the raw control word rather
+ * than `kind`) still gets a fully narrowed `HsfzDiagnosticFrame` from that
+ * check alone, with every one of its fields (`source`/`target`/`payload`)
+ * available -- exactly what the OLD flat `HsfzFrame` shape provided.
+ */
+
+/** 0x0001 diagnostic request/response, or 0x0002 acknowledge (same `[source][target][...]` layout per the addendum). */
+export interface HsfzDiagnosticFrame {
+  kind: 'diagnostic';
+  control: typeof HSFZ_CONTROL.DIAGNOSTIC_REQ_RES | typeof HSFZ_CONTROL.ACKNOWLEDGE;
+  source: number;
+  target: number;
+  /** The UDS PDU (0x0001), or the adapter's echoed request head (0x0002 acknowledge). */
+  payload: Uint8Array;
 }
 
+/** 0x0012 alive check, short addressed form: body is exactly `[source][target]`. */
+export interface HsfzAliveCheckShortFrame {
+  kind: 'aliveCheck';
+  control: typeof HSFZ_CONTROL.ALIVE_CHECK;
+  form: 'short';
+  source: number;
+  target: number;
+}
+
+/** 0x0012 alive check, long identification-string form: body is any length other than 2, opaque bytes. */
+export interface HsfzAliveCheckLongFrame {
+  kind: 'aliveCheck';
+  control: typeof HSFZ_CONTROL.ALIVE_CHECK;
+  form: 'long';
+  identification: Uint8Array;
+}
+
+export type HsfzAliveCheckFrame = HsfzAliveCheckShortFrame | HsfzAliveCheckLongFrame;
+
+type HsfzErrorControlWord =
+  | typeof HSFZ_CONTROL.ERROR_UNKNOWN_TESTER_ADDRESS
+  | typeof HSFZ_CONTROL.ERROR_UNKNOWN_CONTROL_WORD
+  | typeof HSFZ_CONTROL.ERROR_FORMAT_ERROR
+  | typeof HSFZ_CONTROL.ERROR_UNKNOWN_DESTINATION_ADDRESS
+  | typeof HSFZ_CONTROL.ERROR_MESSAGE_TOO_LARGE
+  | typeof HSFZ_CONTROL.ERROR_APPLICATION_NOT_READY;
+
+/** 0x0040-0x0045 error frame: `[expected][received]` bytes, no source/target. */
+export interface HsfzErrorFrame {
+  kind: 'error';
+  control: HsfzErrorControlWord;
+  /** Same value as `control` -- named per the binding spec's `{code, expected, received, raw}` shape. */
+  code: HsfzErrorControlWord;
+  name: string;
+  expected: number;
+  received: number;
+  /** The full body bytes (>= 2). Equal to `[expected, received]` for the common 2-byte case; kept in full for any longer, not-independently-confirmed variant. */
+  raw: Uint8Array;
+}
+
+type HsfzOtherControlWord =
+  | typeof HSFZ_CONTROL.TERMINAL_15
+  | typeof HSFZ_CONTROL.VEHICLE_IDENT_DATA
+  | typeof HSFZ_CONTROL.STATUS_DATA_INQUIRY
+  | typeof HSFZ_CONTROL.OUT_OF_MEMORY;
+
+/** Anything else (0x0010 terminal15, 0x0011 vehicle-ident, 0x0013 status, 0x00FF OOM, or an unrecognized control word): opaque payload, no fields fabricated. */
+export interface HsfzOtherFrame {
+  kind: 'other';
+  /** One of the 4 known "other" words above -- an as-yet-undocumented control word is still routed here at runtime (see `decodeFrameBody`'s fallback) and still carries its real numeric value, just outside what this type enumerates. */
+  control: HsfzOtherControlWord;
+  payload: Uint8Array;
+}
+
+export type HsfzFrame = HsfzDiagnosticFrame | HsfzAliveCheckFrame | HsfzErrorFrame | HsfzOtherFrame;
+
+/** Narrows to the error variant (or `null` for any other frame kind) -- kept as a named helper for callers that only care about errors. */
+export function decodeHsfzError(frame: HsfzFrame): HsfzErrorFrame | null {
+  return frame.kind === 'error' ? frame : null;
+}
+
+function decodeFrameBody(control: number, body: Uint8Array): HsfzFrame {
+  if (control === HSFZ_CONTROL.DIAGNOSTIC_REQ_RES || control === HSFZ_CONTROL.ACKNOWLEDGE) {
+    return {
+      kind: 'diagnostic',
+      control,
+      source: body[0] ?? 0,
+      target: body[1] ?? 0,
+      payload: body.slice(2),
+    };
+  }
+  if (control === HSFZ_CONTROL.ALIVE_CHECK) {
+    if (body.length === 2) {
+      return { kind: 'aliveCheck', control, form: 'short', source: body[0] ?? 0, target: body[1] ?? 0 };
+    }
+    return { kind: 'aliveCheck', control, form: 'long', identification: body };
+  }
+  if (isHsfzErrorControl(control)) {
+    const errorControl = control as HsfzErrorControlWord;
+    return {
+      kind: 'error',
+      control: errorControl,
+      code: errorControl,
+      name: ERROR_CONTROL_NAMES[control] ?? `0x${control.toString(16).padStart(4, '0')}`,
+      expected: body[0] ?? 0,
+      received: body[1] ?? 0,
+      raw: body,
+    };
+  }
+  // Fallback also covers a control word this module doesn't otherwise
+  // recognize -- still tagged 'other' with its real numeric value at
+  // runtime; see `HsfzOtherFrame.control`'s doc comment about the cast.
+  return { kind: 'other', control: control as HsfzOtherControlWord, payload: body };
+}
+
+// ---------- Encoding ----------
+
+function assertByteRange(value: number, label: string): void {
+  if (!Number.isInteger(value) || value < 0 || value > 0xff) {
+    throw new RangeError(`HSFZ ${label} out of range: ${value}`);
+  }
+}
+
+function encodeRawFrame(control: number, body: Uint8Array): Uint8Array {
+  if (!Number.isInteger(control) || control < 0 || control > 0xffff) {
+    throw new RangeError(`HSFZ control word out of range: ${control}`);
+  }
+  const length = body.length;
+  if (length > HSFZ_MAX_LENGTH) {
+    throw new RangeError(`HSFZ payload too large: length would be ${length} (max ${HSFZ_MAX_LENGTH})`);
+  }
+  if (length < HSFZ_MIN_LENGTH) {
+    throw new RangeError(`HSFZ frame body too small: length would be ${length} (min ${HSFZ_MIN_LENGTH})`);
+  }
+
+  const out = new Uint8Array(6 + length);
+  writeUint32BE(out, 0, length);
+  writeUint16BE(out, 4, control);
+  out.set(body, 6);
+  return out;
+}
+
+/**
+ * Generic diagnostic-layout encoder: `[source][target][payload]` under
+ * `control` (0x0001 diagnostic req/res by default, or any other control word
+ * that shares this layout, e.g. 0x0002 acknowledge). Kept under its original
+ * name/signature for existing callers (additive: nothing about this
+ * function's behavior changed for the diagnostic/acknowledge layout it always
+ * implemented).
+ */
 export function encodeFrame(frame: {
   control: number;
   source: number;
   target: number;
   payload: Uint8Array;
 }): Uint8Array {
-  if (!Number.isInteger(frame.control) || frame.control < 0 || frame.control > 0xffff) {
-    throw new RangeError(`HSFZ control word out of range: ${frame.control}`);
-  }
-  if (!Number.isInteger(frame.source) || frame.source < 0 || frame.source > 0xff) {
-    throw new RangeError(`HSFZ source address out of range: ${frame.source}`);
-  }
-  if (!Number.isInteger(frame.target) || frame.target < 0 || frame.target > 0xff) {
-    throw new RangeError(`HSFZ target address out of range: ${frame.target}`);
-  }
-  const length = 2 + frame.payload.length;
-  if (length > HSFZ_MAX_LENGTH) {
-    throw new RangeError(`HSFZ payload too large: length would be ${length} (max ${HSFZ_MAX_LENGTH})`);
-  }
+  assertByteRange(frame.source, 'source address');
+  assertByteRange(frame.target, 'target address');
+  const body = new Uint8Array(2 + frame.payload.length);
+  body[0] = frame.source;
+  body[1] = frame.target;
+  body.set(frame.payload, 2);
+  return encodeRawFrame(frame.control, body);
+}
 
-  const out = new Uint8Array(8 + frame.payload.length);
-  writeUint32BE(out, 0, length);
-  writeUint16BE(out, 4, frame.control);
-  out[6] = frame.source;
-  out[7] = frame.target;
-  out.set(frame.payload, 8);
-  return out;
+/** Encodes an alive-check short addressed reply/request: body = `[source][target]`, no extra payload byte. */
+export function encodeAliveCheckShort(args: { source: number; target: number }): Uint8Array {
+  assertByteRange(args.source, 'source address');
+  assertByteRange(args.target, 'target address');
+  return encodeRawFrame(HSFZ_CONTROL.ALIVE_CHECK, Uint8Array.from([args.source, args.target]));
+}
+
+/** Encodes an alive-check long identification-string frame. Refuses a 2-byte identification (indistinguishable on the wire from the short addressed form). */
+export function encodeAliveCheckLong(args: { identification: Uint8Array }): Uint8Array {
+  if (args.identification.length === 2) {
+    throw new RangeError(
+      'alive-check long-form identification must not be exactly 2 bytes -- it would be parsed back as the short addressed form',
+    );
+  }
+  return encodeRawFrame(HSFZ_CONTROL.ALIVE_CHECK, args.identification);
+}
+
+/** Encodes an 0x0040-0x0045 error frame: body = `[expected][received]`. */
+export function encodeErrorFrame(args: { control: number; expected: number; received: number }): Uint8Array {
+  if (!isHsfzErrorControl(args.control)) {
+    throw new RangeError(`not an HSFZ error control word: 0x${args.control.toString(16).padStart(4, '0')}`);
+  }
+  assertByteRange(args.expected, 'error expected byte');
+  assertByteRange(args.received, 'error received byte');
+  return encodeRawFrame(args.control, Uint8Array.from([args.expected, args.received]));
+}
+
+/** Encodes any other opaque-payload control word (terminal15, vehicle-ident, status, OOM). */
+export function encodeOtherFrame(args: { control: number; payload: Uint8Array }): Uint8Array {
+  return encodeRawFrame(args.control, args.payload);
 }
 
 export type HsfzParseErrorReason = 'LENGTH_TOO_LARGE' | 'LENGTH_TOO_SMALL';
 
 /**
  * Thrown by `HsfzFrameParser.push` when a declared frame length is outside
- * `[HSFZ_MIN_LENGTH, HSFZ_MAX_LENGTH]`. HSFZ has no in-band resync marker
- * (no fixed sync byte, no checksum to hunt for), so once a length prefix is
+ * `[HSFZ_MIN_LENGTH, HSFZ_MAX_LENGTH]`. HSFZ has no in-band resync marker (no
+ * fixed sync byte, no checksum to hunt for), so once a length prefix is
  * untrustworthy there is no principled way to find the next real frame
- * boundary inside the already-buffered bytes -- the documented recovery
- * choice is to DROP THE ENTIRE BUFFERED STREAM and let the next chunk(s)
- * start fresh. Any frames the same `push()` call had already parsed BEFORE
- * hitting the bad length are still returned, via `framesBeforeError`, so a
- * caller never loses already-valid data.
+ * boundary inside the already-buffered bytes. This is FATAL at the session
+ * level: a corrupted length has no in-stream resync point, and TCP chunk
+ * boundaries carry no resynchronization meaning either, so the only safe
+ * recovery is to close the transport and reconnect -- "clear buffer and
+ * continue" is not a valid recovery (see `enetSession.ts`'s handling of this
+ * error). This class only clears ITS OWN internal buffer so a caller that
+ * chooses to keep using the same parser instance is not permanently wedged;
+ * it does not by itself imply the connection is safe to keep reading from.
+ * Any frames the same `push()` call had already parsed BEFORE hitting the bad
+ * length are still returned, via `framesBeforeError`, so a caller never loses
+ * already-valid data.
  */
 export class HsfzParseError extends Error {
   constructor(
@@ -165,10 +333,8 @@ export class HsfzFrameParser {
       if (this.buffer.length < totalFrameLength) break; // wait for more bytes
 
       const control = readUint16BE(this.buffer, 4);
-      const source = this.buffer[6] ?? 0;
-      const target = this.buffer[7] ?? 0;
-      const payload = this.buffer.slice(8, totalFrameLength);
-      frames.push({ control, source, target, payload });
+      const body = this.buffer.slice(6, totalFrameLength);
+      frames.push(decodeFrameBody(control, body));
       this.buffer = this.buffer.slice(totalFrameLength);
     }
 
@@ -207,6 +373,22 @@ export function binaryStringToBytes(text: string): Uint8Array {
 /** Renders bytes as upper-case hex pairs separated by single spaces, e.g. `41 0C 1A F8` -- used for `lastRawFrameHex` diagnostics. */
 export function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+}
+
+/** Encodes any `HsfzFrame` variant back to wire bytes -- used for diagnostics (`lastRawFrameHex`) and by callers that received a frame and want its raw bytes without re-deriving the layout per kind. */
+export function encodeHsfzFrame(frame: HsfzFrame): Uint8Array {
+  switch (frame.kind) {
+    case 'diagnostic':
+      return encodeFrame(frame);
+    case 'aliveCheck':
+      return frame.form === 'short'
+        ? encodeAliveCheckShort(frame)
+        : encodeAliveCheckLong({ identification: frame.identification });
+    case 'error':
+      return encodeErrorFrame({ control: frame.control, expected: frame.expected, received: frame.received });
+    case 'other':
+      return encodeOtherFrame(frame);
+  }
 }
 
 function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {

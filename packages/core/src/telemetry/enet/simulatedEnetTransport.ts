@@ -1,6 +1,14 @@
 import { SeededPrng } from '../../fixtures/prng';
 import type { ObdTransport } from '../contracts';
-import { binaryStringToBytes, bytesToBinaryString, encodeFrame, HSFZ_CONTROL, HsfzFrameParser, type HsfzFrame } from './hsfzCodec';
+import {
+  binaryStringToBytes,
+  bytesToBinaryString,
+  encodeAliveCheckShort,
+  encodeFrame,
+  HSFZ_CONTROL,
+  HsfzFrameParser,
+  type HsfzFrame,
+} from './hsfzCodec';
 
 /**
  * One scripted ECU channel: how the simulator answers a specific
@@ -152,18 +160,13 @@ export class SimulatedEnetTransport implements ObdTransport {
     if (this.config.aliveCheckIntervalMs === undefined) return;
     if (this.config.monotonicNow() < this.nextAliveCheckAtMonoMs) return;
     this.nextAliveCheckAtMonoMs += this.config.aliveCheckIntervalMs;
-    const frame = encodeFrame({
-      control: HSFZ_CONTROL.ALIVE_CHECK,
-      source: this.targetAddress,
-      target: this.testerAddress,
-      payload: new Uint8Array(0),
-    });
+    const frame = encodeAliveCheckShort({ source: this.targetAddress, target: this.testerAddress });
     queueMicrotask(() => this.deliver(frame));
   }
 
   private handleClientFrame(frame: HsfzFrame): void {
-    if (frame.control === HSFZ_CONTROL.ALIVE_CHECK) return; // the client's reply to our alive-check; nothing further to do.
-    if (frame.control !== HSFZ_CONTROL.DIAGNOSTIC_REQ_RES) return;
+    if (frame.kind === 'aliveCheck') return; // the client's reply to our alive-check; nothing further to do.
+    if (frame.kind !== 'diagnostic' || frame.control !== HSFZ_CONTROL.DIAGNOSTIC_REQ_RES) return;
 
     this.diagnosticRequestCount += 1;
     const disconnectAt = this.config.disconnectOnRequestNumber;

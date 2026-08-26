@@ -1,16 +1,24 @@
 import {
   createElm327Session,
+  createEnetSession,
+  DEFAULT_ENET_CONFIG,
   SimulatedElm327Transport,
+  SimulatedEnetTransport,
   type Elm327Config,
   type Elm327Session,
   type Elm327State,
+  type EnetConfig,
+  type EnetSession,
+  type EnetState,
   type ObdTransport,
   type TelemetryChannelId,
   type TelemetrySample,
 } from '@circuit/core';
-import type { SettingsStore } from './settingsStore';
+import type { AdapterType, SettingsStore } from './settingsStore';
 import { TcpObdTransport } from './tcpObdTransport';
+import { EnetTcpTransport } from './enetTcpTransport';
 import { CUSTOM_PID_VALIDATION_ERROR, isAllowedCustomPidRequest } from './customPidValidation';
+import { resolveEnetChannelSpecs } from './enetSettingsValidation';
 
 /**
  * Telemetry addendum — channel revision (2026-08-11, binding) poll plan:
@@ -162,6 +170,27 @@ export function isTelemetryStripVisible(telemetryEnabled: boolean, providerState
   return telemetryEnabled && providerState === 'polling';
 }
 
+/**
+ * ENET telemetry addendum (binding): the ENET engine's own state vocabulary
+ * (`idle|connecting|handshake|polling|stopped|failed`) is reused for the
+ * shared monitor/strip via this mapping rather than widening `onStateChange`'s
+ * public callback type -- `TelemetryStrip.tsx` (out of this ticket's scope)
+ * subscribes with a state setter typed exactly `Elm327State`, so every
+ * consumer of `TelemetryProvider.onStateChange` keeps seeing that SAME
+ * vocabulary regardless of which adapter is active. `'handshake'` (the
+ * transient state right after `connect()` succeeds, before the first poll
+ * exchange) maps to `'initializing'`, ELM327's own closest analog -- both
+ * mean "connected, not yet proven to be exchanging data".
+ */
+const ENET_STATE_TO_PROVIDER_STATE: Readonly<Record<EnetState, Elm327State>> = {
+  idle: 'idle',
+  connecting: 'connecting',
+  handshake: 'initializing',
+  polling: 'polling',
+  stopped: 'stopped',
+  failed: 'failed',
+};
+
 export interface TelemetryProviderDiagnostics {
   state: Elm327State;
   observedHzByChannel: Record<string, number>;
@@ -169,6 +198,26 @@ export interface TelemetryProviderDiagnostics {
   lastError?: string;
   /** 0 or 1 -- whether the single reconnect retry has been used for the current `start()`..`stop()` lifecycle. */
   retriesUsed: number;
+  /** ENET telemetry addendum: which adapter this provider is currently configured for -- always known (read from settings), regardless of whether a session has been built yet. */
+  adapterType: AdapterType;
+  /** ENET-only (present once an ENET session has been built): the UDS target address the current/last ENET session sent requests to. */
+  enetTargetAddress?: number;
+  /** ENET-only: channels currently in the active poll rotation. */
+  supportedChannels?: TelemetryChannelId[];
+  /** ENET-only: channels permanently removed after an UNSUPPORTED NRC (never retried in-session). */
+  unsupportedChannels?: TelemetryChannelId[];
+  /** ENET-only: last NRC observed per channel (unsupported or otherwise). */
+  lastNrcByChannel?: Record<string, number>;
+  /** ENET-only: total HSFZ frames sent. */
+  framesTx?: number;
+  /** ENET-only: total HSFZ frames received. */
+  framesRx?: number;
+  /** ENET-only: request acknowledge latency, p50 (ms). */
+  ackLatencyMsP50?: number;
+  /** ENET-only: request acknowledge latency, p95 (ms). */
+  ackLatencyMsP95?: number;
+  /** ENET-only: hex dump of the most recently received HSFZ frame (the dev DID-probe screen's own tool, also surfaced here for the monitor). */
+  lastRawFrameHex?: string;
 }
 
 /**
@@ -205,12 +254,9 @@ export interface TelemetryProvider {
  * a NEW `start()` races in and installs a fresh generation while the old
  * one's `session.stop()` is still pending.
  */
-interface SessionGeneration {
-  id: number;
-  session: Elm327Session;
-  unsubscribeSample: () => void;
-  unsubscribeState: () => void;
-}
+type SessionGeneration =
+  | { id: number; kind: 'elm327'; session: Elm327Session; unsubscribeSample: () => void; unsubscribeState: () => void }
+  | { id: number; kind: 'enet'; session: EnetSession; unsubscribeSample: () => void; unsubscribeState: () => void };
 
 export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryProvider {
   const { settingsStore, monotonicNow } = deps;
@@ -235,10 +281,47 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     const settings = settingsStore.getSettings();
     // F8 fix: a non-dev build ignores a persisted `telemetrySimulate=true`
     // entirely (never mutates the stored setting -- just ignores it here).
+    // ENET telemetry addendum: `telemetrySimulate` applies to BOTH adapter
+    // types -- the branch below only decides which SIMULATED (or real)
+    // transport to build, never whether simulation itself is honored.
+    if (settings.adapterType === 'enet') {
+      if (settings.telemetrySimulate && isDev) {
+        return new SimulatedEnetTransport({
+          monotonicNow,
+          testerAddress: settings.enetTesterAddress,
+          targetAddress: settings.enetTargetAddress,
+        });
+      }
+      return new EnetTcpTransport({ host: settings.enetHost, port: settings.enetPort });
+    }
     if (settings.telemetrySimulate && isDev) {
       return new SimulatedElm327Transport({ monotonicNow });
     }
     return new TcpObdTransport({ host: settings.adapterHost, port: settings.adapterPort });
+  }
+
+  /**
+   * ENET telemetry addendum: builds the ENET engine's config from settings --
+   * channel specs (parsed/validated JSON, or the built-in defaults --
+   * `resolveEnetChannelSpecs`), the SAME poll plan `buildPollPlan` already
+   * builds for ELM327 (channel ids/rates are adapter-agnostic; the addendum:
+   * "poll plan reused"), tester/target addresses from settings, and the
+   * addendum's default tester-present interval/command-timeout/error-budget
+   * (`DEFAULT_ENET_CONFIG`, `COMMAND_TIMEOUT_MS`/`MAX_CONSECUTIVE_ERRORS`
+   * shared with the ELM327 config below).
+   */
+  function buildEnetConfig(): EnetConfig {
+    const settings = settingsStore.getSettings();
+    return {
+      channelSpecs: resolveEnetChannelSpecs(settings.enetChannelSpecsJson),
+      pollPlan: buildPollPlan(settings.transOilPidHex),
+      testerAddress: settings.enetTesterAddress,
+      targetAddress: settings.enetTargetAddress,
+      testerPresentIntervalMs: DEFAULT_ENET_CONFIG.testerPresentIntervalMs,
+      commandTimeoutMs: COMMAND_TIMEOUT_MS,
+      maxConsecutiveErrors: MAX_CONSECUTIVE_ERRORS,
+      attemptObd01: DEFAULT_ENET_CONFIG.attemptObd01,
+    };
   }
 
   function emitState(state: Elm327State, detail?: string): void {
@@ -250,6 +333,39 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     generationCounter += 1;
     const id = generationCounter;
     const transport = buildTransport();
+    // F3 fix: every listener below checks `current?.id === id` before doing
+    // anything -- once a NEWER generation has replaced `current` (a fresh
+    // `start()`, or this generation's own `stop()`/retry teardown), a late
+    // event from THIS (now-stale) session's transport/session is dropped
+    // instead of forwarding a sample/state change for a session nothing
+    // outside this closure should still believe is live.
+    if (settingsStore.getSettings().adapterType === 'enet') {
+      // ENET telemetry addendum: a completely separate branch from the
+      // ELM327 path below -- nothing here is reachable unless
+      // `adapterType === 'enet'`, so the ELM327 path's own behavior (and the
+      // tests pinning it) is untouched by this addition.
+      const config = buildEnetConfig();
+      const next = createEnetSession(transport, config, monotonicNow);
+      const gen: SessionGeneration = {
+        id,
+        kind: 'enet',
+        session: next,
+        unsubscribeSample: next.onSample((sample) => {
+          if (current?.id !== id) return;
+          for (const listener of [...sampleListeners]) listener(sample);
+        }),
+        unsubscribeState: next.onStateChange((state, detail) => {
+          if (current?.id !== id) return;
+          const mapped = ENET_STATE_TO_PROVIDER_STATE[state];
+          emitState(mapped, detail);
+          if (mapped === 'failed' && running) scheduleRetry(id);
+        }),
+      };
+      current = gen;
+      next.start();
+      return;
+    }
+
     // Channel revision (binding): the poll plan (and whether transOilC's
     // custom PID is even sent) is read fresh from settings on every
     // `start()`, same freshness rule as `buildTransport()`'s own read above --
@@ -264,14 +380,9 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       maxConsecutiveErrors: MAX_CONSECUTIVE_ERRORS,
     };
     const next = createElm327Session(transport, config, monotonicNow);
-    // F3 fix: every listener below checks `current?.id === id` before doing
-    // anything -- once a NEWER generation has replaced `current` (a fresh
-    // `start()`, or this generation's own `stop()`/retry teardown), a late
-    // event from THIS (now-stale) session's transport/session is dropped
-    // instead of forwarding a sample/state change for a session nothing
-    // outside this closure should still believe is live.
     const gen: SessionGeneration = {
       id,
+      kind: 'elm327',
       session: next,
       unsubscribeSample: next.onSample((sample) => {
         if (current?.id !== id) return;
@@ -368,6 +479,32 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     },
 
     getDiagnostics(): TelemetryProviderDiagnostics {
+      const adapterType = settingsStore.getSettings().adapterType;
+      // ENET telemetry addendum: the richer per-channel/frame/latency
+      // diagnostics the monitor screen shows are ENET-only -- narrowed here
+      // by `current.kind`, never surfaced (or even computed) on the ELM327
+      // path below, which keeps returning EXACTLY the same shape it always
+      // has.
+      if (current !== null && current.kind === 'enet') {
+        const diag = current.session.getDiagnostics();
+        return {
+          state: currentState,
+          retriesUsed,
+          observedHzByChannel: diag.observedHzByChannel,
+          errorCount: diag.errorCount,
+          ...(diag.lastError === undefined ? {} : { lastError: diag.lastError }),
+          adapterType,
+          enetTargetAddress: settingsStore.getSettings().enetTargetAddress,
+          supportedChannels: diag.supportedChannels,
+          unsupportedChannels: diag.unsupportedChannels,
+          lastNrcByChannel: diag.lastNrcByChannel,
+          framesTx: diag.framesTx,
+          framesRx: diag.framesRx,
+          ...(diag.ackLatencyMsP50 === undefined ? {} : { ackLatencyMsP50: diag.ackLatencyMsP50 }),
+          ...(diag.ackLatencyMsP95 === undefined ? {} : { ackLatencyMsP95: diag.ackLatencyMsP95 }),
+          ...(diag.lastRawFrameHex === undefined ? {} : { lastRawFrameHex: diag.lastRawFrameHex }),
+        };
+      }
       const base = current?.session.getDiagnostics() ?? { observedHzByChannel: {}, errorCount: 0 };
       return {
         state: currentState,
@@ -375,6 +512,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
         observedHzByChannel: base.observedHzByChannel,
         errorCount: base.errorCount,
         ...(base.lastError === undefined ? {} : { lastError: base.lastError }),
+        adapterType,
       };
     },
   };

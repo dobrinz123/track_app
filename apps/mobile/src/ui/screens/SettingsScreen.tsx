@@ -16,8 +16,13 @@ import {
 } from '../../session/composition';
 import { useFacadeState } from '../hooks/useFacadeState';
 import { useSettings } from '../hooks/useSettings';
-import type { SpeedUnits } from '../../session/settingsStore';
+import type { AdapterType, SpeedUnits } from '../../session/settingsStore';
 import { validateCustomPidHex } from '../../session/customPidValidation';
+import {
+  formatHexByte,
+  parseHexByteDraft,
+  validateEnetChannelSpecsJson,
+} from '../../session/enetSettingsValidation';
 
 /** Session states that mean "there is an active session in progress" -- the delete-my-data control is hidden/disabled during all of these so it can never race a live write (M3 fix). */
 const ACTIVE_SESSION_STATES = new Set([
@@ -197,6 +202,100 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
       // (not snapped back) so the user can see and correct exactly what they
       // typed, alongside the inline error below the field.
       setTransOilPidError(result.error);
+    }
+  }
+
+  // ENET telemetry addendum (Phase 4e, binding): SAME draft/blur pattern as
+  // the ELM327 port field above, one draft per validated ENET field --
+  // `enetHost` is free text (no format validation, same as `adapterHost`
+  // above, committed on every keystroke) so it has no draft of its own.
+  const [enetPortDraft, setEnetPortDraft] = React.useState(String(settings.enetPort));
+  const lastCommittedEnetPort = React.useRef(settings.enetPort);
+  React.useEffect(() => {
+    if (settings.enetPort !== lastCommittedEnetPort.current) {
+      lastCommittedEnetPort.current = settings.enetPort;
+      setEnetPortDraft(String(settings.enetPort));
+    }
+  }, [settings.enetPort]);
+
+  function commitEnetPortDraft(): void {
+    const parsed = parsePortDraft(enetPortDraft);
+    if (parsed !== null) {
+      lastCommittedEnetPort.current = parsed;
+      settingsStore.update({ enetPort: parsed });
+      setEnetPortDraft(String(parsed));
+    } else {
+      setEnetPortDraft(String(lastCommittedEnetPort.current));
+    }
+  }
+
+  const [enetTesterAddressDraft, setEnetTesterAddressDraft] = React.useState(formatHexByte(settings.enetTesterAddress));
+  const lastCommittedEnetTesterAddress = React.useRef(settings.enetTesterAddress);
+  React.useEffect(() => {
+    if (settings.enetTesterAddress !== lastCommittedEnetTesterAddress.current) {
+      lastCommittedEnetTesterAddress.current = settings.enetTesterAddress;
+      setEnetTesterAddressDraft(formatHexByte(settings.enetTesterAddress));
+    }
+  }, [settings.enetTesterAddress]);
+
+  function commitEnetTesterAddressDraft(): void {
+    const parsed = parseHexByteDraft(enetTesterAddressDraft);
+    if (parsed !== null) {
+      lastCommittedEnetTesterAddress.current = parsed;
+      settingsStore.update({ enetTesterAddress: parsed });
+      setEnetTesterAddressDraft(formatHexByte(parsed));
+    } else {
+      setEnetTesterAddressDraft(formatHexByte(lastCommittedEnetTesterAddress.current));
+    }
+  }
+
+  const [enetTargetAddressDraft, setEnetTargetAddressDraft] = React.useState(formatHexByte(settings.enetTargetAddress));
+  const lastCommittedEnetTargetAddress = React.useRef(settings.enetTargetAddress);
+  React.useEffect(() => {
+    if (settings.enetTargetAddress !== lastCommittedEnetTargetAddress.current) {
+      lastCommittedEnetTargetAddress.current = settings.enetTargetAddress;
+      setEnetTargetAddressDraft(formatHexByte(settings.enetTargetAddress));
+    }
+  }, [settings.enetTargetAddress]);
+
+  function commitEnetTargetAddressDraft(): void {
+    const parsed = parseHexByteDraft(enetTargetAddressDraft);
+    if (parsed !== null) {
+      lastCommittedEnetTargetAddress.current = parsed;
+      settingsStore.update({ enetTargetAddress: parsed });
+      setEnetTargetAddressDraft(formatHexByte(parsed));
+    } else {
+      setEnetTargetAddressDraft(formatHexByte(lastCommittedEnetTargetAddress.current));
+    }
+  }
+
+  // Channel-specs JSON: same "invalid text stays in place, inline error below
+  // the field" pattern as `transOilPidDraft` above -- a syntactically valid
+  // draft is committed as-is (verbatim, not re-serialized) even when
+  // `validateEnetChannelSpecsJson` reports per-entry warnings (those are
+  // shown too, but never block the commit -- matching `validateEnetChannelSpecs`'s
+  // own "drop bad entries, don't reject the whole list" model).
+  const [enetChannelSpecsDraft, setEnetChannelSpecsDraft] = React.useState(settings.enetChannelSpecsJson);
+  const lastCommittedEnetChannelSpecs = React.useRef(settings.enetChannelSpecsJson);
+  const [enetChannelSpecsError, setEnetChannelSpecsError] = React.useState<string | null>(null);
+  const [enetChannelSpecsWarnings, setEnetChannelSpecsWarnings] = React.useState<readonly string[]>([]);
+  React.useEffect(() => {
+    if (settings.enetChannelSpecsJson !== lastCommittedEnetChannelSpecs.current) {
+      lastCommittedEnetChannelSpecs.current = settings.enetChannelSpecsJson;
+      setEnetChannelSpecsDraft(settings.enetChannelSpecsJson);
+    }
+  }, [settings.enetChannelSpecsJson]);
+
+  function commitEnetChannelSpecsDraft(): void {
+    const result = validateEnetChannelSpecsJson(enetChannelSpecsDraft);
+    if (result.ok) {
+      lastCommittedEnetChannelSpecs.current = enetChannelSpecsDraft;
+      settingsStore.update({ enetChannelSpecsJson: enetChannelSpecsDraft });
+      setEnetChannelSpecsError(null);
+      setEnetChannelSpecsWarnings(result.warnings);
+    } else {
+      setEnetChannelSpecsError(result.error);
+      setEnetChannelSpecsWarnings([]);
     }
   }
 
@@ -381,73 +480,198 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
           </View>
           {settings.telemetryEnabled ? (
             <>
-              <View style={styles.fieldRow}>
-                <Text style={styles.fieldLabel} maxFontSizeMultiplier={1.3}>
-                  Adapter host
-                </Text>
-                <TextInput
-                  style={styles.fieldInput}
-                  value={settings.adapterHost}
-                  onChangeText={(text) => settingsStore.update({ adapterHost: text })}
-                  placeholder="192.168.0.10"
-                  placeholderTextColor={colors.textMuted}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  keyboardType="numbers-and-punctuation"
-                  accessibilityLabel="Telemetry adapter host"
-                />
-              </View>
-              <View style={styles.fieldRow}>
-                <Text style={styles.fieldLabel} maxFontSizeMultiplier={1.3}>
-                  Adapter port
-                </Text>
-                <TextInput
-                  style={styles.fieldInput}
-                  value={portDraft}
-                  onChangeText={setPortDraft}
-                  onBlur={commitPortDraft}
-                  onSubmitEditing={commitPortDraft}
-                  placeholder="35000"
-                  placeholderTextColor={colors.textMuted}
-                  keyboardType="number-pad"
-                  accessibilityLabel="Telemetry adapter port"
-                />
-              </View>
-              <View style={styles.fieldRow}>
-                <Text style={styles.fieldLabel} maxFontSizeMultiplier={1.3}>
-                  Trans oil PID (hex)
-                </Text>
-                <TextInput
-                  style={styles.fieldInput}
-                  value={transOilPidDraft}
-                  onChangeText={(text) => {
-                    setTransOilPidDraft(text);
-                    if (transOilPidError !== null) setTransOilPidError(null);
-                  }}
-                  onBlur={commitTransOilPidDraft}
-                  onSubmitEditing={commitTransOilPidDraft}
-                  placeholder="disabled"
-                  placeholderTextColor={colors.textMuted}
-                  autoCapitalize="characters"
-                  autoCorrect={false}
-                  keyboardType="numbers-and-punctuation"
-                  accessibilityLabel="Transmission oil temperature PID, hex"
-                />
-              </View>
-              {transOilPidError === null ? null : (
-                <Text
-                  style={styles.errorBanner}
-                  maxFontSizeMultiplier={1.3}
-                  accessibilityLiveRegion="polite"
-                >
-                  {transOilPidError}
-                </Text>
+              <SegmentedControl<AdapterType>
+                labelPrefix="Adapter type"
+                value={settings.adapterType}
+                onChange={(adapterType) => settingsStore.update({ adapterType })}
+                options={[
+                  { label: 'ELM327', value: 'elm327' },
+                  { label: 'ENET (BMW)', value: 'enet' },
+                ]}
+              />
+
+              {settings.adapterType === 'elm327' ? (
+                <>
+                  <View style={styles.fieldRow}>
+                    <Text style={styles.fieldLabel} maxFontSizeMultiplier={1.3}>
+                      Adapter host
+                    </Text>
+                    <TextInput
+                      style={styles.fieldInput}
+                      value={settings.adapterHost}
+                      onChangeText={(text) => settingsStore.update({ adapterHost: text })}
+                      placeholder="192.168.0.10"
+                      placeholderTextColor={colors.textMuted}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      keyboardType="numbers-and-punctuation"
+                      accessibilityLabel="Telemetry adapter host"
+                    />
+                  </View>
+                  <View style={styles.fieldRow}>
+                    <Text style={styles.fieldLabel} maxFontSizeMultiplier={1.3}>
+                      Adapter port
+                    </Text>
+                    <TextInput
+                      style={styles.fieldInput}
+                      value={portDraft}
+                      onChangeText={setPortDraft}
+                      onBlur={commitPortDraft}
+                      onSubmitEditing={commitPortDraft}
+                      placeholder="35000"
+                      placeholderTextColor={colors.textMuted}
+                      keyboardType="number-pad"
+                      accessibilityLabel="Telemetry adapter port"
+                    />
+                  </View>
+                  <View style={styles.fieldRow}>
+                    <Text style={styles.fieldLabel} maxFontSizeMultiplier={1.3}>
+                      Trans oil PID (hex)
+                    </Text>
+                    <TextInput
+                      style={styles.fieldInput}
+                      value={transOilPidDraft}
+                      onChangeText={(text) => {
+                        setTransOilPidDraft(text);
+                        if (transOilPidError !== null) setTransOilPidError(null);
+                      }}
+                      onBlur={commitTransOilPidDraft}
+                      onSubmitEditing={commitTransOilPidDraft}
+                      placeholder="disabled"
+                      placeholderTextColor={colors.textMuted}
+                      autoCapitalize="characters"
+                      autoCorrect={false}
+                      keyboardType="numbers-and-punctuation"
+                      accessibilityLabel="Transmission oil temperature PID, hex"
+                    />
+                  </View>
+                  {transOilPidError === null ? null : (
+                    <Text
+                      style={styles.errorBanner}
+                      maxFontSizeMultiplier={1.3}
+                      accessibilityLiveRegion="polite"
+                    >
+                      {transOilPidError}
+                    </Text>
+                  )}
+                  <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                    Advanced, vehicle-specific: read-only requests only (services 21/22). No standard PID exists for
+                    transmission oil temperature -- enter your vehicle's raw hex request to enable the reading, or
+                    leave blank to disable it. Advisory only -- consult your vehicle's documentation.
+                  </Text>
+                </>
+              ) : (
+                <>
+                  <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                    BMW ENET (HSFZ over WiFi/TCP), advisory and experimental like every telemetry channel above.
+                    Close the MHD app first -- the adapter allows one ECU client at a time.
+                  </Text>
+                  <View style={styles.fieldRow}>
+                    <Text style={styles.fieldLabel} maxFontSizeMultiplier={1.3}>
+                      Adapter host
+                    </Text>
+                    <TextInput
+                      style={styles.fieldInput}
+                      value={settings.enetHost}
+                      onChangeText={(text) => settingsStore.update({ enetHost: text })}
+                      placeholder="read from adapter's web UI"
+                      placeholderTextColor={colors.textMuted}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      keyboardType="numbers-and-punctuation"
+                      accessibilityLabel="ENET adapter host"
+                    />
+                  </View>
+                  <View style={styles.fieldRow}>
+                    <Text style={styles.fieldLabel} maxFontSizeMultiplier={1.3}>
+                      Adapter port
+                    </Text>
+                    <TextInput
+                      style={styles.fieldInput}
+                      value={enetPortDraft}
+                      onChangeText={setEnetPortDraft}
+                      onBlur={commitEnetPortDraft}
+                      onSubmitEditing={commitEnetPortDraft}
+                      placeholder="6801"
+                      placeholderTextColor={colors.textMuted}
+                      keyboardType="number-pad"
+                      accessibilityLabel="ENET adapter port"
+                    />
+                  </View>
+                  <View style={styles.fieldRow}>
+                    <Text style={styles.fieldLabel} maxFontSizeMultiplier={1.3}>
+                      Tester address (hex)
+                    </Text>
+                    <TextInput
+                      style={styles.fieldInput}
+                      value={enetTesterAddressDraft}
+                      onChangeText={setEnetTesterAddressDraft}
+                      onBlur={commitEnetTesterAddressDraft}
+                      onSubmitEditing={commitEnetTesterAddressDraft}
+                      placeholder="F4"
+                      placeholderTextColor={colors.textMuted}
+                      autoCapitalize="characters"
+                      autoCorrect={false}
+                      keyboardType="numbers-and-punctuation"
+                      accessibilityLabel="ENET tester address, hex byte"
+                    />
+                  </View>
+                  <View style={styles.fieldRow}>
+                    <Text style={styles.fieldLabel} maxFontSizeMultiplier={1.3}>
+                      Target address (hex)
+                    </Text>
+                    <TextInput
+                      style={styles.fieldInput}
+                      value={enetTargetAddressDraft}
+                      onChangeText={setEnetTargetAddressDraft}
+                      onBlur={commitEnetTargetAddressDraft}
+                      onSubmitEditing={commitEnetTargetAddressDraft}
+                      placeholder="12"
+                      placeholderTextColor={colors.textMuted}
+                      autoCapitalize="characters"
+                      autoCorrect={false}
+                      keyboardType="numbers-and-punctuation"
+                      accessibilityLabel="ENET target address, hex byte"
+                    />
+                  </View>
+                  <View style={styles.fieldColumn}>
+                    <Text style={styles.fieldLabel} maxFontSizeMultiplier={1.3}>
+                      Channel specs (JSON, advanced)
+                    </Text>
+                    <TextInput
+                      style={styles.multilineInput}
+                      value={enetChannelSpecsDraft}
+                      onChangeText={(text) => {
+                        setEnetChannelSpecsDraft(text);
+                        if (enetChannelSpecsError !== null) setEnetChannelSpecsError(null);
+                      }}
+                      onBlur={commitEnetChannelSpecsDraft}
+                      placeholder="blank = built-in defaults"
+                      placeholderTextColor={colors.textMuted}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      multiline
+                      numberOfLines={4}
+                      accessibilityLabel="ENET channel specs, JSON"
+                    />
+                  </View>
+                  {enetChannelSpecsError === null ? null : (
+                    <Text style={styles.errorBanner} maxFontSizeMultiplier={1.3} accessibilityLiveRegion="polite">
+                      {enetChannelSpecsError}
+                    </Text>
+                  )}
+                  {enetChannelSpecsWarnings.length === 0 ? null : (
+                    <Text style={styles.warningBanner} maxFontSizeMultiplier={1.3} accessibilityLiveRegion="polite">
+                      {enetChannelSpecsWarnings.join('; ')}
+                    </Text>
+                  )}
+                  <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                    Advanced, vehicle-specific: a JSON array of channel requests (obd01 PID or mode-22 DID, with
+                    provenance for any DID entry). Leave blank to use the built-in defaults.
+                  </Text>
+                </>
               )}
-              <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
-                Advanced, vehicle-specific: read-only requests only (services 21/22). No standard PID exists for
-                transmission oil temperature -- enter your vehicle's raw hex request to enable the reading, or
-                leave blank to disable it. Advisory only -- consult your vehicle's documentation.
-              </Text>
+
               {
                 // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
                 __DEV__ ? (
@@ -457,7 +681,8 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
                       Simulate adapter (dev)
                     </Text>
                     <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
-                      Uses a scripted in-app vehicle model instead of a real adapter -- development only.
+                      Uses a scripted in-app vehicle model instead of a real adapter -- development only. Applies to
+                      whichever adapter type is selected above.
                     </Text>
                   </View>
                   <Switch
@@ -662,6 +887,20 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
             </Text>
           </Pressable>
         ) : null}
+        {
+          // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
+          __DEV__ ? (
+          <Pressable
+            style={styles.devButton}
+            onPress={() => navigation.navigate('DidProbe')}
+            accessibilityRole="button"
+            accessibilityLabel="Open ENET DID probe"
+          >
+            <Text style={styles.devButtonText} maxFontSizeMultiplier={1.3}>
+              Dev: DID Probe (ENET)
+            </Text>
+          </Pressable>
+        ) : null}
       </ScrollView>
     </SafeAreaView>
   );
@@ -717,6 +956,21 @@ const styles = StyleSheet.create({
     minWidth: 140,
     textAlign: 'right',
   },
+  fieldColumn: { gap: spacing.xs },
+  multilineInput: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    fontFamily: fontFamily.monoSemibold,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radii.sm,
+    backgroundColor: colors.surface,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    minHeight: 88,
+    textAlignVertical: 'top',
+  },
+  warningBanner: { ...typography.caption, color: colors.warning },
   telemetryLinkRow: {
     borderRadius: radii.sm,
     borderWidth: 1,

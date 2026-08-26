@@ -2,6 +2,16 @@ import { TMR_CIRCUIT_PROFILE } from './tmrProfile';
 
 export type SpeedUnits = 'kmh' | 'mph';
 
+/**
+ * ENET telemetry addendum (contracts.md, 2026-08-27, binding, Phase 4e). The
+ * second OBD transport, next to ELM327: BMW ENET (HSFZ framing over TCP
+ * carrying UDS PDUs). Defaults to `'elm327'` -- every existing install (and
+ * every field below this one) hydrates unchanged, and the ELM327 path stays
+ * byte-identical in behavior regardless of this addendum (`telemetryProvider.ts`
+ * only ever builds ENET machinery when this is `'enet'`).
+ */
+export type AdapterType = 'elm327' | 'enet';
+
 export interface CoverageBinsSetting {
   /** Fraction thresholds, ascending, in (0,1), used to bucket calibration coverage for display. */
   thresholds: readonly number[];
@@ -78,6 +88,45 @@ export interface AppSettings {
    * never a crash, never a fetch.
    */
   selectedCircuitId: string;
+  /**
+   * ENET telemetry addendum (binding, Phase 4e): which OBD transport
+   * `telemetryProvider.ts` builds. Defaults to `'elm327'` -- existing behavior
+   * unchanged for every install with no persisted value.
+   */
+  adapterType: AdapterType;
+  /**
+   * ENET adapter IP (its own local WiFi AP, same "adapter is a local WiFi
+   * AP" model as the ELM327 `adapterHost` above, but a SEPARATE field -- the
+   * two adapter types are never conflated, so switching `adapterType` back
+   * and forth never clobbers either adapter's own remembered address).
+   * Defaults to `''`: unlike the ELM327 adapter (a fixed default AP address),
+   * the user reads the ENET adapter's IP from its own web UI -- `SettingsScreen`'s
+   * copy explains this, there is no sane universal default to pre-fill.
+   */
+  enetHost: string;
+  /** ENET adapter TCP port (contracts.md addendum: HSFZ over TCP 6801, verified). */
+  enetPort: number;
+  /** UDS tester (source) address ENET frames are sent from. EMPIRICAL (addendum: default 0xF4, alt 0xF1) -- never hardcoded without this override. */
+  enetTesterAddress: number;
+  /** UDS target (destination) address ENET frames are sent to. EMPIRICAL (addendum: default 0x12 = DME) -- never hardcoded without this override. */
+  enetTargetAddress: number;
+  /**
+   * Advanced, vehicle-specific: a JSON array of `EnetChannelSpec` (`@circuit/core`),
+   * each entry a `mode: 'obd01' | 'did'` request plus (for `did`) a decode
+   * formula and REQUIRED provenance -- see the ENET addendum's own
+   * `EnetChannelSpec` doc comment. Empty string (the default) means "use the
+   * built-in defaults" (`DEFAULT_ENET_CHANNEL_SPECS`: obd01 rpm/speedKph/
+   * throttlePct/coolantC/engineOilC, all EMPIRICAL on the ENET path, no
+   * default `did` specs). Validated through `@circuit/core`'s
+   * `validateEnetChannelSpecs` (`enetSettingsValidation.ts`'s
+   * `resolveEnetChannelSpecs`/`validateEnetChannelSpecsJson`) both by
+   * `SettingsScreen` (inline warnings on blur) and by `telemetryProvider.ts`
+   * (re-validated on every `start()`, same "never trust a persisted value
+   * blindly" rule as `transOilPidHex`/`buildCustomPids` above) -- malformed
+   * JSON falls back to the built-in defaults with a `console.warn`, never a
+   * crash.
+   */
+  enetChannelSpecsJson: string;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -92,6 +141,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
   adapterPort: 35_000,
   transOilPidHex: '',
   selectedCircuitId: TMR_CIRCUIT_PROFILE.circuitId,
+  adapterType: 'elm327',
+  enetHost: '',
+  enetPort: 6_801,
+  enetTesterAddress: 0xf4,
+  enetTargetAddress: 0x12,
+  enetChannelSpecsJson: '',
 };
 
 /**

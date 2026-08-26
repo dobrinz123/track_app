@@ -582,3 +582,24 @@ export interface EnetChannelSpec {
 // Simulator: SimulatedEnetTransport = scripted ECU over HSFZ (acks, responses, alive checks, NRC,
 // disconnect and TCP fragmentation injection) — the hardware-free proof for tests and preview E2E.
 ```
+
+### ENET addendum — framing & correlation amendment (2026-08-27, binding, after Codex P4e-REV1)
+- HSFZ payload layout is CONTROL-SPECIFIC (per the cited scapy reference): 0x0001/0x0002 = [src][tgt][UDS PDU];
+  0x0012 alive check = either the short addressed form [src][tgt] or a long identification-string form
+  (payload is opaque bytes; the reply to a short alive check is the short form with the tester address —
+  EMPIRICAL either way, recorded raw in diagnostics); 0x0040–0x0045 error frames carry [expected][received]
+  bytes (no src/tgt); 0x0011 vehicle-ident and 0x0013 status carry opaque payloads. The parser exposes a
+  discriminated union by control word and never fabricates src/tgt for non-diagnostic frames.
+- Length bound: the wire field is u32; the app accepts at most 4096 payload bytes (any diagnostic PDU we
+  send/expect is far below); a larger or < 2 length is a FATAL framing error → the transport is closed and
+  the session reconnects (a corrupted length has no in-stream resync point; TCP chunk boundaries are meaningless).
+- Response correlation: a diagnostic response is matched to the in-flight request by (target/source address
+  swapped, response SID = request SID + 0x40 or 0x7F with the request SID echoed, identifier echo — PID or DID).
+  Unmatched responses (late, other SID/identifier, TesterPresent negatives) are counted in diagnostics and do
+  NOT clear the in-flight slot or mark channels unsupported. Negative responses count against a channel only
+  when the echoed request SID and identifier match it.
+- Spec validation (runtime JSON): obd01 requestHex must be a PID whose decoder exists for THAT channel
+  (channel↔PID consistency table); did decode requires integer byteOffset ≥ 0, byteLength ∈ {1,2}, finite
+  scale/offset; decoded values must be finite or the sample is dropped and counted as a decode error.
+- TesterPresent interval is clamped to ≥ 500 ms and never issued back-to-back ahead of channel polling
+  more than once per interval; ACK latency is attributed only to a frame whose echoed head matches.

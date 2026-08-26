@@ -85,6 +85,46 @@ describe('validateEnetChannelSpecs', () => {
     expect(result.valid).toEqual([spec]);
     expect(result.warnings).toEqual([]);
   });
+
+  it('rejects an obd01 spec whose requestHex is the WRONG PID for its channel (review: speedKph with 0C)', () => {
+    const result = validateEnetChannelSpecs([
+      { channel: 'speedKph', mode: 'obd01', requestHex: '0C', provenance: 'x' },
+    ]);
+    expect(result.valid).toEqual([]);
+    expect(result.warnings[0]).toContain('speedKph');
+    expect(result.warnings[0]).toMatch(/PID|mode-01/);
+  });
+
+  it('rejects an obd01 spec for a channel with no mode-01 decoder at all (review: transOilC)', () => {
+    const result = validateEnetChannelSpecs([
+      { channel: 'transOilC', mode: 'obd01', requestHex: '21', provenance: 'x' },
+    ]);
+    expect(result.valid).toEqual([]);
+    expect(result.warnings[0]).toContain('transOilC');
+    expect(result.warnings[0]).toContain('no mode-01 decoder');
+  });
+
+  it('accepts every DEFAULT_ENET_CHANNEL_SPECS entry against the channel<->PID consistency check', () => {
+    // Guards against the consistency check itself being wrong in a way that
+    // would reject the built-in defaults.
+    expect(validateEnetChannelSpecs(DEFAULT_ENET_CHANNEL_SPECS).valid).toHaveLength(5);
+  });
+
+  it('rejects a did spec with a non-integer or negative byteOffset', () => {
+    expect(validateEnetChannelSpecs([did({ decode: { byteOffset: 0.5, byteLength: 1, scale: 1, offset: 0 } })]).valid).toEqual([]);
+    expect(validateEnetChannelSpecs([did({ decode: { byteOffset: -1, byteLength: 1, scale: 1, offset: 0 } })]).valid).toEqual([]);
+  });
+
+  it('rejects a did spec with byteLength outside {1,2} at runtime (bypassing the TS type)', () => {
+    const spec = did({ decode: { byteOffset: 0, byteLength: 3 as 1 | 2, scale: 1, offset: 0 } });
+    expect(validateEnetChannelSpecs([spec]).valid).toEqual([]);
+  });
+
+  it('rejects a did spec with a non-finite scale or offset', () => {
+    expect(validateEnetChannelSpecs([did({ decode: { byteOffset: 0, byteLength: 1, scale: Number.NaN, offset: 0 } })]).valid).toEqual([]);
+    expect(validateEnetChannelSpecs([did({ decode: { byteOffset: 0, byteLength: 1, scale: Number.POSITIVE_INFINITY, offset: 0 } })]).valid).toEqual([]);
+    expect(validateEnetChannelSpecs([did({ decode: { byteOffset: 0, byteLength: 1, scale: 1, offset: Number.NaN } })]).valid).toEqual([]);
+  });
 });
 
 describe('decodeEnetChannelValue', () => {
@@ -117,5 +157,15 @@ describe('decodeEnetChannelValue', () => {
   it('throws when byteOffset/byteLength runs past the payload', () => {
     const spec = did({ decode: { byteOffset: 5, byteLength: 1, scale: 1, offset: 0 } });
     expect(() => decodeEnetChannelValue(spec, Uint8Array.from([0x00]))).toThrow();
+  });
+
+  it('produces a non-finite value when scale/offset overflow -- caller (enetSession) is responsible for dropping it, not this function', () => {
+    // decodeEnetChannelValue itself is a pure arithmetic formula; M2's "must
+    // be finite else dropped + decodeErrors counter" guard lives in
+    // enetSession.ts's pollChannel (see enetSession.test.ts). This test just
+    // pins the raw arithmetic so that guard has something real to catch.
+    const spec = did({ decode: { byteOffset: 0, byteLength: 2, scale: Number.MAX_VALUE, offset: 0 } });
+    const value = decodeEnetChannelValue(spec, Uint8Array.from([0xff, 0xff]));
+    expect(Number.isFinite(value)).toBe(false);
   });
 });

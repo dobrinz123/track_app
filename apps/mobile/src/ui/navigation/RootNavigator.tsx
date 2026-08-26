@@ -63,6 +63,26 @@ export function RootNavigator(): React.JSX.Element {
       <Stack.Screen name="Settings" component={SettingsScreen} options={{ title: 'Settings' }} />
       <Stack.Screen name="Telemetry" component={TelemetryScreen} options={{ title: 'Telemetry' }} />
       {
+        // ENET telemetry addendum (Phase 4e): the DID-probe screen is a
+        // dev-only diagnostic tool (empirical B58/DSC identifier discovery),
+        // same __DEV__-gated inline `require()` treatment as `DevReplay`
+        // immediately below -- for the SAME reason (F6 fix comment there):
+        // Metro only drops a module from a release bundle when the import
+        // itself is inside the folded `__DEV__` branch, not just the
+        // `<Stack.Screen>` registration.
+        // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
+        __DEV__ ? (
+          <Stack.Screen
+            name="DidProbe"
+            component={
+              // eslint-disable-next-line @typescript-eslint/no-require-imports -- see the comment above: this MUST be a runtime require(), not a top-level import, for Metro to drop the module from a release bundle.
+              (require('../screens/DidProbeScreen') as typeof import('../screens/DidProbeScreen')).DidProbeScreen
+            }
+            options={{ title: 'DID Probe' }}
+          />
+        ) : null
+      }
+      {
         // B4 fix: DevReplay must not ship in a release build -- SettingsScreen's
         // entry point to it is already __DEV__-gated; this gates the route
         // registration itself too.

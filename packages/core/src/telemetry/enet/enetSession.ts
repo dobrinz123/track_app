@@ -3,12 +3,13 @@ import {
   binaryStringToBytes,
   bytesToBinaryString,
   bytesToHex,
-  decodeHsfzError,
+  encodeAliveCheckShort,
   encodeFrame,
+  encodeHsfzFrame,
   HSFZ_CONTROL,
   HsfzFrameParser,
   HsfzParseError,
-  isHsfzErrorControl,
+  type HsfzDiagnosticFrame,
   type HsfzFrame,
 } from './hsfzCodec';
 import {
@@ -83,6 +84,20 @@ export interface EnetDiagnostics {
   aliveChecksAnswered: number;
   /** Hex dump of the most recently received HSFZ frame (dev DID-probe screen). */
   lastRawFrameHex?: string;
+  /**
+   * Diagnostic responses that did NOT correlate to the in-flight request
+   * (wrong addresses, wrong echoed SID, or wrong echoed identifier/PID/DID) --
+   * counted, never resolving/clearing the pending slot and never marking a
+   * channel unsupported (framing & correlation amendment).
+   */
+  unmatchedResponses: number;
+  /**
+   * Samples dropped because the decoded value was not finite (NaN/Infinity
+   * from a bad scale/offset/spec) -- counted separately from `errorCount` and
+   * never resets `consecutiveErrors` either way (framing & correlation
+   * amendment: "no error-counter reset").
+   */
+  decodeErrors: number;
 }
 
 /** Same shape as `TelemetrySession<EnetState>`, with `getDiagnostics()` narrowed (covariantly) to the richer `EnetDiagnostics` this engine actually returns. */
@@ -112,9 +127,20 @@ type RequestOutcome =
 interface PendingRequest {
   timer: ReturnType<typeof setTimeout>;
   pendingExtensions: number;
+  /** The request's own SID (0x01, 0x22, or 0x3E) -- a response only correlates if its echoed SID matches this. */
+  requestSid: number;
+  /** obd01: the PID; did: the DID -- a POSITIVE response only correlates if its echoed identifier matches this. */
+  identifier: number;
+  mode: 'obd01' | 'did';
+  /** Expected response addressing: source/target SWAPPED relative to the request we sent. */
+  expectedResponseSource: number;
+  expectedResponseTarget: number;
   resolve(outcome: RequestOutcome): void;
   reject(error: Error): void;
 }
+
+/** Minimum enforced TesterPresent cadence (binding amendment: "clamped to >= 500 ms"), regardless of configured value. */
+const MIN_TESTER_PRESENT_INTERVAL_MS = 500;
 
 class EnetSessionEngine implements EnetSession {
   private state: EnetState = 'idle';
@@ -141,7 +167,6 @@ class EnetSessionEngine implements EnetSession {
   private consecutiveErrors = 0;
   private errorCount = 0;
   private lastError: string | undefined;
-  private lastSentAtMonoMs: number | null = null;
   private framesTx = 0;
   private framesRx = 0;
   private aliveChecksAnswered = 0;
@@ -150,6 +175,15 @@ class EnetSessionEngine implements EnetSession {
   /** Bumped on every `stop()`: any outcome resolved for a request started in an earlier generation is discarded silently (no late samples). */
   private generation = 0;
   private nextTesterPresentAtMonoMs = 0;
+  /** Clamped >= `MIN_TESTER_PRESENT_INTERVAL_MS`, per the binding amendment -- computed once, config's raw value is never used directly. */
+  private readonly testerPresentIntervalMs: number;
+  /** L1 starvation guarantee: at least one channel poll must happen between two TesterPresent sends (irrelevant, trivially satisfied, when there are no channels to poll). */
+  private channelPolledSinceLastTesterPresent = true;
+  private unmatchedResponses = 0;
+  private decodeErrorsCount = 0;
+  /** L2: the head bytes (SID + first data byte) of the last REAL diagnostic request sent -- TesterPresent/alive-check replies never set this, so their acks never match it. */
+  private lastDiagnosticRequestHead: Uint8Array | null = null;
+  private lastDiagnosticRequestSentAtMonoMs: number | null = null;
 
   constructor(
     private readonly transport: ObdTransport,
@@ -157,6 +191,7 @@ class EnetSessionEngine implements EnetSession {
     private readonly monotonicNow: () => number,
   ) {
     validateEnetConfig(config);
+    this.testerPresentIntervalMs = Math.max(MIN_TESTER_PRESENT_INTERVAL_MS, config.testerPresentIntervalMs);
     const { valid: validSpecs, warnings } = validateEnetChannelSpecs(config.channelSpecs);
     for (const warning of warnings) console.warn(`[enetSession] ${warning}`);
     const specByChannel = new Map(validSpecs.map((spec) => [spec.channel, spec] as const));
@@ -176,6 +211,7 @@ class EnetSessionEngine implements EnetSession {
     }
     this.pollEntries = [...entries.values()];
     this.totalHz = sumWeights(this.pollEntries);
+    this.channelPolledSinceLastTesterPresent = this.pollEntries.length === 0;
   }
 
   start(): void {
@@ -235,6 +271,8 @@ class EnetSessionEngine implements EnetSession {
         : { ackLatencyMsP50: percentile(sortedAck, 0.5), ackLatencyMsP95: percentile(sortedAck, 0.95) }),
       aliveChecksAnswered: this.aliveChecksAnswered,
       ...(this.lastRawFrameHex === undefined ? {} : { lastRawFrameHex: this.lastRawFrameHex }),
+      unmatchedResponses: this.unmatchedResponses,
+      decodeErrors: this.decodeErrorsCount,
     };
   }
 
@@ -249,7 +287,7 @@ class EnetSessionEngine implements EnetSession {
       this.transition('handshake');
       this.transition('polling');
       this.pollingStartedAtMonoMs = this.monotonicNow();
-      this.nextTesterPresentAtMonoMs = this.monotonicNow() + this.config.testerPresentIntervalMs;
+      this.nextTesterPresentAtMonoMs = this.monotonicNow() + this.testerPresentIntervalMs;
       await this.pollLoop();
     } catch (error) {
       if (!this.stopRequested) {
@@ -277,9 +315,15 @@ class EnetSessionEngine implements EnetSession {
       this.throwIfTransportClosed();
 
       const now = this.monotonicNow();
-      if (now >= this.nextTesterPresentAtMonoMs) {
+      // L1 starvation guarantee: a TesterPresent send is skipped for this
+      // iteration (falling through to a channel poll instead, if one is due)
+      // until at least one channel poll has happened since the last one --
+      // otherwise a very small configured interval could make TesterPresent
+      // fire on every loop iteration and starve channel polling entirely.
+      if (now >= this.nextTesterPresentAtMonoMs && this.channelPolledSinceLastTesterPresent) {
         await this.sendTesterPresent();
-        this.nextTesterPresentAtMonoMs = now + this.config.testerPresentIntervalMs;
+        this.nextTesterPresentAtMonoMs = now + this.testerPresentIntervalMs;
+        this.channelPolledSinceLastTesterPresent = this.pollEntries.length === 0;
         continue;
       }
 
@@ -291,6 +335,7 @@ class EnetSessionEngine implements EnetSession {
       const entry = this.selectNextChannel();
       nextChannelPollAtMonoMs = now + 1_000 / this.totalHz;
       await this.pollChannel(entry);
+      this.channelPolledSinceLastTesterPresent = true;
     }
   }
 
@@ -319,7 +364,13 @@ class EnetSessionEngine implements EnetSession {
 
     let outcome: RequestOutcome;
     try {
-      outcome = await this.executeDiagnosticRequest(pdu, targetAddress, this.config.commandTimeoutMs);
+      outcome = await this.executeDiagnosticRequest(
+        pdu,
+        targetAddress,
+        this.config.commandTimeoutMs,
+        entry.spec.mode,
+        requestValue,
+      );
     } catch (error) {
       if (this.stopRequested || requestGeneration !== this.generation) return;
       if (this.transportClosed) throw error;
@@ -357,6 +408,17 @@ class EnetSessionEngine implements EnetSession {
       value = decodeEnetChannelValue(entry.spec, dataBytes);
     } catch (error) {
       this.recordChannelError(entry.channel, errorMessage(error));
+      return;
+    }
+
+    if (!Number.isFinite(value)) {
+      // M2 (binding amendment): a non-finite decoded value (bad scale/offset,
+      // arithmetic overflow) is dropped and counted on its OWN counter --
+      // never emitted as a sample, and NEVER touches consecutiveErrors either
+      // way ("no error-counter reset": this is not a success, so it must not
+      // reset the streak, but it is also not the kind of transient failure
+      // that should push toward 'failed').
+      this.decodeErrorsCount += 1;
       return;
     }
 
@@ -402,7 +464,13 @@ class EnetSessionEngine implements EnetSession {
     this.lastError = detail;
   }
 
-  private executeDiagnosticRequest(pdu: Uint8Array, targetAddress: number, timeoutMs: number): Promise<RequestOutcome> {
+  private executeDiagnosticRequest(
+    pdu: Uint8Array,
+    targetAddress: number,
+    timeoutMs: number,
+    mode: 'obd01' | 'did',
+    identifier: number,
+  ): Promise<RequestOutcome> {
     if (this.pending !== null) return Promise.reject(new Error('ENET request already in flight'));
     if (this.transportClosed) {
       return Promise.reject(this.transportError ?? new Error('ENET transport closed'));
@@ -415,7 +483,20 @@ class EnetSessionEngine implements EnetSession {
         this.pending = null;
         reject(new Error(`ENET request timed out after ${timeoutMs}ms`));
       }, timeoutMs);
-      this.pending = { timer, pendingExtensions: 0, resolve, reject };
+      this.pending = {
+        timer,
+        pendingExtensions: 0,
+        requestSid: pdu[0] ?? 0,
+        identifier,
+        mode,
+        // H2 (binding amendment): a response's addresses are the request's
+        // SWAPPED -- our source becomes its expected target, our target
+        // becomes its expected source.
+        expectedResponseSource: targetAddress,
+        expectedResponseTarget: this.config.testerAddress,
+        resolve,
+        reject,
+      };
 
       try {
         const frame = encodeFrame({
@@ -424,6 +505,10 @@ class EnetSessionEngine implements EnetSession {
           target: targetAddress,
           payload: pdu,
         });
+        // L2: only a REAL diagnostic request's head is eligible for ack-latency
+        // attribution -- TesterPresent/alive-check replies never set this.
+        this.lastDiagnosticRequestHead = pdu.slice(0, 2);
+        this.lastDiagnosticRequestSentAtMonoMs = this.monotonicNow();
         this.sendFrame(frame);
       } catch (error) {
         clearTimeout(timer);
@@ -433,7 +518,7 @@ class EnetSessionEngine implements EnetSession {
     });
   }
 
-  /** TesterPresent (0x3E 0x80) suppresses the positive response, so this never occupies the single in-flight slot -- it is fire-and-forget by design, matching the addendum's "no response expected" wire behavior. */
+  /** TesterPresent (0x3E 0x80) suppresses the positive response, so this never occupies the single in-flight slot -- it is fire-and-forget by design, matching the addendum's "no response expected" wire behavior. Deliberately does NOT set `lastDiagnosticRequestHead` (L2: its ack must never be attributed as diagnostic-request latency). */
   private async sendTesterPresent(): Promise<void> {
     if (this.transportClosed) return;
     try {
@@ -451,17 +536,17 @@ class EnetSessionEngine implements EnetSession {
     }
   }
 
-  private handleAliveCheck(frame: HsfzFrame): void {
-    // EMPIRICAL (addendum): answered with an alive-check frame carrying the
-    // tester address; recorded in diagnostics either way via
-    // `aliveChecksAnswered`.
+  /**
+   * Only the SHORT addressed alive-check form (H1: `form === 'short'`) has a
+   * defined reply -- "the short form with the tester address" (addendum).
+   * The long identification-string form has no documented reply behavior
+   * (EMPIRICAL either way); it is recorded via `lastRawFrameHex` by the
+   * caller and otherwise ignored, never fabricating a reply.
+   */
+  private handleAliveCheck(frame: HsfzFrame & { kind: 'aliveCheck' }): void {
+    if (frame.form !== 'short') return;
     try {
-      const reply = encodeFrame({
-        control: HSFZ_CONTROL.ALIVE_CHECK,
-        source: this.config.testerAddress,
-        target: frame.source,
-        payload: Uint8Array.from([this.config.testerAddress]),
-      });
+      const reply = encodeAliveCheckShort({ source: this.config.testerAddress, target: frame.source });
       this.sendFrame(reply);
       this.aliveChecksAnswered += 1;
     } catch {
@@ -469,9 +554,26 @@ class EnetSessionEngine implements EnetSession {
     }
   }
 
-  private handleDiagnosticFrame(frame: HsfzFrame): void {
+  /**
+   * H2 (binding amendment): a diagnostic response is only allowed to resolve
+   * (or otherwise touch) the in-flight request once it correlates: addresses
+   * swapped relative to what we sent, AND the echoed SID (+0x40 positive, or
+   * 0x7F-echoed-SID negative) matches the request's own SID. A POSITIVE
+   * response additionally must echo the request's own identifier (PID/DID).
+   * Anything that fails to correlate is counted (`unmatchedResponses`) and
+   * otherwise ignored -- the pending slot is left untouched, so the real
+   * response (or the request's own timeout) is still free to resolve it
+   * later, and no channel is ever marked unsupported by a response that was
+   * never actually an answer to ITS request.
+   */
+  private handleDiagnosticFrame(frame: HsfzDiagnosticFrame): void {
     const pending = this.pending;
     if (pending === null) return; // unsolicited/late response -- lastRawFrameHex already recorded by the caller.
+
+    if (frame.source !== pending.expectedResponseSource || frame.target !== pending.expectedResponseTarget) {
+      this.unmatchedResponses += 1;
+      return;
+    }
 
     let parsed: ReturnType<typeof parseUdsResponse>;
     try {
@@ -486,6 +588,13 @@ class EnetSessionEngine implements EnetSession {
     const arrivedAtMonoMs = this.monotonicNow();
 
     if (parsed.kind === 'negative') {
+      if (parsed.requestSid !== pending.requestSid) {
+        // e.g. a delayed `7F 3E 31` (TesterPresent's own negative response)
+        // arriving while an OBD/DID request is pending -- same address pair,
+        // wrong echoed SID: not an answer to this request.
+        this.unmatchedResponses += 1;
+        return;
+      }
       if (parsed.nrc === UDS_NRC.RESPONSE_PENDING) {
         if (pending.pendingExtensions >= MAX_RESPONSE_PENDING_EXTENSIONS) {
           this.pending = null;
@@ -515,35 +624,55 @@ class EnetSessionEngine implements EnetSession {
       return;
     }
 
+    if (!positiveResponseMatchesIdentifier(parsed.sid, parsed.data, pending.mode, pending.identifier)) {
+      // A positive response with the right addresses but the WRONG
+      // identifier (different PID/DID) -- e.g. a different-DID answer
+      // arriving while this DID is still outstanding. Never decoded as this
+      // channel's sample, and the request stays pending for its real answer.
+      this.unmatchedResponses += 1;
+      return;
+    }
+
     this.pending = null;
     clearTimeout(pending.timer);
     pending.resolve({ kind: 'positive', sid: parsed.sid, dataBytes: parsed.data, arrivedAtMonoMs });
   }
 
   private sendFrame(frame: Uint8Array): void {
-    this.lastSentAtMonoMs = this.monotonicNow();
     this.framesTx += 1;
     this.transport.send(bytesToBinaryString(frame));
   }
 
   private subscribeToTransport(): void {
     this.unsubscribeData = this.transport.onData((chunk) => {
+      // M1: once a fatal framing error has closed us down, ignore any further
+      // chunks outright -- a corrupted length has no in-stream resync point,
+      // so nothing arriving after it may be treated as a fresh frame header.
+      if (this.transportClosed) return;
+
       const bytes = binaryStringToBytes(chunk);
       let frames: HsfzFrame[];
       try {
         frames = this.parser.push(bytes);
       } catch (error) {
         if (error instanceof HsfzParseError) {
-          frames = [...error.framesBeforeError];
+          // Frames the parser had already completed before the corruption,
+          // within this SAME chunk, are still legitimate and are processed.
+          for (const frame of error.framesBeforeError) {
+            this.framesRx += 1;
+            this.lastRawFrameHex = bytesToHex(encodeHsfzFrame(frame));
+            this.routeFrame(frame);
+          }
           this.recordProtocolAnomaly(error.message);
+          this.failFatally(error);
         } else {
           this.recordProtocolAnomaly(errorMessage(error));
-          frames = [];
         }
+        return;
       }
       for (const frame of frames) {
         this.framesRx += 1;
-        this.lastRawFrameHex = bytesToHex(encodeFrame(frame));
+        this.lastRawFrameHex = bytesToHex(encodeHsfzFrame(frame));
         this.routeFrame(frame);
       }
     });
@@ -561,30 +690,61 @@ class EnetSessionEngine implements EnetSession {
     });
   }
 
+  /**
+   * M1 (binding amendment): a corrupted HSFZ length is FATAL -- there is no
+   * in-stream resync point, and TCP chunk boundaries carry no
+   * resynchronization meaning either, so "clear buffer and continue" is not
+   * a valid recovery. This marks the transport closed (so no further chunk
+   * is processed, see `subscribeToTransport`'s guard above) and rejects any
+   * in-flight request, exactly like an `onClose` from the transport itself --
+   * `run()`'s normal catch/finally then closes the real transport and
+   * transitions to 'failed' through the SAME path a transport-initiated
+   * close already uses.
+   */
+  private failFatally(error: Error): void {
+    if (this.transportClosed) return;
+    this.transportClosed = true;
+    this.transportError = error;
+    const pending = this.pending;
+    if (pending !== null) {
+      this.pending = null;
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.cancelWait();
+  }
+
   private routeFrame(frame: HsfzFrame): void {
-    if (frame.control === HSFZ_CONTROL.ALIVE_CHECK) {
+    if (frame.kind === 'aliveCheck') {
       this.handleAliveCheck(frame);
       return;
     }
-    if (isHsfzErrorControl(frame.control)) {
-      const decoded = decodeHsfzError(frame);
-      this.recordProtocolAnomaly(`HSFZ error frame ${decoded?.name ?? `0x${frame.control.toString(16)}`}`);
+    if (frame.kind === 'error') {
+      this.recordProtocolAnomaly(`HSFZ error frame ${frame.name}`);
       return;
     }
+    if (frame.kind === 'other') {
+      // Unhandled control words (terminal15, vehicle_ident, status_data_inquiry,
+      // out-of-memory): diagnostics-only via lastRawFrameHex, already recorded
+      // by the caller -- none of these are expected during normal polling.
+      return;
+    }
+    // frame.kind === 'diagnostic': either an acknowledge (0x0002) or an
+    // actual diagnostic response (0x0001) -- both share the same
+    // [source][target][payload] layout.
     if (frame.control === HSFZ_CONTROL.ACKNOWLEDGE) {
-      if (this.lastSentAtMonoMs !== null) {
-        this.ackLatenciesMs.push(Math.max(0, this.monotonicNow() - this.lastSentAtMonoMs));
-        if (this.ackLatenciesMs.length > MAX_ACK_LATENCY_SAMPLES) this.ackLatenciesMs.shift();
-      }
+      this.handleAcknowledge(frame);
       return;
     }
-    if (frame.control === HSFZ_CONTROL.DIAGNOSTIC_REQ_RES) {
-      this.handleDiagnosticFrame(frame);
-      return;
-    }
-    // Unhandled control words (terminal15, vehicle_ident, status_data_inquiry,
-    // out-of-memory): diagnostics-only via lastRawFrameHex, already recorded
-    // by the caller -- none of these are expected during normal polling.
+    this.handleDiagnosticFrame(frame);
+  }
+
+  /** L2: an ack's latency is only attributed when its echoed head matches the last REAL diagnostic request's head -- an ack for TesterPresent or an alive-check reply (which never set `lastDiagnosticRequestHead`) is ignored. */
+  private handleAcknowledge(frame: HsfzDiagnosticFrame): void {
+    if (this.lastDiagnosticRequestHead === null || this.lastDiagnosticRequestSentAtMonoMs === null) return;
+    if (!bytesEqual(frame.payload, this.lastDiagnosticRequestHead)) return;
+    this.ackLatenciesMs.push(Math.max(0, this.monotonicNow() - this.lastDiagnosticRequestSentAtMonoMs));
+    if (this.ackLatenciesMs.length > MAX_ACK_LATENCY_SAMPLES) this.ackLatenciesMs.shift();
   }
 
   private unsubscribeFromTransport(): void {
@@ -686,6 +846,27 @@ function validateEnetConfig(config: EnetConfig): void {
       throw new RangeError(`ENET poll rate must be positive for ${item.channel}`);
     }
   }
+}
+
+/** H2: does a positive UDS response's SID+identifier echo the request it's being checked against? obd01: SID 0x41 + echoed PID; did: SID 0x62 + echoed DID (2 bytes, big-endian). */
+function positiveResponseMatchesIdentifier(
+  sid: number,
+  data: Uint8Array,
+  mode: 'obd01' | 'did',
+  identifier: number,
+): boolean {
+  if (mode === 'obd01') {
+    return sid === 0x41 && data[0] === identifier;
+  }
+  return sid === 0x62 && data.length >= 2 && (((data[0] ?? 0) << 8) | (data[1] ?? 0)) === identifier;
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let index = 0; index < a.length; index += 1) {
+    if (a[index] !== b[index]) return false;
+  }
+  return true;
 }
 
 function sumWeights(entries: readonly PollEntry[]): number {

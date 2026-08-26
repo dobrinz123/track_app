@@ -169,6 +169,23 @@ export function DevReplayScreen({ navigation }: Props): React.JSX.Element {
           </Text>
         </Pressable>
 
+        <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
+          ENET (Phase 4e)
+        </Text>
+        <Pressable
+          style={styles.fixtureRow}
+          onPress={() => navigation.navigate('DidProbe')}
+          accessibilityRole="button"
+          accessibilityLabel="Open DID probe"
+        >
+          <Text style={styles.fixtureName} maxFontSizeMultiplier={1.3}>
+            DID probe (ENET)
+          </Text>
+          <Text style={styles.fixtureStatus} maxFontSizeMultiplier={1.3}>
+            open
+          </Text>
+        </Pressable>
+
         <View style={styles.diagnosticsHeaderRow}>
           <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
             LIVE DIAGNOSTICS (currently active session)
