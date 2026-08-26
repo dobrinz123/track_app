@@ -132,6 +132,47 @@ telemetry all follow this); the driving screen stays GT-minimal (3-word voice
 vocabulary: "Brake hard."/"Brake."/"Lift." — beginners can't parse sentences at
 speed).
 
+## 3b. Lessons from circuit N+1 (MotorPark România, 2026-08-26)
+
+**Lesson 5 — scouts fabricate "raw" data.** A web-research scout returned an "Overpass raw
+JSON" that was a synthesized summary (fields Overpass never emits, wrong lengths). The
+LEAD must fetch Overpass itself (`curl -d '<query>' https://overpass-api.de/api/interpreter`),
+archive the real response in `data/osm/`, and treat every scout number as a claim.
+
+**Lesson 6 — topology by node IDs, never by coordinates.** The LEAD's own "41 m unmapped
+pit gap" was wrong: the two pit ways SHARE a node; concatenating by endpoint coordinates
+produced an 82 m out-and-back. Join ways by shared node ids; assert junctions in the generator
+(fail loud); pin splice / S-F / pit polyline in tests that read the RAW archived JSON, not the
+generator's helpers (Codex cross-review caught this — same-family tests had blessed it).
+
+**Lesson 7 — modular circuits.** OSM may map a modular circuit as one closed loop + open
+extension ways + short chords. Verify the published full-layout length against the spliced
+loop (MotorPark: 3326 m loop − 137 m chord + 867 m extension = 4056 m vs 4052 m published),
+and expect pit entries on the extension for the full layout (short-config connectors must be
+excluded).
+
+**Lesson 8 — corner counts differ from published maps by design.** Detection threshold
+0.008 rad/m ignores kinks with radius > 125 m and merges same-direction back-to-back bends
+(MotorPark: 10 detected vs 16 numbered). Verify by overlaying detected corners on the geometry
+next to the published map (render an SVG from the asset) and pin the exact direction sequence.
+
+**Lesson 9 — the app was single-circuit end to end.** "Built for multiple circuits" was true
+only of the list. The production controller, history store, delete-all, coaching corners,
+calibration map, CircuitDetail and PB screens all hardcoded TMR. The multi-circuit selection
+addenda in contracts.md (selectedCircuitId, catalog entries carry corners, ONE lifecycleLock,
+facade commands inside the lock, recovery circuit persisted transactionally) are now the
+binding model — read them before touching `composition.ts`. Four review rounds
+(Codex + cloud ultrareview) were needed to close the concurrency holes; write failing tests
+first for every lifecycle race.
+
+**Lesson 10 — preview E2E mechanics.** The Chrome-extension preview window can be occluded
+(`document.hidden === true`) → Chrome throttles timers → replay stalls while the 10x virtual
+clock runs (looks like a lap-timer bug; it is not). Use the headless `agent-browser` flow
+(`scratchpad/e2e-motorpark.sh` pattern: bounded `open` because Metro never fires load,
+absolute screenshot paths, DOM `.click()` for buttons the a11y locator reports as covered,
+360x640 viewport). Seam laps of a re-looped fixture are INVALID (pause gap / reverse travel)
+by design.
+
 ## 4. Current feature inventory (shipped & verified)
 
 GNSS lap/sector timing on monotonic time; Learn-lap calibration (bias-adaptive);

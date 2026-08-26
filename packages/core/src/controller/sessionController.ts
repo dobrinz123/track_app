@@ -742,15 +742,20 @@ export class SessionController {
   private async ensureProviderRunning(): Promise<void> {
     if (!this.providerRunning) {
       await this.deps.locationProvider.start();
-      // CN-FIX4 (facade boundary amendment, binding): disposed WHILE the
-      // provider was starting. `dispose()` has already run its own
-      // stop/detach against a provider that was not yet running, so stop the
-      // one this call just started and never install a subscription -- a
-      // disposed controller must not receive another sample.
-      if (this.disposed) {
-        await this.deps.locationProvider.stop().catch(() => undefined);
-        return;
-      }
+      // CN-FIX4 (facade boundary amendment) + CN-FIX5 item 2 (closing
+      // amendment), both binding: disposed WHILE the provider was starting.
+      // Return without installing a subscription -- a disposed controller
+      // must never receive another sample -- and deliberately WITHOUT
+      // stopping the provider. `locationProvider` may be SHARED (mobile's
+      // composition hands one `GnssLocationProvider` to every successive
+      // production controller), its start/stop calls are serialized, and by
+      // the time this continuation runs a replacement controller may already
+      // have started it and be depending on the native watcher. Ownership is
+      // not knowable from inside core, so the only safe action is to take
+      // none: whichever controller legitimately owns the provider stops it
+      // when its own session ends (`endSession()`) or when it is disposed
+      // while genuinely running (`dispose()`'s `providerRunning` branch).
+      if (this.disposed) return;
       if (this.providerUnsubscribe !== null) {
         this.providerUnsubscribe();
         this.providerUnsubscribe = null;

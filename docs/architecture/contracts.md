@@ -507,3 +507,16 @@ left ordering holes. Replaced by ONE ordering boundary:
   the selection write and before install; `CANCELLED` means settings/history/controller untouched.
 - Recovery whose circuit is not bundled is discarded (both keys cleared, banner cleared) — no
   fallback to the selection.
+
+### Multi-circuit selection — closing amendment (2026-08-26, binding, after Codex CN-REV5)
+- Queued `endSession()`: the wrapper re-invokes the idempotent telemetry shutdown INSIDE the lock,
+  immediately before the inner end, so telemetry started by a preceding locked section can never
+  outlive the session end (F2 guarantee holds even when the command queued).
+- `SessionController.start()` aborted by disposal never stops the shared provider (ownership is
+  not knowable in core); it only skips subscribing/starting/persisting. A running provider is
+  stopped by the controller that legitimately ends its session.
+- Delete-all while a DevReplay controller is active (any non-idle replay state) is refused with
+  `{ ok: false, reason: 'DEV_REPLAY_ACTIVE' }` — durability over convenience on the dev path.
+- DevReplay cancellation is honored only BEFORE the selection write. Once the selection write has
+  begun, the run completes the selection consistently (settings + history + controller agree),
+  then skips install and navigation and returns `CANCELLED`. There is no rollback.

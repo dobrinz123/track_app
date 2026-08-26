@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { LocationProvider, LocationSample } from '../../src/contracts';
 import { SessionController, type WatchdogScheduler } from '../../src/controller';
+import { cleanRecognitionLap } from '../../src/fixtures';
 import { InMemorySessionRepository } from '../../src/persistence';
 
 import { FakeClock, tmr } from './testSupport';
@@ -28,20 +29,29 @@ class GatedLocationProvider implements LocationProvider {
   stopCount = 0;
   subscribeCount = 0;
   running = false;
-  private releaseStart: (() => void) | null = null;
+  private pendingStarts: Array<() => void> = [];
+  private gateOpen = false;
 
   async start(): Promise<void> {
     this.startCount += 1;
-    await new Promise<void>((resolve) => {
-      this.releaseStart = resolve;
-    });
+    if (!this.gateOpen) {
+      await new Promise<void>((resolve) => {
+        this.pendingStarts.push(resolve);
+      });
+    }
     this.running = true;
   }
 
+  /** Releases every parked `start()` and lets later ones resolve immediately -- models the real provider's serialized start queue. */
   release(): void {
-    const resolve = this.releaseStart;
-    this.releaseStart = null;
-    resolve?.();
+    this.gateOpen = true;
+    const pending = this.pendingStarts;
+    this.pendingStarts = [];
+    for (const resolve of pending) resolve();
+  }
+
+  emit(sample: LocationSample): void {
+    for (const listener of [...this.listeners]) listener(sample);
   }
 
   async stop(): Promise<void> {
@@ -125,16 +135,77 @@ describe('SessionController.start() aborts when disposed mid-start (ticket CN-FI
     // controller can never ingest another sample.
     expect(provider.listenerCount).toBe(0);
     expect(provider.subscribeCount).toBe(0);
-    // The provider it started is not left running behind a disposed
-    // controller.
-    expect(provider.running).toBe(false);
-    expect(provider.stopCount).toBeGreaterThanOrEqual(1);
+    // CN-FIX5 item 2 (contracts.md's closing amendment, binding): the
+    // aborted start does NOT stop the provider. Ownership of a SHARED
+    // provider is not knowable in core -- a replacement controller may
+    // already have started it -- so stopping here would pull the native
+    // watcher out from under whoever legitimately owns it now. The provider
+    // is stopped by the controller that ends its own session (or by
+    // `dispose()` when that controller genuinely had it running).
+    expect(provider.stopCount).toBe(0);
+    expect(provider.running).toBe(true);
     // No session was begun: no state change, no session id, no watchdog.
     expect(controller.diagnostics().sessionId).toBeNull();
     expect(scheduler.setIntervalCalls).toBe(0);
     // And nothing was persisted for a session that never really started.
     expect(saveCheckpointCalls).toEqual([]);
     unsubscribe();
+  });
+
+  it('two controllers sharing ONE provider: A disposed mid-start never stops the provider B has taken over -- B keeps receiving samples (ticket CN-FIX5)', async () => {
+    const { profile, runtime } = tmr();
+    const provider = new GatedLocationProvider();
+    const deps = {
+      runtimeProfile: runtime,
+      circuitProfile: profile,
+      locationProvider: provider,
+      clock: new FakeClock(1_000_000),
+      repository: new InMemorySessionRepository(),
+      userId: 'local-driver',
+      appVersion: 'test',
+      algorithmVersion: 1,
+      restartProvider: () => {},
+      config: { scheduler: new CountingScheduler() },
+    };
+    const a = new SessionController(deps);
+    const b = new SessionController(deps);
+
+    // A parks inside the shared provider's start...
+    const startingA = a.start('calibration');
+    await tick();
+    // ...is disposed, and B (its replacement) starts on the SAME provider.
+    await a.dispose();
+    const startingB = b.start('calibration');
+    await tick();
+
+    provider.release();
+    await Promise.all([startingA, startingB]);
+    await tick();
+
+    // Before CN-FIX5, A's disposed continuation called `provider.stop()`,
+    // which -- on the real serialized GNSS provider -- ran AFTER B's start
+    // and tore down the native watcher B depends on.
+    expect(provider.stopCount).toBe(0);
+    expect(provider.running).toBe(true);
+    // Exactly one live subscription: B's.
+    expect(provider.listenerCount).toBe(1);
+
+    let bState = '';
+    const unsubscribe = b.subscribe((s) => {
+      bState = s.sessionState;
+    });
+    expect(bState).toBe('calibrating');
+    expect(b.diagnostics().sessionId).not.toBeNull();
+    expect(a.diagnostics().sessionId).toBeNull();
+
+    // And B genuinely ingests samples from the shared provider: a full Learn
+    // lap drives it all the way to an accepted calibration result.
+    for (const sample of cleanRecognitionLap(profile, 500_001)) provider.emit(sample);
+    await tick();
+    expect(bState).toBe('calibrationReview');
+
+    unsubscribe();
+    await b.dispose();
   });
 
   it('a normal (undisposed) start still subscribes, enters calibration, and keeps its session id', async () => {

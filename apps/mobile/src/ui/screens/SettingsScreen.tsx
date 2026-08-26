@@ -137,6 +137,8 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
   // text (which bundled circuits rejected, if any) -- `null` on success or
   // when the call itself threw before producing a result.
   const [deleteErrorText, setDeleteErrorText] = React.useState<string | null>(null);
+  /** CN-FIX5: the delete was REFUSED (a live session / an active dev replay), not attempted-and-failed -- the banner then names the condition instead of prompting a retry. */
+  const [deleteRefused, setDeleteRefused] = React.useState(false);
   const [diagnostics, setDiagnostics] = React.useState<LiveDiagnosticsSnapshot | null>(null);
 
   // F11 fix (WPT3): a local string draft, distinct from the committed
@@ -230,9 +232,11 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
       const result = await deleteAllStoredUserData();
       setDeleteBanner(result.ok ? 'success' : 'error');
       setDeleteErrorText(result.ok ? null : result.errorText);
+      setDeleteRefused(!result.ok && result.reason !== undefined);
     } catch {
       setDeleteBanner('error');
       setDeleteErrorText(null);
+      setDeleteRefused(false);
     } finally {
       setDeleting(false);
       setConfirmingDelete(false);
@@ -576,9 +580,15 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
             ) : null}
             {deleteBanner === 'error' ? (
               <Text style={styles.errorBanner} maxFontSizeMultiplier={1.3} accessibilityLiveRegion="polite">
-                {deleteErrorText !== null
-                  ? `Could not delete all data (${deleteErrorText}). Please try again.`
-                  : 'Could not delete data. Please try again.'}
+                {/* CN-FIX5: a REFUSAL (`reason` set -- a live session or a dev
+                    replay) is not a failure to retry: it names the fixed
+                    condition to clear first. Genuine failures keep the
+                    retry prompt. */}
+                {deleteRefused && deleteErrorText !== null
+                  ? `Nothing was deleted: ${deleteErrorText}.`
+                  : deleteErrorText !== null
+                    ? `Could not delete all data (${deleteErrorText}). Please try again.`
+                    : 'Could not delete data. Please try again.'}
               </Text>
             ) : null}
           </View>

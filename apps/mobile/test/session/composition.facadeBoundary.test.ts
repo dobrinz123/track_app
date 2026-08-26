@@ -40,6 +40,7 @@ interface StubLocationProviderInstance {
   stopCount: number;
   startDelayMs: number;
   stopDelayMs: number;
+  stopShouldReject: boolean;
   push(sample: LocationSample): void;
 }
 
@@ -55,6 +56,8 @@ vi.mock('../../src/platform', () => {
     /** Test-controlled latency for the exact awaits the amendment is about. */
     startDelayMs = 0;
     stopDelayMs = 0;
+    /** Drives the "controller end FAILS" path: `SessionController.endSession()` awaits provider stop first, so a rejection there means its success-only `onSessionEnded` callback never runs. */
+    stopShouldReject = false;
     constructor() {
       tracked.gnssProviders.push(this);
     }
@@ -65,6 +68,7 @@ vi.mock('../../src/platform', () => {
     async stop(): Promise<void> {
       this.stopCount += 1;
       if (this.stopDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.stopDelayMs));
+      if (this.stopShouldReject) throw new Error('provider stop failed (test double)');
     }
     subscribe(cb: (s: LocationSample) => void): () => void {
       this.listeners.add(cb);
@@ -236,6 +240,59 @@ describe('A/N3 (ticket CN-FIX4): an asynchronous session start is inside the loc
   });
 });
 
+describe('1 (ticket CN-FIX5): a QUEUED endSession() still shuts telemetry down', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('telemetry started by the lock holder after the fire-early stop is stopped inside the queued section -- even when the controller end itself fails', async () => {
+    await seedDatabase();
+    const composition = await importFreshComposition();
+    const gnss = tracked.gnssProviders[0]!;
+    composition.settingsStore.update({ telemetryEnabled: true });
+
+    // Mirrors the provider's real running/stopped lifecycle: `startTelemetryRecording()`
+    // starts it, `stopTelemetryRecording()` stops it.
+    let telemetryRunning = false;
+    const provider = composition.telemetryProvider as unknown as {
+      start: () => void;
+      stop: () => Promise<void>;
+    };
+    const originalStart = provider.start.bind(provider);
+    const originalStop = provider.stop.bind(provider);
+    provider.start = () => {
+      telemetryRunning = true;
+      originalStart();
+    };
+    provider.stop = async () => {
+      telemetryRunning = false;
+      await originalStop();
+    };
+
+    composition.facade.startPreflight();
+    await tick(0);
+
+    // The lock holder: a slow beginCalibration whose onSessionStarted will
+    // START telemetry when it finally completes.
+    gnss.startDelayMs = 30;
+    composition.facade.beginCalibration();
+    // Queued behind it. Its fire-early telemetry stop runs NOW -- while
+    // nothing is recording yet, so it stops nothing.
+    composition.facade.endSession();
+    expect(telemetryRunning).toBe(false);
+    // ...and the queued controller end then FAILS, so the success-only
+    // `onSessionEnded` telemetry stop never runs either.
+    gnss.stopShouldReject = true;
+
+    await tick(90);
+
+    // HEAD (`a2681e3`): telemetry started by the lock holder outlives the
+    // session end entirely -- the F2 "shutdown even when the controller end
+    // rejects" guarantee did not survive the command queueing.
+    expect(telemetryRunning).toBe(false);
+  });
+});
+
 describe('C (ticket CN-FIX4): delete-all is durable against controller persistence', () => {
   beforeEach(() => {
     vi.resetModules();
@@ -320,7 +377,44 @@ describe('C (ticket CN-FIX4): delete-all is durable against controller persisten
   });
 });
 
-describe('D/N5 (ticket CN-FIX4): a cancelled DevReplay run has NO side effects', () => {
+describe('3 (ticket CN-FIX5): delete-all is refused while a DevReplay controller is installed', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('a live replay controller means DEV_REPLAY_ACTIVE -- nothing is read, deleted or verified', async () => {
+    const { db, repository } = await seedDatabase();
+    const composition = await importFreshComposition();
+    await repository.saveSession({
+      sessionId: 'driver-1--survives-dev-replay',
+      circuitId: TMR_CIRCUIT_PROFILE.circuitId,
+      layoutId: TMR_CIRCUIT_PROFILE.layoutId,
+      layoutVersion: TMR_CIRCUIT_PROFILE.layoutVersion,
+      startedAtUtc: new Date().toISOString(),
+      laps: [lap(1, 90_000)],
+      userId: 'local-driver',
+    });
+
+    const scenario = DEV_REPLAY_SCENARIOS.find((s) => s.circuitId === TMR_CIRCUIT_PROFILE.circuitId)!;
+    const run = await composition.runDevReplayScenario(scenario);
+    expect(run).toEqual({ ok: true });
+    // The replay controller -- not the production one -- is driving `facade`.
+    expect(composition.getLiveDiagnostics()!.gnss).toBeNull();
+
+    const result = await composition.deleteAllStoredUserData();
+
+    // HEAD (`a2681e3`): the replay's states are not in `MID_SESSION_STATES`,
+    // so the wipe was admitted while `unlockedRebuildProductionController()`
+    // silently no-opped (a replay controller is active) -- leaving a live
+    // controller with a session id that can persist right back over the wipe.
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('DEV_REPLAY_ACTIVE');
+    expect(result.errorText as string).toContain('replay');
+    expect(await countRows(db, 'sessions')).toBe(1);
+  });
+});
+
+describe('D/N5 (ticket CN-FIX4 + CN-FIX5 item 4): DevReplay cancellation is honored before the selection write', () => {
   beforeEach(() => {
     vi.resetModules();
   });
@@ -353,6 +447,53 @@ describe('D/N5 (ticket CN-FIX4): a cancelled DevReplay run has NO side effects',
     expect(composition.getProductionCircuitId()).toBe(TMR_CIRCUIT_PROFILE.circuitId);
     expect(composition.sessionHistoryStore.listSessions().map((s) => s.sessionId)).toEqual(historyBefore);
     expect(composition.getLiveDiagnostics()!.gnss).not.toBeNull();
+  });
+
+  /**
+   * ticket CN-FIX5 item 4 (contracts.md's closing amendment, binding): once
+   * the selection write has BEGUN, cancellation no longer aborts it -- there
+   * is no rollback. The run finishes the selection so settings, the history
+   * store and the production controller all agree, then skips the install and
+   * the navigation and reports `CANCELLED`. This pins that contract (a
+   * half-applied selection would be far worse than a consistent one the user
+   * did not ask for).
+   */
+  it('cancellation that flips DURING the selection write completes the selection consistently and installs nothing', async () => {
+    const { repository } = await seedDatabase();
+    const composition = await importFreshComposition();
+    await repository.saveSession({
+      sessionId: 'driver-1--mp-history',
+      circuitId: MOTORPARK_CIRCUIT_PROFILE.circuitId,
+      layoutId: MOTORPARK_CIRCUIT_PROFILE.layoutId,
+      layoutVersion: MOTORPARK_CIRCUIT_PROFILE.layoutVersion,
+      startedAtUtc: new Date().toISOString(),
+      laps: [lap(1, 95_000)],
+      userId: 'local-driver',
+    });
+
+    let cancelled = false;
+    const originalListSessions = repository.listSessions.bind(repository);
+    repository.listSessions = async (userId: string, circuitId: string) => {
+      if (circuitId === MOTORPARK_CIRCUIT_PROFILE.circuitId) {
+        // The scenario's own selection write is in flight at exactly this
+        // moment (settings already applied, history refresh pending).
+        cancelled = true;
+        await tick(5);
+      }
+      return originalListSessions(userId, circuitId);
+    };
+
+    const scenario = DEV_REPLAY_SCENARIOS.find((s) => s.circuitId === MOTORPARK_CIRCUIT_PROFILE.circuitId)!;
+    const result = await composition.runDevReplayScenario(scenario, () => cancelled);
+
+    expect(result).toEqual({ ok: false, reason: 'CANCELLED' });
+    // Consistency, not rollback: all three agree on MotorPark.
+    expect(composition.settingsStore.getSettings().selectedCircuitId).toBe(MOTORPARK_CIRCUIT_PROFILE.circuitId);
+    expect(composition.getProductionCircuitId()).toBe(MOTORPARK_CIRCUIT_PROFILE.circuitId);
+    expect(composition.sessionHistoryStore.listSessions().map((s) => s.sessionId)).toContain('driver-1--mp-history');
+    // Nothing was installed: production still drives `facade`.
+    expect(composition.getLiveDiagnostics()!.gnss).not.toBeNull();
+    expect(latestFacadeState(composition).sessionState).toBe('idle');
   });
 });
 

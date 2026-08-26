@@ -360,7 +360,20 @@ class SwappableFacade implements SessionFacade {
     // queued behind it observes its session/checkpoint persistence complete
     // (CN-FIX4 item C).
     this.endSessionSideEffect?.();
-    this.runLockedCommand('endSession', () => this.inner.endSession());
+    this.runLockedCommand('endSession', () => {
+      // CN-FIX5 item 1 (contracts.md's closing amendment, binding): the
+      // idempotent shutdown runs AGAIN here, inside the lock, immediately
+      // before the inner end. The synchronous fire-early call above happens
+      // when `endSession()` is invoked -- but if this command QUEUED behind
+      // another section (a slow `beginCalibration()`, a `resumeRecovery()`),
+      // that holder may have STARTED telemetry after the early stop ran.
+      // Without this second call, a controller end that then fails (its
+      // success-only `onSessionEnded` never runs) would leave telemetry
+      // recording forever -- the exact F2 guarantee this wrapper exists to
+      // keep. Stopping nothing is a no-op, so the common case is unchanged.
+      this.endSessionSideEffect?.();
+      this.inner.endSession();
+    });
   }
   pause(): void {
     this.inner.pause();
@@ -1806,8 +1819,13 @@ export interface AggregatedDeleteUserDataResult extends DeleteUserDataResult {
   /** Bundled circuit ids whose `deleteAllUserData()` call REJECTED (not just returned `ok: false`) -- empty unless a per-circuit delete actually threw. */
   failedCircuitIds: string[];
   errorText: string | null;
-  /** `'SESSION_ACTIVE'` when the wipe was REFUSED outright because a session is genuinely mid-drive (CN-FIX4, facade boundary amendment) -- nothing was read, deleted, or verified on that path. */
-  reason?: 'SESSION_ACTIVE';
+  /**
+   * Set when the wipe was REFUSED outright -- nothing was read, deleted, or
+   * verified on those paths. `'SESSION_ACTIVE'`: a session is genuinely
+   * mid-drive (CN-FIX4, facade boundary amendment). `'DEV_REPLAY_ACTIVE'`: a
+   * `__DEV__` replay controller is installed (CN-FIX5, closing amendment).
+   */
+  reason?: 'SESSION_ACTIVE' | 'DEV_REPLAY_ACTIVE';
 }
 
 export async function deleteAllStoredUserData(): Promise<AggregatedDeleteUserDataResult> {
@@ -1836,6 +1854,24 @@ async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDa
       failedCircuitIds: [],
       reason: 'SESSION_ACTIVE',
       errorText: 'a session is currently active -- end it before deleting all data',
+    };
+  }
+  // 1b. REFUSE while a `__DEV__` DevReplay controller is installed (CN-FIX5
+  //    item 3, closing amendment, binding). A replay controller sits in
+  //    `calibrating`/`calibrationReview`/`armed` -- none of them
+  //    `MID_SESSION_STATES` -- and step 2's rebuild deliberately no-ops
+  //    while it owns `facade`, so the wipe would leave a live controller
+  //    holding a session id that persists its session/checkpoint right back
+  //    over the deleted data. Durability wins over convenience on the dev
+  //    path: leave the replay, refuse the delete.
+  if (controller !== null && activeController !== controller) {
+    return {
+      ok: false,
+      remainingSessionCount: 0,
+      referenceLapCleared: false,
+      failedCircuitIds: [],
+      reason: 'DEV_REPLAY_ACTIVE',
+      errorText: 'a dev replay session is active -- leave the replay before deleting all data',
     };
   }
   // 2. Otherwise: drop any pending recovery and REPLACE the production
@@ -2158,11 +2194,16 @@ export interface DevReplayScenarioResult {
  * longer complete BETWEEN those steps and leave the scenario installing a
  * replay controller into a screen that is already gone.
  *
- * `isCancelled()` is the screen's own run-generation check, consulted twice:
- * once before the replay controller is installed (so a cancelled scenario
- * installs nothing at all and leaves production restored) and once before
- * returning `ok` (so a scenario cancelled during the install is unwound the
- * same way and the screen never navigates). The screen calls this ONE
+ * `isCancelled()` is the screen's own run-generation check. Per contracts.md's
+ * closing amendment (binding, ticket CN-FIX5 item 4) cancellation is honored
+ * ONLY BEFORE the selection write -- at section entry, after `ready()`, and
+ * immediately before `unlockedApplySelection()`. Once that write has begun it
+ * runs to completion, so settings, the history store and the production
+ * controller always agree; the run then skips the install and the navigation
+ * and reports `CANCELLED`. There is deliberately NO rollback: a half-applied
+ * selection (settings on one circuit, history/controller on another) would be
+ * a far worse state than a consistent selection the user did not ask for, and
+ * the next real selection overwrites it anyway. The screen calls this ONE
  * function instead of sequencing three separately-locked calls.
  */
 export async function runDevReplayScenario(
@@ -2172,13 +2213,11 @@ export async function runDevReplayScenario(
   return lifecycleLock.run(async (): Promise<DevReplayScenarioResult> => {
     const entry = circuitCatalog.get(scenario.circuitId);
     if (entry === null) return { ok: false, reason: 'UNKNOWN_CIRCUIT' };
-    // D fix (contracts.md's facade boundary amendment, binding, ticket
-    // CN-FIX4): `CANCELLED` means NO side effects -- checked at section
-    // entry (this run may have waited behind other lifecycle work and be
-    // stale before it even begins), again before the selection write, and
-    // again before/after the install below. Previously the first check came
-    // after the restore, the selection write and the controller rebuild, so
-    // a cancelled run still left the fixture's circuit selected.
+    // D fix (facade boundary amendment, ticket CN-FIX4) + item 4 (closing
+    // amendment, ticket CN-FIX5), both binding: before the selection write,
+    // `CANCELLED` means NO side effects -- checked at section entry (this
+    // run may have waited behind other lifecycle work and be stale before it
+    // even begins), after `ready()`, and immediately before the write.
     if (isCancelled()) return { ok: false, reason: 'CANCELLED' };
     await ready();
     if (isCancelled()) return { ok: false, reason: 'CANCELLED' };
@@ -2202,20 +2241,18 @@ export async function runDevReplayScenario(
     if (isCancelled()) return { ok: false, reason: 'CANCELLED' };
     await unlockedApplySelection(entry);
 
-    const samples = scenario.build(entry.profile);
+    // The selection is now committed and internally consistent. Item 4
+    // (closing amendment): a cancellation observed from here on skips the
+    // INSTALL and the navigation -- it never unwinds the selection, and it
+    // never installs-then-restores (which would churn the facade for a
+    // screen that is already gone).
     if (isCancelled()) return { ok: false, reason: 'CANCELLED' };
 
+    const samples = scenario.build(entry.profile);
     await unlockedStartDevReplaySession(samples, {
       circuitProfile: entry.profile,
       runtimeProfile: entry.runtime,
     });
-    if (isCancelled()) {
-      // Cancelled during the install: unwind it here, inside the same
-      // section, rather than leaving a replay controller driving `facade`
-      // for a screen that has already gone away.
-      await unlockedRestoreProductionFacade();
-      return { ok: false, reason: 'CANCELLED' };
-    }
     return { ok: true };
   });
 }
