@@ -471,8 +471,9 @@ export class SessionController {
     await this.ensureProviderRunning();
     if (this.disposed) {
       // `ensureProviderRunning()` itself already declined to subscribe (see
-      // its own disposed guard) and stopped whatever it started, so there is
-      // nothing to unwind here beyond the session identity.
+      // its own disposed guard) and deliberately leaves the shared provider
+      // running (ownership is not knowable here), so there is nothing to
+      // unwind beyond the session identity.
       abortStart();
       return;
     }

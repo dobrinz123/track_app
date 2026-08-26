@@ -1871,7 +1871,7 @@ async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDa
       referenceLapCleared: false,
       failedCircuitIds: [],
       reason: 'DEV_REPLAY_ACTIVE',
-      errorText: 'a dev replay session is active -- leave the replay before deleting all data',
+      errorText: 'a developer replay or mock session is active -- leave the Dev Replay screen before deleting all data',
     };
   }
   // 2. Otherwise: drop any pending recovery and REPLACE the production
