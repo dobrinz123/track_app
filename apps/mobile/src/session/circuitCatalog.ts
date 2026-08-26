@@ -1,5 +1,11 @@
-import { summarize, type CircuitProfile, type RuntimeProfile } from '@circuit/core';
+import { loadProfileFromJson, summarize, type CircuitProfile, type RuntimeProfile } from '@circuit/core';
 import { TMR_CIRCUIT_PROFILE, TMR_RUNTIME_PROFILE } from './tmrProfile';
+// Static import (same contract as tmrProfile.ts, ADR-0004): Metro inlines this
+// `.json` module into the Hermes bundle at build time -- NOT a runtime
+// fetch/fs read. MotorPark has no observed-speeds overlay yet (TMR-only,
+// Phase 3 coaching addendum), so this entry is profile+runtime only, exactly
+// what `AppCircuitCatalog.get()` already returns.
+import motorparkProfileJson from '@circuit/core/assets/circuits/motorpark-romania.v1.json';
 
 /**
  * Display-oriented summary of a circuit for list/selection UI. Field set is
@@ -25,9 +31,27 @@ export interface AppCircuitCatalog {
   get(circuitId: string): { profile: CircuitProfile; runtime: RuntimeProfile } | null;
 }
 
-/** Today's only entry: the bundled Transilvania Motor Ring profile (session/tmrProfile.ts). */
+/**
+ * Bundled MotorPark România profile+runtime (ticket CN-W2), loaded through
+ * the SAME validation path (`loadProfileFromJson`) as TMR above -- see
+ * tmrProfile.ts's `load()` for the identical pattern this mirrors.
+ */
+function loadMotorPark(): { profile: CircuitProfile; runtime: RuntimeProfile } {
+  const result = loadProfileFromJson(JSON.stringify(motorparkProfileJson));
+  if (!result.ok) {
+    throw new Error(`Bundled MotorPark profile failed validation: ${result.errors.join(', ')}`);
+  }
+  return { profile: result.profile, runtime: result.runtime };
+}
+
+const motorpark = loadMotorPark();
+export const MOTORPARK_CIRCUIT_PROFILE: CircuitProfile = motorpark.profile;
+export const MOTORPARK_RUNTIME_PROFILE: RuntimeProfile = motorpark.runtime;
+
+/** Bundled circuits: Transilvania Motor Ring + MotorPark România (session/tmrProfile.ts, above). */
 const ENTRIES: ReadonlyMap<string, { profile: CircuitProfile; runtime: RuntimeProfile }> = new Map([
   [TMR_CIRCUIT_PROFILE.circuitId, { profile: TMR_CIRCUIT_PROFILE, runtime: TMR_RUNTIME_PROFILE }],
+  [MOTORPARK_CIRCUIT_PROFILE.circuitId, { profile: MOTORPARK_CIRCUIT_PROFILE, runtime: MOTORPARK_RUNTIME_PROFILE }],
 ]);
 
 /**

@@ -3,16 +3,6 @@ import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
-import type { CircuitProfile, TelemetryFixture } from '@circuit/core';
-import {
-  cleanRecognitionLap,
-  multiLapSession,
-  noisyGpsLap,
-  pbImprovementSession,
-  pitLaneTransitLap,
-  reverseTravelLap,
-  signalLossLap,
-} from '@circuit/core';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, radii, spacing, typography } from '../theme';
 import {
@@ -23,31 +13,21 @@ import {
   useMockFacadeForDevReplay,
   type LiveDiagnosticsSnapshot,
 } from '../../session/composition';
-import { TMR_CIRCUIT_PROFILE } from '../../session/tmrProfile';
+import { circuitCatalog } from '../../session/circuitCatalog';
+import { DEV_REPLAY_SCENARIOS, type DevReplayScenario } from '../../session/devReplayScenarios';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'DevReplay'>;
 
-interface ScenarioDefinition {
-  id: string;
-  label: string;
-  build: (profile: CircuitProfile) => TelemetryFixture;
-}
-
 /**
  * Real bundled fixture scenarios from `@circuit/core/fixtures`
- * (`packages/core/src/fixtures/scenarios.ts`) -- each one's
+ * (`packages/core/src/fixtures/scenarios.ts` + `motorpark-scenarios.ts`),
+ * defined in `../../session/devReplayScenarios.ts` -- each one's
  * `metadata.expectedOutcome` is shown as the row's description so this
- * screen is self-documenting.
+ * screen is self-documenting. Each scenario names its own `circuitId`; the
+ * profile it runs against is resolved from the real bundled `circuitCatalog`
+ * (ticket CN-W2) rather than hardcoded to one circuit.
  */
-const SCENARIOS: ScenarioDefinition[] = [
-  { id: 'clean-recognition-lap', label: 'Clean recognition lap', build: (p) => cleanRecognitionLap(p, 901) },
-  { id: 'three-laps', label: 'Three timed laps', build: (p) => multiLapSession(p, 3, 902) },
-  { id: 'pb-improvement', label: 'PB improvement (3 laps, each faster)', build: (p) => pbImprovementSession(p, 903) },
-  { id: 'noisy-gps', label: 'Noisy GPS (8m Gaussian noise)', build: (p) => noisyGpsLap(p, 904) },
-  { id: 'signal-loss', label: 'Signal loss (15s gap)', build: (p) => signalLossLap(p, 905) },
-  { id: 'reverse-travel', label: 'Reverse travel', build: (p) => reverseTravelLap(p, 906) },
-  { id: 'pit-lane-transit', label: 'Pit lane transit', build: (p) => pitLaneTransitLap(p, 907) },
-];
+const SCENARIOS: DevReplayScenario[] = DEV_REPLAY_SCENARIOS;
 
 /**
  * S13 — dev-only (__DEV__ gated). Lists real bundled fixture scenarios; on
@@ -79,16 +59,23 @@ export function DevReplayScreen({ navigation }: Props): React.JSX.Element {
     };
   }, []);
 
-  const runScenario = async (scenario: ScenarioDefinition): Promise<void> => {
+  const runScenario = async (scenario: DevReplayScenario): Promise<void> => {
     setRunningId(scenario.id);
     try {
+      const circuit = circuitCatalog.get(scenario.circuitId);
+      if (circuit === null) {
+        throw new Error(`No bundled circuit found for circuitId "${scenario.circuitId}"`);
+      }
       // C6 fix: restore production (disposing any still-active replay
       // controller) before building a new one, every time -- not just on
       // unmount -- so switching straight from one fixture to another never
       // leaves the previous replay's provider/watchdog running.
       await restoreProductionFacade();
-      const samples = scenario.build(TMR_CIRCUIT_PROFILE);
-      await startDevReplaySession(samples);
+      const samples = scenario.build(circuit.profile);
+      await startDevReplaySession(samples, {
+        circuitProfile: circuit.profile,
+        runtimeProfile: circuit.runtime,
+      });
       navigation.navigate('CalibrationInstructions');
     } catch (error) {
       Alert.alert('Replay failed to start', error instanceof Error ? error.message : String(error));

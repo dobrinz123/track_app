@@ -24,3 +24,8 @@ export {
   wraparoundSession,
 } from './scenarios';
 export type { ScenarioFixtureOptions } from './scenarios';
+export {
+  motorparkCleanRecognitionLap,
+  motorparkMultiLapSession,
+  motorparkPitLaneTransitLap,
+} from './motorpark-scenarios';

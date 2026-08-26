@@ -14,9 +14,17 @@ const TMR_ASSET_URL = new URL(
   '../../assets/circuits/transilvania-motor-ring.v1.json',
   import.meta.url,
 );
+const MOTORPARK_ASSET_URL = new URL(
+  '../../assets/circuits/motorpark-romania.v1.json',
+  import.meta.url,
+);
 
 function readTmrProfile(): unknown {
   return JSON.parse(readFileSync(TMR_ASSET_URL, 'utf8')) as unknown;
+}
+
+function readMotorParkProfile(): unknown {
+  return JSON.parse(readFileSync(MOTORPARK_ASSET_URL, 'utf8')) as unknown;
 }
 
 describe('circuit catalog', () => {
@@ -39,6 +47,30 @@ describe('circuit catalog', () => {
     const loaded = catalog.get('transilvania-motor-ring');
 
     expect(loaded?.profile.circuitId).toBe('transilvania-motor-ring');
+    expect(loaded?.runtime.centerline.length).toBe(loaded?.profile.centerline.length);
+    expect(loaded?.runtime.cumulativeDistancesM.length).toBe(loaded?.profile.centerline.length);
+  });
+
+  it('lists both real circuits (TMR + MotorPark) under distinct keys (CN-W2)', () => {
+    const catalog = createCircuitCatalog([
+      { raw: readTmrProfile() },
+      { raw: readMotorParkProfile() },
+    ]);
+
+    expect(Object.keys(catalog.summaries)).toEqual([
+      circuitCatalogKey('transilvania-motor-ring', 'main'),
+      circuitCatalogKey('motorpark-romania', 'full'),
+    ]);
+    expect(catalog.list().map(({ circuitId }) => circuitId)).toEqual(
+      expect.arrayContaining(['transilvania-motor-ring', 'motorpark-romania']),
+    );
+  });
+
+  it('returns the validated MotorPark profile and computed runtime with matching lengths', () => {
+    const catalog = createCircuitCatalog([{ raw: readMotorParkProfile() }]);
+    const loaded = catalog.get('motorpark-romania');
+
+    expect(loaded?.profile.circuitId).toBe('motorpark-romania');
     expect(loaded?.runtime.centerline.length).toBe(loaded?.profile.centerline.length);
     expect(loaded?.runtime.cumulativeDistancesM.length).toBe(loaded?.profile.centerline.length);
   });

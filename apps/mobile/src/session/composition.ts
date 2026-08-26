@@ -1,7 +1,9 @@
 import Constants from 'expo-constants';
 import type {
+  CircuitProfile,
   LocationProvider,
   LocationSample,
+  RuntimeProfile,
   SessionControllerDiagnostics,
   SessionMachineSnapshot,
   SessionState,
@@ -1387,7 +1389,18 @@ export async function restoreProductionFacade(): Promise<void> {
  * pacing bug (`currentLapMs` showing minutes within seconds of the first
  * crossing after an idle calibration-review pause).
  */
-export async function startDevReplaySession(samples: LocationSample[]): Promise<void> {
+export async function startDevReplaySession(
+  samples: LocationSample[],
+  // CN-W2: which circuit's profile+runtime the replay controller is
+  // configured with. Defaults to TMR (the pre-existing, byte-identical
+  // behavior every current call site relies on) -- DevReplayScreen passes
+  // the scenario's OWN resolved circuit explicitly so a MotorPark fixture is
+  // matched against MotorPark's centerline, not TMR's.
+  circuit: { circuitProfile: CircuitProfile; runtimeProfile: RuntimeProfile } = {
+    circuitProfile: TMR_CIRCUIT_PROFILE,
+    runtimeProfile: TMR_RUNTIME_PROFILE,
+  },
+): Promise<void> {
   const { repository: repo } = await ready();
   return withDevReplayLock(async () => {
     if (replayController !== null) {
@@ -1403,8 +1416,8 @@ export async function startDevReplaySession(samples: LocationSample[]): Promise<
     const replayProvider: LocationProvider = new ReplayTimestampedLocationProvider(replayInner, timeSource);
 
     const devController = new SessionController({
-      runtimeProfile: TMR_RUNTIME_PROFILE,
-      circuitProfile: TMR_CIRCUIT_PROFILE,
+      runtimeProfile: circuit.runtimeProfile,
+      circuitProfile: circuit.circuitProfile,
       locationProvider: replayProvider,
       clock,
       repository: repo,
