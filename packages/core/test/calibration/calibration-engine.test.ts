@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { LocalPoint, LocationSample } from '../../src/contracts';
 import { CalibrationEngine } from '../../src/calibration';
+import { polylineLength } from '../../src/geometry';
 import {
   loadProfileFromJson,
   makeTestProfile,
@@ -362,6 +363,80 @@ describe('CalibrationEngine', () => {
     // silently truncated.
     expect(result.accepted).toBe(false);
     expect(result.failureReasons).toContain('CALIBRATION_OVERRUN');
+  });
+
+  it('V6: progress().onTrack (live indicator) uses the WIDE 40m Learn corridor, not the tight one', () => {
+    const { runtime } = lapFixture();
+    const engine = new CalibrationEngine(runtime, { corridorWidthM: 20, direction: 'counterclockwise' });
+    const point = runtime.centerline[0] as LocalPoint;
+    const next = runtime.centerline[1] as LocalPoint;
+    const segmentLength = Math.hypot(next.e - point.e, next.n - point.n);
+    const normal = { e: -(next.n - point.n) / segmentLength, n: (next.e - point.e) / segmentLength };
+    const sampleAtLateralM = (lateralM: number): LocationSample => ({
+      ...runtime.projection.toLatLon({
+        e: point.e + normal.e * lateralM,
+        n: point.n + normal.n * lateralM,
+      }),
+      tMono: 0,
+      accuracyM: 3,
+      source: 'replay',
+    });
+
+    // 25m: outside the tight 20m corridorWidthM, inside the 40m wide Learn corridor --
+    // must read as on-track live even though it will not be a tight-corridor accept.
+    engine.feed(sampleAtLateralM(25));
+    expect(engine.progress().onTrack).toBe(true);
+
+    // 60m: outside both the tight corridor AND the 40m wide Learn corridor -- genuinely
+    // off track, must still read as off-track live.
+    engine.reset();
+    engine.feed(sampleAtLateralM(60));
+    expect(engine.progress().onTrack).toBe(false);
+  });
+
+  it('V2: progress() exposes the LAST fed sample\'s additive raw/matched local-frame projection (pinned)', () => {
+    // Runs against the real TMR asset (not the synthetic makeTestProfile fixture,
+    // where the start/finish gate happens to sit at centerline vertex 0) so this
+    // genuinely exercises converting `TrackMatch.distanceM` (distance FROM start/finish)
+    // back to a centerline-vertex-0-relative distance before indexing
+    // `cumulativeDistancesM` -- a real profile's start/finish gate need not be at
+    // vertex 0, and `sampleAtLapDistance` (fixtures/drive-lap.ts) confirms the exact
+    // relationship: rawDistanceM = startFinishGate.distanceM + distanceFromStartFinishM.
+    const runtime = tmrRuntime();
+    const engine = new CalibrationEngine(runtime, { corridorWidthM: 20 });
+
+    // Nothing fed yet -- additive fields are omitted entirely.
+    const before = engine.progress();
+    expect(before.rawLocalX).toBeUndefined();
+    expect(before.matchedLocalX).toBeUndefined();
+    expect(before.lateralM).toBeUndefined();
+    expect(before.distanceM).toBeUndefined();
+
+    // A sample fed exactly on a known centerline vertex (zero lateral offset): the
+    // ground-truth expected raw AND matched local point is simply that vertex --
+    // independent of how the engine internally computes `distanceM`.
+    const vertex = runtime.centerline[5] as LocalPoint;
+    engine.feed({
+      ...runtime.projection.toLatLon(vertex),
+      tMono: 0,
+      accuracyM: 3,
+      source: 'replay',
+    });
+
+    const progress = engine.progress();
+    expect(progress.rawLocalX).toBeCloseTo(vertex.e, 2);
+    expect(progress.rawLocalY).toBeCloseTo(vertex.n, 2);
+    expect(progress.matchedLocalX).toBeCloseTo(vertex.e, 2);
+    expect(progress.matchedLocalY).toBeCloseTo(vertex.n, 2);
+    expect(progress.lateralM).toBeCloseTo(0, 1);
+    // distance-from-start/finish for this vertex, independently derived the same way
+    // `sampleAtLapDistance` (fixtures/drive-lap.ts) relates the two -- NOT by calling
+    // into the engine's own `pointAtDistanceM` helper.
+    const totalLengthM = polylineLength(runtime.centerline);
+    const expectedDistanceM =
+      (((runtime.cumulativeDistancesM[5] as number) - runtime.startFinishGate.distanceM) % totalLengthM + totalLengthM) %
+      totalLengthM;
+    expect(progress.distanceM).toBeCloseTo(expectedDistanceM, 1);
   });
 
   it('reset clears accumulated observations and progress exposes last feed state', () => {

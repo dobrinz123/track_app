@@ -319,7 +319,12 @@ describe('SessionController', () => {
     // The real bundled TMR profile's corridorWidthM (15 m) is narrower than
     // both TrackMatcher's and CalibrationEngine's own 20 m defaults -- a
     // sample at 17 m lateral offset is a genuine corridor-boundary case:
-    // off-corridor for the real profile, on-corridor for the stale default.
+    // off-corridor (tight) for the real profile, on-corridor for the stale
+    // default. `calibration.onTrack` itself no longer distinguishes this (V6
+    // live-indicator fix: it now reads the fixed 40 m wide Learn corridor
+    // regardless of corridorWidthM), so wiring is asserted via
+    // `coverageFraction` instead -- only a tight-corridor ACCEPT marks a
+    // coverage bin, and only one sample has been fed.
     expect(profile.corridorWidthM).toBe(15);
 
     await controller.start('calibration');
@@ -327,8 +332,9 @@ describe('SessionController', () => {
     provider.push(sample);
 
     // If corridorWidthM weren't wired (defaulting to 20 m), 17 m would still
-    // read onTrack=true -- this fails red without the MUST DO #1 fix.
-    expect(last(states).calibration?.onTrack).toBe(false);
+    // be tight-corridor accepted and mark a coverage bin -- this fails red
+    // without the MUST DO #1 fix.
+    expect(last(states).calibration?.coverageFraction).toBe(0);
   });
 
   it('checkpointNow() is public and persists the current state/laps on demand (MUST DO #4)', async () => {

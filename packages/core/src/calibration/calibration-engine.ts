@@ -119,10 +119,29 @@ export class CalibrationEngine implements CalibrationEngineContract {
   private firstTimestamp: number | undefined;
   private lastTimestamp: number | undefined;
   private timestampCount = 0;
-  private lastOnTrack = false;
+  /**
+   * V6 live-indicator fix: whether the LAST fed sample is within the wide Learn
+   * corridor (`LEARN_WIDE_CORRIDOR_M`), used only for the live on-track indicator
+   * surfaced by `progress()`. A driver within 40 m of an unvalidated centerline reads
+   * as on-track on screen during calibration even though that sample may still miss
+   * tight-corridor acceptance (`acceptedPoints`, lateral stats, `finish()`) below.
+   */
+  private lastLiveOnTrack = false;
   private lastQualityOk = false;
   /** Set once `acceptedPoints` hits `MAX_ACCEPTED_POINTS` -- L1 fix. Sticky for the life of this engine instance (cleared only by `reset()`), so `finish()` always force-fails with `CALIBRATION_OVERRUN` after an overrun, however long calibration continues to run past it. */
   private calibrationOverrun = false;
+  /**
+   * V2 track-map plumbing: the LAST fed sample's raw (unmatched) local-frame position
+   * and its matched (projected-onto-centerline) local-frame position, plus that match's
+   * own `lateralM`/`distanceM` -- exposed additively through `progress()` for the live
+   * track-map view. Sticky: only updated when `match !== null` (an invalid-quality
+   * sample leaves the last known position in place rather than going blank). `undefined`
+   * until the first sample with a valid match has been fed.
+   */
+  private lastRawLocalPoint: LocalPoint | undefined;
+  private lastMatchedLocalPoint: LocalPoint | undefined;
+  private lastMatchLateralM: number | undefined;
+  private lastMatchDistanceM: number | undefined;
 
   constructor(
     private readonly profile: RuntimeProfile,
@@ -158,9 +177,13 @@ export class CalibrationEngine implements CalibrationEngineContract {
     this.firstTimestamp = undefined;
     this.lastTimestamp = undefined;
     this.timestampCount = 0;
-    this.lastOnTrack = false;
+    this.lastLiveOnTrack = false;
     this.lastQualityOk = false;
     this.calibrationOverrun = false;
+    this.lastRawLocalPoint = undefined;
+    this.lastMatchedLocalPoint = undefined;
+    this.lastMatchLateralM = undefined;
+    this.lastMatchDistanceM = undefined;
   }
 
   feed(sample: LocationSample): void {
@@ -169,8 +192,28 @@ export class CalibrationEngine implements CalibrationEngineContract {
     const match = this.matcher.match(sample);
     const qualityOk = assessment.level === 'good' || assessment.level === 'degraded';
     const onTrack = match !== null && Math.abs(match.lateralM) <= this.config.corridorWidthM;
+    // V6 live-indicator fix: the live on-track indicator uses the WIDE Learn corridor,
+    // not the tight one -- a driver within LEARN_WIDE_CORRIDOR_M of an unvalidated
+    // centerline must not be told "off track" while actually on the circuit. Tight
+    // `onTrack` above is unchanged and still gates acceptance/coverage/bias below.
+    const liveOnTrack = match !== null && Math.abs(match.lateralM) <= LEARN_WIDE_CORRIDOR_M;
     this.lastQualityOk = qualityOk;
-    this.lastOnTrack = onTrack;
+    this.lastLiveOnTrack = liveOnTrack;
+
+    // V2 track-map plumbing: record this sample's raw + matched local-frame positions
+    // regardless of tight on-track acceptance below -- the live map shows the raw GPS
+    // dot and the matched dot (red/green by `liveOnTrack`) for every fed sample that
+    // produced a match, on-track or not.
+    if (match !== null) {
+      this.lastRawLocalPoint = this.profile.projection.toLocal({ lat: sample.lat, lon: sample.lon });
+      // `match.distanceM` is distance-from-start/finish (`TrackMatcher` subtracts its
+      // own `startOffsetM`); `cumulativeDistancesM`/`pointAtDistanceM` are indexed from
+      // centerline vertex 0 -- add `startFinishGate.distanceM` back to convert, same
+      // relationship `sampleAtLapDistance` (fixtures/drive-lap.ts) uses in reverse.
+      this.lastMatchedLocalPoint = this.pointAtDistanceM(match.distanceM + this.profile.startFinishGate.distanceM);
+      this.lastMatchLateralM = match.lateralM;
+      this.lastMatchDistanceM = match.distanceM;
+    }
 
     // D1 field-calibration fix: retain every quality-ok, matched sample within the wide
     // Learn corridor regardless of tight on-track acceptance below -- see `WideSample`.
@@ -221,16 +264,73 @@ export class CalibrationEngine implements CalibrationEngineContract {
     this.previousQualitySample = sample;
   }
 
-  /** Live progress during the Learn lap. Deliberately still reports TIGHT-corridor
-   * coverage (unchanged by the D1 field-calibration fix): `finish()`'s bias-corrected
-   * acceptance coverage can end up higher than what was ever shown live here, once a
-   * systematic offset is estimated and corrected for. See `CalibrationConfig`. */
-  progress(): { coverageFraction: number; onTrack: boolean; qualityOk: boolean } {
+  /** Live progress during the Learn lap. `coverageFraction` deliberately still reports
+   * TIGHT-corridor coverage (unchanged by the D1 field-calibration fix): `finish()`'s
+   * bias-corrected acceptance coverage can end up higher than what was ever shown live
+   * here, once a systematic offset is estimated and corrected for. `onTrack` (V6 live-
+   * indicator fix) reports the WIDE Learn-corridor result instead -- see
+   * `lastLiveOnTrack` -- so the live display doesn't say "off track" for a driver who is
+   * on the circuit but outside the still-unvalidated tight corridor. See
+   * `CalibrationConfig`. Additive V2 track-map fields (`rawLocalX`/`Y`, `matchedLocalX`/
+   * `Y`, `lateralM`, `distanceM`) report the LAST fed sample's projection -- see
+   * `lastRawLocalPoint` -- and are omitted until the first sample with a valid match has
+   * been fed. */
+  progress(): {
+    coverageFraction: number;
+    onTrack: boolean;
+    qualityOk: boolean;
+    rawLocalX?: number;
+    rawLocalY?: number;
+    matchedLocalX?: number;
+    matchedLocalY?: number;
+    lateralM?: number;
+    distanceM?: number;
+  } {
+    const lastProjection =
+      this.lastRawLocalPoint !== undefined &&
+      this.lastMatchedLocalPoint !== undefined &&
+      this.lastMatchLateralM !== undefined &&
+      this.lastMatchDistanceM !== undefined
+        ? {
+            rawLocalX: this.lastRawLocalPoint.e,
+            rawLocalY: this.lastRawLocalPoint.n,
+            matchedLocalX: this.lastMatchedLocalPoint.e,
+            matchedLocalY: this.lastMatchedLocalPoint.n,
+            lateralM: this.lastMatchLateralM,
+            distanceM: this.lastMatchDistanceM,
+          }
+        : {};
     return {
       coverageFraction: this.coverageFraction(this.coverage),
-      onTrack: this.lastOnTrack,
+      onTrack: this.lastLiveOnTrack,
       qualityOk: this.lastQualityOk,
+      ...lastProjection,
     };
+  }
+
+  /** Interpolated local-frame point at `distanceM` along the closed-loop centerline --
+   * V2 track-map plumbing's cheap way to get the MATCHED (on-centerline) position for
+   * the live map from a `TrackMatch`'s own `distanceM`, without re-running the O(n)
+   * nearest-point search `projectOntoPolyline` does (that work already happened inside
+   * `this.matcher.match()` to produce `distanceM` in the first place). */
+  private pointAtDistanceM(distanceM: number): LocalPoint {
+    const centerline = this.profile.centerline;
+    const cumulative = this.profile.cumulativeDistancesM;
+    const normalized = ((distanceM % this.totalLengthM) + this.totalLengthM) % this.totalLengthM;
+    for (let index = 0; index < centerline.length; index += 1) {
+      const current = centerline[index];
+      const next = centerline[(index + 1) % centerline.length];
+      if (current === undefined || next === undefined) continue;
+      const startM = cumulative[index] ?? 0;
+      const segmentLength = Math.hypot(next.e - current.e, next.n - current.n);
+      const endM = index === centerline.length - 1 ? this.totalLengthM : startM + segmentLength;
+      if (normalized <= endM || index === centerline.length - 1) {
+        const span = endM - startM;
+        const t = span === 0 ? 0 : Math.max(0, Math.min(1, (normalized - startM) / span));
+        return { e: current.e + (next.e - current.e) * t, n: current.n + (next.n - current.n) * t };
+      }
+    }
+    return centerline[0] as LocalPoint;
   }
 
   finish(): CalibrationResult {

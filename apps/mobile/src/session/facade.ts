@@ -23,7 +23,20 @@ export interface FacadeState {
   delta: DeltaUpdate | null;
   sector: number;
   gnssQuality: QualityLevel;
-  calibration: { coverageFraction: number; onTrack: boolean } | null;
+  /** Additive V2 track-map fields, mirrored 1:1 from `FacadeStateCore.calibration`
+   * (`@circuit/core`) -- the last fed calibration sample's raw and matched-onto-
+   * centerline local-frame positions, present once a sample with a valid match has been
+   * fed this calibration attempt. */
+  calibration: {
+    coverageFraction: number;
+    onTrack: boolean;
+    rawLocalX?: number;
+    rawLocalY?: number;
+    matchedLocalX?: number;
+    matchedLocalY?: number;
+    lateralM?: number;
+    distanceM?: number;
+  } | null;
   calibrationResult: CalibrationResult | null;
   laps: LapRecord[];
   /** Latest known speed in km/h, derived from the most recent sample's `speedMps`; `null` before any sample reports one. */

@@ -9,7 +9,9 @@ import { ProgressRing } from '../components/ProgressRing';
 import { LongPressButton } from '../components/LongPressButton';
 import { StatusBanner } from '../components/StatusBanner';
 import { facade } from '../../session/composition';
+import { TMR_CIRCUIT_PROFILE, TMR_RUNTIME_PROFILE } from '../../session/tmrProfile';
 import { useFacadeState } from '../hooks/useFacadeState';
+import { TrackMapView } from '../components/TrackMapView';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'ActiveCalibration'>;
 
@@ -32,6 +34,20 @@ export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Elemen
   const coverageFraction = state.calibration?.coverageFraction ?? 0;
   const onTrack = state.calibration?.onTrack ?? true;
   const percent = Math.round(coverageFraction * 100);
+
+  // V2/V3 track-map plumbing: additive fields on `state.calibration`, present once a
+  // sample with a valid track match has been fed this calibration attempt.
+  const lateralM = state.calibration?.lateralM;
+  const distanceM = state.calibration?.distanceM;
+  const rawLocal =
+    state.calibration?.rawLocalX !== undefined && state.calibration?.rawLocalY !== undefined
+      ? { e: state.calibration.rawLocalX, n: state.calibration.rawLocalY }
+      : undefined;
+  const matchedLocal =
+    state.calibration?.matchedLocalX !== undefined && state.calibration?.matchedLocalY !== undefined
+      ? { e: state.calibration.matchedLocalX, n: state.calibration.matchedLocalY }
+      : undefined;
+  const offsetOverCorridor = lateralM !== undefined && Math.abs(lateralM) > TMR_CIRCUIT_PROFILE.corridorWidthM;
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -75,6 +91,30 @@ export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Elemen
           </Text>
         </View>
 
+        {/* V3 binding design: live track-map + offset/position info row, diagnosing
+            OSM-centerline mismatches on-site (field context: "off track" while the
+            driver was actually on the circuit). */}
+        <View style={styles.infoRow}>
+          <Text
+            style={[styles.infoText, offsetOverCorridor && styles.infoTextAlert]}
+            maxFontSizeMultiplier={1.3}
+          >
+            {lateralM === undefined ? 'Offset: — m' : `Offset: ${Math.abs(lateralM).toFixed(1)} m`}
+          </Text>
+          <Text style={styles.infoText} maxFontSizeMultiplier={1.3}>
+            {distanceM === undefined ? 'Position: — km' : `Position: ${(distanceM / 1_000).toFixed(1)} km`}
+          </Text>
+        </View>
+        <View style={styles.mapWrap}>
+          <TrackMapView
+            centerline={TMR_RUNTIME_PROFILE.centerline}
+            startFinishLocal={TMR_RUNTIME_PROFILE.startFinishGate.a}
+            rawLocal={rawLocal}
+            matchedLocal={matchedLocal}
+            onTrack={onTrack}
+          />
+        </View>
+
         <View style={styles.cancelWrap}>
           <LongPressButton
             label="Cancel Calibration"
@@ -113,5 +153,9 @@ const styles = StyleSheet.create({
   },
   onTrackDot: { width: 10, height: 10, borderRadius: 5, marginRight: spacing.sm },
   onTrackText: { ...typography.label },
+  infoRow: { flexDirection: 'row', justifyContent: 'space-between', width: '100%' },
+  infoText: { ...typography.caption, color: colors.textSecondary },
+  infoTextAlert: { color: colors.danger },
+  mapWrap: { width: '100%' },
   cancelWrap: { marginTop: spacing.xl, width: '100%' },
 });

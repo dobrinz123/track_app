@@ -38,7 +38,20 @@ export interface FacadeStateCore {
   delta: DeltaUpdate | null;
   sector: number;
   gnssQuality: QualityLevel;
-  calibration: { coverageFraction: number; onTrack: boolean } | null;
+  /** Additive V2 track-map fields (`rawLocalX`/`Y`, `matchedLocalX`/`Y`, `lateralM`,
+   * `distanceM`) mirror `CalibrationEngine.progress()`'s own additive fields 1:1 -- the
+   * last fed sample's raw and matched-onto-centerline local-frame positions, present
+   * once a sample with a valid match has been fed this calibration attempt. */
+  calibration: {
+    coverageFraction: number;
+    onTrack: boolean;
+    rawLocalX?: number;
+    rawLocalY?: number;
+    matchedLocalX?: number;
+    matchedLocalY?: number;
+    lateralM?: number;
+    distanceM?: number;
+  } | null;
   calibrationResult: CalibrationResult | null;
   laps: LapRecord[];
   /** Latest known speed in km/h, derived from the most recent sample's `speedMps`; `null` before any sample reports one. */
@@ -241,7 +254,16 @@ export class SessionController {
   private latestDelta: DeltaUpdate | null = null;
   private latestSpeedKph: number | null = null;
   private latestGnssQuality: QualityLevel = 'good';
-  private calibrationSnapshot: { coverageFraction: number; onTrack: boolean } | null = null;
+  private calibrationSnapshot: {
+    coverageFraction: number;
+    onTrack: boolean;
+    rawLocalX?: number;
+    rawLocalY?: number;
+    matchedLocalX?: number;
+    matchedLocalY?: number;
+    lateralM?: number;
+    distanceM?: number;
+  } | null = null;
   private calibrationResult: CalibrationResult | null = null;
   private lastLapMs: number | null = null;
   private pbMs: number | null = null;
@@ -706,7 +728,16 @@ export class SessionController {
     if (this.mode === 'calibrating' && this.calibrationEngine !== null) {
       this.calibrationEngine.feed(sample);
       const progress = this.calibrationEngine.progress();
-      this.calibrationSnapshot = { coverageFraction: progress.coverageFraction, onTrack: progress.onTrack };
+      this.calibrationSnapshot = {
+        coverageFraction: progress.coverageFraction,
+        onTrack: progress.onTrack,
+        rawLocalX: progress.rawLocalX,
+        rawLocalY: progress.rawLocalY,
+        matchedLocalX: progress.matchedLocalX,
+        matchedLocalY: progress.matchedLocalY,
+        lateralM: progress.lateralM,
+        distanceM: progress.distanceM,
+      };
       this.latestGnssQuality = progress.qualityOk ? 'good' : 'degraded';
       if (progress.coverageFraction >= CALIBRATION_COMPLETE_COVERAGE_FRACTION) this.finishCalibrationNow();
       this.emit();
