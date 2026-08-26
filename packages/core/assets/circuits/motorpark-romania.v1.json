@@ -1,0 +1,584 @@
+{
+  "schemaVersion": 1,
+  "circuitId": "motorpark-romania",
+  "displayName": "MotorPark România",
+  "country": "Romania",
+  "locality": "Adâncata, Ialomița",
+  "layoutId": "full",
+  "layoutVersion": 1,
+  "source": {
+    "name": "© OpenStreetMap contributors",
+    "url": "https://www.openstreetmap.org/way/333031201",
+    "license": "ODbL 1.0",
+    "retrievedAt": "2026-08-26"
+  },
+  "geometryStatus": "community-derived",
+  "sectorStatus": "app-defined",
+  "direction": "clockwise",
+  "centerline": [
+    {
+      "lat": 44.7797194,
+      "lon": 26.4720758
+    },
+    {
+      "lat": 44.7806738,
+      "lon": 26.4702799
+    },
+    {
+      "lat": 44.7812273,
+      "lon": 26.4692364
+    },
+    {
+      "lat": 44.7817294,
+      "lon": 26.468339
+    },
+    {
+      "lat": 44.7819438,
+      "lon": 26.4679939
+    },
+    {
+      "lat": 44.7822378,
+      "lon": 26.4677178
+    },
+    {
+      "lat": 44.7824337,
+      "lon": 26.4676747
+    },
+    {
+      "lat": 44.7826009,
+      "lon": 26.4676928
+    },
+    {
+      "lat": 44.7827135,
+      "lon": 26.4677843
+    },
+    {
+      "lat": 44.7827915,
+      "lon": 26.4679033
+    },
+    {
+      "lat": 44.7828741,
+      "lon": 26.4680558
+    },
+    {
+      "lat": 44.7829304,
+      "lon": 26.4683121
+    },
+    {
+      "lat": 44.7829348,
+      "lon": 26.4686781
+    },
+    {
+      "lat": 44.7828871,
+      "lon": 26.4692333
+    },
+    {
+      "lat": 44.7827919,
+      "lon": 26.4703193
+    },
+    {
+      "lat": 44.7827572,
+      "lon": 26.4710087
+    },
+    {
+      "lat": 44.7828135,
+      "lon": 26.4716554
+    },
+    {
+      "lat": 44.7829887,
+      "lon": 26.4724038
+    },
+    {
+      "lat": 44.7831898,
+      "lon": 26.4730688
+    },
+    {
+      "lat": 44.7833798,
+      "lon": 26.4735557
+    },
+    {
+      "lat": 44.7836103,
+      "lon": 26.4738701
+    },
+    {
+      "lat": 44.7839567,
+      "lon": 26.474285
+    },
+    {
+      "lat": 44.7841689,
+      "lon": 26.4746633
+    },
+    {
+      "lat": 44.7843183,
+      "lon": 26.4749531
+    },
+    {
+      "lat": 44.7843703,
+      "lon": 26.4750964
+    },
+    {
+      "lat": 44.7843811,
+      "lon": 26.4752307
+    },
+    {
+      "lat": 44.7843595,
+      "lon": 26.4753588
+    },
+    {
+      "lat": 44.7842902,
+      "lon": 26.4754717
+    },
+    {
+      "lat": 44.7841884,
+      "lon": 26.4755388
+    },
+    {
+      "lat": 44.7840693,
+      "lon": 26.4755479
+    },
+    {
+      "lat": 44.7839351,
+      "lon": 26.4754961
+    },
+    {
+      "lat": 44.783751,
+      "lon": 26.4753435
+    },
+    {
+      "lat": 44.7835074,
+      "lon": 26.4750847
+    },
+    {
+      "lat": 44.7827174,
+      "lon": 26.4742305
+    },
+    {
+      "lat": 44.7824786,
+      "lon": 26.4739026
+    },
+    {
+      "lat": 44.7823194,
+      "lon": 26.4735489
+    },
+    {
+      "lat": 44.7822214,
+      "lon": 26.4731779
+    },
+    {
+      "lat": 44.7821234,
+      "lon": 26.4728155
+    },
+    {
+      "lat": 44.7819458,
+      "lon": 26.4724272
+    },
+    {
+      "lat": 44.7817559,
+      "lon": 26.4721684
+    },
+    {
+      "lat": 44.78156,
+      "lon": 26.4720044
+    },
+    {
+      "lat": 44.7813579,
+      "lon": 26.4719699
+    },
+    {
+      "lat": 44.7811933,
+      "lon": 26.4720444
+    },
+    {
+      "lat": 44.781043,
+      "lon": 26.4722215
+    },
+    {
+      "lat": 44.7806117,
+      "lon": 26.4729314
+    },
+    {
+      "lat": 44.7804698,
+      "lon": 26.4731865
+    },
+    {
+      "lat": 44.7803841,
+      "lon": 26.4734108
+    },
+    {
+      "lat": 44.7803841,
+      "lon": 26.4736179
+    },
+    {
+      "lat": 44.7804131,
+      "lon": 26.4738704
+    },
+    {
+      "lat": 44.7805224,
+      "lon": 26.474126
+    },
+    {
+      "lat": 44.780671,
+      "lon": 26.4744143
+    },
+    {
+      "lat": 44.7808924,
+      "lon": 26.4747632
+    },
+    {
+      "lat": 44.7810693,
+      "lon": 26.4751343
+    },
+    {
+      "lat": 44.7810978,
+      "lon": 26.4754298
+    },
+    {
+      "lat": 44.7810361,
+      "lon": 26.4757495
+    },
+    {
+      "lat": 44.7808084,
+      "lon": 26.4761438
+    },
+    {
+      "lat": 44.7798312,
+      "lon": 26.4776486
+    },
+    {
+      "lat": 44.7795125,
+      "lon": 26.4778902
+    },
+    {
+      "lat": 44.7792633,
+      "lon": 26.477932
+    },
+    {
+      "lat": 44.7790734,
+      "lon": 26.4778371
+    },
+    {
+      "lat": 44.7789571,
+      "lon": 26.4776041
+    },
+    {
+      "lat": 44.7789719,
+      "lon": 26.4772204
+    },
+    {
+      "lat": 44.7791898,
+      "lon": 26.4763272
+    },
+    {
+      "lat": 44.7792817,
+      "lon": 26.4759993
+    },
+    {
+      "lat": 44.7793,
+      "lon": 26.4757577
+    },
+    {
+      "lat": 44.7792388,
+      "lon": 26.4756024
+    },
+    {
+      "lat": 44.7791347,
+      "lon": 26.4755161
+    },
+    {
+      "lat": 44.7789938,
+      "lon": 26.4755161
+    },
+    {
+      "lat": 44.778853,
+      "lon": 26.4756283
+    },
+    {
+      "lat": 44.7787611,
+      "lon": 26.4758181
+    },
+    {
+      "lat": 44.7784891,
+      "lon": 26.4763672
+    },
+    {
+      "lat": 44.7781386,
+      "lon": 26.4768107
+    },
+    {
+      "lat": 44.7777563,
+      "lon": 26.4771226
+    },
+    {
+      "lat": 44.7772437,
+      "lon": 26.4774435
+    },
+    {
+      "lat": 44.7770949,
+      "lon": 26.4775347
+    },
+    {
+      "lat": 44.7769399,
+      "lon": 26.477621
+    },
+    {
+      "lat": 44.7760944,
+      "lon": 26.478177
+    },
+    {
+      "lat": 44.7757726,
+      "lon": 26.4784733
+    },
+    {
+      "lat": 44.7754293,
+      "lon": 26.4788645
+    },
+    {
+      "lat": 44.7752747,
+      "lon": 26.4789698
+    },
+    {
+      "lat": 44.7751391,
+      "lon": 26.479012
+    },
+    {
+      "lat": 44.7749628,
+      "lon": 26.4790059
+    },
+    {
+      "lat": 44.7747969,
+      "lon": 26.4789307
+    },
+    {
+      "lat": 44.7746463,
+      "lon": 26.4788156
+    },
+    {
+      "lat": 44.7741731,
+      "lon": 26.4781974
+    },
+    {
+      "lat": 44.7740913,
+      "lon": 26.4780156
+    },
+    {
+      "lat": 44.7740446,
+      "lon": 26.4777655
+    },
+    {
+      "lat": 44.7740645,
+      "lon": 26.477537
+    },
+    {
+      "lat": 44.7741515,
+      "lon": 26.4773065
+    },
+    {
+      "lat": 44.7742505,
+      "lon": 26.4771732
+    },
+    {
+      "lat": 44.7755369,
+      "lon": 26.4760035
+    },
+    {
+      "lat": 44.7756786,
+      "lon": 26.4759023
+    },
+    {
+      "lat": 44.7758337,
+      "lon": 26.475846
+    },
+    {
+      "lat": 44.7759843,
+      "lon": 26.4758339
+    },
+    {
+      "lat": 44.7761822,
+      "lon": 26.4758702
+    },
+    {
+      "lat": 44.7768968,
+      "lon": 26.476142
+    },
+    {
+      "lat": 44.7770426,
+      "lon": 26.4761975
+    },
+    {
+      "lat": 44.7772491,
+      "lon": 26.4762641
+    },
+    {
+      "lat": 44.777391,
+      "lon": 26.476246
+    },
+    {
+      "lat": 44.7775095,
+      "lon": 26.4761803
+    },
+    {
+      "lat": 44.7783539,
+      "lon": 26.4746111
+    },
+    {
+      "lat": 44.7796418,
+      "lon": 26.4722176
+    }
+  ],
+  "totalLengthM": 4056.2614023331853,
+  "startFinishGate": {
+    "id": "start-finish",
+    "kind": "startFinish",
+    "a": {
+      "lat": 44.77960421456777,
+      "lon": 26.471954306637596
+    },
+    "b": {
+      "lat": 44.779834585432226,
+      "lon": 26.472197293362402
+    }
+  },
+  "sectorGates": [
+    {
+      "id": "sector-1",
+      "kind": "sector",
+      "a": {
+        "lat": 44.782629792029276,
+        "lon": 26.474391311780376
+      },
+      "b": {
+        "lat": 44.78280500797073,
+        "lon": 26.474069688219625
+      },
+      "sectorIndex": 1
+    },
+    {
+      "id": "sector-2",
+      "kind": "sector",
+      "a": {
+        "lat": 44.77781473081696,
+        "lon": 26.477307849719185
+      },
+      "b": {
+        "lat": 44.777697869183044,
+        "lon": 26.476937350280817
+      },
+      "sectorIndex": 2
+    }
+  ],
+  "pitLane": {
+    "polyline": [
+      {
+        "lat": 44.7768968,
+        "lon": 26.476142
+      },
+      {
+        "lat": 44.777174,
+        "lon": 26.476077
+      },
+      {
+        "lat": 44.7773628,
+        "lon": 26.4759354
+      },
+      {
+        "lat": 44.7775517,
+        "lon": 26.4757621
+      },
+      {
+        "lat": 44.7777302,
+        "lon": 26.4755986
+      },
+      {
+        "lat": 44.7779363,
+        "lon": 26.4752446
+      },
+      {
+        "lat": 44.7781893,
+        "lon": 26.4748101
+      },
+      {
+        "lat": 44.7785295,
+        "lon": 26.474149
+      },
+      {
+        "lat": 44.7783539,
+        "lon": 26.4746111
+      },
+      {
+        "lat": 44.7785295,
+        "lon": 26.474149
+      },
+      {
+        "lat": 44.7786848,
+        "lon": 26.4738605
+      },
+      {
+        "lat": 44.7787365,
+        "lon": 26.4737096
+      },
+      {
+        "lat": 44.7787729,
+        "lon": 26.47358
+      },
+      {
+        "lat": 44.7789442,
+        "lon": 26.4732508
+      },
+      {
+        "lat": 44.7794262,
+        "lon": 26.472353
+      },
+      {
+        "lat": 44.7796153,
+        "lon": 26.4720005
+      },
+      {
+        "lat": 44.7797758,
+        "lon": 26.471772
+      },
+      {
+        "lat": 44.7804717,
+        "lon": 26.4705405
+      },
+      {
+        "lat": 44.7806738,
+        "lon": 26.4702799
+      }
+    ],
+    "entryGate": {
+      "id": "pit-entry",
+      "kind": "pitEntry",
+      "a": {
+        "lat": 44.77693430506781,
+        "lon": 26.475946291256104
+      },
+      "b": {
+        "lat": 44.776859294932194,
+        "lon": 26.476337708743895
+      }
+    },
+    "exitGate": {
+      "id": "pit-exit",
+      "kind": "pitExit",
+      "a": {
+        "lat": 44.780558614567774,
+        "lon": 26.470158406637598
+      },
+      "b": {
+        "lat": 44.78078898543223,
+        "lon": 26.470401393362405
+      }
+    }
+  },
+  "boundingRegion": {
+    "center": {
+      "lat": 44.77993939215685,
+      "lon": 26.474519351960787
+    },
+    "radiusM": 1206.4083104400488
+  },
+  "corridorWidthM": 16,
+  "createdAtUtc": "2026-08-26T00:00:00Z",
+  "updatedAtUtc": "2026-08-26T00:00:00Z",
+  "confidenceNotes": "Geometry OpenStreetMap © OpenStreetMap contributors, ODbL 1.0 -- attribution mandatory wherever this circuit is shown. Traced from OSM aerial mapping and NOT validated on-site. Nothing in this asset is \"official\": start/finish, sector, and pit gates are app-defined (ADR-0002), not sanctioning-body-provided. Way IDs: main loop 333031201 (83 nodes incl. closing duplicate, 3326.1 m closed), full-layout extension 949617051 (26 nodes) splicing in for the main-loop segment between node-index 74 (node 3401455119) and node-index 79 (node 8791129031, same orientation) -- short-config chord way 333031200 (120 m) is excluded, it is not part of this full layout. Computed closed length 4056.3 m vs published 4052 m (racingcircuits.info, 0.11% delta) vs 4129 m (motorparkromania.ro, 1.76% delta) -- both published figures recorded for reference. Pit lane: way 953930215 (249 m, SE, track-side entry) then way 953930214 (430 m, NW, rejoins track); there is a ~41 m unmapped gap between the two ways (garage apron, not mapped as raceway) bridged by a straight connector -- the pitLane.polyline simply concatenates both ways, so that gap is one implicit straight segment in the polyline. corridorWidthM=16 combines the published 11-16 m [PLAUSIBLE] track width with a GNSS matching margin. Sector gates use the TMR v2 \"straight vertex\" rule verbatim: for each target fraction (1/3, 2/3 of lap distance), find the nearest qualifying straight vertex within +/-180 m of the target distance; place the gate there (perpendicular, same width rules as the start/finish gate). A vertex qualifies as straight when its mean absolute turning angle over a +/-40 m centerline window is < 0.008 rad/m. If no qualifying vertex exists in the window, fall back to the exact fraction and note it here. No fallback was required."
+}

@@ -12,7 +12,8 @@
     "test": "npm run test --workspaces --if-present",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "generate:tmr": "node --experimental-strip-types packages/core/scripts/generate-tmr-profile.ts"
+    "generate:tmr": "node --experimental-strip-types packages/core/scripts/generate-tmr-profile.ts",
+    "generate:motorpark": "node --experimental-strip-types packages/core/scripts/generate-motorpark-profile.ts"
   },
   "devDependencies": {
     "@eslint/js": "^9.13.0",
