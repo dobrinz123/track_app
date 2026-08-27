@@ -35,12 +35,23 @@ export interface ObdTransport {
 
 // ---------- ELM327 session (pure TS, @circuit/core) ----------
 export type Elm327State = 'idle' | 'connecting' | 'initializing' | 'polling' | 'stopped' | 'failed';
+/**
+ * Field revision 2 (2026-08-27, binding — Phase 4h): which standard PID
+ * `accelPedalPct` is polled with -- '5A' ("Relative accelerator pedal
+ * position", the primary source) or '49' (the fallback, used when the DME
+ * answers NRC/unsupported for 0x5A). P4h-FIX1 H4 (after Codex P4h-REV1 HIGH):
+ * carried per-session in `Elm327Config` below, never in process-global state.
+ */
+export type AccelPedalPidSource = '5A' | '49';
+
 export interface Elm327Config {
   pollPlan: Array<{ channel: TelemetryChannelId; hz: number }>; // target rates; scheduler degrades gracefully
   customPids?: Array<{ channel: TelemetryChannelId; request: string }>; // raw hex sent verbatim
   initTimeoutMs: number;       // default 5000
   commandTimeoutMs: number;    // default 1500 per request
   maxConsecutiveErrors: number;// default 5 -> 'failed'
+  /** P4h-FIX1 H4 (binding): the accelPedalPct PID this session polls/decodes, FROZEN for its whole lifetime. Default '5A'. */
+  accelPedalPidSource?: AccelPedalPidSource;
 }
 export interface Elm327Session {
   start(): void;               // runs init handshake then the polling loop

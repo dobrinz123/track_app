@@ -552,6 +552,46 @@ export const gForceProvider: GForceProvider = createGForceProvider({
   monotonicNow: () => telemetryClock.now(),
 });
 
+/**
+ * P4h-FIX1 H6 (binding, after Codex P4h-REV1 HIGH, `TelemetryScreen.tsx:224-238`;
+ * `composition.ts:613-624`): "G-provider ownership is not reference-counted
+ * ... monitor Start -> driving session reuses the already-running provider ->
+ * session end unconditionally calls `gForceProvider.stop()` -> G rows die
+ * while the monitor remains open and still expects ownership."
+ *
+ * The provider is a singleton with two independent users -- the telemetry
+ * monitor screen and a driving session -- so ownership lives HERE, with the
+ * singleton, as a reference count (the same "the composition layer owns the
+ * provider" principle contracts.md's provider-ownership amendment already
+ * applies to GNSS). Each user takes exactly one reference and releases it;
+ * the provider starts on the first and stops only at zero.
+ */
+let gForceHolders = 0;
+
+/** Takes one G-provider reference, starting it if it was not already running. Synchronous, never throws (a provider-side throw is logged, exactly like the session-start path's own backstop). */
+export function acquireGForce(): void {
+  gForceHolders += 1;
+  if (gForceHolders > 1) return;
+  try {
+    gForceProvider.start();
+  } catch (error) {
+    console.warn('[composition] gForceProvider.start() threw synchronously', error);
+  }
+}
+
+/** Releases one G-provider reference; stops the provider only when the LAST holder lets go. An unbalanced extra release is a no-op (never stops a provider nobody holds). */
+export function releaseGForce(): Promise<void> {
+  if (gForceHolders === 0) return Promise.resolve();
+  gForceHolders -= 1;
+  if (gForceHolders > 0) return Promise.resolve();
+  return gForceProvider.stop();
+}
+
+/** Test/diagnostic visibility into the reference count above. */
+export function gForceHolderCount(): number {
+  return gForceHolders;
+}
+
 let telemetryRecorder: TelemetryRecorder | null = null;
 /** In-flight telemetry shutdown (F2 residue fix) -- repeated `stopTelemetryRecording()` calls return this same promise so `onSessionEnded`'s barrier awaits the REAL final flush. Cleared on the next `startTelemetryRecording()`. */
 let telemetryShutdown: Promise<void> | null = null;
@@ -611,7 +651,9 @@ function stopTelemetryRecording(): Promise<void> {
     // recorded through `recorder` either on this path.
     telemetryShutdown = null;
     void telemetryProvider.stop();
-    void gForceProvider.stop();
+    // P4h-FIX1 H6 (binding): releases only THIS session's own reference --
+    // the monitor screen's (if it holds one) keeps the provider running.
+    void releaseGForce();
     return Promise.resolve();
   }
   telemetryShutdown = (async () => {
@@ -621,7 +663,11 @@ function stopTelemetryRecording(): Promise<void> {
       // flush -- a G-provider failure here is isolated (logged, never
       // thrown) exactly like an OBD-provider failure already was, and never
       // blocks or fails session-end persistence.
-      const results = await Promise.allSettled([telemetryProvider.stop(), gForceProvider.stop(), recorder.endSession()]);
+      // P4h-FIX1 H6 (binding): `releaseGForce()` (not a bare
+      // `gForceProvider.stop()`) -- the session drops ITS OWN reference; the
+      // provider stops only if nothing else (the telemetry monitor) still
+      // holds one. It still joins the SAME `allSettled` barrier.
+      const results = await Promise.allSettled([telemetryProvider.stop(), releaseGForce(), recorder.endSession()]);
       for (const result of results) {
         if (result.status === 'rejected') {
           console.warn('[composition] telemetry shutdown step failed', result.reason);
@@ -693,12 +739,11 @@ function startTelemetryRecording(sessionId: string): void {
   }
   // Channel revision: started alongside the OBD provider but independently --
   // neither `start()` call is gated on the other, and neither's own state
-  // (running/failed) affects whether the other is called.
-  try {
-    gForceProvider.start();
-  } catch (error) {
-    console.warn('[composition] gForceProvider.start() threw synchronously', error);
-  }
+  // (running/failed) affects whether the other is called. P4h-FIX1 H6
+  // (binding): through the reference count, so this session's hold is
+  // released (and only this one) when it ends -- `acquireGForce()` carries
+  // the same never-throw backstop this call site had.
+  acquireGForce();
 }
 
 // F2 fix (WPT3, binding): registered once at module load (independent of

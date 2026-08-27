@@ -5,17 +5,22 @@ import {
   ENET_SPEC_CHANNELS,
   SimulatedEnetTransport,
   DEFAULT_ENET_DID_SCENARIO,
+  DID_OBSERVATION_PHASES,
+  filterSweepCandidates,
+  type DidCandidateSummary,
   type ObdTransport,
   type TelemetryChannelId,
 } from '@circuit/core';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
-import { facade, settingsStore } from '../../session/composition';
+import { facade, getTelemetryReadDb, settingsStore } from '../../session/composition';
 import { useSettings } from '../hooks/useSettings';
 import { EnetTcpTransport } from '../../session/enetTcpTransport';
 import { formatHexByte, mergeEnetChannelSpecJson } from '../../session/enetSettingsValidation';
 import { createDidSweepController, type DidSweepSnapshot } from '../../session/didSweepController';
+import { createDidSweepStore, type DidSweepRunRecord } from '../../persistence/didSweepStore';
+import { buildDidSweepExportDocument, buildCopySummaryText, shareDidSweepExport } from '../../session/didSweepExport';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'DidSweep'>;
 
@@ -63,6 +68,17 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   const [snapshot, setSnapshot] = React.useState<DidSweepSnapshot | null>(null);
   const [tagPickerDid, setTagPickerDid] = React.useState<number | null>(null);
   const [tagBanner, setTagBanner] = React.useState<string | null>(null);
+  // DID sweep — results persistence, export & candidate filtering addendum
+  // (2026-08-27, binding — Phase 4i): "Resume button when a persisted run
+  // exists" -- refreshed after every start()/stop()/resumePersistedRun() so
+  // it never shows a run that's now superseded.
+  const [resumableRuns, setResumableRuns] = React.useState<DidSweepRunRecord[]>([]);
+  // "responders collapsed with count + expand".
+  const [respondersExpanded, setRespondersExpanded] = React.useState(false);
+  const [staticExpanded, setStaticExpanded] = React.useState(false);
+  const [shareBanner, setShareBanner] = React.useState<string | null>(null);
+  const [sharing, setSharing] = React.useState(false);
+  const didSweepStoreRef = React.useRef(createDidSweepStore(getTelemetryReadDb()));
 
   const settingsRef = React.useRef(settings);
   settingsRef.current = settings;
@@ -139,12 +155,21 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
             .filter((sample) => sample.tMs >= 0), // drop samples collected before the anchor (the tap-to-connect gap) -- no corresponding DID-relative instant exists for them.
         };
       },
+      // DID sweep persistence addendum (binding, P4i): `null` (web preview /
+      // before bootstrap resolves the on-device db) falls back to
+      // `createDidSweepStore`'s own in-memory implementation -- same
+      // ternary convention `composition.ts` uses everywhere else.
+      store: didSweepStoreRef.current,
     });
     controllerRef.current = controller;
     controller.subscribe((next) => {
       observingRef.current = next.phase === 'observing';
       setSnapshot(next);
+      if (next.phase === 'sweepComplete' || next.phase === 'stopped' || next.phase === 'idle') {
+        void controller.listPersistedRuns().then(setResumableRuns);
+      }
     });
+    void controller.listPersistedRuns().then(setResumableRuns);
     return controller;
   }
 
@@ -156,6 +181,37 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
     },
     [],
   );
+
+  // "Resume button when a persisted run exists" -- built (and its store
+  // queried) on mount, so the affordance is available BEFORE the user ever
+  // taps Start.
+  React.useEffect(() => {
+    ensureController();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `ensureController` is a stable ref-memoized factory, not meant to re-run per render.
+  }, []);
+
+  // DID sweep — range presets addendum (binding, P4i): "Full (slow, ~70
+  // min)", "Resume", and the two priority presets discovered from the field
+  // sweep (0x1000-0x1FFF, 0x4000-0x4FFF are dense on this DME -- EMPIRICAL).
+  function applyRangePreset(preset: 'full' | 'range1000' | 'range4000'): void {
+    setRangeError(null);
+    if (preset === 'full') {
+      setFromDraft('0000');
+      setToDraft('FFFF');
+    } else if (preset === 'range1000') {
+      setFromDraft('1000');
+      setToDraft('1FFF');
+    } else {
+      setFromDraft('4000');
+      setToDraft('4FFF');
+    }
+  }
+
+  function handleResume(runId: string): void {
+    setRangeError(null);
+    setTagBanner(null);
+    void ensureController().resumePersistedRun(runId);
+  }
 
   function handleStart(): void {
     setRangeError(null);
@@ -186,6 +242,53 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
     controllerRef.current?.startObservation(windowMs);
   }
 
+  // DID sweep — guided candidate observation addendum (2026-08-27, binding —
+  // Phase 4i, user clarification): the visible, guided, repeated re-read
+  // (baseline -> brake -> steering -> throttle) over the FILTERED candidate
+  // set.
+  function handleStartGuidedObservation(): void {
+    controllerRef.current?.startGuidedObservation();
+  }
+
+  function handleStopGuidedObservationEarly(): void {
+    controllerRef.current?.stopGuidedObservationEarly();
+  }
+
+  async function handleShareResults(): Promise<void> {
+    const controller = controllerRef.current;
+    const runId = controller?.getCurrentRunId() ?? null;
+    if (controller === null || runId === null) {
+      setShareBanner('Nothing to share yet -- start a sweep first.');
+      return;
+    }
+    setSharing(true);
+    setShareBanner(null);
+    try {
+      const store = didSweepStoreRef.current;
+      const run = await store.getRun(runId);
+      if (run === null) {
+        setShareBanner('Could not find this run in storage.');
+        return;
+      }
+      const responders = await store.getResponders(runId);
+      const doc = buildDidSweepExportDocument({
+        run,
+        responders,
+        candidateSummaries: controllerRef.current?.getSnapshot().candidateSummaries,
+        suggestions: controllerRef.current?.getSnapshot().suggestions,
+        nowIso: new Date().toISOString(),
+      });
+      const result = await shareDidSweepExport(doc);
+      setShareBanner(
+        result.shared
+          ? 'Shared.'
+          : `Export ready (${result.jsonLength} bytes) -- sharing isn't available on this platform; see the console log.`,
+      );
+    } finally {
+      setSharing(false);
+    }
+  }
+
   function confirmTag(did: number, channel: TelemetryChannelId): void {
     const controller = controllerRef.current;
     if (controller === null) return;
@@ -205,6 +308,15 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   const observing = phase === 'observing';
   const canStart = phase === 'idle' || phase === 'stopped' || phase === 'sweepComplete' || phase === 'observationComplete';
   const totalNrc = Object.values(snapshot?.nrcCounts ?? {}).reduce((sum, n) => sum + n, 0);
+  // Addendum (binding, P4i): "the observation phase uses the filtered
+  // candidate set and shows 'N candidates of M responders'" -- computed here
+  // (pure, deterministic) purely for DISPLAY; the controller applies the
+  // SAME filter internally when it actually builds its own poll list.
+  const candidateDids = snapshot === null ? [] : filterSweepCandidates(snapshot.responders);
+  const guidedPhaseSpec = snapshot?.guidedPhase == null ? null : DID_OBSERVATION_PHASES.find((p) => p.id === snapshot.guidedPhase) ?? null;
+  const rankedCandidates = snapshot?.candidateSummaries ?? [];
+  const activeCandidates = rankedCandidates.filter((c) => c.rank !== 'static');
+  const staticCandidates = rankedCandidates.filter((c) => c.rank === 'static');
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -248,6 +360,49 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
               accessibilityLabel="Sweep range end, hex DID"
             />
           </View>
+
+          {/* Range presets addendum (binding, P4i): "Full (slow, ~70 min)",
+              "Resume", and the two priority presets discovered from the
+              field sweep -- 0x1000-0x1FFF/0x4000-0x4FFF are dense on this
+              DME (EMPIRICAL). */}
+          {canStart ? (
+            <View style={styles.buttonRow}>
+              <Pressable style={styles.presetChip} onPress={() => applyRangePreset('full')} accessibilityRole="button" accessibilityLabel="Full range preset, 0000 to FFFF">
+                <Text style={styles.presetChipText} maxFontSizeMultiplier={1.3}>
+                  Full (~70 min)
+                </Text>
+              </Pressable>
+              <Pressable style={styles.presetChip} onPress={() => applyRangePreset('range1000')} accessibilityRole="button" accessibilityLabel="Preset range 0x1000 to 0x1FFF">
+                <Text style={styles.presetChipText} maxFontSizeMultiplier={1.3}>
+                  0x1000–0x1FFF
+                </Text>
+              </Pressable>
+              <Pressable style={styles.presetChip} onPress={() => applyRangePreset('range4000')} accessibilityRole="button" accessibilityLabel="Preset range 0x4000 to 0x4FFF">
+                <Text style={styles.presetChipText} maxFontSizeMultiplier={1.3}>
+                  0x4000–0x4FFF
+                </Text>
+              </Pressable>
+            </View>
+          ) : null}
+
+          {/* "Resume button when a persisted run exists" (binding, P4i). */}
+          {canStart && resumableRuns.length > 0
+            ? resumableRuns.slice(0, 1).map((run) => (
+                <Pressable
+                  key={run.runId}
+                  style={styles.buttonSecondary}
+                  onPress={() => handleResume(run.runId)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Resume sweep from ${formatHexDid(run.lastDid ?? run.rangeFrom)}`}
+                >
+                  <Text style={styles.buttonSecondaryText} maxFontSizeMultiplier={1.3}>
+                    Resume from {run.lastDid === null ? formatHexDid(run.rangeFrom) : formatHexDid(run.lastDid)} (
+                    {run.responderCount} responders so far)
+                  </Text>
+                </Pressable>
+              ))
+            : null}
+
           {rangeError === null ? null : (
             <Text style={styles.errorBanner} maxFontSizeMultiplier={1.3} accessibilityLiveRegion="polite">
               {rangeError}
@@ -326,19 +481,35 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
 
         {snapshot === null || snapshot.responders.length === 0 ? null : (
           <View style={styles.card}>
-            <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
-              RESPONDERS
+            <Pressable
+              style={styles.collapseHeaderRow}
+              onPress={() => setRespondersExpanded((v) => !v)}
+              accessibilityRole="button"
+              accessibilityLabel={respondersExpanded ? 'Collapse responders' : `Expand ${snapshot.responders.length} responders`}
+            >
+              <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
+                RESPONDERS ({snapshot.responders.length})
+              </Text>
+              <Text style={styles.buttonSecondaryText} maxFontSizeMultiplier={1.3}>
+                {respondersExpanded ? 'Hide' : 'Show'}
+              </Text>
+            </Pressable>
+            <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+              {candidateDids.length} candidate{candidateDids.length === 1 ? '' : 's'} of {snapshot.responders.length} responders
+              (length 1-8 bytes, not an ASCII string).
             </Text>
-            {snapshot.responders.map((responder) => (
-              <View key={responder.did} style={styles.responderRow}>
-                <Text style={styles.responderDid} maxFontSizeMultiplier={1.3}>
-                  {formatHexDid(responder.did)}
-                </Text>
-                <Text style={styles.responderRaw} maxFontSizeMultiplier={1.3}>
-                  {formatBytesHex(responder.raw)}
-                </Text>
-              </View>
-            ))}
+            {respondersExpanded
+              ? snapshot.responders.map((responder) => (
+                  <View key={responder.did} style={styles.responderRow}>
+                    <Text style={styles.responderDid} maxFontSizeMultiplier={1.3}>
+                      {formatHexDid(responder.did)}
+                    </Text>
+                    <Text style={styles.responderRaw} maxFontSizeMultiplier={1.3}>
+                      {formatBytesHex(responder.raw)}
+                    </Text>
+                  </View>
+                ))
+              : null}
 
             {(phase === 'sweepComplete' || phase === 'paused' || phase === 'stopped' || phase === 'observationComplete') && !observing ? (
               <View style={styles.fieldRow}>
@@ -357,11 +528,33 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
             {(phase === 'sweepComplete' || phase === 'paused' || phase === 'stopped' || phase === 'observationComplete') && !observing ? (
               <Pressable style={styles.buttonSecondary} onPress={handleStartObservation} accessibilityRole="button" accessibilityLabel="Start observation">
                 <Text style={styles.buttonSecondaryText} maxFontSizeMultiplier={1.3}>
-                  Start observation
+                  Start observation (single window, suggestions)
                 </Text>
               </Pressable>
             ) : null}
-            {observing ? (
+            {/* Guided candidate observation addendum (binding, P4i, user
+                clarification): the visible, guided, repeated re-read across
+                baseline/brake/steering/throttle. */}
+            {(phase === 'sweepComplete' || phase === 'stopped' || phase === 'observationComplete') && !observing ? (
+              <Pressable style={styles.button} onPress={handleStartGuidedObservation} accessibilityRole="button" accessibilityLabel="Start guided observation">
+                <Text style={styles.buttonText} maxFontSizeMultiplier={1.3}>
+                  Start guided observation (baseline → brake → steering → throttle)
+                </Text>
+              </Pressable>
+            ) : null}
+            {observing && guidedPhaseSpec !== null ? (
+              <>
+                <Text style={styles.helperText} maxFontSizeMultiplier={1.3} accessibilityLiveRegion="polite">
+                  {guidedPhaseSpec.prompt} — {Math.max(0, Math.ceil((guidedPhaseSpec.durationMs - snapshot.guidedPhaseElapsedMs) / 1_000))}s
+                </Text>
+                <Pressable style={styles.buttonDanger} onPress={handleStopGuidedObservationEarly} accessibilityRole="button" accessibilityLabel="Stop guided observation now">
+                  <Text style={styles.buttonDangerText} maxFontSizeMultiplier={1.3}>
+                    Stop now
+                  </Text>
+                </Pressable>
+              </>
+            ) : null}
+            {observing && guidedPhaseSpec === null ? (
               <>
                 <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
                   Observing… {(snapshot.observationElapsedMs / 1_000).toFixed(0)}s
@@ -379,6 +572,102 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
                 </Pressable>
               </>
             ) : null}
+          </View>
+        )}
+
+        {/* Guided candidate observation results (binding, P4i, user
+            clarification): "Sort: DIDs that changed in exactly one active
+            phase ... first, then changed-in-several, then static
+            (collapsed)." */}
+        {rankedCandidates.length === 0 ? null : (
+          <View style={styles.card}>
+            <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
+              CANDIDATES ({rankedCandidates.length})
+            </Text>
+            {activeCandidates.map((candidate) => (
+              <View key={candidate.did} style={styles.suggestionRow}>
+                <Text style={styles.responderDid} maxFontSizeMultiplier={1.3}>
+                  {formatHexDid(candidate.did)} — {candidate.lastRawHex} ·{' '}
+                  {candidate.rank === 'brakeOrSteeringCandidate' ? 'BRAKE/STEERING?' : 'changed (several)'}
+                </Text>
+                <Text style={styles.rationaleText} maxFontSizeMultiplier={1.3}>
+                  {(['baseline', 'brake', 'steering', 'throttle'] as const)
+                    .filter((p) => candidate.changedInPhase[p])
+                    .map((p) => p.toUpperCase())
+                    .join(', ') || 'no change observed'}{' '}
+                  · {candidate.sampleCount} samples
+                  {candidate.min !== null && candidate.max !== null ? ` · range ${candidate.min}-${candidate.max}` : ''}
+                </Text>
+                {tagPickerDid === candidate.did ? (
+                  <View style={styles.channelPickerRow}>
+                    {ENET_TAG_CHANNELS.map((channel) => (
+                      <Pressable
+                        key={channel}
+                        style={styles.channelChip}
+                        onPress={() => confirmTag(candidate.did, channel)}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Tag ${formatHexDid(candidate.did)} as ${channel}`}
+                      >
+                        <Text style={styles.channelChipText} maxFontSizeMultiplier={1.3}>
+                          {channel}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                ) : (
+                  <Pressable
+                    style={styles.buttonSecondary}
+                    onPress={() => setTagPickerDid(candidate.did)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Tag ${formatHexDid(candidate.did)} as a channel`}
+                  >
+                    <Text style={styles.buttonSecondaryText} maxFontSizeMultiplier={1.3}>
+                      Tag as…
+                    </Text>
+                  </Pressable>
+                )}
+              </View>
+            ))}
+            {staticCandidates.length === 0 ? null : (
+              <>
+                <Pressable
+                  style={styles.collapseHeaderRow}
+                  onPress={() => setStaticExpanded((v) => !v)}
+                  accessibilityRole="button"
+                  accessibilityLabel={staticExpanded ? 'Collapse static candidates' : `Expand ${staticCandidates.length} static candidates`}
+                >
+                  <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                    Static ({staticCandidates.length})
+                  </Text>
+                  <Text style={styles.buttonSecondaryText} maxFontSizeMultiplier={1.3}>
+                    {staticExpanded ? 'Hide' : 'Show'}
+                  </Text>
+                </Pressable>
+                {staticExpanded
+                  ? staticCandidates.map((candidate) => (
+                      <Text key={candidate.did} style={styles.responderRaw} maxFontSizeMultiplier={1.3}>
+                        {formatHexDid(candidate.did)} — {candidate.lastRawHex}
+                      </Text>
+                    ))
+                  : null}
+              </>
+            )}
+          </View>
+        )}
+
+        {/* "Share results" addendum (binding, P4i). */}
+        {snapshot === null || snapshot.responders.length === 0 ? null : (
+          <View style={styles.card}>
+            {shareBanner === null ? null : (
+              <Text style={styles.successBanner} maxFontSizeMultiplier={1.3} accessibilityLiveRegion="polite">
+                {shareBanner}
+              </Text>
+            )}
+            <Pressable style={styles.button} onPress={() => void handleShareResults()} disabled={sharing} accessibilityRole="button" accessibilityLabel="Share results">
+              <Text style={styles.buttonText} maxFontSizeMultiplier={1.3}>
+                {sharing ? 'Preparing…' : 'Share results'}
+              </Text>
+            </Pressable>
           </View>
         )}
 
@@ -554,4 +843,15 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   channelChipText: { ...typography.caption, color: colors.accent },
+  // "responders collapsed with count + expand" / "static (collapsed)" (binding, P4i).
+  collapseHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: spacing.sm },
+  // Range presets addendum (binding, P4i) -- small chip buttons, wraps on a 360pt screen.
+  presetChip: {
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 6,
+  },
+  presetChipText: { ...typography.caption, color: colors.textSecondary },
 });

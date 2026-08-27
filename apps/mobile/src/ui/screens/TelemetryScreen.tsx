@@ -5,34 +5,17 @@ import type { Elm327State, TelemetryChannelId, TelemetrySample } from '@circuit/
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, radii, spacing, typography } from '../theme';
-import { facade, gForceProvider, settingsStore, telemetryProvider } from '../../session/composition';
-import { useFacadeState } from '../hooks/useFacadeState';
+import {
+  acquireGForce,
+  gForceProvider,
+  releaseGForce,
+  settingsStore,
+  telemetryProvider,
+} from '../../session/composition';
 import { useSettings } from '../hooks/useSettings';
 import { summarizeGForceSamples, type TelemetryProviderDiagnostics } from '../../session/telemetryProvider';
 import { formatHexByte, resolveEnetChannelSpecs } from '../../session/enetSettingsValidation';
 import { getNetworkInfo, type NetworkInfo } from '../../session/networkInfo';
-
-/**
- * Field revision 2 (2026-08-27, binding — Phase 4h, "G in the monitor"):
- * session states that mean "a driving session currently owns the G-force
- * provider" -- mirrors `SettingsScreen.tsx`'s OWN identically-named local
- * constant (kept separately per-screen, same convention that file already
- * uses, rather than a shared export). This monitor's Stop button must NOT
- * stop `gForceProvider` while any of these are live -- the driving session
- * needs latG/longG samples for the WHOLE session, this screen's own
- * OBD Start/Stop is unrelated.
- */
-const ACTIVE_SESSION_STATES = new Set([
-  'preflight',
-  'awaitingCalibration',
-  'calibrating',
-  'calibrationReview',
-  'armed',
-  'outLap',
-  'timing',
-  'inPit',
-  'paused',
-]);
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Telemetry'>;
 
@@ -120,6 +103,18 @@ const STATE_COLOR: Record<Elm327State, string> = {
 
 const RUNNING_STATES = new Set<Elm327State>(['connecting', 'initializing', 'polling']);
 
+/**
+ * Field revision 2 (binding): "the monitor label shows '(rel.)' or '(0x49
+ * norm.)'", extended by P4h-FIX1 M4 (binding) with the honest third case --
+ * the 0x49 fallback running with no learned rest offset is RAW, not
+ * normalized (`telemetryProvider.ts`'s `pedalSourceDiagnostic()`).
+ */
+const PEDAL_SOURCE_LABEL: Record<TelemetryProviderDiagnostics['pedalSource'], string> = {
+  '5A': '(rel.)',
+  '49-normalized': '(0x49 norm.)',
+  '49-raw': '(0x49 raw)',
+};
+
 function formatNrc(nrc: number): string {
   return `0x${nrc.toString(16).padStart(2, '0').toUpperCase()}`;
 }
@@ -140,8 +135,6 @@ function formatNrc(nrc: number): string {
  */
 export function TelemetryScreen(_props: Props): React.JSX.Element {
   const settings = useSettings(settingsStore);
-  const facadeState = useFacadeState(facade);
-  const drivingSessionActive = ACTIVE_SESSION_STATES.has(facadeState.sessionState);
   const [state, setState] = React.useState<Elm327State>('idle');
   const [detail, setDetail] = React.useState<string | undefined>(undefined);
   const [lastValues, setLastValues] = React.useState<Partial<Record<TelemetryChannelId, number>>>({});
@@ -221,20 +214,39 @@ export function TelemetryScreen(_props: Props): React.JSX.Element {
     : channelsFor(settings.transOilPidHex).map((channel) => channel.id);
   const unsupportedSet = new Set(diagnostics.unsupportedChannels ?? []);
 
+  /**
+   * P4h-FIX1 H6 (binding, after Codex P4h-REV1 HIGH): whether THIS screen
+   * currently holds a G-provider reference, so it releases exactly what it
+   * took -- never more (an unbalanced release would stop the provider a
+   * driving session still needs) and never less (a leaked hold would keep the
+   * accelerometer running after the monitor is closed). Replaces the previous
+   * `drivingSessionActive` guard, which only covered the monitor-stops-while-
+   * a-session-runs direction and missed its reverse: a session ENDING while
+   * the monitor was open unconditionally stopped the provider under it.
+   */
+  const holdsGForceRef = React.useRef(false);
+  React.useEffect(() => {
+    return () => {
+      if (holdsGForceRef.current) {
+        holdsGForceRef.current = false;
+        void releaseGForce();
+      }
+    };
+  }, []);
+
   function toggleConnection(): void {
     if (running) {
       void telemetryProvider.stop();
-      // Field revision 2 (2026-08-27, binding — Phase 4h, "G in the
-      // monitor"): Stop only stops `gForceProvider` when no DRIVING session
-      // is currently using it -- a live session (`composition.ts`) owns its
-      // latG/longG samples for the session's whole duration, independent of
-      // this screen's own OBD Start/Stop.
-      if (!drivingSessionActive) void gForceProvider.stop();
+      if (holdsGForceRef.current) {
+        holdsGForceRef.current = false;
+        void releaseGForce();
+      }
     } else {
       telemetryProvider.start();
-      // `gForceProvider.start()` is a no-op if already running (a driving
-      // session may already own it) -- idempotent either way.
-      gForceProvider.start();
+      if (!holdsGForceRef.current) {
+        holdsGForceRef.current = true;
+        acquireGForce();
+      }
     }
   }
 
@@ -312,11 +324,11 @@ export function TelemetryScreen(_props: Props): React.JSX.Element {
                 // Field revision 2 (2026-08-27, binding — Phase 4h): "the
                 // monitor label shows '(rel.)' or '(0x49 norm.)'" -- which
                 // accelPedalPct source is CURRENTLY active (diagnostics
-                // always report one of the two, never absent).
-                const label =
-                  id === 'accelPedalPct'
-                    ? `${channel.label} ${diagnostics.pedalSource === '49-normalized' ? '(0x49 norm.)' : '(rel.)'}`
-                    : channel.label;
+                // always report one, never absent). P4h-FIX1 M4 (binding):
+                // "(0x49 raw)" is its own label -- the 0x49 fallback with NO
+                // rest offset learned is NOT normalized, and the monitor must
+                // not claim it is.
+                const label = id === 'accelPedalPct' ? `${channel.label} ${PEDAL_SOURCE_LABEL[diagnostics.pedalSource]}` : channel.label;
                 return (
                   <View key={id} style={styles.channelRow}>
                     <Text style={styles.channelLabel} maxFontSizeMultiplier={1.3}>

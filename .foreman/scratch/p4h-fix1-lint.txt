@@ -1,0 +1,18 @@
+
+> circuit-timer@0.0.0 lint
+> eslint .
+
+
+D:\CODE\APLICTIE_Circuit\apps\mobile\src\persistence\didSweepStore.ts
+  104:25  warning  '_responders' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+D:\CODE\APLICTIE_Circuit\apps\mobile\src\ui\screens\DidSweepScreen.tsx
+   10:8   warning  'DidCandidateSummary' is defined but never used                  @typescript-eslint/no-unused-vars
+   23:39  warning  'buildCopySummaryText' is defined but never used                 @typescript-eslint/no-unused-vars
+  190:5   error    Definition for rule 'react-hooks/exhaustive-deps' was not found  react-hooks/exhaustive-deps
+
+D:\CODE\APLICTIE_Circuit\apps\mobile\test\session\didSweepController.test.ts
+  1257:11  warning  'sendCounts' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+✖ 5 problems (1 error, 4 warnings)
+

@@ -310,6 +310,20 @@ export class SessionController {
   private providerUnsubscribe: (() => void) | null = null;
   /** Set by `dispose()`; makes it idempotent (a second call is a no-op). */
   private disposed = false;
+  /**
+   * P4h-FIX1 M2 (binding, after Codex P4h-REV1 MEDIUM): true for exactly the
+   * window in which `start('calibration')` is awaiting its asynchronous
+   * startup (reference-lap I/O, above all `locationProvider.start()`), during
+   * which this controller still reports `idle`. `rejectCalibration()` -- the
+   * UI's Cancel, which the driver can reach the instant the app navigates to
+   * ActiveCalibration -- is a no-op in `idle`, so a cancel landing in this
+   * window used to be swallowed and the start then completed into an
+   * INVISIBLE calibrating session (watchdog running, provider subscribed,
+   * session id minted) that nothing on screen owned.
+   */
+  private calibrationStartInFlight = false;
+  /** Set by `rejectCalibration()` while {@link calibrationStartInFlight}; consumed by `start()` at its next `disposed` re-check, which then unwinds exactly like the disposal abort. */
+  private calibrationStartCancelled = false;
 
   constructor(private readonly deps: SessionControllerDeps) {
     this.core = new SessionPipelineCore(deps.runtimeProfile, {
@@ -456,6 +470,24 @@ export class SessionController {
       }
     };
 
+    // P4h-FIX1 M2 (binding): opens the cancellable window -- see
+    // `calibrationStartInFlight`'s own doc comment. `cancelledMidStart()`
+    // below is checked at EXACTLY the same points as `disposed` (after every
+    // await) and unwinds identically: no dispatch, no mode change, no
+    // watchdog, no session identity left behind. Like the disposal abort it
+    // deliberately does NOT stop the (possibly shared) location provider --
+    // ownership is not knowable in core (contracts.md's closing amendment).
+    this.calibrationStartInFlight = true;
+    this.calibrationStartCancelled = false;
+    /** True once a `rejectCalibration()` landed during this start; consumes the flag so the cancel applies to THIS start only. */
+    const cancelledMidStart = (): boolean => {
+      if (!this.calibrationStartCancelled) return false;
+      this.calibrationStartCancelled = false;
+      this.calibrationStartInFlight = false;
+      abortStart();
+      return true;
+    };
+
     if (phase === 'session') {
       // Pure repository I/O -- doesn't touch `core.state`/`mode`, so its
       // position relative to `ensureProviderRunning()` below is immaterial;
@@ -463,13 +495,29 @@ export class SessionController {
       // time the CALIBRATION_ACCEPTED dispatch below runs.
       await this.loadReferenceForSession();
       if (this.disposed) {
+        this.calibrationStartInFlight = false;
         abortStart();
         return;
       }
+      if (cancelledMidStart()) return;
     }
 
     await this.ensureProviderRunning();
+    if (cancelledMidStart()) {
+      // The driver cancelled while the provider was starting. Detach the
+      // subscription `ensureProviderRunning()` just installed (it is THIS
+      // controller's own -- nothing else could have replaced it in the same
+      // microtask) so no sample can reach a calibration that was never
+      // entered, and leave the provider itself alone.
+      if (this.providerUnsubscribe !== null) {
+        this.providerUnsubscribe();
+        this.providerUnsubscribe = null;
+      }
+      this.providerRunning = false;
+      return;
+    }
     if (this.disposed) {
+      this.calibrationStartInFlight = false;
       // `ensureProviderRunning()` itself already declined to subscribe (see
       // its own disposed guard) and deliberately leaves the shared provider
       // running (ownership is not knowable here), so there is nothing to
@@ -477,6 +525,12 @@ export class SessionController {
       abortStart();
       return;
     }
+
+    // P4h-FIX1 M2: past this point the start is committed -- every remaining
+    // step below is synchronous, so no cancel can land "mid-start" any more;
+    // a `rejectCalibration()` after this takes the ordinary
+    // `calibrating -> calibrationReview -> awaitingCalibration` path.
+    this.calibrationStartInFlight = false;
 
     this.core.dispatch({ type: 'START_PREFLIGHT' });
     this.core.dispatch({ type: 'PREFLIGHT_PASSED' });
@@ -521,6 +575,17 @@ export class SessionController {
   }
 
   rejectCalibration(): void {
+    // P4h-FIX1 M2 (binding, after Codex P4h-REV1 MEDIUM): a Cancel that lands
+    // while `start('calibration')` is still awaiting GNSS startup -- the
+    // controller reports `idle` for that whole window, so every branch below
+    // would be a no-op and the start would later complete into an invisible
+    // calibrating session. Recorded here; `start()` consumes it at its next
+    // await checkpoint and unwinds itself (no dispatch, no watchdog, no
+    // subscription, ends idle).
+    if (this.calibrationStartInFlight) {
+      this.calibrationStartCancelled = true;
+      return;
+    }
     const state = this.core.state.state;
     if (state === 'calibrating') {
       // Mid-lap cancel: no CALIBRATION_REJECTED transition is legal directly
@@ -757,6 +822,11 @@ export class SessionController {
       // when its own session ends (`endSession()`) or when it is disposed
       // while genuinely running (`dispose()`'s `providerRunning` branch).
       if (this.disposed) return;
+      // P4h-FIX1 M2 (binding): the SAME rule for a Cancel that landed while
+      // the provider was starting -- do not subscribe at all (the start that
+      // awaited this is about to unwind), and, exactly like the disposal
+      // guard above, do not stop the possibly-shared provider.
+      if (this.calibrationStartCancelled) return;
       if (this.providerUnsubscribe !== null) {
         this.providerUnsubscribe();
         this.providerUnsubscribe = null;

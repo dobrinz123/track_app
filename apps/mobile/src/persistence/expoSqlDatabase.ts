@@ -2,6 +2,7 @@ import { openDatabaseAsync, type SQLiteDatabase } from 'expo-sqlite';
 import type { SqlBindValue, SqlDatabase } from '@circuit/core/src/persistence-sql';
 import { SqlSessionRepository } from '@circuit/core/src/persistence-sql';
 import { migrateTelemetrySchema } from './telemetrySchema';
+import { migrateDidSweepSchema } from './didSweepSchema';
 import { createSqlWriteGate, gateSqlTransactions, type SqlWriteGate } from './sqlWriteGate';
 
 // Thin adapter from expo-sqlite's `SQLiteDatabase` to the `SqlDatabase`
@@ -52,10 +53,12 @@ export async function createSqliteSessionRepository(dbName: string): Promise<Sql
  * (including the v2 `settings` table) -- this must be awaited before the raw
  * `db` handle is used for anything settings-related.
  *
- * Also applies `migrateTelemetrySchema` (Telemetry addendum) over the SAME
- * connection -- a mobile-owned additive migration entirely independent of
- * `SqlSessionRepository`'s own (packages/core is out of the ticket that added
- * this call's write set); see `./telemetrySchema.ts`'s doc comment.
+ * Also applies `migrateTelemetrySchema` (Telemetry addendum) and
+ * `migrateDidSweepSchema` (DID sweep results persistence addendum, P4i) over
+ * the SAME connection -- both mobile-owned additive migrations entirely
+ * independent of `SqlSessionRepository`'s own (packages/core is out of the
+ * ticket that added these calls' write set); see `./telemetrySchema.ts`'s
+ * and `./didSweepSchema.ts`'s own doc comments.
  */
 export async function openAppDatabase(
   dbName: string,
@@ -71,5 +74,6 @@ export async function openAppDatabase(
   const db = gateSqlTransactions(wrapExpoSqliteDatabase(raw), writeGate);
   const repository = await SqlSessionRepository.create(db);
   await migrateTelemetrySchema(db);
+  await migrateDidSweepSchema(db);
   return { db, repository, writeGate };
 }

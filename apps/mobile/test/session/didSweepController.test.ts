@@ -17,10 +17,12 @@ import {
   HsfzFrameParser,
   parseUdsResponse,
   SimulatedEnetTransport,
+  type DidObservationPhaseId,
   type ObdTransport,
 } from '@circuit/core';
 import { createDidSweepController, createRawUdsChannel } from '../../src/session/didSweepController';
 import { createEnetAdapterReservation } from '../../src/session/enetAdapterReservation';
+import { createInMemoryDidSweepStore } from '../../src/persistence/didSweepStore';
 
 /**
  * ENET auto-discovery & DID sweep addendum, extended by the "sweep transport
@@ -1187,5 +1189,262 @@ describe('didSweepController test fixtures: sanity', () => {
     expect(parseUdsResponse(positivePdu(0x1e20, [0x14]))).toEqual({ kind: 'positive', sid: 0x62, data: Uint8Array.from([0x1e, 0x20, 0x14]) });
     expect(parseUdsResponse(negativePdu(0x11))).toEqual({ kind: 'negative', requestSid: 0x22, nrc: 0x11 });
     expect(parseUdsResponse(wrongSidPdu())).toEqual({ kind: 'positive', sid: 0x41, data: Uint8Array.from([0x0c, 0x12, 0x34]) });
+  });
+});
+
+/**
+ * DID sweep — results persistence, export & candidate filtering addendum
+ * (2026-08-27, binding — Phase 4i): "every sweep run is persisted
+ * incrementally ... A run survives app kill and can be resumed from
+ * `lastDid`." Every EXISTING test above passes NO `store` -- this describe
+ * block is entirely additive.
+ */
+describe('didSweepController: persistence (binding, P4i)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a completed sweep with a store persists the run AND its responder', async () => {
+    const store = createInMemoryDidSweepStore();
+    const script = new Map<number, ScriptEntry>([[0x0001, { responses: [positivePdu(0x0001, [0x50])], delayMs: 5 }]]);
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store,
+    });
+
+    controller.start({ from: 0x0000, to: 0x0002 });
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('sweepComplete');
+
+    const runs = await store.listRuns();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ adapterType: 'enet', rangeFrom: 0x0000, rangeTo: 0x0002, status: 'complete', responderCount: 1 });
+    const responders = await store.getResponders(runs[0]!.runId);
+    expect(responders).toHaveLength(1);
+    expect(responders[0]).toMatchObject({ did: 0x0001, rawHex: '50' });
+  });
+
+  it('start() with a store enforces retention (keeps only the most recent runs)', async () => {
+    const store = createInMemoryDidSweepStore();
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(new Map()),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store,
+      retentionRuns: 2,
+    });
+
+    for (let i = 0; i < 3; i += 1) {
+      controller.start({ from: 0x0000, to: 0x0000 });
+      await vi.runAllTimersAsync();
+      await flush();
+    }
+
+    const runs = await store.listRuns();
+    expect(runs).toHaveLength(2); // the OLDEST of the 3 runs was pruned.
+  });
+
+  it('resumePersistedRun continues from lastDid with the accumulator restored -- already-visited DIDs are never re-swept', async () => {
+    const store = createInMemoryDidSweepStore();
+    const sendCounts = new Map<number, number>();
+    function makeTransport(): FakeSweepTransport {
+      const script = new Map<number, ScriptEntry>([[0x0001, { responses: [positivePdu(0x0001, [0x50])], delayMs: 5 }]]);
+      const t = new FakeSweepTransport(script);
+      const realSend = t.send.bind(t);
+      t.send = (line: string) => {
+        realSend(line);
+      };
+      return t;
+    }
+
+    // First controller: sweeps 0x0000..0x0001 (0x0001 answers), then is
+    // stopped -- simulating "app kill" mid-sweep. `stop()` still force-
+    // flushes the persisted state (this ticket's own binding requirement).
+    const controllerA = createDidSweepController({
+      transportFactory: makeTransport,
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store,
+      requestTimeoutMs: 20,
+    });
+    controllerA.start({ from: 0x0000, to: 0x0005 });
+    await vi.advanceTimersByTimeAsync(60); // lets 0x0000 (times out at 20ms) and 0x0001 (answers at 5ms) resolve.
+    await flush();
+    controllerA.stop();
+    await vi.runAllTimersAsync();
+    await flush();
+
+    const runs = await store.listRuns();
+    expect(runs).toHaveLength(1);
+    const runId = runs[0]!.runId;
+    const persistedRun = await store.getRun(runId);
+    expect(persistedRun?.lastDid).not.toBeNull();
+    const lastDid = persistedRun!.lastDid!;
+
+    // A FRESH controller instance ("app relaunch") resumes the SAME run.
+    const transportsBuiltByB: FakeSweepTransport[] = [];
+    const controllerB = createDidSweepController({
+      transportFactory: () => {
+        const t = makeTransport();
+        transportsBuiltByB.push(t);
+        return t;
+      },
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store,
+      requestTimeoutMs: 20,
+    });
+
+    expect(controllerB.getSnapshot().responders).toHaveLength(0); // nothing yet -- this is a FRESH controller/accumulator.
+    await controllerB.resumePersistedRun(runId);
+    // The restored responder (0x0001) is immediately visible, from the STORE, before the resumed sweep has re-visited anything.
+    expect(controllerB.getSnapshot().responders.map((r) => r.did)).toEqual([0x0001]);
+
+    await vi.runAllTimersAsync();
+    await flush();
+
+    expect(controllerB.getSnapshot().phase).toBe('sweepComplete');
+    // Every DID up to and including `lastDid` was NEVER re-sent by the resumed sweep.
+    const [transportB] = transportsBuiltByB;
+    for (let did = 0x0000; did <= lastDid; did += 1) {
+      expect(transportB!.sendCallCountByDid.get(did) ?? 0).toBe(0);
+    }
+  });
+
+  it('resumePersistedRun is a no-op when deps.store is undefined', async () => {
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(new Map()),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+    await controller.resumePersistedRun('nonexistent-run');
+    expect(controller.getSnapshot().phase).toBe('idle'); // untouched.
+  });
+
+  it('listPersistedRuns delegates to the store, and returns [] without one', async () => {
+    const store = createInMemoryDidSweepStore();
+    const controllerWithStore = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(new Map()),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store,
+    });
+    controllerWithStore.start({ from: 0x0000, to: 0x0000 });
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(await controllerWithStore.listPersistedRuns()).toHaveLength(1);
+
+    const controllerWithoutStore = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(new Map()),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+    expect(await controllerWithoutStore.listPersistedRuns()).toEqual([]);
+  });
+});
+
+/**
+ * DID sweep — guided candidate observation addendum (2026-08-27, binding —
+ * Phase 4i, user clarification): "the OBSERVATION on the filtered candidates
+ * must be a visible, guided, repeated re-read" across the 4 fixed phases.
+ */
+describe('didSweepController: guided candidate observation (binding, P4i)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('startGuidedObservation runs baseline -> brake -> steering -> throttle in order, then reaches observationComplete with candidateSummaries populated', async () => {
+    // Alternates every poll -- guarantees "changed" is observable within any
+    // phase that actually re-reads it more than once.
+    const responses = Array.from({ length: 60 }, (_, i) => positivePdu(0x0001, [i % 2 === 0 ? 0x10 : 0x20]));
+    const script = new Map<number, ScriptEntry>([[0x0001, { responses, mode: 'oneFramePerSend', delayMs: 5 }]]);
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+
+    controller.start({ from: 0x0001, to: 0x0001 });
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().responders).toHaveLength(1);
+
+    const phasesSeen: DidObservationPhaseId[] = [];
+    controller.subscribe((s) => {
+      if (s.guidedPhase !== null && phasesSeen[phasesSeen.length - 1] !== s.guidedPhase) phasesSeen.push(s.guidedPhase);
+    });
+
+    controller.startGuidedObservation();
+    expect(controller.getSnapshot().phase).toBe('observing');
+
+    // Bounded advance through all 4 ~6s phases (24s) -- NOT `runAllTimersAsync`
+    // (the transport's own recurring keep-alive timer stays armed while open).
+    for (let i = 0; i < 26 && controller.getSnapshot().phase === 'observing'; i += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flush();
+    }
+
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+    expect(phasesSeen).toEqual(['baseline', 'brake', 'steering', 'throttle']);
+    const summaries = controller.getSnapshot().candidateSummaries;
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.did).toBe(0x0001);
+    expect(summaries[0]?.sampleCount).toBeGreaterThan(4); // several samples across the 4 phases.
+  });
+
+  it('stopGuidedObservationEarly ends the run early and still computes candidateSummaries from whatever was collected', async () => {
+    const responses = Array.from({ length: 20 }, (_, i) => positivePdu(0x0001, [i % 2 === 0 ? 0x10 : 0x20]));
+    const script = new Map<number, ScriptEntry>([[0x0001, { responses, mode: 'oneFramePerSend', delayMs: 5 }]]);
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+
+    controller.start({ from: 0x0001, to: 0x0001 });
+    await vi.runAllTimersAsync();
+    await flush();
+
+    controller.startGuidedObservation();
+    await vi.advanceTimersByTimeAsync(2_000); // still mid-"baseline".
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('observing');
+    expect(controller.getSnapshot().guidedPhase).toBe('baseline');
+
+    controller.stopGuidedObservationEarly();
+    await vi.runAllTimersAsync();
+    await flush();
+
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+    expect(controller.getSnapshot().candidateSummaries.length).toBeGreaterThan(0);
+  });
+
+  it('startGuidedObservation is a no-op with no responders', () => {
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(new Map()),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+    controller.startGuidedObservation();
+    expect(controller.getSnapshot().phase).toBe('idle');
   });
 });

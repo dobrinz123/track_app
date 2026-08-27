@@ -756,3 +756,23 @@ latch MUST clear after every launch attempt (success or failure) so later Starts
   `accelPedalPct`; the monitor label shows "(rel.)" or "(0x49 norm.)".
 - **G in the monitor**: the telemetry monitor's Start also starts the phone accelerometer provider (and
   Stop stops it unless a driving session owns it), so latG/longG rows are live outside a session.
+
+## DID sweep — results persistence, export & candidate filtering addendum (2026-08-27, binding — Phase 4i, after sweep test 1)
+Field facts (Supra, MHD ENET, sweep 0x0000–0x53F5 stopped by the user): ~15.8 req/s on the real adapter (full
+range ≈ 70 min), 608 responders in 21494 DIDs, NRC 20744, timeouts 142; responders include very large blobs
+(hundreds of bytes: software/coding tables, ASCII identification strings). Screenshots are not a viable export.
+- **Persistence**: every sweep run is persisted incrementally (SQLite table `did_sweep_runs` + `did_sweep_responders`:
+  run id, circuit-agnostic, adapter type, target, started/updated, range, last DID, counters; responders: did,
+  length, raw hex, first/last seen, sample count). A run survives app kill and can be **resumed** from `lastDid`
+  (Resume button) or restarted. Retention: keep the last 5 runs.
+- **Export**: "Share results" produces a JSON file (`trace-did-sweep-<date>.json`: run meta, counters, responders
+  with raw hex, observation series if any, suggestions) through the OS share sheet (`expo-sharing` +
+  `expo-file-system`, SDK-matched). Also "Copy summary" to clipboard (counts + top candidates) for quick chat.
+- **Candidate filtering** (core, pure): observation and heuristics operate on a FILTERED set: length 1–8 bytes,
+  not ASCII-looking (≥ 60 % printable bytes over length ≥ 4), and — after a two-sample "changing values" pre-pass
+  (each candidate read twice ~2 s apart while the user blips the throttle/steers) — only DIDs whose bytes
+  changed OR that decode into a plausible physical range. Static responders are kept in the export but
+  excluded from observation. The UI shows: responders (collapsed, count), candidates (expanded), suggestions.
+- **Range presets**: "Full (slow, ~70 min)", "Resume", and priority presets discovered from this run
+  (0x1000–0x1FFF, 0x4000–0x4FFF are dense on this DME — EMPIRICAL, from the field export).
+- P4h-FIX1 note (2026-08-27): the accelerator PID source is NOT global state — `Elm327Config.accelPedalPidSource` ('5A' | '49') is frozen per session and passed to the codec; pedal diagnostics read `5A` / `49-normalized` / `49-raw` (raw = no valid rest offset learned; offsets ≥ 95 % are invalid; rest = speed < 1 km/h). G-force provider ownership is reference-counted in composition (`acquireGForce/releaseGForce`). Preflight owns exactly one proximity watcher, started after permission and the fix collector, stopped on blur/unmount; with no usable fix (age > 30 s or accuracy > 200 m) the distance is "unknown" and Continue is disabled (Continue-anyway allowed). `rejectCalibration()` cancels an in-flight calibration start under the lifecycle lock.

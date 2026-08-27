@@ -63,3 +63,115 @@ export function evaluateCircuitProximity(
   const distanceKm = haversineDistanceKm(fix, gateMidpoint(startFinishGate));
   return { distanceKm, shouldWarn: distanceKm > warnThresholdKm };
 }
+
+// ---------------------------------------------------------------------------
+// P4h-FIX1 H2+H3 (after Codex P4h-REV1 HIGH, `PreflightScreen.tsx:75-78,
+// 99-117,137-138,245-255`): "the distance guard can silently bypass itself
+// ... `currentFix` remains `null`, `evaluateCircuitProximity(null, ...)`
+// returns no warning, and the ordinary Continue button is shown."
+//
+// The guard now has THREE outcomes, not two, and "no usable fix" is one of
+// them: the screen says so and keeps Continue disabled (binding ticket rule:
+// "Never silently pass ... Continue stays disabled until a fix arrives
+// (Continue-anyway remains available). Keep accuracy/age of the fix (stale
+// > 30 s or accuracy > 200 m -> unknown)"). Pure -- the screen owns only the
+// watcher lifetime and the rendering.
+// ---------------------------------------------------------------------------
+
+/** A fix is only usable while it is this fresh (wall-clock ms since it arrived). */
+export const CIRCUIT_FIX_MAX_AGE_MS = 30_000;
+/** ...and only this imprecise. A 200 m 1-sigma fix is still two orders of magnitude below the 3 km gate, so anything worse cannot answer "am I at the circuit?" either way. */
+export const CIRCUIT_FIX_MAX_ACCURACY_M = 200;
+
+/** One GNSS fix as the preflight watcher records it: position plus the quality/age metadata the guard needs. `tMs` is wall-clock (`Date.now()`), the same clock `nowMs` is read from. */
+export interface PreflightFix {
+  lat: number;
+  lon: number;
+  accuracyM?: number | null;
+  tMs: number;
+}
+
+export type CircuitProximityStatus = 'unknown' | 'near' | 'far';
+
+export interface PreflightProximityDecision {
+  status: CircuitProximityStatus;
+  /** `null` unless `status` is 'near'/'far' (i.e. a usable fix produced it). */
+  distanceKm: number | null;
+  /** "Distance to circuit unknown" card. */
+  showUnknownCard: boolean;
+  /** "You are X km from <circuit>" card. */
+  showFarWarning: boolean;
+  /** The plain Continue button is enabled ONLY for a usable fix at the circuit. */
+  continueEnabled: boolean;
+  /** The deliberate testing override stays available whenever the guard is not satisfied. */
+  continueAnywayAvailable: boolean;
+}
+
+export function evaluatePreflightProximity(
+  fix: PreflightFix | null,
+  startFinishGate: { a: LatLon; b: LatLon },
+  options: {
+    nowMs: number;
+    /** The rest of preflight passed. While false the existing failure/GNSS-wait UI owns the screen and this guard shows nothing at all. */
+    preflightPassed: boolean;
+    warnThresholdKm?: number;
+    maxFixAgeMs?: number;
+    maxAccuracyM?: number;
+  },
+): PreflightProximityDecision {
+  const {
+    nowMs,
+    preflightPassed,
+    warnThresholdKm = CIRCUIT_PROXIMITY_WARN_KM,
+    maxFixAgeMs = CIRCUIT_FIX_MAX_AGE_MS,
+    maxAccuracyM = CIRCUIT_FIX_MAX_ACCURACY_M,
+  } = options;
+
+  if (!preflightPassed) {
+    return {
+      status: 'unknown',
+      distanceKm: null,
+      showUnknownCard: false,
+      showFarWarning: false,
+      continueEnabled: false,
+      continueAnywayAvailable: false,
+    };
+  }
+
+  if (!isUsableFix(fix, nowMs, maxFixAgeMs, maxAccuracyM)) {
+    return {
+      status: 'unknown',
+      distanceKm: null,
+      showUnknownCard: true,
+      showFarWarning: false,
+      continueEnabled: false,
+      continueAnywayAvailable: true,
+    };
+  }
+
+  const { distanceKm, shouldWarn } = evaluateCircuitProximity(fix, startFinishGate, warnThresholdKm);
+  return {
+    status: shouldWarn ? 'far' : 'near',
+    distanceKm,
+    showUnknownCard: false,
+    showFarWarning: shouldWarn,
+    continueEnabled: !shouldWarn,
+    continueAnywayAvailable: shouldWarn,
+  };
+}
+
+function isUsableFix(
+  fix: PreflightFix | null,
+  nowMs: number,
+  maxFixAgeMs: number,
+  maxAccuracyM: number,
+): fix is PreflightFix {
+  if (fix === null) return false;
+  if (!Number.isFinite(fix.lat) || !Number.isFinite(fix.lon)) return false;
+  if (!Number.isFinite(fix.tMs) || nowMs - fix.tMs > maxFixAgeMs) return false;
+  // An unreported accuracy is treated as unusable rather than assumed good --
+  // "never silently pass" applies to missing metadata too.
+  if (fix.accuracyM === undefined || fix.accuracyM === null) return false;
+  if (!Number.isFinite(fix.accuracyM) || fix.accuracyM > maxAccuracyM) return false;
+  return true;
+}

@@ -1,25 +1,19 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import {
   channelForMode01Request,
   decodeMode01Response,
+  DEFAULT_ACCEL_PEDAL_PID_SOURCE,
   encodeMode01Request,
-  getAccelPedalPidSource,
   isMode01TelemetryChannel,
-  setAccelPedalPidSource,
   type Mode01TelemetryChannelId,
 } from '../../src/telemetry';
 
 describe('mode-01 PID codec', () => {
-  // Field revision 2 (2026-08-27, binding — Phase 4h): `accelPedalPct`'s PID
-  // source is now mutable module state (0x5A primary, 0x49 fallback -- see
-  // `pidCodec.ts`'s own doc comment) -- every test in this file runs with
-  // the DEFAULT ('5A') unless it explicitly switches, and always restores
-  // the default afterward so no test's choice leaks into another's.
-  afterEach(() => {
-    setAccelPedalPidSource('5A');
-  });
-
+  // P4h-FIX1 H4 (after Codex P4h-REV1 HIGH, `pidCodec.ts:40-58,88-93`):
+  // `accelPedalPct`'s PID source is NO LONGER process-global mutable state --
+  // it is an explicit, optional PARAMETER (default 0x5A, the primary source),
+  // so nothing this file does can leak into another test file's run.
   const requests: Array<[Mode01TelemetryChannelId, string]> = [
     ['rpm', '010C'],
     ['speedKph', '010D'],
@@ -91,42 +85,55 @@ describe('mode-01 PID codec', () => {
   );
 
   /**
-   * Field revision 2 (2026-08-27, binding — Phase 4h, P4h ticket item 3):
-   * "primary source PID 0x5A ... if the DME answers NRC/unsupported for
-   * 0x5A, fall back to 0x49." `elm327Session.ts` calls `encodeMode01Request`
-   * exactly ONCE per channel, at session construction -- `telemetryProvider.ts`
-   * is the only thing that can "switch" it, by calling
-   * `setAccelPedalPidSource` BEFORE relaunching a fresh session. Both PIDs
-   * must always resolve via `channelForMode01Request`/`isMode01TelemetryChannel`
-   * regardless of which one is CURRENTLY active, since `enetChannelSpecs.ts`'s
-   * validator needs to accept either.
+   * P4h-FIX1 H4 (after Codex P4h-REV1 HIGH: "accelerator PID selection is
+   * process-global mutable state, and live ELM sessions re-read it while
+   * decoding ... provider/session A was constructed for 0x5A; provider B or a
+   * test switches the global to 0x49; A continues sending 0x5A but rejects
+   * every valid response").
+   *
+   * The source is now a per-call PARAMETER: the caller (a session, frozen at
+   * construction) decides, and two callers can disagree simultaneously with
+   * no shared state between them. Both PIDs must always resolve via
+   * `channelForMode01Request`/`isMode01TelemetryChannel` regardless of which
+   * one a given caller uses, since `enetChannelSpecs.ts`'s validator needs to
+   * accept either.
    */
-  describe('accelPedalPct PID fallback (Field revision 2, binding, P4h)', () => {
-    it('defaults to 0x5A', () => {
-      expect(getAccelPedalPidSource()).toBe('5A');
+  describe('accelPedalPct PID source is a parameter, never global state (P4h-FIX1 H4)', () => {
+    it('defaults to 0x5A when no source is passed', () => {
+      expect(DEFAULT_ACCEL_PEDAL_PID_SOURCE).toBe('5A');
+      expect(encodeMode01Request('accelPedalPct')).toBe('015A');
+      expect(decodeMode01Response('accelPedalPct', '41 5A 80')).toBeCloseTo(50.2, 1);
+    });
+
+    it('the source parameter switches BOTH the encoded request and the decoder\'s expected PID literal', () => {
+      expect(encodeMode01Request('accelPedalPct', '49')).toBe('0149');
+      expect(decodeMode01Response('accelPedalPct', '41 49 80', '49')).toBeCloseTo(50.2, 1);
+      // A decoder built for 0x49 must not accept a 0x5A frame, and vice versa.
+      expect(() => decodeMode01Response('accelPedalPct', '41 5A 80', '49')).toThrow('Missing mode 01 PID');
+      expect(() => decodeMode01Response('accelPedalPct', '41 49 80', '5A')).toThrow('Missing mode 01 PID');
+    });
+
+    it('two callers with DIFFERENT sources never disturb each other (interleaved, no global to race on)', () => {
+      // Interleaved exactly as two live provider generations would be.
+      expect(encodeMode01Request('accelPedalPct', '5A')).toBe('015A');
+      expect(encodeMode01Request('accelPedalPct', '49')).toBe('0149');
+      expect(decodeMode01Response('accelPedalPct', '41 5A 40', '5A')).toBeCloseTo(25.1, 1);
+      expect(decodeMode01Response('accelPedalPct', '41 49 40', '49')).toBeCloseTo(25.1, 1);
+      // ...and the default is STILL 0x5A afterward: nothing was mutated.
       expect(encodeMode01Request('accelPedalPct')).toBe('015A');
     });
 
-    it('setAccelPedalPidSource switches BOTH encodeMode01Request and decodeMode01Response\'s expected PID literal', () => {
-      setAccelPedalPidSource('49');
-      expect(getAccelPedalPidSource()).toBe('49');
-      expect(encodeMode01Request('accelPedalPct')).toBe('0149');
-      expect(decodeMode01Response('accelPedalPct', '41 49 80')).toBeCloseTo(50.2, 1);
-      // The OLD (5A) response literal no longer matches while the fallback is active.
-      expect(() => decodeMode01Response('accelPedalPct', '41 5A 80')).toThrow('Missing mode 01 PID');
+    it('the source parameter is ignored for every other channel (its PID comes from the table)', () => {
+      expect(encodeMode01Request('rpm', '49')).toBe('010C');
+      expect(decodeMode01Response('rpm', '41 0C 1A F8', '49')).toBe(1_726);
     });
 
-    it('channelForMode01Request recognizes BOTH 0x49 and 0x5A as accelPedalPct, regardless of which source is currently active', () => {
-      expect(channelForMode01Request('0149')).toBe('accelPedalPct');
-      expect(channelForMode01Request('015A')).toBe('accelPedalPct');
-      setAccelPedalPidSource('49');
+    it('channelForMode01Request recognizes BOTH 0x49 and 0x5A as accelPedalPct', () => {
       expect(channelForMode01Request('0149')).toBe('accelPedalPct');
       expect(channelForMode01Request('015A')).toBe('accelPedalPct');
     });
 
-    it('isMode01TelemetryChannel(accelPedalPct) is true regardless of the current source', () => {
-      expect(isMode01TelemetryChannel('accelPedalPct')).toBe(true);
-      setAccelPedalPidSource('49');
+    it('isMode01TelemetryChannel(accelPedalPct) is true', () => {
       expect(isMode01TelemetryChannel('accelPedalPct')).toBe(true);
     });
   });

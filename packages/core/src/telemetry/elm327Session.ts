@@ -1,4 +1,5 @@
 import type {
+  AccelPedalPidSource,
   Elm327Config,
   Elm327Session,
   Elm327State,
@@ -8,6 +9,7 @@ import type {
 } from './contracts';
 import {
   decodeMode01Response,
+  DEFAULT_ACCEL_PEDAL_PID_SOURCE,
   encodeMode01Request,
   isMode01TelemetryChannel,
 } from './pidCodec';
@@ -87,6 +89,17 @@ class Elm327SessionEngine implements Elm327Session {
   private errorCount = 0;
   private lastError: string | undefined;
   private readonly pollingWarning: string | undefined;
+  /**
+   * P4h-FIX1 H4 (binding, after Codex P4h-REV1 HIGH): the accelPedalPct PID
+   * source THIS session was constructed with, read once from the config and
+   * frozen here for its whole lifetime -- used for BOTH the poll command
+   * (built in the constructor) and every decode of the responses to it, so
+   * the two can never disagree, and a concurrent session built for the other
+   * PID cannot affect this one (the previous process-global flag could, and
+   * did: a live 0x5A session rejected every valid response once anything
+   * switched the global to 0x49).
+   */
+  private readonly accelPedalPidSource: AccelPedalPidSource;
 
   constructor(
     private readonly transport: ObdTransport,
@@ -94,6 +107,7 @@ class Elm327SessionEngine implements Elm327Session {
     private readonly monotonicNow: () => number,
   ) {
     validateConfig(config);
+    this.accelPedalPidSource = config.accelPedalPidSource ?? DEFAULT_ACCEL_PEDAL_PID_SOURCE;
     // F1 HIGH fix (L3, binding, defense layer 3 of 3): a customPid entry that
     // fails the read-only-service whitelist is DROPPED with one
     // `console.warn` each -- never thrown. This is the core-side
@@ -121,7 +135,7 @@ class Elm327SessionEngine implements Elm327Session {
         command = customRequest;
         custom = true;
       } else if (isMode01TelemetryChannel(item.channel)) {
-        command = encodeMode01Request(item.channel);
+        command = encodeMode01Request(item.channel, this.accelPedalPidSource);
         custom = false;
       } else {
         if (item.channel === 'transOilC') ignoredUnconfiguredTransOil = true;
@@ -276,7 +290,7 @@ class Elm327SessionEngine implements Elm327Session {
         if (entry.custom) {
           value = decodeCustomResponse(response, entry.channel);
         } else if (isMode01TelemetryChannel(entry.channel)) {
-          value = decodeMode01Response(entry.channel, response);
+          value = decodeMode01Response(entry.channel, response, this.accelPedalPidSource);
         } else {
           throw new Error(`No telemetry decoder for ${entry.channel}`);
         }

@@ -4,7 +4,6 @@ import {
   createElm327Session,
   decodeMode01Response,
   DEFAULT_SIMULATED_VEHICLE_SCENARIO,
-  setAccelPedalPidSource,
   SimulatedElm327Transport,
   type Elm327Config,
   type Elm327Session,
@@ -178,16 +177,14 @@ describe('SimulatedElm327Transport', () => {
    * channel-keyed and would refuse EVERY PID mapping to that channel) --
    * this is what lets a test script "0x5A NRC'd, 0x49 still answers" for
    * `accelPedalPct`, the exact scenario `telemetryProvider.ts`'s pedal
-   * fallback needs to react to. Restores `setAccelPedalPidSource('5A')`
-   * afterward so this test's choice never leaks into another test file's
-   * run (module-level mutable state, shared across the whole process).
+   * fallback needs to react to.
+   *
+   * P4h-FIX1 H4 (after Codex P4h-REV1 HIGH): the source is no longer
+   * process-global state a test has to set and restore -- it is
+   * `Elm327Config.accelPedalPidSource`, frozen for that session's lifetime.
    */
   describe('noDataOnPids (Field revision 2, binding: pedal 0x5A NRC / 0x49 fallback simulation)', () => {
-    afterEach(() => {
-      setAccelPedalPidSource('5A');
-    });
-
-    it('refuses ONLY the scripted PID (0x5A) for accelPedalPct -- switching the source to 0x49 (unscripted) then answers normally', async () => {
+    it('refuses ONLY the scripted PID (0x5A) for accelPedalPct -- a session built for 0x49 (unscripted) then answers normally', async () => {
       vi.useFakeTimers();
       const clock = new FakeClock();
       const transport = new SimulatedElm327Transport({
@@ -195,10 +192,9 @@ describe('SimulatedElm327Transport', () => {
         noDataOnPids: ['5A'],
         seed: 7,
       });
-      setAccelPedalPidSource('5A'); // primary source -- matches the DEFAULT, explicit for clarity.
       const session = createElm327Session(
         transport,
-        config({ pollPlan: [{ channel: 'accelPedalPct', hz: 1 }] }),
+        config({ pollPlan: [{ channel: 'accelPedalPct', hz: 1 }], accelPedalPidSource: '5A' }),
         () => clock.now(),
       );
       const samples: TelemetrySample[] = [];
@@ -224,10 +220,11 @@ describe('SimulatedElm327Transport', () => {
         noDataOnPids: ['5A'],
         seed: 7,
       });
-      setAccelPedalPidSource('49'); // the mobile provider's fallback -- a FRESH session built with the switched source.
       const session = createElm327Session(
         transport,
-        config({ pollPlan: [{ channel: 'accelPedalPct', hz: 1 }] }),
+        // The mobile provider's fallback -- a FRESH session built with the
+        // switched source in ITS OWN config (P4h-FIX1 H4).
+        config({ pollPlan: [{ channel: 'accelPedalPct', hz: 1 }], accelPedalPidSource: '49' }),
         () => clock.now(),
       );
       const samples: TelemetrySample[] = [];
@@ -245,6 +242,50 @@ describe('SimulatedElm327Transport', () => {
         true,
       );
       expect(session.getDiagnostics().errorCount).toBe(0);
+    });
+
+    /**
+     * P4h-FIX1 H4 (after Codex P4h-REV1 HIGH, `pidCodec.ts:40-58,88-93`;
+     * `elm327Session.ts:123-125,274-284`): "provider/session A was constructed
+     * for 0x5A; provider B or a test switches the global to 0x49; A continues
+     * sending 0x5A but rejects every valid response as 'Missing mode 01 PID
+     * 49'." Two LIVE sessions, each frozen to its own source, polling at the
+     * same time: each must decode its own responses cleanly.
+     */
+    it('two concurrent sessions with DIFFERENT accelPedal PIDs decode independently (no shared state)', async () => {
+      vi.useFakeTimers();
+      const clock = new FakeClock();
+      const makeSession = (source: '5A' | '49', noDataOnPids: string[]): Elm327Session =>
+        createElm327Session(
+          new SimulatedElm327Transport({ monotonicNow: () => clock.now(), noDataOnPids, seed: 7 }),
+          config({ pollPlan: [{ channel: 'accelPedalPct', hz: 1 }], accelPedalPidSource: source }),
+          () => clock.now(),
+        );
+
+      // Session A polls the PRIMARY source against an ECU that answers it;
+      // session B polls the FALLBACK against an ECU that refuses 0x5A -- the
+      // exact "old generation still alive while a new one switched" shape.
+      const sessionA = makeSession('5A', []);
+      const sessionB = makeSession('49', ['5A']);
+      const samplesA: TelemetrySample[] = [];
+      const samplesB: TelemetrySample[] = [];
+      sessionA.onSample((sample) => samplesA.push(sample));
+      sessionB.onSample((sample) => samplesB.push(sample));
+      await Promise.all([startUntil(sessionA, 'polling'), startUntil(sessionB, 'polling')]);
+
+      for (let index = 0; index < 4; index += 1) {
+        clock.advance(500);
+        await vi.advanceTimersByTimeAsync(500);
+      }
+      await Promise.all([sessionA.stop(), sessionB.stop()]);
+
+      expect(samplesA.length).toBeGreaterThan(0);
+      expect(samplesB.length).toBeGreaterThan(0);
+      expect(samplesA.every((s) => s.channel === 'accelPedalPct' && Number.isFinite(s.value))).toBe(true);
+      expect(samplesB.every((s) => s.channel === 'accelPedalPct' && Number.isFinite(s.value))).toBe(true);
+      // Neither session ever rejected a valid response for "the other one's" PID.
+      expect(sessionA.getDiagnostics().errorCount).toBe(0);
+      expect(sessionB.getDiagnostics().errorCount).toBe(0);
     });
   });
 

@@ -35,3 +35,48 @@ export type CalibrationExitTrigger = 'header-back' | 'gesture-back' | 'cancel-bu
 export function shouldConfirmCalibrationExit(trigger: CalibrationExitTrigger): boolean {
   return trigger === 'header-back' || trigger === 'gesture-back';
 }
+
+/**
+ * P4h-FIX1 H1 (binding, after Codex P4h-REV1 HIGH,
+ * `ActiveCalibrationScreen.tsx:73-98`): "confirming header/gesture
+ * cancellation cannot navigate away. `beforeRemove` intercepts every
+ * `GO_BACK`; `confirmCancelExit()` redispatches that same action without an
+ * allow-once flag, so the listener prevents it again and reopens the confirm
+ * card." The screen holds ONE of these (in a ref) for its whole lifetime and
+ * asks it on every `beforeRemove` event; confirming arms a ONE-SHOT bypass so
+ * the replayed action -- and only that one -- passes straight through.
+ */
+export interface CalibrationExitInterceptor {
+  /** `true` -> `e.preventDefault()` + open the confirm card. Consumes an armed bypass when the action is an implicit back. */
+  shouldIntercept(actionType: string): boolean;
+  /** "Cancel Calibration" confirmed: the next implicit back is allowed through. */
+  allowNext(): void;
+  /** "Keep Calibrating" / dismiss: disarms any armed bypass. */
+  reset(): void;
+}
+
+export function createCalibrationExitInterceptor(): CalibrationExitInterceptor {
+  let allowOnce = false;
+  return {
+    shouldIntercept(actionType: string): boolean {
+      // A programmatic navigation (`REPLACE`, from the sticky Cancel button or
+      // the calibration-complete effect) is never intercepted -- and never
+      // consumes the armed one-shot either, so a confirmed back still gets
+      // through if one happens to interleave.
+      if (!shouldConfirmCalibrationExit(actionType === 'GO_BACK' ? 'header-back' : 'calibration-complete')) {
+        return false;
+      }
+      if (allowOnce) {
+        allowOnce = false;
+        return false;
+      }
+      return true;
+    },
+    allowNext(): void {
+      allowOnce = true;
+    },
+    reset(): void {
+      allowOnce = false;
+    },
+  };
+}

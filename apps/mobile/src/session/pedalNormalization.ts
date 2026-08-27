@@ -15,6 +15,32 @@
 
 export const PEDAL_OFFSET_LEARNING_WINDOW_MS = 10_000;
 
+/**
+ * P4h-FIX1 M4 (after Codex P4h-REV1 MEDIUM, `pedalNormalization.ts:32-49`):
+ * "learning requires speed to equal exactly `0`. If speed is unavailable,
+ * noisy (for example 0.1 km/h), or never zero during the first ten seconds,
+ * the window still expires with no offset." A real DME reports speed in whole
+ * km/h but can sit at 0.x through rounding/jitter on other transports -- "at
+ * rest" is therefore anything strictly below this, never an exact 0 compare.
+ * A missing speed reading is still NOT at rest (it cannot be confirmed).
+ */
+export const PEDAL_AT_REST_MAX_KPH = 1;
+
+/**
+ * P4h-FIX1 M3 (after Codex P4h-REV1 MEDIUM, `pedalNormalization.ts:45-64`):
+ * "offset `100` produces `0/0`, and the clamp preserves `NaN`. A valid 0x49
+ * byte `FF` observed at speed zero therefore causes emitted pedal samples to
+ * become `NaN`." An offset this high is not a rest floor -- it is a broken or
+ * misread channel -- so it is REFUSED: the raw value is kept and diagnostics
+ * report `49-raw` instead of claiming a normalization that never happened.
+ */
+export const MAX_PEDAL_REST_OFFSET_PCT = 95;
+
+/** Whether a learned rest offset is usable at all: strictly inside (0, {@link MAX_PEDAL_REST_OFFSET_PCT}), and finite. */
+export function isPedalOffsetValid(offset: number | null): offset is number {
+  return offset !== null && Number.isFinite(offset) && offset > 0 && offset < MAX_PEDAL_REST_OFFSET_PCT;
+}
+
 export interface PedalOffsetLearner {
   /** The minimum raw (0x49) pedal percentage observed so far while `speedKph === 0`, within the learning window -- `null` until at least one qualifying sample has arrived. */
   minRestValue: number | null;
@@ -40,9 +66,24 @@ export function registerPedalOffsetSample(
 ): PedalOffsetLearner {
   const startedAtMs = learner.startedAtMs ?? nowMs;
   if (nowMs - startedAtMs >= PEDAL_OFFSET_LEARNING_WINDOW_MS) return { ...learner, startedAtMs };
-  if (speedKph !== 0) return { ...learner, startedAtMs };
+  // P4h-FIX1 M4: "at rest" is speed < 1 km/h, not === 0 (see
+  // `PEDAL_AT_REST_MAX_KPH`); `undefined` (no speed reading) still never
+  // qualifies. P4h-FIX1 M3: a non-finite raw reading never enters the
+  // learner -- it could only ever poison the offset.
+  if (speedKph === undefined || !(speedKph < PEDAL_AT_REST_MAX_KPH)) return { ...learner, startedAtMs };
+  if (!Number.isFinite(rawPct)) return { ...learner, startedAtMs };
   const minRestValue = learner.minRestValue === null ? rawPct : Math.min(learner.minRestValue, rawPct);
   return { minRestValue, startedAtMs };
+}
+
+/**
+ * The offset actually usable for normalization, or `null` when none was ever
+ * learned (no at-rest sample in the window) or the learned value is not
+ * credible ({@link isPedalOffsetValid}). `null` is what makes diagnostics
+ * report `49-raw` rather than `49-normalized` (P4h-FIX1 M3+M4).
+ */
+export function resolvePedalOffset(learner: PedalOffsetLearner): number | null {
+  return isPedalOffsetValid(learner.minRestValue) ? learner.minRestValue : null;
 }
 
 /** Whether the learning window has fully elapsed (the offset, if any was ever observed, is now final for this session). */
@@ -57,9 +98,18 @@ export function isPedalOffsetLearningComplete(learner: PedalOffsetLearner, nowMs
  * = 28.24% ("~28%"); raw 15 (at the offset itself) -> 0%.
  */
 export function normalizeAccelPedalPct(rawPct: number, offset: number): number {
-  if (offset <= 0) return clamp(rawPct, 0, 100);
+  // P4h-FIX1 M3: an offset at/over the 95 % ceiling (or non-finite) is not a
+  // rest floor -- it is refused, and the RAW value is kept, rather than
+  // dividing by a vanishing (or zero) span and clamping a `NaN` through.
+  if (!isPedalOffsetValid(offset)) return clampFinite(rawPct);
   const scaled = ((rawPct - offset) / (100 - offset)) * 100;
-  return clamp(scaled, 0, 100);
+  return clampFinite(scaled);
+}
+
+/** Clamp to [0, 100] that never turns a non-finite input into a plausible-looking finite reading (`Math.max`/`Math.min` would map `NaN` through, and `Infinity` to 100). */
+function clampFinite(value: number): number {
+  if (!Number.isFinite(value)) return value;
+  return clamp(value, 0, 100);
 }
 
 function clamp(value: number, lo: number, hi: number): number {

@@ -16,7 +16,7 @@ import { StatusBanner } from '../components/StatusBanner';
 import { facade, settingsStore } from '../../session/composition';
 import { useSettings } from '../hooks/useSettings';
 import { resolveSelectedCircuit } from '../../session/circuitCatalog';
-import { evaluateCircuitProximity } from '../../session/circuitProximity';
+import { evaluatePreflightProximity, type PreflightFix } from '../../session/circuitProximity';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Preflight'>;
 
@@ -73,13 +73,27 @@ export function PreflightScreen({ navigation }: Props): React.JSX.Element {
   // driver's own current GNSS fix, used ONLY for the proximity check below --
   // `report.gnssFix` (the existing preflight collector) never carries
   // lat/lon, so this is a SEPARATE, purpose-built watcher (own
-  // `GnssLocationProvider`, started/stopped with this screen's own
-  // lifetime), not a change to `preflight.ts`'s own collector.
-  const [currentFix, setCurrentFix] = useState<{ lat: number; lon: number } | null>(null);
+  // `GnssLocationProvider`), not a change to `preflight.ts`'s own collector.
+  //
+  // P4h-FIX1 H2+H3 (binding, after Codex P4h-REV1 HIGH): the fix now carries
+  // its accuracy and arrival time -- the guard refuses a stale or imprecise
+  // one instead of silently passing (`evaluatePreflightProximity`).
+  const [currentFix, setCurrentFix] = useState<PreflightFix | null>(null);
+  // P4h-FIX1 H3 (binding): this screen is NOT unmounted when Continue pushes
+  // CalibrationInstructions, so the watcher is bound to FOCUS, not to mount:
+  // it stops on every navigation away (Continue, Continue-anyway, Back) and
+  // resumes when the driver comes back -- never a second maximum-rate native
+  // watcher alongside the controller's own during calibration.
+  const [screenFocused, setScreenFocused] = useState(true);
+  /** Set once the permission request resolved GRANTED and the preflight collector finished -- the proximity watcher's start gate (P4h-FIX1 H2). */
+  const [permissionGranted, setPermissionGranted] = useState(false);
   // Field revision 2 (binding): "Continue anyway" (testing) bypasses the
   // warning for the REST of this screen's lifetime, without re-triggering it
   // on the next render (e.g. a fresh, still-far-away fix arriving).
   const [proximityAcknowledged, setProximityAcknowledged] = useState(false);
+  // P4h-FIX1 H2 (binding): a fix goes STALE with the passage of time alone,
+  // so the guard is re-evaluated on a slow ticker as well as on each new fix.
+  const [, forceStalenessTick] = useState(0);
   const settings = useSettings(settingsStore);
 
   useEffect(() => {
@@ -95,13 +109,20 @@ export function PreflightScreen({ navigation }: Props): React.JSX.Element {
     const abortController = new AbortController();
     setStatus('running');
     setReport(null);
+    setPermissionGranted(false);
 
     (async () => {
-      await requestForegroundLocationPermission();
+      const permission = await requestForegroundLocationPermission();
       const result = await runPreflightChecks(abortController.signal);
       if (!cancelled) {
         setReport(result);
         setStatus('done');
+        // P4h-FIX1 H2 (binding): the proximity watcher below is gated on
+        // this, so it starts ONLY after permission was actually granted AND
+        // the collector's own native watcher has finished -- never
+        // concurrently with either (the previous watcher started on mount,
+        // raced the permission prompt, and its failure went unnoticed).
+        setPermissionGranted(permission.state === 'granted' && result.permissionGranted);
       }
     })();
 
@@ -111,14 +132,63 @@ export function PreflightScreen({ navigation }: Props): React.JSX.Element {
     };
   }, [runToken]);
 
+  /**
+   * P4h-FIX1 H2+H3 (binding): THE proximity watcher -- exactly one, started
+   * only once permission is granted and the preflight collector has finished,
+   * stopped whenever this screen loses focus (Continue / Continue-anyway /
+   * Back) or unmounts, and with its `start()` rejection HANDLED (web preview
+   * and any no-GNSS device reject here; an unhandled rejection was the
+   * review's other finding on this effect).
+   */
   useEffect(() => {
+    if (!permissionGranted || !screenFocused) return;
+    let stopped = false;
     const provider = new GnssLocationProvider();
-    const unsubscribe = provider.subscribe((sample) => setCurrentFix({ lat: sample.lat, lon: sample.lon }));
-    void provider.start();
+    const unsubscribe = provider.subscribe((sample) =>
+      setCurrentFix({
+        lat: sample.lat,
+        lon: sample.lon,
+        accuracyM: sample.accuracyM ?? null,
+        tMs: Date.now(),
+      }),
+    );
+    const started = provider.start().catch((error: unknown) => {
+      // No fix will ever arrive from this watcher: the guard stays "unknown"
+      // (Continue disabled, Continue-anyway available) rather than silently
+      // passing, which is exactly the intended behavior here.
+      console.warn('[PreflightScreen] proximity GNSS watcher failed to start', error);
+    });
     return () => {
+      stopped = true;
       unsubscribe();
-      void provider.stop();
+      // Stop only after the start settles -- `GnssLocationProvider`
+      // serializes its own start/stop, and stopping before the start
+      // resolved would otherwise leave the native watcher running.
+      void started.then(() => {
+        if (stopped) void provider.stop().catch(() => undefined);
+      });
     };
+  }, [permissionGranted, screenFocused, runToken]);
+
+  // P4h-FIX1 H3 (binding): focus/blur, not mount/unmount -- see
+  // `screenFocused`'s own comment above.
+  useEffect(() => {
+    const unsubscribeFocus = navigation.addListener('focus', () => setScreenFocused(true));
+    const unsubscribeBlur = navigation.addListener('blur', () => {
+      setScreenFocused(false);
+      setCurrentFix(null); // a fix from before we left is not evidence about where the driver is now.
+    });
+    return () => {
+      unsubscribeFocus();
+      unsubscribeBlur();
+    };
+  }, [navigation]);
+
+  // P4h-FIX1 H2 (binding): re-render on a slow ticker so a fix that ages past
+  // the freshness limit flips the guard back to "unknown" on its own.
+  useEffect(() => {
+    const timer = setInterval(() => forceStalenessTick((n) => n + 1), 5_000);
+    return () => clearInterval(timer);
   }, []);
 
   const retry = useCallback(() => {
@@ -133,9 +203,20 @@ export function PreflightScreen({ navigation }: Props): React.JSX.Element {
   // yet) keeps the EXISTING failure/wait UI untouched, per contracts.md's
   // "No fix yet -> the existing GNSS wait applies".
   const selectedCircuit = resolveSelectedCircuit(settings);
-  const proximity =
-    report?.pass === true ? evaluateCircuitProximity(currentFix, selectedCircuit.profile.startFinishGate) : null;
-  const showProximityWarning = proximity !== null && proximity.shouldWarn && !proximityAcknowledged;
+  // P4h-FIX1 H2 (binding): three outcomes, and "no usable fix" is one of them
+  // -- see `evaluatePreflightProximity`. `proximityAcknowledged` ("Continue
+  // anyway") suppresses the guard entirely for the rest of this screen's
+  // lifetime, exactly as before.
+  const proximity = evaluatePreflightProximity(currentFix, selectedCircuit.profile.startFinishGate, {
+    nowMs: Date.now(),
+    preflightPassed: report?.pass === true,
+  });
+  const showProximityWarning = proximity.showFarWarning && !proximityAcknowledged;
+  const showProximityUnknown = proximity.showUnknownCard && !proximityAcknowledged;
+  const showContinueAnyway = proximity.continueAnywayAvailable && !proximityAcknowledged;
+  // The plain Continue is enabled only for a usable fix AT the circuit -- or
+  // once the driver has deliberately overridden the guard.
+  const showPlainContinue = report?.pass === true && (proximityAcknowledged || proximity.continueEnabled);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -194,11 +275,24 @@ export function PreflightScreen({ navigation }: Props): React.JSX.Element {
         ) : null}
         {report && report.pass ? <StatusBanner variant="success" message="All checks passed." /> : null}
 
-        {showProximityWarning && proximity?.distanceKm !== null && proximity?.distanceKm !== undefined ? (
+        {showProximityWarning && proximity.distanceKm !== null ? (
           <View style={styles.proximityCard} accessibilityLiveRegion="polite">
             <Text style={styles.proximityText} maxFontSizeMultiplier={1.3}>
               You are {Math.round(proximity.distanceKm)} km from {selectedCircuit.profile.displayName} — calibration
               needs you on the circuit.
+            </Text>
+          </View>
+        ) : null}
+
+        {/* P4h-FIX1 H2 (binding): "Never silently pass" -- with no usable fix
+            (none yet, older than 30 s, or worse than 200 m) the guard SAYS so
+            and Continue stays disabled; "Continue anyway" remains available
+            for testing. */}
+        {showProximityUnknown ? (
+          <View style={styles.proximityCard} accessibilityLiveRegion="polite">
+            <Text style={styles.proximityText} maxFontSizeMultiplier={1.3}>
+              Distance to circuit unknown — waiting for an accurate GPS fix. Calibration needs you on{' '}
+              {selectedCircuit.profile.displayName}.
             </Text>
           </View>
         ) : null}
@@ -216,41 +310,53 @@ export function PreflightScreen({ navigation }: Props): React.JSX.Element {
         </Pressable>
 
         {showProximityWarning ? (
-          <>
-            {/* Field revision 2 (binding): "Back" (default) and "Continue anyway" (testing) -- Back is the primary/emphasized action since calibration off-circuit is the mistake path, "Continue anyway" is the deliberate override for testing. */}
-            <Pressable
-              style={[styles.button, styles.primaryButton]}
-              onPress={() => navigation.goBack()}
-              accessibilityRole="button"
-              accessibilityLabel="Back"
-            >
-              <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.3}>
-                Back
-              </Text>
-            </Pressable>
-            <Pressable
-              style={[styles.button, styles.secondaryButton]}
-              onPress={() => {
-                setProximityAcknowledged(true);
-                navigation.navigate('CalibrationInstructions');
-              }}
-              accessibilityRole="button"
-              accessibilityLabel="Continue anyway"
-            >
-              <Text style={styles.secondaryButtonText} maxFontSizeMultiplier={1.3}>
-                Continue anyway
-              </Text>
-            </Pressable>
-          </>
-        ) : report?.pass ? (
+          /* Field revision 2 (binding): "Back" (default) and "Continue anyway" (testing) -- Back is the primary/emphasized action since calibration off-circuit is the mistake path, "Continue anyway" is the deliberate override for testing. */
           <Pressable
             style={[styles.button, styles.primaryButton]}
-            onPress={() => navigation.navigate('CalibrationInstructions')}
+            onPress={() => navigation.goBack()}
             accessibilityRole="button"
+            accessibilityLabel="Back"
+          >
+            <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.3}>
+              Back
+            </Text>
+          </Pressable>
+        ) : null}
+
+        {/* P4h-FIX1 H2 (binding): "Continue stays disabled until a fix
+            arrives" -- it stays VISIBLE while disabled (with the card above
+            saying why), rather than vanishing and leaving the driver
+            guessing. */}
+        {report?.pass ? (
+          <Pressable
+            style={[styles.button, styles.primaryButton, !showPlainContinue && styles.disabledButton]}
+            onPress={() => navigation.navigate('CalibrationInstructions')}
+            disabled={!showPlainContinue}
+            accessibilityRole="button"
+            accessibilityState={{ disabled: !showPlainContinue }}
             accessibilityLabel="Continue to calibration"
           >
             <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.3}>
               Continue
+            </Text>
+          </Pressable>
+        ) : null}
+
+        {/* P4h-FIX1 H2 (binding): available for BOTH unsatisfied outcomes --
+            "too far" and "no usable fix" -- so testing off-circuit (and web
+            preview, where no fix ever arrives) is never blocked outright. */}
+        {showContinueAnyway ? (
+          <Pressable
+            style={[styles.button, styles.secondaryButton]}
+            onPress={() => {
+              setProximityAcknowledged(true);
+              navigation.navigate('CalibrationInstructions');
+            }}
+            accessibilityRole="button"
+            accessibilityLabel="Continue anyway"
+          >
+            <Text style={styles.secondaryButtonText} maxFontSizeMultiplier={1.3}>
+              Continue anyway
             </Text>
           </Pressable>
         ) : null}
@@ -304,6 +410,8 @@ const styles = StyleSheet.create({
   },
   proximityText: { ...typography.body, color: colors.textPrimary },
   button: { borderRadius: radii.lg, paddingVertical: spacing.md, alignItems: 'center' },
+  /** P4h-FIX1 H2: Continue while the distance guard is unsatisfied -- visible, clearly inert. */
+  disabledButton: { opacity: 0.4 },
   primaryButton: { backgroundColor: colors.accent },
   primaryButtonText: { ...typography.subtitle, color: colors.onAccent },
   secondaryButton: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },

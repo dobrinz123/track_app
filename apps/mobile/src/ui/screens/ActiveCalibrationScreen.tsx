@@ -14,7 +14,7 @@ import { resolveSelectedCircuit } from '../../session/circuitCatalog';
 import {
   CALIBRATION_CANCEL_CONFIRM_BODY,
   CALIBRATION_CANCEL_CONFIRM_TITLE,
-  shouldConfirmCalibrationExit,
+  createCalibrationExitInterceptor,
 } from '../../session/calibrationEscape';
 import { useFacadeState } from '../hooks/useFacadeState';
 import { useSettings } from '../hooks/useSettings';
@@ -69,6 +69,15 @@ export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Elemen
   // replay it via `navigation.dispatch`, rather than re-deriving a target
   // route.
   const pendingBackActionRef = useRef<NavigationAction | null>(null);
+  // P4h-FIX1 H1 (binding, after Codex P4h-REV1 HIGH): the ALLOW-ONCE gate the
+  // `beforeRemove` listener consults. Without it, `confirmCancelExit()`'s
+  // re-dispatch of the very action the listener had intercepted was
+  // intercepted AGAIN -- the confirm card reopened immediately, forever, and
+  // the driver could never actually leave (the "user felt stuck" failure this
+  // whole escape hatch exists to fix). Held in a ref (not state) so the
+  // listener registered below always reads the CURRENT gate without needing
+  // to be torn down and re-registered.
+  const exitInterceptorRef = useRef(createCalibrationExitInterceptor());
 
   useEffect(() => {
     const unsubscribe = navigation.addListener('beforeRemove', (e) => {
@@ -76,9 +85,10 @@ export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Elemen
       // action type `GO_BACK`) is intercepted -- this screen's OWN
       // programmatic navigations (`navigation.replace(...)`, from either the
       // sticky Cancel button below or the calibration-complete effect
-      // above) dispatch a `REPLACE` action, which `shouldConfirmCalibrationExit`
-      // never flags, so they proceed unconfirmed exactly as before.
-      if (!shouldConfirmCalibrationExit(e.data.action.type === 'GO_BACK' ? 'header-back' : 'calibration-complete')) {
+      // above) dispatch a `REPLACE` action, which the interceptor never
+      // flags, so they proceed unconfirmed exactly as before. A back the
+      // driver has ALREADY confirmed passes through the same way (one shot).
+      if (!exitInterceptorRef.current.shouldIntercept(e.data.action.type)) {
         return;
       }
       e.preventDefault();
@@ -93,15 +103,20 @@ export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Elemen
     setConfirmingCancel(false);
     const action = pendingBackActionRef.current;
     pendingBackActionRef.current = null;
+    // P4h-FIX1 H1: arm the one-shot bypass BEFORE re-dispatching, so the
+    // listener above lets exactly this replayed action through.
+    exitInterceptorRef.current.allowNext();
     if (action !== null) {
       navigation.dispatch(action);
     } else {
+      exitInterceptorRef.current.reset(); // a REPLACE never needed the bypass -- do not leave it armed.
       navigation.replace('CalibrationInstructions');
     }
   }, [navigation]);
 
   const dismissCancelExit = useCallback(() => {
     pendingBackActionRef.current = null;
+    exitInterceptorRef.current.reset();
     setConfirmingCancel(false);
   }, []);
 

@@ -90,8 +90,23 @@ vi.mock('../../src/session/tcpObdTransport', () => ({
   },
 }));
 
+/**
+ * P4h-FIX1 H5: wraps the REAL `createElm327Session` so a test can COUNT the
+ * generations this provider actually built -- the only direct evidence that a
+ * fallback relaunch did (or did not) happen after a Stop.
+ */
+vi.mock('@circuit/core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@circuit/core')>();
+  return { ...actual, createElm327Session: vi.fn(actual.createElm327Session) };
+});
+import { createElm327Session } from '@circuit/core';
+
 async function flushMicrotasks(times = 30): Promise<void> {
   for (let i = 0; i < times; i += 1) await Promise.resolve();
+}
+
+function sessionsBuilt(): number {
+  return vi.mocked(createElm327Session).mock.calls.length;
 }
 
 function monotonicCounter(): () => number {
@@ -109,6 +124,7 @@ function byteFor(pct: number): number {
 describe('telemetryProvider: accelPedalPct PID fallback (Field revision 2, binding, P4h)', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.mocked(createElm327Session).mockClear();
     pidScript.noDataOnPids.clear();
     pidScript.byteSequenceByPid.clear();
     pidScript.pidRequestCount.clear();
@@ -193,6 +209,181 @@ describe('telemetryProvider: accelPedalPct PID fallback (Field revision 2, bindi
     expect(laterSample.value).toBeGreaterThan(20);
     expect(laterSample.value).toBeLessThan(35);
 
+    await provider.stop();
+  });
+});
+
+/**
+ * P4h-FIX1 H5 (after Codex P4h-REV1 HIGH, `telemetryProvider.ts:621-661,1302-1337`):
+ * "pressing Stop while fallback teardown is underway can restart telemetry
+ * after Stop completes. `triggerPedalFallback()` always runs
+ * `doStop().then(relaunch, relaunch)`; its relaunch guard checks only the
+ * settings fingerprint, not an explicit Stop or lifecycle generation."
+ */
+describe('telemetryProvider: Stop during the pedal-fallback teardown (P4h-FIX1 H5)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.mocked(createElm327Session).mockClear();
+    pidScript.noDataOnPids.clear();
+    pidScript.byteSequenceByPid.clear();
+    pidScript.pidRequestCount.clear();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('Stop issued while the fallback is tearing down leaves the provider STOPPED -- no relaunch, no new session generation', async () => {
+    pidScript.noDataOnPids.add('5A'); // forces the fallback path.
+    pidScript.byteSequenceByPid.set('49', [byteFor(15)]);
+    pidScript.byteSequenceByPid.set('0D', [0]);
+
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'elm327' });
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
+    const states: Elm327State[] = [];
+    const samples: TelemetrySample[] = [];
+    provider.onStateChange((s) => states.push(s));
+    provider.onSample((s) => samples.push(s));
+
+    provider.start();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flushMicrotasks();
+    expect(states.at(-1)).toBe('polling');
+    expect(sessionsBuilt()).toBe(1);
+
+    // Fire the 8s fallback-check timer SYNCHRONOUSLY: `triggerPedalFallback()`
+    // runs and its `doStop()` teardown is now in flight, its relaunch
+    // continuation still queued...
+    vi.advanceTimersByTime(8_000);
+    // ...and the user presses Stop in exactly that window.
+    const stopped = provider.stop();
+    await flushMicrotasks();
+    await stopped;
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(10_000); // give any (wrong) relaunch every chance to appear.
+    await flushMicrotasks();
+
+    // The provider stayed stopped: no second generation was ever built...
+    expect(sessionsBuilt()).toBe(1);
+    // ...and it is not polling again.
+    expect(provider.getDiagnostics().state).not.toBe('polling');
+    expect(states.at(-1)).not.toBe('polling');
+    // 0x49 was never polled, because the relaunch never happened.
+    expect(samples.filter((s) => s.channel === 'accelPedalPct')).toHaveLength(0);
+
+    await provider.stop(); // idempotent.
+  });
+
+  it('two concurrent stop() calls share one teardown (no latch overwrite) and both settle', async () => {
+    pidScript.byteSequenceByPid.set('5A', [byteFor(20)]);
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'elm327' });
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
+
+    provider.start();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flushMicrotasks();
+    expect(provider.getDiagnostics().state).toBe('polling');
+
+    const first = provider.stop();
+    const second = provider.stop();
+    await flushMicrotasks();
+    await Promise.all([first, second]);
+    await flushMicrotasks();
+
+    expect(provider.getDiagnostics().state).not.toBe('polling');
+    expect(sessionsBuilt()).toBe(1);
+  });
+});
+
+/**
+ * P4h-FIX1 M3+M4 (after Codex P4h-REV1 MEDIUM, `pedalNormalization.ts:32-64`;
+ * `telemetryProvider.ts:674-684`): "a valid 0x49 byte `FF` observed at speed
+ * zero therefore causes emitted pedal samples to become `NaN`", and
+ * "diagnostics still say `49-normalized`, although no normalization was
+ * learned."
+ */
+describe('telemetryProvider: 0x49 fallback diagnostics honesty (P4h-FIX1 M3+M4)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.mocked(createElm327Session).mockClear();
+    pidScript.noDataOnPids.clear();
+    pidScript.byteSequenceByPid.clear();
+    pidScript.pidRequestCount.clear();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Starts a provider, lets the 0x5A grace window elapse, and returns it once the 0x49 generation is polling. */
+  async function startFallenBackProvider(): Promise<{
+    provider: ReturnType<typeof createTelemetryProvider>;
+    samples: TelemetrySample[];
+  }> {
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'elm327' });
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
+    const samples: TelemetrySample[] = [];
+    provider.onSample((s) => samples.push(s));
+    provider.start();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(8_000); // grace window -> fallback.
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(3_000); // the relaunched generation reaches polling.
+    await flushMicrotasks();
+    return { provider, samples };
+  }
+
+  it('0x49 reading FF (100 %) at rest: no NaN is ever emitted, and diagnostics report "49-raw" rather than a normalization that never happened', async () => {
+    pidScript.noDataOnPids.add('5A');
+    pidScript.byteSequenceByPid.set('49', [255]); // FF -> 100 % raw at rest -> the old offset-100 => 0/0 => NaN.
+    pidScript.byteSequenceByPid.set('0D', [0]); // at rest throughout.
+
+    const { provider, samples } = await startFallenBackProvider();
+    await vi.advanceTimersByTimeAsync(3_000);
+    await flushMicrotasks();
+
+    const pedalSamples = samples.filter((s) => s.channel === 'accelPedalPct');
+    expect(pedalSamples.length).toBeGreaterThan(0);
+    expect(pedalSamples.every((s) => Number.isFinite(s.value))).toBe(true);
+    // A >= 95 % "rest offset" is not credible -- the raw value is kept as-is.
+    expect(pedalSamples.every((s) => s.value === 100)).toBe(true);
+    expect(provider.getDiagnostics().pedalSource).toBe('49-raw');
+
+    await provider.stop();
+  });
+
+  it('the car never stops during the learning window: no offset is learned, so diagnostics say "49-raw" and the values stay raw', async () => {
+    pidScript.noDataOnPids.add('5A');
+    pidScript.byteSequenceByPid.set('49', [byteFor(39)]);
+    pidScript.byteSequenceByPid.set('0D', [50]); // 50 km/h throughout -- never at rest.
+
+    const { provider, samples } = await startFallenBackProvider();
+    await vi.advanceTimersByTimeAsync(12_000); // well past the 10s learning window.
+    await flushMicrotasks();
+
+    expect(provider.getDiagnostics().pedalSource).toBe('49-raw');
+    const pedalSamples = samples.filter((s) => s.channel === 'accelPedalPct');
+    expect(pedalSamples.length).toBeGreaterThan(0);
+    expect(pedalSamples.at(-1)!.value).toBeCloseTo(39, 0); // raw 0x49 percentage, unnormalized.
+
+    await provider.stop();
+  });
+
+  it('once a real rest offset IS learned, diagnostics flip to "49-normalized"', async () => {
+    pidScript.noDataOnPids.add('5A');
+    pidScript.byteSequenceByPid.set('49', [byteFor(15), byteFor(15), byteFor(15), byteFor(39)]);
+    pidScript.byteSequenceByPid.set('0D', [0]);
+
+    const { provider } = await startFallenBackProvider();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flushMicrotasks();
+
+    expect(provider.getDiagnostics().pedalSource).toBe('49-normalized');
     await provider.stop();
   });
 });
