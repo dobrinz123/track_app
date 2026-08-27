@@ -325,3 +325,9 @@ Scout (haiku) root cause for the ELM→ENET switch bug: start() no-op while `run
 | P4g-E2E-2 | LEAD (headless) | RUNNING on d992353 |
 | P4g-REV2 | codex (bounded) | FAIL — H2/M1/M2/L1 FIXED; H1 PARTIAL (stale 'stopped' over a newer discovery when current===null); NEW HIGH: `starting` latch never clears (p.finally identity mismatch) → all later Starts no-op forever; ELM change on rejecting stop = mandated unification (accepted, contracts note appended). P4g-FIX2 DISPATCHED. |
 | P4g-E2E-2 | LEAD (headless) | PASS on d992353 (CONNECTED, probe gated) — cannot catch the latch bug (single Start). |
+| P4g-FIX2 | sonnet (T2 seat) | DONE — starting latch (starting = p, finally as side effect) at both call sites; stale 'stopped' requires current===null AND generationCounter unchanged since the stop; ELM rejecting-stop cleanup documented; +3 tests red→green. LEAD gates: typecheck 0, test 0 (841 + 555 = 1396), lint 0, expo export ios 0. Commit 3e687b2. |
+| P4g-REV3 | codex (bounded) | DISPATCHED bg on 3e687b2 |
+| P4g-E2E-3 | LEAD (headless, now with Stop→Start cycle) | RUNNING on 3e687b2 |
+| P4g-E2E-3 | LEAD (headless) | PASS on 3e687b2 — CONNECTED → Stop → STOPPED → Start → CONNECTED again (restart cycle now covered in preview); probe gated. |
+| P4g-REV3 | codex (bounded) | PASS on 3e687b2 — latch + stale-stopped FIXED, zero new findings. |
+- P4g CLOSED (2026-08-27) at 3e687b2: pedal PID 0x49 + relabel, G rows in monitor, adapter-switch lifecycle fix (unified teardown, fingerprint incl. simulate, discovery abort on settings change, latch fix), hidden developer mode for DID probe/sweep in release; 3 Codex rounds (5+5+2 findings → last clean), 3 E2E runs incl. Stop→Start cycle; 1396 tests. BUILD 2 dispatched for the second driveway test (user's standing "da build sa testam"; install = 1 slot, user's decision).
