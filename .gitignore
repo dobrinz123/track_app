@@ -14,3 +14,6 @@ dist-export/
 apps/mobile/ios/
 apps/mobile/android/
 builds/
+
+# E2E screenshots written by the agent-browser daemon into its cwd (never commit)
+/[0-9][0-9]-*.png
