@@ -67,9 +67,23 @@ function buildResponse(command: string): string {
   }
 }
 
+/**
+ * P4h-FIX2 F1: counts the RAW transports this provider constructed/closed --
+ * the direct evidence for "never two sessions/transports" (a second
+ * transport constructed and then orphaned by an overwrite of `current` shows
+ * up here as `constructed - closed > 1`).
+ */
+const transportTracker = vi.hoisted(() => ({ constructed: 0, closedIds: new Set<number>() }));
+
 vi.mock('../../src/session/tcpObdTransport', () => ({
   TcpObdTransport: class {
     private dataListener: ((chunk: string) => void) | null = null;
+    /** Identifies THIS transport instance, so a double-close of the same one (the teardown's graceful stop plus its 200 ms force-close race) is not mistaken for two closed transports. */
+    private readonly id: number;
+    constructor() {
+      transportTracker.constructed += 1;
+      this.id = transportTracker.constructed;
+    }
     async connect(): Promise<void> {}
     send(line: string): void {
       const command = line.replace(/[\r\n\s]+/g, '').toUpperCase();
@@ -86,7 +100,9 @@ vi.mock('../../src/session/tcpObdTransport', () => ({
     onClose(): () => void {
       return () => undefined;
     }
-    async close(): Promise<void> {}
+    async close(): Promise<void> {
+      transportTracker.closedIds.add(this.id);
+    }
   },
 }));
 
@@ -295,6 +311,81 @@ describe('telemetryProvider: Stop during the pedal-fallback teardown (P4h-FIX1 H
 
     expect(provider.getDiagnostics().state).not.toBe('polling');
     expect(sessionsBuilt()).toBe(1);
+  });
+});
+
+/**
+ * P4h-FIX2 F1 (after Codex P4h-REV2 HIGH, `telemetryProvider.ts:697,1688`):
+ * "fallback lifecycle is still racy with an intervening Start. During fallback
+ * teardown, Start queues `launchFresh()` on `stopping`; that promise resolves
+ * before `stopShared()` invokes the fallback's own `relaunch`. Both
+ * continuations can therefore launch ... two sessions/transports are
+ * constructed and one is overwritten without teardown."
+ *
+ * Binding fix (ticket P4h-FIX2): ONE lifecycle intent -- every deferred launch
+ * (public Start, fallback relaunch) runs through `launchAfterStop(generation)`,
+ * a public Start bumps the lifecycle generation, and the older fallback
+ * continuation therefore sees its generation stale and exits.
+ */
+describe('telemetryProvider: Start during the pedal-fallback teardown (P4h-FIX2 F1)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.mocked(createElm327Session).mockClear();
+    pidScript.noDataOnPids.clear();
+    pidScript.byteSequenceByPid.clear();
+    pidScript.pidRequestCount.clear();
+    transportTracker.constructed = 0;
+    transportTracker.closedIds.clear();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('Start tapped while the fallback is tearing down launches EXACTLY ONE session (the fallback relaunch is superseded, not doubled) and resolves the source from settings', async () => {
+    pidScript.noDataOnPids.add('5A'); // forces the fallback path.
+    pidScript.byteSequenceByPid.set('49', [byteFor(15)]);
+    pidScript.byteSequenceByPid.set('0D', [0]);
+
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'elm327' });
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
+    const states: Elm327State[] = [];
+    provider.onStateChange((s) => states.push(s));
+
+    provider.start();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flushMicrotasks();
+    expect(states.at(-1)).toBe('polling');
+    expect(sessionsBuilt()).toBe(1);
+    expect(transportTracker.constructed).toBe(1);
+
+    // Fire the 8s fallback-check timer SYNCHRONOUSLY: `triggerPedalFallback()`
+    // ran, its teardown is in flight and its relaunch continuation is queued...
+    vi.advanceTimersByTime(8_000);
+    // ...and the user taps Start in exactly that window (the monitor briefly
+    // showed "stopped").
+    provider.start();
+    await flushMicrotasks();
+    // Deliberately well SHORT of another 8s grace window, so nothing here can
+    // be a second, legitimate fallback.
+    await vi.advanceTimersByTimeAsync(3_000);
+    await flushMicrotasks();
+
+    // HEAD (74a21e9): the queued Start's `launchFresh()` AND the fallback's own
+    // `relaunch()` both fire -- 3 sessions, 3 transports, one generation
+    // overwritten without teardown.
+    expect(sessionsBuilt()).toBe(2);
+    expect(transportTracker.constructed).toBe(2);
+    // Exactly ONE transport is live: the torn-down generation's was closed,
+    // and no orphan was left behind by an overwrite.
+    expect(transportTracker.constructed - transportTracker.closedIds.size).toBe(1);
+    // The Start won: the source is resolved from settings again (0x5A), not
+    // left on the fallback's 0x49.
+    expect(provider.getDiagnostics().pedalSource).toBe('5A');
+    expect(provider.getDiagnostics().state).toBe('polling');
+
+    await provider.stop();
   });
 });
 

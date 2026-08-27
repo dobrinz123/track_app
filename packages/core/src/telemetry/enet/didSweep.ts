@@ -435,6 +435,19 @@ export interface RunDidObservationResult {
   errors: number;
   /** True if ANY full round (one poll of every responder) took longer than `1000 / targetHz` ms. */
   cadenceDegraded: boolean;
+  /**
+   * F2 fix (P4i-FIX1, binding, after Codex P4hrev2c): the round-robin index
+   * into `input.responders` a CONTINUATION call should start from (persistent
+   * cursor) -- one past the last responder this call actually attempted a
+   * request for, wrapped modulo the list length. `0` if this call never
+   * attempted any responder at all (e.g. zero responders, or stopped/expired
+   * before the very first send). A caller running several `runDidObservation`
+   * calls back to back over the SAME candidate set (e.g. the mobile
+   * controller's guided phases) rotates its `responders` array by this amount
+   * before the NEXT call, so round-robin coverage continues from where THIS
+   * call left off instead of restarting at index 0 every time.
+   */
+  nextResponderIndex: number;
 }
 
 const DEFAULT_TARGET_HZ = 1;
@@ -458,7 +471,7 @@ export async function runDidObservation(input: RunDidObservationInput): Promise<
   if (input.responders.length === 0) {
     const startedAtMsForEmptyRun = input.clock.now();
     input.onStarted?.(startedAtMsForEmptyRun);
-    return { series: [], startedAtMs: startedAtMsForEmptyRun, errors: 0, cadenceDegraded: false };
+    return { series: [], startedAtMs: startedAtMsForEmptyRun, errors: 0, cadenceDegraded: false, nextResponderIndex: 0 };
   }
 
   const requestTimeoutMs = sanitizePositive(input.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
@@ -501,6 +514,8 @@ export async function runDidObservation(input: RunDidObservationInput): Promise<
   let cadenceDegraded = false;
   let lastMeasuredRttMs: number | null = null;
   let nextRequestNotBeforeMs = startedAtMs;
+  /** F2 fix (binding): index (into `input.responders`) of the last responder this call actually attempted a request for -- `-1` if none yet. Drives `result.nextResponderIndex` (see its own doc). */
+  let lastAttemptedIndex = -1;
 
   /** Re-checked at every responder boundary (same discipline as `runDidSweep`'s pacing-wait recheck). Returns true once the caller should stop entirely -- `control.stopped`, or the window elapsing while paused. */
   const waitWhilePaused = async (): Promise<boolean> => {
@@ -533,7 +548,8 @@ export async function runDidObservation(input: RunDidObservationInput): Promise<
 
     const roundStartMs = input.clock.now();
 
-    for (const did of input.responders) {
+    for (let responderIndex = 0; responderIndex < input.responders.length; responderIndex += 1) {
+      const did = input.responders[responderIndex]!;
       if (!(await shouldContinue())) break outer;
 
       const now = input.clock.now();
@@ -549,6 +565,7 @@ export async function runDidObservation(input: RunDidObservationInput): Promise<
       // `resolveDid`.
       if (!(await shouldContinue())) break outer;
 
+      lastAttemptedIndex = responderIndex; // F2 fix (binding): this slot is "used" for cursor purposes regardless of the outcome below.
       const sentAtMs = input.clock.now();
       const { outcome } = await resolveDid(
         did,
@@ -590,7 +607,8 @@ export async function runDidObservation(input: RunDidObservationInput): Promise<
   }
 
   const series: DidResponderSeries[] = input.responders.map((did) => ({ did, samples: samplesByDid.get(did) ?? [] }));
-  return { series, startedAtMs, errors, cadenceDegraded };
+  const nextResponderIndex = lastAttemptedIndex === -1 ? 0 : (lastAttemptedIndex + 1) % input.responders.length;
+  return { series, startedAtMs, errors, cadenceDegraded, nextResponderIndex };
 }
 
 interface ErrorBudget {

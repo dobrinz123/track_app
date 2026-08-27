@@ -82,7 +82,7 @@ describe('runDidObservation', () => {
       durationMs: 10_000,
       control: control(),
     });
-    expect(result).toEqual({ series: [], startedAtMs: 500, errors: 0, cadenceDegraded: false });
+    expect(result).toEqual({ series: [], startedAtMs: 500, errors: 0, cadenceDegraded: false, nextResponderIndex: 0 });
   });
 
   it('[REV3] keep-alive fires during a 10s window of FAST responses -- owned by the one loop, not reset per poll', async () => {
@@ -526,5 +526,119 @@ describe('runDidObservation', () => {
     const reconstructedRawReading = (observedStartedAtMs ?? Number.NaN) + (sample?.tMs ?? Number.NaN);
     expect(reads).toContain(reconstructedRawReading);
     expect(reconstructedRawReading).toBeGreaterThan(observedStartedAtMs ?? Number.NaN); // the sample was correlated strictly after the anchor was captured
+  });
+
+  describe('[F2, P4i-FIX1] nextResponderIndex -- the persistent round-robin cursor', () => {
+    it('stopping mid-round reports the index one past the last responder actually attempted', async () => {
+      // Real timers -- the SAME response cadence pushes each `nextRequestNotBeforeMs`
+      // wait past `now` (the pacing floor's clamp is 5ms), and this test's
+      // assertion doesn't need fake-timer control; a real 5ms wait is trivial.
+      const clock = new FakeClock();
+      const ctl = control();
+      const seen: number[] = [];
+      const transport = makeTransport({
+        send: (pdu) => {
+          const did = didOf(pdu);
+          seen.push(did);
+          if (did === 20) ctl.stopped = true; // stop right after the 2nd of 4 responders is attempted.
+        },
+        nextResponse: (_t, sentPdus) => positiveRaw(didOf(sentPdus[sentPdus.length - 1]!), [1]),
+      });
+
+      const result = await runDidObservation({
+        responders: [10, 20, 30, 40],
+        transport,
+        clock,
+        durationMs: 10_000,
+        control: ctl,
+      });
+
+      expect(seen).toEqual([10, 20]); // 30/40 never attempted.
+      expect(result.nextResponderIndex).toBe(2); // one past index 1 (did 20) -- a continuation should resume AT did 30.
+    });
+
+    it('a window that ends before any responder is attempted reports index 0 (nothing consumed)', async () => {
+      vi.useFakeTimers();
+      const clock = new FakeClock();
+      const result = await runDidObservation({
+        responders: [10, 20, 30],
+        transport: makeTransport(),
+        clock,
+        durationMs: 0, // expires immediately, before the first send.
+        control: control(),
+      });
+      expect(result.nextResponderIndex).toBe(0);
+    });
+
+    it('completing a full round wraps the cursor back to 0', async () => {
+      vi.useFakeTimers();
+      const clock = new FakeClock();
+      const transport = makeTransport({
+        send: () => {
+          clock.advance(10);
+        },
+        nextResponse: (_t, sentPdus) => positiveRaw(didOf(sentPdus[sentPdus.length - 1]!), [1]),
+      });
+      const resultPromise = runDidObservation({
+        responders: [10, 20, 30],
+        transport,
+        clock,
+        durationMs: 25, // just enough for one full round (3 x 10ms sends) and no more.
+        control: control(),
+      });
+      await vi.runAllTimersAsync();
+      const result = await resultPromise;
+      expect(result.nextResponderIndex).toBe(0); // wrapped after attempting index 2 (the last responder).
+    });
+
+    it('a caller rotating `responders` by nextResponderIndex between two calls continues coverage instead of restarting at index 0', async () => {
+      // Real timers -- same reasoning as the sibling test above.
+      const clock = new FakeClock();
+      const seenFirstCall: number[] = [];
+      const transportA = makeTransport({
+        send: (pdu) => {
+          seenFirstCall.push(didOf(pdu));
+          clock.advance(7); // each request/response round-trip costs the clock some real time.
+        },
+        nextResponse: (_t, sentPdus) => positiveRaw(didOf(sentPdus[sentPdus.length - 1]!), [1]),
+      });
+      const firstResult = await runDidObservation({
+        responders: [10, 20, 30, 40],
+        transport: transportA,
+        clock,
+        durationMs: 15, // enough for did 10 and 20 only (2 x 7ms), not the full round.
+        control: control(),
+      });
+      // Whatever the exact cutoff, the cursor tells us precisely where to resume.
+      const rotated = [
+        ...[10, 20, 30, 40].slice(firstResult.nextResponderIndex),
+        ...[10, 20, 30, 40].slice(0, firstResult.nextResponderIndex),
+      ];
+
+      const clockB = new FakeClock();
+      const seenSecondCall: number[] = [];
+      const transportB = makeTransport({
+        send: (pdu) => {
+          seenSecondCall.push(didOf(pdu));
+          clockB.advance(7);
+        },
+        nextResponse: (_t, sentPdus) => positiveRaw(didOf(sentPdus[sentPdus.length - 1]!), [1]),
+      });
+      await runDidObservation({
+        responders: rotated,
+        transport: transportB,
+        clock: clockB,
+        durationMs: 5, // short -- this assertion only needs the FIRST send to land.
+        control: control(),
+      });
+
+      // The rotated continuation must START with whatever responder the
+      // cursor pointed at -- never restarting the sequence at responder 10
+      // (the REV bug: a naive per-phase caller always began at index 0,
+      // over-sampling the front of a large candidate list and starving the
+      // tail).
+      expect(seenSecondCall[0]).toBe(rotated[0]);
+      expect(seenSecondCall[0]).not.toBe(seenFirstCall[0]);
+    });
   });
 });

@@ -68,6 +68,22 @@ export interface DidSweepStore {
   updateRunProgress(runId: string, patch: DidSweepRunProgressPatch, nowUtc: string): Promise<void>;
   /** Upserts a batch of responder observations for `runId` (see `DidSweepResponderInput`'s doc). Also updates the run's own `responderCount` to the resulting distinct-DID count for this run. */
   upsertResponders(runId: string, responders: readonly DidSweepResponderInput[], nowUtc: string): Promise<void>;
+  /**
+   * F1 fix (P4i-FIX1, binding, after Codex P4hrev2c): "responders + progress
+   * written in ONE transaction" -- upserts `responders` (if any) AND applies
+   * `patch` to the run row TOGETHER, atomically (SQL-backed: one
+   * `withTransactionAsync` BEGIN..COMMIT span; in-memory: no `await` between
+   * the two mutations, so nothing else can ever observe a half-applied
+   * state). A real process kill mid-flush can therefore never persist
+   * responders without the matching progress checkpoint (or vice versa).
+   * No-op (writes nothing) if `runId` doesn't exist.
+   */
+  flushRunProgress(
+    runId: string,
+    responders: readonly DidSweepResponderInput[],
+    patch: DidSweepRunProgressPatch,
+    nowUtc: string,
+  ): Promise<void>;
   /** Every persisted run, most-recently-updated first. */
   listRuns(): Promise<DidSweepRunRecord[]>;
   getRun(runId: string): Promise<DidSweepRunRecord | null>;
@@ -75,6 +91,27 @@ export interface DidSweepStore {
   deleteRun(runId: string): Promise<void>;
   /** Deletes every run beyond the `keep` most-recently-updated ones (and their responders) -- addendum: "Retention: keep the last 5 runs." */
   enforceRetention(keep: number): Promise<void>;
+}
+
+/**
+ * F6 fix (P4i-FIX1, binding, after Codex P4hrev2c): "Resume picks the most
+ * recent RESUMABLE run (status paused/stopped/interrupted with lastDid <
+ * rangeEnd), not the most recent run." `runs` is expected most-recently-
+ * updated first (== `listRuns()`'s own contract) -- returns the first entry
+ * that is NOT `'complete'` and still has room left to sweep (`lastDid` either
+ * unset, or short of `rangeTo`); `null` if none qualifies. A run that reached
+ * `'complete'` (even if it happens to be the most RECENTLY updated one) is
+ * never offered as "Resume" -- the field scenario this fixes: the latest run
+ * completed naturally while an EARLIER run was killed mid-sweep; only that
+ * earlier one is genuinely resumable.
+ */
+export function selectResumableRun(runs: readonly DidSweepRunRecord[]): DidSweepRunRecord | null {
+  for (const run of runs) {
+    if (run.status === 'complete') continue;
+    if (run.lastDid !== null && run.lastDid >= run.rangeTo) continue; // nothing left to sweep even though never marked complete.
+    return run;
+  }
+  return null;
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -96,6 +133,43 @@ interface MemoryRun extends DidSweepRunRecord {
   responders: Map<number, DidSweepResponderRecord>;
 }
 
+/** Shared by `updateRunProgress` and `flushRunProgress` -- mutates `run` in place, synchronously (no `await`s), so both callers apply a patch the identical way. */
+function applyProgressPatchToMemoryRun(run: MemoryRun, patch: DidSweepRunProgressPatch): void {
+  if (patch.lastDid !== undefined) run.lastDid = patch.lastDid;
+  if (patch.status !== undefined) run.status = patch.status;
+  if (patch.visitedCount !== undefined) run.visitedCount = patch.visitedCount;
+  if (patch.timeoutCount !== undefined) run.timeoutCount = patch.timeoutCount;
+  if (patch.unmatchedCount !== undefined) run.unmatchedCount = patch.unmatchedCount;
+  if (patch.errorCount !== undefined) run.errorCount = patch.errorCount;
+  if (patch.nrcCounts !== undefined) run.nrcCounts = { ...patch.nrcCounts };
+}
+
+/** Shared by `upsertResponders` and `flushRunProgress` -- mutates `run` in place, synchronously. */
+function upsertRespondersIntoMemoryRun(run: MemoryRun, responders: readonly DidSweepResponderInput[], nowUtc: string): void {
+  for (const input of responders) {
+    const existing = run.responders.get(input.did);
+    if (existing === undefined) {
+      run.responders.set(input.did, {
+        runId: run.runId,
+        did: input.did,
+        length: input.raw.length,
+        rawHex: bytesToHex(input.raw),
+        rttMs: input.rttMs,
+        firstSeenUtc: nowUtc,
+        lastSeenUtc: nowUtc,
+        sampleCount: 1,
+      });
+    } else {
+      existing.length = input.raw.length;
+      existing.rawHex = bytesToHex(input.raw);
+      existing.rttMs = input.rttMs;
+      existing.lastSeenUtc = nowUtc;
+      existing.sampleCount += 1;
+    }
+  }
+  run.responderCount = run.responders.size;
+}
+
 /** Web-preview / test fallback: no persistence across reloads, but satisfies the SAME `DidSweepStore` contract as the SQL-backed implementation (mirrors `InMemorySessionRepository`'s own role for the session repository). */
 export function createInMemoryDidSweepStore(): DidSweepStore {
   const runs = new Map<string, MemoryRun>();
@@ -113,41 +187,24 @@ export function createInMemoryDidSweepStore(): DidSweepStore {
     async updateRunProgress(runId, patch, nowUtc): Promise<void> {
       const run = runs.get(runId);
       if (run === undefined) return;
-      if (patch.lastDid !== undefined) run.lastDid = patch.lastDid;
-      if (patch.status !== undefined) run.status = patch.status;
-      if (patch.visitedCount !== undefined) run.visitedCount = patch.visitedCount;
-      if (patch.timeoutCount !== undefined) run.timeoutCount = patch.timeoutCount;
-      if (patch.unmatchedCount !== undefined) run.unmatchedCount = patch.unmatchedCount;
-      if (patch.errorCount !== undefined) run.errorCount = patch.errorCount;
-      if (patch.nrcCounts !== undefined) run.nrcCounts = { ...patch.nrcCounts };
+      applyProgressPatchToMemoryRun(run, patch);
       run.updatedAtUtc = nowUtc;
     },
 
     async upsertResponders(runId, responders, nowUtc): Promise<void> {
       const run = runs.get(runId);
       if (run === undefined) return;
-      for (const input of responders) {
-        const existing = run.responders.get(input.did);
-        if (existing === undefined) {
-          run.responders.set(input.did, {
-            runId,
-            did: input.did,
-            length: input.raw.length,
-            rawHex: bytesToHex(input.raw),
-            rttMs: input.rttMs,
-            firstSeenUtc: nowUtc,
-            lastSeenUtc: nowUtc,
-            sampleCount: 1,
-          });
-        } else {
-          existing.length = input.raw.length;
-          existing.rawHex = bytesToHex(input.raw);
-          existing.rttMs = input.rttMs;
-          existing.lastSeenUtc = nowUtc;
-          existing.sampleCount += 1;
-        }
-      }
-      run.responderCount = run.responders.size;
+      upsertRespondersIntoMemoryRun(run, responders, nowUtc);
+      run.updatedAtUtc = nowUtc;
+    },
+
+    // F1 fix (binding): no `await` anywhere between the two mutations below --
+    // synchronously atomic (nothing else can observe an in-between state).
+    async flushRunProgress(runId, responders, patch, nowUtc): Promise<void> {
+      const run = runs.get(runId);
+      if (run === undefined) return;
+      if (responders.length > 0) upsertRespondersIntoMemoryRun(run, responders, nowUtc);
+      applyProgressPatchToMemoryRun(run, patch);
       run.updatedAtUtc = nowUtc;
     },
 
@@ -253,6 +310,72 @@ function rowToResponder(row: ResponderRow): DidSweepResponderRecord {
   };
 }
 
+/** Shared by `updateRunProgress` and `flushRunProgress` -- builds the `SET` clause fragments/params for a progress patch (everything except `run_id`, appended by the caller). */
+function buildProgressPatchSql(patch: DidSweepRunProgressPatch, nowUtc: string): { sets: string[]; params: SqlBindValue[] } {
+  const sets: string[] = ['updated_at_utc = ?'];
+  const params: SqlBindValue[] = [nowUtc];
+  if (patch.lastDid !== undefined) {
+    sets.push('last_did = ?');
+    params.push(patch.lastDid);
+  }
+  if (patch.status !== undefined) {
+    sets.push('status = ?');
+    params.push(patch.status);
+  }
+  if (patch.visitedCount !== undefined) {
+    sets.push('visited_count = ?');
+    params.push(patch.visitedCount);
+  }
+  if (patch.timeoutCount !== undefined) {
+    sets.push('timeout_count = ?');
+    params.push(patch.timeoutCount);
+  }
+  if (patch.unmatchedCount !== undefined) {
+    sets.push('unmatched_count = ?');
+    params.push(patch.unmatchedCount);
+  }
+  if (patch.errorCount !== undefined) {
+    sets.push('error_count = ?');
+    params.push(patch.errorCount);
+  }
+  if (patch.nrcCounts !== undefined) {
+    sets.push('nrc_counts_json = ?');
+    params.push(JSON.stringify(patch.nrcCounts));
+  }
+  return { sets, params };
+}
+
+/** Shared by `upsertResponders` and `flushRunProgress` -- issues the upsert statements only (never touches `did_sweep_runs` itself; the caller recomputes/persists `responder_count` separately, possibly inside the SAME transaction). */
+async function upsertRespondersSql(
+  db: SqlDatabase,
+  runId: string,
+  responders: readonly DidSweepResponderInput[],
+  nowUtc: string,
+): Promise<void> {
+  for (const input of responders) {
+    const rawHex = bytesToHex(input.raw);
+    await db.runAsync(
+      `INSERT INTO did_sweep_responders (run_id, did, length, raw_hex, rtt_ms, first_seen_utc, last_seen_utc, sample_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+       ON CONFLICT(run_id, did) DO UPDATE SET
+         length = excluded.length,
+         raw_hex = excluded.raw_hex,
+         rtt_ms = excluded.rtt_ms,
+         last_seen_utc = excluded.last_seen_utc,
+         sample_count = sample_count + 1`,
+      [runId, input.did, input.raw.length, rawHex, input.rttMs, nowUtc, nowUtc],
+    );
+  }
+}
+
+async function countRespondersSql(db: SqlDatabase, runId: string): Promise<number> {
+  const countRows = await db.getAllAsync<{ n: number }>(
+    'SELECT COUNT(*) AS n FROM did_sweep_responders WHERE run_id = ?',
+    [runId],
+  );
+  return countRows[0]?.n ?? 0;
+}
+
 /** Real, on-device SQLite implementation over `didSweepSchema.ts`'s tables -- same connection `openAppDatabase()` opens for everything else. */
 export function createSqlDidSweepStore(db: SqlDatabase): DidSweepStore {
   return {
@@ -281,66 +404,39 @@ export function createSqlDidSweepStore(db: SqlDatabase): DidSweepStore {
     },
 
     async updateRunProgress(runId, patch, nowUtc): Promise<void> {
-      const sets: string[] = ['updated_at_utc = ?'];
-      const params: SqlBindValue[] = [nowUtc];
-      if (patch.lastDid !== undefined) {
-        sets.push('last_did = ?');
-        params.push(patch.lastDid);
-      }
-      if (patch.status !== undefined) {
-        sets.push('status = ?');
-        params.push(patch.status);
-      }
-      if (patch.visitedCount !== undefined) {
-        sets.push('visited_count = ?');
-        params.push(patch.visitedCount);
-      }
-      if (patch.timeoutCount !== undefined) {
-        sets.push('timeout_count = ?');
-        params.push(patch.timeoutCount);
-      }
-      if (patch.unmatchedCount !== undefined) {
-        sets.push('unmatched_count = ?');
-        params.push(patch.unmatchedCount);
-      }
-      if (patch.errorCount !== undefined) {
-        sets.push('error_count = ?');
-        params.push(patch.errorCount);
-      }
-      if (patch.nrcCounts !== undefined) {
-        sets.push('nrc_counts_json = ?');
-        params.push(JSON.stringify(patch.nrcCounts));
-      }
+      const { sets, params } = buildProgressPatchSql(patch, nowUtc);
       params.push(runId);
       await db.runAsync(`UPDATE did_sweep_runs SET ${sets.join(', ')} WHERE run_id = ?`, params);
     },
 
     async upsertResponders(runId, responders, nowUtc): Promise<void> {
       if (responders.length === 0) return;
-      for (const input of responders) {
-        const rawHex = bytesToHex(input.raw);
-        await db.runAsync(
-          `INSERT INTO did_sweep_responders (run_id, did, length, raw_hex, rtt_ms, first_seen_utc, last_seen_utc, sample_count)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-           ON CONFLICT(run_id, did) DO UPDATE SET
-             length = excluded.length,
-             raw_hex = excluded.raw_hex,
-             rtt_ms = excluded.rtt_ms,
-             last_seen_utc = excluded.last_seen_utc,
-             sample_count = sample_count + 1`,
-          [runId, input.did, input.raw.length, rawHex, input.rttMs, nowUtc, nowUtc],
-        );
-      }
-      const countRows = await db.getAllAsync<{ n: number }>(
-        'SELECT COUNT(*) AS n FROM did_sweep_responders WHERE run_id = ?',
-        [runId],
-      );
-      const responderCount = countRows[0]?.n ?? 0;
+      await upsertRespondersSql(db, runId, responders, nowUtc);
+      const responderCount = await countRespondersSql(db, runId);
       await db.runAsync('UPDATE did_sweep_runs SET responder_count = ?, updated_at_utc = ? WHERE run_id = ?', [
         responderCount,
         nowUtc,
         runId,
       ]);
+    },
+
+    // F1 fix (P4i-FIX1, binding, after Codex P4hrev2c): responders AND the
+    // progress patch (including the recomputed `responder_count`) are all
+    // written inside ONE `withTransactionAsync` BEGIN..COMMIT span -- a real
+    // process kill mid-flush can only ever see the run's PRE-flush state or
+    // its fully-updated post-flush state, never a partial checkpoint.
+    async flushRunProgress(runId, responders, patch, nowUtc): Promise<void> {
+      await db.withTransactionAsync(async () => {
+        if (responders.length > 0) await upsertRespondersSql(db, runId, responders, nowUtc);
+        const { sets, params } = buildProgressPatchSql(patch, nowUtc);
+        if (responders.length > 0) {
+          const responderCount = await countRespondersSql(db, runId);
+          sets.push('responder_count = ?');
+          params.push(responderCount);
+        }
+        params.push(runId);
+        await db.runAsync(`UPDATE did_sweep_runs SET ${sets.join(', ')} WHERE run_id = ?`, params);
+      });
     },
 
     async listRuns(): Promise<DidSweepRunRecord[]> {

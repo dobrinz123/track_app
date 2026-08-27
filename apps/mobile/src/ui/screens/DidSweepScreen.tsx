@@ -19,8 +19,8 @@ import { useSettings } from '../hooks/useSettings';
 import { EnetTcpTransport } from '../../session/enetTcpTransport';
 import { formatHexByte, mergeEnetChannelSpecJson } from '../../session/enetSettingsValidation';
 import { createDidSweepController, type DidSweepSnapshot } from '../../session/didSweepController';
-import { createDidSweepStore, type DidSweepRunRecord } from '../../persistence/didSweepStore';
-import { buildDidSweepExportDocument, buildCopySummaryText, shareDidSweepExport } from '../../session/didSweepExport';
+import { createDidSweepStore, selectResumableRun, type DidSweepRunRecord } from '../../persistence/didSweepStore';
+import { buildDidSweepExportForRun, buildCopySummaryText, shareDidSweepExport } from '../../session/didSweepExport';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'DidSweep'>;
 
@@ -185,9 +185,17 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   // "Resume button when a persisted run exists" -- built (and its store
   // queried) on mount, so the affordance is available BEFORE the user ever
   // taps Start.
+  // F8 fix (P4i-FIX1, binding, after Codex P4hrev2c): the `react-hooks/
+  // exhaustive-deps` inline suppression below this comment used to reference
+  // a rule this project's flat `eslint.config.mjs` never configures
+  // (`eslint-plugin-react-hooks` is not installed/wired here) -- ESLint
+  // reports "Definition for rule ... was not found" for an unknown-rule
+  // reference, red-lining the lint gate. `ensureController` genuinely IS a
+  // stable ref-memoized factory not meant to re-run per render (unchanged
+  // intent), so this empty-deps effect needs no suppression at all once the
+  // phantom rule reference is gone.
   React.useEffect(() => {
     ensureController();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `ensureController` is a stable ref-memoized factory, not meant to re-run per render.
   }, []);
 
   // DID sweep — range presets addendum (binding, P4i): "Full (slow, ~70
@@ -264,20 +272,16 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
     setSharing(true);
     setShareBanner(null);
     try {
-      const store = didSweepStoreRef.current;
-      const run = await store.getRun(runId);
-      if (run === null) {
+      // F3 fix (P4i-FIX1, binding, after Codex P4hrev2c): this is the ONE
+      // handoff point -- delegates straight to `buildDidSweepExportForRun`
+      // (controller + store -> export document) rather than re-assembling
+      // the builder's input inline, which is what previously omitted
+      // `getGuidedSamples()` (`observationSamples` was never passed at all).
+      const doc = await buildDidSweepExportForRun(controller, didSweepStoreRef.current, runId, new Date().toISOString());
+      if (doc === null) {
         setShareBanner('Could not find this run in storage.');
         return;
       }
-      const responders = await store.getResponders(runId);
-      const doc = buildDidSweepExportDocument({
-        run,
-        responders,
-        candidateSummaries: controllerRef.current?.getSnapshot().candidateSummaries,
-        suggestions: controllerRef.current?.getSnapshot().suggestions,
-        nowIso: new Date().toISOString(),
-      });
       const result = await shareDidSweepExport(doc);
       setShareBanner(
         result.shared
@@ -313,6 +317,9 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   // (pure, deterministic) purely for DISPLAY; the controller applies the
   // SAME filter internally when it actually builds its own poll list.
   const candidateDids = snapshot === null ? [] : filterSweepCandidates(snapshot.responders);
+  // F6 fix (P4i-FIX1, binding): the single most-recent RESUMABLE run, or
+  // `null` if none qualifies -- see `selectResumableRun`'s own doc comment.
+  const resumableRun = selectResumableRun(resumableRuns);
   const guidedPhaseSpec = snapshot?.guidedPhase == null ? null : DID_OBSERVATION_PHASES.find((p) => p.id === snapshot.guidedPhase) ?? null;
   const rankedCandidates = snapshot?.candidateSummaries ?? [];
   const activeCandidates = rankedCandidates.filter((c) => c.rank !== 'static');
@@ -385,23 +392,25 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
             </View>
           ) : null}
 
-          {/* "Resume button when a persisted run exists" (binding, P4i). */}
-          {canStart && resumableRuns.length > 0
-            ? resumableRuns.slice(0, 1).map((run) => (
-                <Pressable
-                  key={run.runId}
-                  style={styles.buttonSecondary}
-                  onPress={() => handleResume(run.runId)}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Resume sweep from ${formatHexDid(run.lastDid ?? run.rangeFrom)}`}
-                >
-                  <Text style={styles.buttonSecondaryText} maxFontSizeMultiplier={1.3}>
-                    Resume from {run.lastDid === null ? formatHexDid(run.rangeFrom) : formatHexDid(run.lastDid)} (
-                    {run.responderCount} responders so far)
-                  </Text>
-                </Pressable>
-              ))
-            : null}
+          {/* "Resume button when a persisted run exists" (binding, P4i).
+              F6 fix (P4i-FIX1, binding, after Codex P4hrev2c): the MOST
+              RECENT RESUMABLE run (status paused/stopped/interrupted with
+              lastDid < rangeEnd) -- never the most recently updated run
+              regardless of status (a naturally COMPLETED run is never
+              offered here, even if it happens to be the newest one). */}
+          {canStart && resumableRun !== null ? (
+            <Pressable
+              style={styles.buttonSecondary}
+              onPress={() => handleResume(resumableRun.runId)}
+              accessibilityRole="button"
+              accessibilityLabel={`Resume sweep from ${formatHexDid(resumableRun.lastDid ?? resumableRun.rangeFrom)}`}
+            >
+              <Text style={styles.buttonSecondaryText} maxFontSizeMultiplier={1.3}>
+                Resume from {resumableRun.lastDid === null ? formatHexDid(resumableRun.rangeFrom) : formatHexDid(resumableRun.lastDid)} (
+                {resumableRun.responderCount} responders so far)
+              </Text>
+            </Pressable>
+          ) : null}
 
           {rangeError === null ? null : (
             <Text style={styles.errorBanner} maxFontSizeMultiplier={1.3} accessibilityLiveRegion="polite">
@@ -542,10 +551,15 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
                 </Text>
               </Pressable>
             ) : null}
-            {observing && guidedPhaseSpec !== null ? (
+            {/* F2 fix (P4i-FIX1, binding): the two-sample changing-value
+                pre-pass runs BEFORE "baseline" -- its own distinct prompt,
+                wired to the SAME `stopGuidedObservationEarly` (never the
+                plain single-window `stopObservationEarly`). */}
+            {observing && snapshot.guidedPhase === 'prePass' ? (
               <>
                 <Text style={styles.helperText} maxFontSizeMultiplier={1.3} accessibilityLiveRegion="polite">
-                  {guidedPhaseSpec.prompt} — {Math.max(0, Math.ceil((guidedPhaseSpec.durationMs - snapshot.guidedPhaseElapsedMs) / 1_000))}s
+                  Reading candidates twice (blip the throttle / press the brake / turn the wheel) —{' '}
+                  {Math.max(0, Math.ceil((snapshot.guidedPhaseDurationMs - snapshot.guidedPhaseElapsedMs) / 1_000))}s
                 </Text>
                 <Pressable style={styles.buttonDanger} onPress={handleStopGuidedObservationEarly} accessibilityRole="button" accessibilityLabel="Stop guided observation now">
                   <Text style={styles.buttonDangerText} maxFontSizeMultiplier={1.3}>
@@ -554,7 +568,23 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
                 </Pressable>
               </>
             ) : null}
-            {observing && guidedPhaseSpec === null ? (
+            {observing && guidedPhaseSpec !== null ? (
+              <>
+                <Text style={styles.helperText} maxFontSizeMultiplier={1.3} accessibilityLiveRegion="polite">
+                  {/* F2 fix (binding, "show it"): the countdown uses the
+                      ACTUAL (possibly auto-raised) duration, not the fixed
+                      ~6s spec -- a large candidate set's phase can run far
+                      longer than 6s. */}
+                  {guidedPhaseSpec.prompt} — {Math.max(0, Math.ceil((snapshot.guidedPhaseDurationMs - snapshot.guidedPhaseElapsedMs) / 1_000))}s
+                </Text>
+                <Pressable style={styles.buttonDanger} onPress={handleStopGuidedObservationEarly} accessibilityRole="button" accessibilityLabel="Stop guided observation now">
+                  <Text style={styles.buttonDangerText} maxFontSizeMultiplier={1.3}>
+                    Stop now
+                  </Text>
+                </Pressable>
+              </>
+            ) : null}
+            {observing && guidedPhaseSpec === null && snapshot.guidedPhase !== 'prePass' ? (
               <>
                 <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
                   Observing… {(snapshot.observationElapsedMs / 1_000).toFixed(0)}s
@@ -588,7 +618,15 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
               <View key={candidate.did} style={styles.suggestionRow}>
                 <Text style={styles.responderDid} maxFontSizeMultiplier={1.3}>
                   {formatHexDid(candidate.did)} — {candidate.lastRawHex} ·{' '}
-                  {candidate.rank === 'brakeOrSteeringCandidate' ? 'BRAKE/STEERING?' : 'changed (several)'}
+                  {/* F5 fix (P4i-FIX1, binding): labelled by the ONE phase
+                      that actually changed it -- never a merged "BRAKE/STEERING?" guess. */}
+                  {candidate.rank === 'brakeCandidate'
+                    ? 'BRAKE?'
+                    : candidate.rank === 'steeringCandidate'
+                      ? 'STEERING?'
+                      : candidate.rank === 'throttleCandidate'
+                        ? 'THROTTLE?'
+                        : 'changed (several)'}
                 </Text>
                 <Text style={styles.rationaleText} maxFontSizeMultiplier={1.3}>
                   {(['baseline', 'brake', 'steering', 'throttle'] as const)

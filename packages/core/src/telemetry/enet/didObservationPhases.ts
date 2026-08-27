@@ -60,7 +60,13 @@ export interface DidPhaseSample {
   raw: Uint8Array;
 }
 
-export type DidCandidateRank = 'brakeOrSteeringCandidate' | 'changedInSeveral' | 'static';
+/**
+ * F5 fix (P4i-FIX1, binding, after Codex P4hrev2c): a DID that changed in
+ * EXACTLY ONE active phase is labelled by THAT phase specifically -- never a
+ * merged "brakeOrSteeringCandidate" that throws away which phase actually
+ * moved it. `rankOf` below picks the ONE active phase that changed.
+ */
+export type DidCandidateRank = 'brakeCandidate' | 'steeringCandidate' | 'throttleCandidate' | 'changedInSeveral' | 'static';
 
 export interface DidCandidateSummary {
   did: number;
@@ -89,15 +95,27 @@ function decodeUint(raw: Uint8Array): number | null {
   return null;
 }
 
+const PHASE_TO_RANK: Readonly<Record<'brake' | 'steering' | 'throttle', DidCandidateRank>> = {
+  brake: 'brakeCandidate',
+  steering: 'steeringCandidate',
+  throttle: 'throttleCandidate',
+};
+
 function rankOf(changedInPhase: Record<DidObservationPhaseId, boolean>): DidCandidateRank {
-  const activeChangedCount = ACTIVE_PHASES.filter((phase) => changedInPhase[phase]).length;
-  if (!changedInPhase.baseline && activeChangedCount === 1) return 'brakeOrSteeringCandidate';
-  if (activeChangedCount >= 2) return 'changedInSeveral';
+  const changedActivePhases = ACTIVE_PHASES.filter((phase) => changedInPhase[phase]);
+  if (!changedInPhase.baseline && changedActivePhases.length === 1) {
+    // F5 fix (binding): label by the ONE phase that actually changed --
+    // never a merged "brake/steering" guess.
+    return PHASE_TO_RANK[changedActivePhases[0] as 'brake' | 'steering' | 'throttle'];
+  }
+  if (changedActivePhases.length >= 2) return 'changedInSeveral';
   return 'static';
 }
 
 const RANK_ORDER: Readonly<Record<DidCandidateRank, number>> = {
-  brakeOrSteeringCandidate: 0,
+  brakeCandidate: 0,
+  steeringCandidate: 0,
+  throttleCandidate: 0,
   changedInSeveral: 1,
   static: 2,
 };
@@ -162,4 +180,37 @@ export function computeDidCandidateSummaries(samples: readonly DidPhaseSample[])
   }
 
   return summaries.sort((a, b) => RANK_ORDER[a.rank] - RANK_ORDER[b.rank] || a.did - b.did);
+}
+
+/**
+ * F2 fix (P4i-FIX1, binding, after Codex P4hrev2c): "if the [candidate] set is
+ * larger than ~rate×phaseSeconds, raise the phase length automatically (show
+ * it) so every candidate is sampled ≥ 2× per phase." `ASSUMED_GUIDED_REQ_PER_SEC`
+ * is the field-measured baseline (contracts.md P4i addendum: "~15.8 req/s on
+ * the real adapter") -- a conservative, fixed estimate (no live rate is known
+ * before a phase starts) used ONLY to size the phase window generously enough
+ * that round-robin coverage twice over is achievable at that rate.
+ */
+export const ASSUMED_GUIDED_REQ_PER_SEC = 15;
+/** "every candidate is sampled ≥ 2× per phase" (binding). */
+export const MIN_SAMPLES_PER_CANDIDATE_PER_PHASE = 2;
+
+/**
+ * Pure, deterministic: the ACTUAL duration a guided phase (or the two-sample
+ * pre-pass round -- pass `minSamplesPerCandidate: 1` for that case) should run
+ * for, given how many candidates it must cover. Never shorter than
+ * `baseDurationMs` (the fixed ~6s phase length is still the floor for a small
+ * candidate set); grows only when the candidate count would otherwise leave
+ * the tail of the list under-sampled within the base window.
+ */
+export function computeGuidedPhaseDurationMs(
+  candidateCount: number,
+  baseDurationMs: number,
+  assumedReqPerSec: number = ASSUMED_GUIDED_REQ_PER_SEC,
+  minSamplesPerCandidate: number = MIN_SAMPLES_PER_CANDIDATE_PER_PHASE,
+): number {
+  if (!Number.isFinite(candidateCount) || candidateCount <= 0) return baseDurationMs;
+  if (!Number.isFinite(assumedReqPerSec) || assumedReqPerSec <= 0) return baseDurationMs;
+  const neededMs = Math.ceil((minSamplesPerCandidate * candidateCount) / assumedReqPerSec * 1_000);
+  return Math.max(baseDurationMs, neededMs);
 }

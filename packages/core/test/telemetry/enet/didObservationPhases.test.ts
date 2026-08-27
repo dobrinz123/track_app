@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ASSUMED_GUIDED_REQ_PER_SEC,
   computeDidCandidateSummaries,
+  computeGuidedPhaseDurationMs,
   DID_OBSERVATION_PHASES,
+  MIN_SAMPLES_PER_CANDIDATE_PER_PHASE,
   type DidPhaseSample,
 } from '../../../src/telemetry/enet/didObservationPhases';
 
@@ -30,7 +33,7 @@ describe('DID_OBSERVATION_PHASES (binding, P4i guided observation)', () => {
 });
 
 describe('computeDidCandidateSummaries (binding, P4i guided observation)', () => {
-  it('a brake candidate: static at baseline, changed ONLY during brake -> ranked "brakeOrSteeringCandidate"', () => {
+  it('a brake candidate: static at baseline, changed ONLY during brake -> ranked "brakeCandidate" (F5 fix: labelled by the phase, not a merged guess)', () => {
     const samples: DidPhaseSample[] = [
       sample(0x2010, 'baseline', 0, [0x00]),
       sample(0x2010, 'baseline', 1_000, [0x00]),
@@ -45,12 +48,12 @@ describe('computeDidCandidateSummaries (binding, P4i guided observation)', () =>
     const [summary] = computeDidCandidateSummaries(samples);
     expect(summary).toMatchObject({
       did: 0x2010,
-      rank: 'brakeOrSteeringCandidate',
+      rank: 'brakeCandidate',
       changedInPhase: { baseline: false, brake: true, steering: false, throttle: false },
     });
   });
 
-  it('a steering candidate: static at baseline, changed ONLY during steering -> ranked "brakeOrSteeringCandidate"', () => {
+  it('a steering candidate: static at baseline, changed ONLY during steering -> ranked "steeringCandidate"', () => {
     const samples: DidPhaseSample[] = [
       sample(0x2020, 'baseline', 0, [0x80, 0x00]),
       sample(0x2020, 'brake', 0, [0x80, 0x00]),
@@ -60,8 +63,21 @@ describe('computeDidCandidateSummaries (binding, P4i guided observation)', () =>
       sample(0x2020, 'throttle', 0, [0x80, 0x00]),
     ];
     const [summary] = computeDidCandidateSummaries(samples);
-    expect(summary?.rank).toBe('brakeOrSteeringCandidate');
+    expect(summary?.rank).toBe('steeringCandidate');
     expect(summary?.changedInPhase).toEqual({ baseline: false, brake: false, steering: true, throttle: false });
+  });
+
+  it('a throttle candidate: static at baseline, changed ONLY during throttle -> ranked "throttleCandidate" (F5 fix: previously mislabelled "BRAKE/STEERING?")', () => {
+    const samples: DidPhaseSample[] = [
+      sample(0x2030, 'baseline', 0, [0x00]),
+      sample(0x2030, 'brake', 0, [0x00]),
+      sample(0x2030, 'steering', 0, [0x00]),
+      sample(0x2030, 'throttle', 0, [0x00]),
+      sample(0x2030, 'throttle', 500, [0xff]),
+    ];
+    const [summary] = computeDidCandidateSummaries(samples);
+    expect(summary?.rank).toBe('throttleCandidate');
+    expect(summary?.changedInPhase).toEqual({ baseline: false, brake: false, steering: false, throttle: true });
   });
 
   it('a DID that changed in TWO active phases (brake AND throttle) is ranked "changedInSeveral", not a single-phase candidate', () => {
@@ -77,7 +93,7 @@ describe('computeDidCandidateSummaries (binding, P4i guided observation)', () =>
     expect(summary?.rank).toBe('changedInSeveral');
   });
 
-  it('a DID that already changed at baseline (never a clean control) is NEVER "brakeOrSteeringCandidate" even if it also changed in exactly one active phase', () => {
+  it('a DID that already changed at baseline (never a clean control) is NEVER a single-phase candidate even if it also changed in exactly one active phase', () => {
     const samples: DidPhaseSample[] = [
       sample(0x3100, 'baseline', 0, [0x00]),
       sample(0x3100, 'baseline', 500, [0x01]), // already varies at rest -- e.g. sensor noise, not a clean brake/steering signal.
@@ -88,7 +104,7 @@ describe('computeDidCandidateSummaries (binding, P4i guided observation)', () =>
     ];
     const [summary] = computeDidCandidateSummaries(samples);
     expect(summary?.changedInPhase.baseline).toBe(true);
-    expect(summary?.rank).not.toBe('brakeOrSteeringCandidate');
+    expect(summary?.rank).toBe('static');
   });
 
   it('a DID static in EVERY phase is ranked "static" (collapsed by the UI)', () => {
@@ -103,7 +119,7 @@ describe('computeDidCandidateSummaries (binding, P4i guided observation)', () =>
     expect(Object.values(summary!.changedInPhase).every((c) => c === false)).toBe(true);
   });
 
-  it('sorts brakeOrSteeringCandidate first, then changedInSeveral, then static -- ties broken by ascending DID', () => {
+  it('sorts single-phase candidates first (any of brake/steering/throttle), then changedInSeveral, then static -- ties broken by ascending DID', () => {
     const staticDid = [sample(0x9000, 'baseline', 0, [0x01]), sample(0x9000, 'brake', 0, [0x01])];
     const severalDid = [
       sample(0x5000, 'baseline', 0, [0x00]),
@@ -117,8 +133,8 @@ describe('computeDidCandidateSummaries (binding, P4i guided observation)', () =>
     const summaries = computeDidCandidateSummaries([...staticDid, ...severalDid, ...candidateA, ...candidateB]);
     expect(summaries.map((s) => s.did)).toEqual([0x2010, 0x2020, 0x5000, 0x9000]);
     expect(summaries.map((s) => s.rank)).toEqual([
-      'brakeOrSteeringCandidate',
-      'brakeOrSteeringCandidate',
+      'brakeCandidate',
+      'brakeCandidate',
       'changedInSeveral',
       'static',
     ]);
@@ -191,11 +207,48 @@ describe('computeDidCandidateSummaries (binding, P4i guided observation)', () =>
     ];
     const summaries = computeDidCandidateSummaries(samples);
     expect(summaries).toHaveLength(2);
-    expect(summaries.find((s) => s.did === 0x1000)?.rank).toBe('brakeOrSteeringCandidate');
+    expect(summaries.find((s) => s.did === 0x1000)?.rank).toBe('brakeCandidate');
     expect(summaries.find((s) => s.did === 0x2000)?.rank).toBe('static');
   });
 
   it('an empty sample log returns an empty summary list', () => {
     expect(computeDidCandidateSummaries([])).toEqual([]);
+  });
+});
+
+/**
+ * F2 fix (P4i-FIX1, binding, after Codex P4hrev2c): "if the [candidate] set is
+ * larger than ~rate×phaseSeconds, raise the phase length automatically (show
+ * it) so every candidate is sampled ≥ 2× per phase." Test: "300 candidates at
+ * 15 req/s → phase length grows" (the ticket's own literal scenario).
+ */
+describe('computeGuidedPhaseDurationMs (binding, P4i-FIX1 F2)', () => {
+  it('300 candidates at 15 req/s -> the phase length grows to guarantee >= 2 samples/candidate (40s, well beyond the 6s base)', () => {
+    const durationMs = computeGuidedPhaseDurationMs(300, 6_000, 15);
+    expect(durationMs).toBe(40_000); // ceil(2 * 300 / 15 * 1000).
+    expect(durationMs).toBeGreaterThan(6_000);
+  });
+
+  it('uses the field-measured ASSUMED_GUIDED_REQ_PER_SEC and MIN_SAMPLES_PER_CANDIDATE_PER_PHASE as its own defaults', () => {
+    expect(ASSUMED_GUIDED_REQ_PER_SEC).toBeGreaterThan(0);
+    expect(MIN_SAMPLES_PER_CANDIDATE_PER_PHASE).toBe(2);
+    expect(computeGuidedPhaseDurationMs(300, 6_000)).toBe(
+      Math.ceil((MIN_SAMPLES_PER_CANDIDATE_PER_PHASE * 300) / ASSUMED_GUIDED_REQ_PER_SEC * 1_000),
+    );
+  });
+
+  it('a small candidate set never shrinks below the fixed base duration', () => {
+    expect(computeGuidedPhaseDurationMs(5, 6_000, 15)).toBe(6_000);
+    expect(computeGuidedPhaseDurationMs(0, 6_000, 15)).toBe(6_000);
+  });
+
+  it('a minSamplesPerCandidate of 1 (the two-sample pre-pass\' own single-round sizing) needs half the duration of the default 2', () => {
+    expect(computeGuidedPhaseDurationMs(300, 2_000, 15, 1)).toBe(20_000); // ceil(1 * 300 / 15 * 1000).
+  });
+
+  it('a non-finite/non-positive rate falls back to the base duration rather than dividing by zero/NaN', () => {
+    expect(computeGuidedPhaseDurationMs(300, 6_000, 0)).toBe(6_000);
+    expect(computeGuidedPhaseDurationMs(300, 6_000, Number.NaN)).toBe(6_000);
+    expect(computeGuidedPhaseDurationMs(300, 6_000, -5)).toBe(6_000);
   });
 });

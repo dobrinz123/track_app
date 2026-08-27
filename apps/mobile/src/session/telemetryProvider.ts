@@ -694,26 +694,79 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     // continuation below can tell "nothing else intervened" from "the user
     // stopped telemetry while this teardown was in flight" -- which the
     // fingerprint alone never could, since a Stop leaves settings untouched.
+    // P4h-FIX2 F1 (binding): the relaunch is now ONE of the two deferred
+    // launch intents that share `launchAfterStop()` -- an intervening public
+    // `start()` bumps `lifecycleGeneration` too (not just `stop()`), so this
+    // continuation sees its own generation stale and exits without launching
+    // a SECOND session behind the one that Start already launched.
     const generationAtTrigger = lifecycleGeneration;
     const relaunch = (): void => {
-      if (stopRequested || generationAtTrigger !== lifecycleGeneration) return;
-      if (
-        fingerprintAtTrigger !== null &&
-        !fingerprintsEqual(fingerprintAtTrigger, currentConfigFingerprint(settingsStore.getSettings()))
-      ) {
-        return;
-      }
-      // Unconditional, same as `launchFresh()`'s own `running = true` --
-      // this internal relaunch is not gated behind the (already-cleared-by-
-      // doStop) `running` flag.
-      running = true;
-      try {
-        launchSession();
-      } catch (error) {
-        handleLaunchFailure(error);
-      }
+      launchAfterStop(generationAtTrigger, { intent: 'pedal-fallback', fingerprintAtTrigger });
     };
     void stopShared().then(relaunch, relaunch);
+  }
+
+  /**
+   * P4h-FIX2 F1 (binding, after Codex P4h-REV2 HIGH,
+   * `telemetryProvider.ts:697,1688`): "fallback lifecycle is still racy with an
+   * intervening Start. During fallback teardown, Start queues `launchFresh()`
+   * on `stopping`; that promise resolves BEFORE `stopShared()` invokes the
+   * fallback's own `relaunch`. Both continuations can therefore launch ... two
+   * sessions/transports are constructed and one is overwritten without
+   * teardown."
+   *
+   * The ONE continuation every deferred launch runs through -- the public
+   * `start()`'s queued launch AND `triggerPedalFallback()`'s own relaunch.
+   * Each captures `lifecycleGeneration` when it was SCHEDULED; every public
+   * lifecycle intent (`start()` via `beginLaunchIntent()`, `stop()`) bumps
+   * that counter, so a continuation scheduled before a newer intent is stale
+   * by construction and exits. Exactly one launch results, and the winner is
+   * the LATEST intent: a Start supersedes the fallback relaunch and launches
+   * from CURRENT settings (`launchFresh()` -> primary 0x5A source again),
+   * never both.
+   */
+  function launchAfterStop(
+    generation: number,
+    launch: { intent: 'fresh' } | { intent: 'pedal-fallback'; fingerprintAtTrigger: ConfigFingerprint | null },
+  ): void {
+    if (stopRequested || generation !== lifecycleGeneration) return;
+    if (launch.intent === 'fresh') {
+      launchFresh();
+      return;
+    }
+    // Fallback-only guard (unchanged): an actual settings change in the
+    // teardown window means the settings watcher already owns what comes next.
+    if (
+      launch.fingerprintAtTrigger !== null &&
+      !fingerprintsEqual(launch.fingerprintAtTrigger, currentConfigFingerprint(settingsStore.getSettings()))
+    ) {
+      return;
+    }
+    // Unconditional, same as `launchFresh()`'s own `running = true` -- this
+    // internal relaunch is not gated behind the (already-cleared-by-doStop)
+    // `running` flag.
+    running = true;
+    try {
+      launchSession();
+    } catch (error) {
+      handleLaunchFailure(error);
+    }
+  }
+
+  /**
+   * P4h-FIX2 F1 (binding): opens a NEW public launch intent -- called by
+   * `start()` on every path that will actually launch (immediately or through
+   * a deferred `launchAfterStop()`), never on the "already running, nothing to
+   * do" no-op path. Bumping the generation here is what supersedes an older
+   * queued continuation (above all the pedal fallback's relaunch, which a Stop
+   * alone used to be the only thing able to invalidate); clearing
+   * `stopRequested` is what keeps THIS intent's own continuation from being
+   * refused by a Stop that preceded it.
+   */
+  function beginLaunchIntent(): number {
+    stopRequested = false;
+    lifecycleGeneration += 1;
+    return lifecycleGeneration;
   }
 
   /** Clears BOTH pedal-fallback detection timers (ELM327's one-shot grace window, ENET's unsupported-channel poll) -- called from `doStop()` and whenever the fallback itself fires. */
@@ -1658,6 +1711,11 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
         const generationIsTerminal = current === null || currentState === 'failed' || currentState === 'stopped';
         const fingerprintChanged = activeFingerprint !== null && !fingerprintsEqual(activeFingerprint, fingerprint);
         if (!generationIsTerminal && !fingerprintChanged) return;
+        // P4h-FIX2 F1 (binding): this Start is a NEW lifecycle intent -- it
+        // supersedes any older queued continuation (e.g. a pedal-fallback
+        // relaunch whose teardown `stopShared()` below may even JOIN).
+        const generation = beginLaunchIntent();
+        const launch = (): void => launchAfterStop(generation, { intent: 'fresh' });
         // P4g-FIX2 (binding, H1 -- Codex P4g-REV2 HIGH "starting never
         // clears"): `starting` must hold THIS SAME promise object `p` --
         // assigning it the RESULT of `.finally()` (a distinct, newly
@@ -1665,7 +1723,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
         // false inside the finally callback below, so `starting` never
         // cleared and every Start after the first queued launch was a
         // silent no-op forever, even long after the launch had settled.
-        const p = stopShared().then(launchFresh, launchFresh);
+        const p = stopShared().then(launch, launch);
         starting = p;
         void p.finally(() => {
           if (starting === p) starting = null;
@@ -1686,17 +1744,30 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       // own teardown, meant an ELM-stuck-in-connect generation followed by
       // switching to ENET and pressing Start did not wait for anything).
       if (stopping !== null) {
+        // P4h-FIX2 F1 (binding): the exact review scenario -- the teardown in
+        // flight may be the pedal FALLBACK's own, whose relaunch continuation
+        // is queued on `stopShared()`'s promise (which settles one microtask
+        // AFTER the `stopping` latch this Start waits on). Bumping the
+        // lifecycle generation here makes that older continuation stale, so
+        // only THIS Start launches -- one session, one transport.
+        const generation = beginLaunchIntent();
+        const launch = (): void => launchAfterStop(generation, { intent: 'fresh' });
         // P4g-FIX2 (binding, H1 -- Codex P4g-REV2 HIGH "starting never
         // clears"): same identity fix as the `running` branch above --
         // `starting` holds `p` itself, not `.finally()`'s own distinct
         // returned promise.
-        const p = stopping.then(launchFresh, launchFresh);
+        const p = stopping.then(launch, launch);
         starting = p;
         void p.finally(() => {
           if (starting === p) starting = null;
         });
         return;
       }
+      // P4h-FIX2 F1 (binding): a direct (non-deferred) launch is a new
+      // lifecycle intent too -- a fallback relaunch continuation whose own
+      // teardown has already settled but whose microtask has not yet run is
+      // superseded by it, exactly like the deferred paths above.
+      beginLaunchIntent();
       launchFresh();
     },
 

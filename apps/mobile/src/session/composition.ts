@@ -320,7 +320,7 @@ class SwappableFacade implements SessionFacade {
    * anywhere else is surfaced the same way the preflight gate's is, so it
    * can never become an unhandled rejection or wedge the lock.
    */
-  private runLockedCommand(name: string, command: () => void): void {
+  private runLockedCommand(name: string, command: () => void | 'skipped'): void {
     void lifecycleLock
       .run(async () => {
         // Captured INSIDE the section: `inner` may have been swapped by
@@ -328,7 +328,12 @@ class SwappableFacade implements SessionFacade {
         // the command must be dispatched to -- and awaited on -- the facade
         // that is current NOW.
         const target = this.inner;
-        command();
+        // P4h-FIX2 F3 (binding): `'skipped'` means the command dispatched
+        // NOTHING (a queued calibration start the driver cancelled meanwhile),
+        // so there is no async work of its own to hold the lock for --
+        // awaiting `whenCommandsSettled()` here would await some OTHER,
+        // unrelated command's pending promise.
+        if (command() === 'skipped') return;
         await target.whenCommandsSettled?.();
       })
       .catch((error: unknown) => {
@@ -339,13 +344,47 @@ class SwappableFacade implements SessionFacade {
       });
   }
 
+  /**
+   * P4h-FIX2 F3 (binding, after Codex P4h-REV2 MEDIUM, `composition.ts:323,342`;
+   * `CalibrationInstructionsScreen.tsx:48`): "calibration cancellation covers
+   * only a start already executing inside the lifecycle lock. If
+   * `beginCalibration()` is QUEUED behind another lock holder, navigation still
+   * immediately pushes ActiveCalibration; Cancel calls the unlocked
+   * `rejectCalibration()` before `SessionController.start()` sets
+   * `calibrationStartInFlight`, so it is a no-op. The queued command later
+   * starts an invisible calibration after the user has left."
+   *
+   * One cancel token per calibration start that has not yet ACQUIRED the lock.
+   * The token leaves this set the instant its section starts running -- from
+   * that point the cancel window belongs to the controller's own
+   * `calibrationStartInFlight` (P4h-FIX1 M2), and `SessionController.start()`
+   * latches that synchronously, before its first `await`, so the two windows
+   * meet with no gap between them.
+   */
+  private readonly queuedCalibrationStarts = new Set<{ cancelled: boolean }>();
+
   beginCalibration(): void {
-    this.runLockedCommand('beginCalibration', () => this.inner.beginCalibration());
+    const token = { cancelled: false };
+    this.queuedCalibrationStarts.add(token);
+    this.runLockedCommand('beginCalibration', () => {
+      this.queuedCalibrationStarts.delete(token);
+      // Cancelled while queued: dispatch NOTHING (no session id minted, no
+      // provider start, no watchdog) -- the driver already left the screen.
+      if (token.cancelled) return 'skipped';
+      this.inner.beginCalibration();
+      return undefined;
+    });
   }
   acceptCalibration(): void {
     this.inner.acceptCalibration();
   }
   rejectCalibration(): void {
+    // P4h-FIX2 F3 (binding): deliberately UNLOCKED (a Cancel must act the
+    // instant the driver taps it, never queue behind the very start it is
+    // cancelling) -- it cancels every calibration start still waiting for the
+    // lock, then forwards as before for the in-flight/live cases.
+    for (const token of this.queuedCalibrationStarts) token.cancelled = true;
+    this.queuedCalibrationStarts.clear();
     this.inner.rejectCalibration();
   }
   arm(): void {
@@ -592,6 +631,25 @@ export function gForceHolderCount(): number {
   return gForceHolders;
 }
 
+/**
+ * P4h-FIX2 F2 (binding, after Codex P4h-REV2 HIGH, `composition.ts:650,684`):
+ * "G-force release is not paired with actual acquisition.
+ * `startTelemetryRecording()` returns early when SQLite is unavailable or
+ * telemetry is disabled, but `stopTelemetryRecording()`'s `recorder === null`
+ * path still calls `releaseGForce()`. Scenario: monitor owns the sole
+ * reference; a web/disabled/recovery session starts without acquiring, then
+ * session end, controller rebuild, or delete-all releases the monitor's
+ * reference and stops its G rows."
+ *
+ * TRUE only while THIS session's recording actually holds one
+ * `acquireGForce()` reference. Every early return in
+ * `startTelemetryRecording()` (no on-device database -- web preview --,
+ * telemetry disabled) leaves it FALSE, and `stopTelemetryRecording()` releases
+ * only when it is TRUE, on every path that reaches it: session end, the
+ * `'error'`-terminal rebuild, recovery, and delete-all.
+ */
+let sessionHoldsGForce = false;
+
 let telemetryRecorder: TelemetryRecorder | null = null;
 /** In-flight telemetry shutdown (F2 residue fix) -- repeated `stopTelemetryRecording()` calls return this same promise so `onSessionEnded`'s barrier awaits the REAL final flush. Cleared on the next `startTelemetryRecording()`. */
 let telemetryShutdown: Promise<void> | null = null;
@@ -637,6 +695,12 @@ function stopTelemetryRecording(): Promise<void> {
   unsubscribeTelemetryLapWatch?.();
   unsubscribeTelemetryLapWatch = null;
   telemetryCurrentLapNumber = null;
+  // P4h-FIX2 F2 (binding): consumed HERE, synchronously, for BOTH branches
+  // below -- a second call (this function is idempotent and is invoked from
+  // several paths for the same session end) therefore never releases twice,
+  // and a session that never acquired never releases at all.
+  const releaseSessionGForce = sessionHoldsGForce;
+  sessionHoldsGForce = false;
   if (recorder === null) {
     // P4b amendment: nothing was ever recording for the session that just
     // ended -- there is no real shutdown work to await. Fire `provider.stop()`
@@ -653,7 +717,12 @@ function stopTelemetryRecording(): Promise<void> {
     void telemetryProvider.stop();
     // P4h-FIX1 H6 (binding): releases only THIS session's own reference --
     // the monitor screen's (if it holds one) keeps the provider running.
-    void releaseGForce();
+    // P4h-FIX2 F2 (binding): and ONLY if this session really took one. This is
+    // the path a telemetry-disabled / web (no on-device database) / recovery
+    // session takes -- it never acquired, so releasing here used to drop the
+    // MONITOR's reference and stop its G rows (the same for the rebuild and
+    // delete-all paths, which reach this exact branch).
+    if (releaseSessionGForce) void releaseGForce();
     return Promise.resolve();
   }
   telemetryShutdown = (async () => {
@@ -667,7 +736,15 @@ function stopTelemetryRecording(): Promise<void> {
       // `gForceProvider.stop()`) -- the session drops ITS OWN reference; the
       // provider stops only if nothing else (the telemetry monitor) still
       // holds one. It still joins the SAME `allSettled` barrier.
-      const results = await Promise.allSettled([telemetryProvider.stop(), releaseGForce(), recorder.endSession()]);
+      // P4h-FIX2 F2 (binding): `releaseSessionGForce` is normally true on this
+      // branch (a recorder exists only where `acquireGForce()` also ran), and
+      // the conditional keeps the pairing honest regardless of how this
+      // function is reached.
+      const results = await Promise.allSettled([
+        telemetryProvider.stop(),
+        releaseSessionGForce ? releaseGForce() : Promise.resolve(),
+        recorder.endSession(),
+      ]);
       for (const result of results) {
         if (result.status === 'rejected') {
           console.warn('[composition] telemetry shutdown step failed', result.reason);
@@ -742,8 +819,14 @@ function startTelemetryRecording(sessionId: string): void {
   // (running/failed) affects whether the other is called. P4h-FIX1 H6
   // (binding): through the reference count, so this session's hold is
   // released (and only this one) when it ends -- `acquireGForce()` carries
-  // the same never-throw backstop this call site had.
-  acquireGForce();
+  // the same never-throw backstop this call site had. P4h-FIX2 F2 (binding):
+  // recorded, so `stopTelemetryRecording()` releases EXACTLY the reference
+  // this call took -- and takes at most one per session even if a start were
+  // ever to run twice without an intervening stop.
+  if (!sessionHoldsGForce) {
+    acquireGForce();
+    sessionHoldsGForce = true;
+  }
 }
 
 // F2 fix (WPT3, binding): registered once at module load (independent of

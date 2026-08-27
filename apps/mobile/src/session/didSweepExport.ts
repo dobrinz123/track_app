@@ -1,7 +1,8 @@
 import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import type { DidCandidateSummary, DidHeuristicSuggestion, DidObservationPhaseId, DidPhaseSample } from '@circuit/core';
-import type { DidSweepResponderRecord, DidSweepRunRecord } from '../persistence/didSweepStore';
+import type { DidSweepStore, DidSweepResponderRecord, DidSweepRunRecord } from '../persistence/didSweepStore';
+import type { DidSweepController } from './didSweepController';
 
 /**
  * DID sweep — results persistence, export & candidate filtering addendum
@@ -179,6 +180,38 @@ export function buildDidSweepExportDocument(input: {
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0').toUpperCase()).join('');
+}
+
+/**
+ * F3 fix (P4i-FIX1, binding, after Codex P4hrev2c HIGH finding #5): "the
+ * screen passes them [`getGuidedSamples()`] to `buildDidSweepExportDocument`."
+ * The exact "screen/controller handoff" this finding is about -- reads
+ * `runId`'s run+responders from `store` and the controller's OWN live
+ * `candidateSummaries`/`suggestions`/`getGuidedSamples()`, then builds the
+ * export document. `DidSweepScreen.tsx`'s "Share results" calls this
+ * DIRECTLY (never re-implements the handoff inline) so the guided
+ * observation series can never again be silently omitted here. `null` if
+ * `runId` doesn't exist in `store` (mirrors the screen's own prior "Could not
+ * find this run in storage" branch).
+ */
+export async function buildDidSweepExportForRun(
+  controller: Pick<DidSweepController, 'getSnapshot' | 'getGuidedSamples'>,
+  store: DidSweepStore,
+  runId: string,
+  nowIso: string,
+): Promise<DidSweepExportDocument | null> {
+  const run = await store.getRun(runId);
+  if (run === null) return null;
+  const responders = await store.getResponders(runId);
+  const snapshot = controller.getSnapshot();
+  return buildDidSweepExportDocument({
+    run,
+    responders,
+    candidateSummaries: snapshot.candidateSummaries,
+    observationSamples: controller.getGuidedSamples(),
+    suggestions: snapshot.suggestions,
+    nowIso,
+  });
 }
 
 /** `trace-did-sweep-<date>.json`, `<date>` being the export's own `generatedAtUtc` truncated to `YYYY-MM-DD` (addendum's own exact filename pattern). */

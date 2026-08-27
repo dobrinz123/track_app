@@ -38,12 +38,19 @@ vi.mock('expo-sharing', () => ({
 import {
   buildCopySummaryText,
   buildDidSweepExportDocument,
+  buildDidSweepExportForRun,
   DID_SWEEP_EXPORT_SCHEMA_VERSION,
   didSweepExportFileName,
   shareDidSweepExport,
   type DidSweepExportDocument,
 } from '../../src/session/didSweepExport';
-import type { DidSweepResponderRecord, DidSweepRunRecord } from '../../src/persistence/didSweepStore';
+import { createInMemoryDidSweepStore, type DidSweepResponderRecord, type DidSweepRunRecord } from '../../src/persistence/didSweepStore';
+import { createDidSweepController } from '../../src/session/didSweepController';
+import { DEFAULT_ENET_DID_SCENARIO, SimulatedEnetTransport } from '@circuit/core';
+
+async function flush(times = 30): Promise<void> {
+  for (let i = 0; i < times; i += 1) await Promise.resolve();
+}
 
 function run(overrides: Partial<DidSweepRunRecord> = {}): DidSweepRunRecord {
   return {
@@ -132,12 +139,12 @@ describe('buildDidSweepExportDocument (binding, P4i)', () => {
       run: run(),
       responders: [],
       candidateSummaries: [
-        { did: 0x2010, lastRawHex: 'FF', sampleCount: 12, min: 0, max: 255, distinctValueCount: 2, changedInPhase: { baseline: false, brake: true, steering: false, throttle: false }, rank: 'brakeOrSteeringCandidate' },
+        { did: 0x2010, lastRawHex: 'FF', sampleCount: 12, min: 0, max: 255, distinctValueCount: 2, changedInPhase: { baseline: false, brake: true, steering: false, throttle: false }, rank: 'brakeCandidate' },
       ],
       nowIso: '2026-08-27T19:00:00.000Z',
     });
     expect(doc.candidates).toEqual([
-      { didHex: '0x2010', rank: 'brakeOrSteeringCandidate', lastRawHex: 'FF', sampleCount: 12, min: 0, max: 255, distinctValueCount: 2, changedInPhase: { baseline: false, brake: true, steering: false, throttle: false } },
+      { didHex: '0x2010', rank: 'brakeCandidate', lastRawHex: 'FF', sampleCount: 12, min: 0, max: 255, distinctValueCount: 2, changedInPhase: { baseline: false, brake: true, steering: false, throttle: false } },
     ]);
   });
 
@@ -172,6 +179,80 @@ describe('buildDidSweepExportDocument (binding, P4i)', () => {
   });
 });
 
+/**
+ * F3 fix (P4i-FIX1, binding, after Codex P4hrev2c HIGH finding #5): "controller
+ * exposes `getGuidedSamples()` ... the screen passes them to
+ * `buildDidSweepExportDocument`. Test at screen/controller handoff level (not
+ * just the builder)." Drives a REAL `createDidSweepController` guided run
+ * (through `@circuit/core`'s own `SimulatedEnetTransport` -- no hand-fed
+ * observation samples anywhere in this test) and calls the EXACT function
+ * `DidSweepScreen.tsx`'s "Share results" calls -- proving the handoff itself,
+ * not just that the builder can accept samples when told to.
+ */
+describe('buildDidSweepExportForRun (binding, P4i-FIX1 F3): the screen/controller handoff', () => {
+  const TESTER_ADDRESS = 0xf4;
+  const TARGET_ADDRESS = 0x12;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a real guided run\'s samples end up in the exported observationSeries -- never [] the way the pre-fix screen always produced', async () => {
+    const store = createInMemoryDidSweepStore();
+    const controller = createDidSweepController({
+      transportFactory: () =>
+        new SimulatedEnetTransport({
+          monotonicNow: () => Date.now(),
+          scenario: DEFAULT_ENET_DID_SCENARIO,
+          testerAddress: TESTER_ADDRESS,
+          targetAddress: TARGET_ADDRESS,
+        }),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: { now: () => Date.now() },
+      store,
+    });
+
+    // Sweep the 3 scripted DEFAULT_ENET_DID_SCENARIO responders first.
+    controller.start({ from: 0x1e1c, to: 0x1e24 });
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('sweepComplete');
+    const runId = controller.getCurrentRunId()!;
+
+    controller.startGuidedObservation();
+    for (let i = 0; i < 40 && controller.getSnapshot().phase === 'observing'; i += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flush();
+    }
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+    expect(controller.getGuidedSamples().length).toBeGreaterThan(0); // the controller genuinely collected phase-tagged samples.
+
+    const doc = await buildDidSweepExportForRun(controller, store, runId, '2026-08-27T19:00:00.000Z');
+    expect(doc).not.toBeNull();
+    // The exact regression this fixes: "'Share results' always omits guided
+    // observation series ... observationSeries is always []."
+    expect(doc!.observationSeries.length).toBeGreaterThan(0);
+    expect(doc!.candidates.length).toBeGreaterThan(0); // candidateSummaries also flow through.
+  });
+
+  it('returns null when runId is not in the store (mirrors the screen\'s own "could not find this run" branch)', async () => {
+    const store = createInMemoryDidSweepStore();
+    const controller = createDidSweepController({
+      transportFactory: () =>
+        new SimulatedEnetTransport({ monotonicNow: () => Date.now(), scenario: DEFAULT_ENET_DID_SCENARIO, testerAddress: TESTER_ADDRESS, targetAddress: TARGET_ADDRESS }),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: { now: () => Date.now() },
+      store,
+    });
+    expect(await buildDidSweepExportForRun(controller, store, 'nonexistent-run', '2026-08-27T19:00:00.000Z')).toBeNull();
+  });
+});
+
 describe('didSweepExportFileName (binding, P4i: "trace-did-sweep-<date>.json")', () => {
   it('truncates generatedAtUtc to YYYY-MM-DD', () => {
     expect(didSweepExportFileName('2026-08-27T19:00:00.000Z')).toBe('trace-did-sweep-2026-08-27.json');
@@ -184,7 +265,7 @@ describe('buildCopySummaryText (binding, P4i: "Copy summary ... counts + top can
       run: run(),
       responders: [],
       candidateSummaries: [
-        { did: 0x2010, lastRawHex: 'FF', sampleCount: 1, min: null, max: null, distinctValueCount: 1, changedInPhase: { baseline: false, brake: true, steering: false, throttle: false }, rank: 'brakeOrSteeringCandidate' },
+        { did: 0x2010, lastRawHex: 'FF', sampleCount: 1, min: null, max: null, distinctValueCount: 1, changedInPhase: { baseline: false, brake: true, steering: false, throttle: false }, rank: 'brakeCandidate' },
         { did: 0x3000, lastRawHex: '00', sampleCount: 1, min: null, max: null, distinctValueCount: 1, changedInPhase: { baseline: false, brake: false, steering: false, throttle: false }, rank: 'static' },
       ],
       nowIso: '2026-08-27T19:00:00.000Z',

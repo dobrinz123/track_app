@@ -131,6 +131,7 @@ vi.mock('../../src/session/tcpObdTransport', () => ({
 }));
 
 import { TMR_CIRCUIT_PROFILE } from '../../src/session/tmrProfile';
+import { MOTORPARK_CIRCUIT_PROFILE } from '../../src/session/circuitCatalog';
 
 function flushBootstrap(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
@@ -213,7 +214,7 @@ describe('composition.ts: reference-counted G-force provider ownership (P4h-FIX1
     expect(gforceDouble.stopCalls).toBe(1);
   });
 
-  it('acquire/release is balanced and idempotent at zero: an extra release never stops a provider nobody holds', async () => {
+  it('acquire/release is balanced and idempotent at zero: an extra release never stops a provider nobody holds (P4h-FIX1 H6)', async () => {
     const composition = await bootFresh();
 
     composition.acquireGForce();
@@ -225,6 +226,94 @@ describe('composition.ts: reference-counted G-force provider ownership (P4h-FIX1
     await composition.releaseGForce();
     expect(gforceDouble.stopCalls).toBe(1);
     await composition.releaseGForce(); // unbalanced extra release.
+    expect(gforceDouble.stopCalls).toBe(1);
+  });
+});
+
+/**
+ * P4h-FIX2 F2 (after Codex P4h-REV2 HIGH, `composition.ts:650,684`): "G-force
+ * release is not paired with actual acquisition. `startTelemetryRecording()`
+ * returns early when SQLite is unavailable or telemetry is disabled, but
+ * `stopTelemetryRecording()`'s `recorder === null` path still calls
+ * `releaseGForce()`. Scenario: monitor owns the sole reference; a
+ * web/disabled/recovery session starts without acquiring, then session end,
+ * controller rebuild, or delete-all releases the monitor's reference and stops
+ * its G rows."
+ *
+ * Binding fix (ticket P4h-FIX2): the release is paired with THIS session's own
+ * acquisition -- a session that never acquired never releases.
+ */
+describe('composition.ts: a session that never ACQUIRED never releases (P4h-FIX2 F2)', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('telemetry DISABLED: a full session start+end leaves the monitor\'s reference (and the running provider) untouched', async () => {
+    const composition = await bootFresh();
+    // The web/disabled/no-database class of session: recording never starts,
+    // so no G reference is ever taken by the session.
+    composition.settingsStore.update({ telemetryEnabled: false, telemetrySimulate: false });
+
+    composition.acquireGForce(); // the telemetry monitor's Start -- the ONLY holder.
+    expect(gforceDouble.startCalls).toBe(1);
+
+    await runSession(composition, 970_001);
+
+    // HEAD (74a21e9): `stopTelemetryRecording()`'s `recorder === null` path
+    // released a reference this session never took -- the monitor's -- and the
+    // provider stopped underneath it.
+    expect(gforceDouble.stopCalls).toBe(0);
+    expect(composition.gForceHolderCount()).toBe(1);
+  });
+
+  it('a controller REBUILD (circuit change) never releases the monitor\'s reference', async () => {
+    const composition = await bootFresh();
+    composition.settingsStore.update({ telemetryEnabled: false, telemetrySimulate: false });
+
+    composition.acquireGForce();
+    expect(gforceDouble.startCalls).toBe(1);
+
+    const selection = await composition.selectCircuit(MOTORPARK_CIRCUIT_PROFILE.circuitId);
+    expect(selection).toEqual({ ok: true });
+    await flushBootstrap();
+
+    expect(gforceDouble.stopCalls).toBe(0);
+    expect(composition.gForceHolderCount()).toBe(1);
+  });
+
+  it('delete-all never releases the monitor\'s reference', async () => {
+    const composition = await bootFresh();
+    composition.settingsStore.update({ telemetryEnabled: false, telemetrySimulate: false });
+
+    composition.acquireGForce();
+    expect(gforceDouble.startCalls).toBe(1);
+
+    const result = await composition.deleteAllStoredUserData();
+    expect(result.ok).toBe(true);
+    await flushBootstrap();
+
+    expect(gforceDouble.stopCalls).toBe(0);
+    expect(composition.gForceHolderCount()).toBe(1);
+  });
+
+  it('an ENABLED session still takes and releases exactly its OWN reference across an end + rebuild + delete-all', async () => {
+    const composition = await bootFresh();
+    composition.settingsStore.update({ telemetryEnabled: true, telemetrySimulate: false });
+
+    composition.acquireGForce(); // the monitor.
+    await runSession(composition, 980_001); // acquires one, releases one.
+    expect(composition.gForceHolderCount()).toBe(1);
+    expect(gforceDouble.stopCalls).toBe(0);
+
+    await composition.selectCircuit(MOTORPARK_CIRCUIT_PROFILE.circuitId);
+    await flushBootstrap();
+    await composition.deleteAllStoredUserData();
+    await flushBootstrap();
+
+    expect(composition.gForceHolderCount()).toBe(1);
+    expect(gforceDouble.stopCalls).toBe(0);
+
+    await composition.releaseGForce(); // the monitor finally lets go.
     expect(gforceDouble.stopCalls).toBe(1);
   });
 });

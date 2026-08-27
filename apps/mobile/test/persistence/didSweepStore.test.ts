@@ -7,6 +7,7 @@ import {
   createSqlDidSweepStore,
   createDidSweepStore,
   hexToBytes,
+  selectResumableRun,
   type DidSweepRunRecord,
   type DidSweepStore,
 } from '../../src/persistence/didSweepStore';
@@ -163,6 +164,39 @@ describe.each([
     expect(await store.getResponders('run-1')).toEqual([]);
   });
 
+  it('flushRunProgress writes responders AND the progress patch together -- both readable afterward', async () => {
+    const store: DidSweepStore = await makeStore();
+    await store.createRun(freshRun());
+    await store.flushRunProgress(
+      'run-1',
+      [{ did: 0x1002, raw: Uint8Array.from([0x1a]), rttMs: 20 }],
+      { status: 'paused', lastDid: 0x1002, visitedCount: 5 },
+      '2026-08-27T18:00:05.000Z',
+    );
+    const run = await store.getRun('run-1');
+    expect(run).toMatchObject({ status: 'paused', lastDid: 0x1002, visitedCount: 5, responderCount: 1 });
+    const responders = await store.getResponders('run-1');
+    expect(responders).toHaveLength(1);
+    expect(responders[0]).toMatchObject({ did: 0x1002, rawHex: '1A' });
+  });
+
+  it('flushRunProgress applies ONLY the progress patch when responders is empty (no responder_count churn)', async () => {
+    const store: DidSweepStore = await makeStore();
+    await store.createRun(freshRun());
+    await store.upsertResponders('run-1', [{ did: 0x1002, raw: Uint8Array.from([0x10]), rttMs: 10 }], '2026-08-27T18:00:00.000Z');
+    await store.flushRunProgress('run-1', [], { status: 'stopped', lastDid: 0x1003 }, '2026-08-27T18:00:10.000Z');
+    const run = await store.getRun('run-1');
+    expect(run).toMatchObject({ status: 'stopped', lastDid: 0x1003, responderCount: 1 });
+  });
+
+  it('flushRunProgress is a no-op if runId does not exist', async () => {
+    const store: DidSweepStore = await makeStore();
+    await expect(
+      store.flushRunProgress('nope', [{ did: 1, raw: Uint8Array.from([1]), rttMs: 1 }], { status: 'stopped' }, '2026-08-27T18:00:00.000Z'),
+    ).resolves.toBeUndefined();
+    expect(await store.getRun('nope')).toBeNull();
+  });
+
   it('enforceRetention(5) keeps only the 5 most-recently-updated runs, deleting the rest (and their responders)', async () => {
     const store: DidSweepStore = await makeStore();
     for (let i = 0; i < 7; i += 1) {
@@ -176,6 +210,47 @@ describe.each([
     // The 2 OLDEST (run-0, run-1) are the ones dropped.
     expect(remaining.map((r) => r.runId).sort()).toEqual(['run-2', 'run-3', 'run-4', 'run-5', 'run-6'].sort());
     expect(await store.getResponders('run-0')).toEqual([]); // responders dropped too.
+  });
+});
+
+/**
+ * F1 fix (P4i-FIX1, binding, after Codex P4hrev2c): "responders + progress
+ * written in ONE transaction" -- SQL-only (the in-memory fallback has no
+ * partial-failure mode to inject a fault into: nothing ever yields between
+ * its two mutations).
+ */
+describe('DidSweepStore.flushRunProgress: atomicity (SQL-backed, binding P4i-FIX1 F1)', () => {
+  it('a failure partway through the flush (after the responder insert, before the progress UPDATE commits) rolls back BOTH -- never a partial checkpoint', async () => {
+    const db = await migratedDb();
+    const store = createSqlDidSweepStore(db);
+    await store.createRun(freshRun());
+
+    const realRunAsync = db.runAsync.bind(db);
+    let runAsyncCalls = 0;
+    db.runAsync = (async (sql: string, params?: readonly unknown[]) => {
+      runAsyncCalls += 1;
+      // Let the responder INSERT through, then fail on the run-row UPDATE
+      // that would otherwise commit the progress patch.
+      if (sql.startsWith('UPDATE did_sweep_runs')) throw new Error('kill mid-flush (test double)');
+      return realRunAsync(sql, params as never);
+    }) as typeof db.runAsync;
+
+    await expect(
+      store.flushRunProgress(
+        'run-1',
+        [{ did: 0x2000, raw: Uint8Array.from([0x55]), rttMs: 5 }],
+        { status: 'stopped', lastDid: 0x2000 },
+        '2026-08-27T18:00:05.000Z',
+      ),
+    ).rejects.toThrow(/kill mid-flush/);
+    expect(runAsyncCalls).toBeGreaterThan(0);
+
+    // Restore the real implementation to read back the post-rollback state.
+    db.runAsync = realRunAsync;
+    const run = await store.getRun('run-1');
+    expect(run).toMatchObject({ status: 'running', lastDid: null }); // progress patch never landed.
+    const responders = await store.getResponders('run-1');
+    expect(responders).toEqual([]); // the responder insert was rolled back TOO, not left dangling.
   });
 });
 
@@ -200,6 +275,50 @@ describe('DidSweepStore: resume across a simulated app restart (SQL-backed only)
     expect(resumedRun).toMatchObject({ lastDid: 0x1002, visitedCount: 3, status: 'stopped' });
     expect(resumedResponders).toHaveLength(1);
     expect(resumedResponders[0]!.did).toBe(0x1002);
+  });
+});
+
+/**
+ * F6 fix (P4i-FIX1, binding, after Codex P4hrev2c): "Resume picks the most
+ * recent RESUMABLE run (status paused/stopped/interrupted with lastDid <
+ * rangeEnd), not the most recent run." Field scenario: the latest run
+ * completed naturally while an EARLIER run was killed mid-sweep -- only the
+ * earlier one should ever be offered as "Resume".
+ */
+describe('selectResumableRun (binding, P4i-FIX1 F6)', () => {
+  function makeRun(overrides: Partial<DidSweepRunRecord>): DidSweepRunRecord {
+    return { ...freshRun(), responderCount: 0, ...overrides };
+  }
+
+  it('skips a completed run even when it is the most recently updated, picking the earlier killed-mid-sweep one', () => {
+    const completedLatest = makeRun({ runId: 'run-complete', status: 'complete', lastDid: 0xffff, updatedAtUtc: '2026-08-27T19:00:00.000Z' });
+    const killedMidSweep = makeRun({ runId: 'run-killed', status: 'running', lastDid: 0x1200, updatedAtUtc: '2026-08-27T18:00:00.000Z' });
+    // `listRuns()`'s own contract: most-recently-updated first.
+    expect(selectResumableRun([completedLatest, killedMidSweep])).toMatchObject({ runId: 'run-killed' });
+  });
+
+  it('a paused run with room left to sweep is resumable', () => {
+    const run = makeRun({ status: 'paused', lastDid: 0x1000, rangeTo: 0xffff });
+    expect(selectResumableRun([run])).toMatchObject({ runId: 'run-1' });
+  });
+
+  it('a run whose lastDid already reached rangeTo is NOT resumable even if never marked complete', () => {
+    const run = makeRun({ status: 'stopped', lastDid: 0xffff, rangeTo: 0xffff });
+    expect(selectResumableRun([run])).toBeNull();
+  });
+
+  it('a run that never resolved even one DID (lastDid null) is still resumable -- restarts the SAME run from its own beginning', () => {
+    const run = makeRun({ status: 'stopped', lastDid: null, rangeFrom: 0, rangeTo: 0xffff });
+    expect(selectResumableRun([run])).toMatchObject({ runId: 'run-1' });
+  });
+
+  it('an empty run list has no resumable run', () => {
+    expect(selectResumableRun([])).toBeNull();
+  });
+
+  it('every run being complete leaves nothing resumable', () => {
+    const runs = [makeRun({ runId: 'a', status: 'complete' }), makeRun({ runId: 'b', status: 'complete' })];
+    expect(selectResumableRun(runs)).toBeNull();
   });
 });
 

@@ -556,3 +556,70 @@ describe('E (ticket CN-FIX4): a recovery whose circuit is no longer bundled is D
     }
   });
 });
+
+/**
+ * P4h-FIX2 F3 (after Codex P4h-REV2 MEDIUM, `composition.ts:323,342`;
+ * `CalibrationInstructionsScreen.tsx:48`): "calibration cancellation covers
+ * only a start already executing inside the lifecycle lock. If
+ * `beginCalibration()` is QUEUED behind another lock holder, navigation still
+ * immediately pushes ActiveCalibration; Cancel calls the unlocked
+ * `rejectCalibration()` before `SessionController.start()` sets
+ * `calibrationStartInFlight`, so it is a no-op. The queued command later
+ * starts an invisible calibration after the user has left."
+ *
+ * Binding fix (ticket P4h-FIX2): `beginCalibration()` carries a
+ * composition-level cancel token; when the lock is finally acquired and the
+ * token is cancelled, the command returns without starting anything.
+ */
+describe('F3 (ticket P4h-FIX2): Cancel cancels a calibration start that is still QUEUED behind the lock', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('a beginCalibration() queued behind a slow selection is cancelled by rejectCalibration(): no calibration ever starts', async () => {
+    await seedDatabase();
+    const composition = await importFreshComposition();
+    const gnss = tracked.gnssProviders[0]!;
+
+    // The lock holder: a circuit change whose controller rebuild awaits the
+    // (deliberately slow) GNSS provider stop -- contracts.md's provider
+    // ownership amendment -- so it holds `lifecycleLock` for ~30 ms.
+    gnss.stopDelayMs = 30;
+    const selection = composition.selectCircuit(MOTORPARK_CIRCUIT_PROFILE.circuitId);
+
+    // The user taps "Start calibration": the command QUEUES behind the
+    // selection, and the screen navigates to ActiveCalibration immediately.
+    composition.facade.beginCalibration();
+    // ...and immediately taps Cancel there, while the start is still queued
+    // (the controller is `idle`, `calibrationStartInFlight` is still false).
+    composition.facade.rejectCalibration();
+
+    expect(await selection).toEqual({ ok: true });
+    gnss.stopDelayMs = 0;
+    await tick(60);
+
+    // HEAD (74a21e9): the queued command runs after the user has left and
+    // starts an INVISIBLE calibration (watchdog running, session id minted).
+    expect(latestFacadeState(composition).sessionState).toBe('idle');
+    expect(composition.getProductionCircuitId()).toBe(MOTORPARK_CIRCUIT_PROFILE.circuitId);
+  });
+
+  it('the cancel applies to THAT queued start only -- a later beginCalibration() still works', async () => {
+    await seedDatabase();
+    const composition = await importFreshComposition();
+    const gnss = tracked.gnssProviders[0]!;
+
+    gnss.stopDelayMs = 30;
+    const selection = composition.selectCircuit(MOTORPARK_CIRCUIT_PROFILE.circuitId);
+    composition.facade.beginCalibration();
+    composition.facade.rejectCalibration();
+    expect(await selection).toEqual({ ok: true });
+    gnss.stopDelayMs = 0;
+    await tick(60);
+    expect(latestFacadeState(composition).sessionState).toBe('idle');
+
+    composition.facade.beginCalibration();
+    await tick(20);
+    expect(latestFacadeState(composition).sessionState).toBe('calibrating');
+  });
+});

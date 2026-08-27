@@ -22,7 +22,7 @@ import {
 } from '@circuit/core';
 import { createDidSweepController, createRawUdsChannel } from '../../src/session/didSweepController';
 import { createEnetAdapterReservation } from '../../src/session/enetAdapterReservation';
-import { createInMemoryDidSweepStore } from '../../src/persistence/didSweepStore';
+import { createInMemoryDidSweepStore, type DidSweepStore } from '../../src/persistence/didSweepStore';
 
 /**
  * ENET auto-discovery & DID sweep addendum, extended by the "sweep transport
@@ -159,6 +159,52 @@ function monotonicCounter(): { now: () => number } {
 
 async function flush(times = 30): Promise<void> {
   for (let i = 0; i < times; i += 1) await Promise.resolve();
+}
+
+/**
+ * F1 fix (P4i-FIX1, binding, after Codex P4hrev2c) test support: wraps a real
+ * `DidSweepStore` so a test can HOLD the NEXT `flushRunProgress` call
+ * in-flight (never resolving until `release()`), then let a LATER call
+ * proceed immediately -- lets tests interleave a controller action (a second
+ * flush, a new `start()`) while an earlier flush is still pending, exactly
+ * the race the ticket's HIGH finding describes ("A quick new Start while the
+ * previous flush awaits storage...").
+ */
+function createGatedDidSweepStore(inner: DidSweepStore): {
+  store: DidSweepStore;
+  holdNextFlush: () => void;
+  release: () => void;
+  flushCalls: Array<{ runId: string; responderCount: number }>;
+} {
+  let gate: Promise<void> | null = null;
+  let releaseGate: (() => void) | null = null;
+  let holdNext = false;
+  const flushCalls: Array<{ runId: string; responderCount: number }> = [];
+  const store: DidSweepStore = {
+    ...inner,
+    async flushRunProgress(runId, responders, patch, nowUtc) {
+      flushCalls.push({ runId, responderCount: responders.length });
+      if (holdNext) {
+        holdNext = false;
+        gate = new Promise((resolve) => {
+          releaseGate = resolve;
+        });
+        await gate;
+      }
+      return inner.flushRunProgress(runId, responders, patch, nowUtc);
+    },
+  };
+  return {
+    store,
+    holdNextFlush: () => {
+      holdNext = true;
+    },
+    release: () => {
+      releaseGate?.();
+      releaseGate = null;
+    },
+    flushCalls,
+  };
 }
 
 describe('createRawUdsChannel (H3, binding): address-swap-only correlation, FIFO in-order delivery', () => {
@@ -1357,6 +1403,261 @@ describe('didSweepController: persistence (binding, P4i)', () => {
 });
 
 /**
+ * F1 fix (P4i-FIX1, binding, after Codex P4hrev2c HIGH finding #3): "flushes
+ * are queued (serialized promise chain), run-scoped (each flush captures its
+ * runId + index and is discarded if the controller moved to another run),
+ * forced stop/complete flush is NEVER dropped (awaited, chained after the
+ * active flush) ... batch window ≤ 1 s." These tests use a REAL (but gated/
+ * delayed) store -- not the builder in isolation -- to reproduce the exact
+ * races the finding describes.
+ */
+describe('didSweepController: persistence queueing/run-scoping (binding, P4i-FIX1 F1)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a forced flush is QUEUED behind an already in-flight one -- runs strictly AFTER it settles, never dropped, never concurrent', async () => {
+    const gated = createGatedDidSweepStore(createInMemoryDidSweepStore());
+    // A big, all-timeout range -- pause() lands mid-sweep (never reaches its
+    // own natural completion), so the run stays 'paused' (not yet terminal)
+    // right up until the test's own explicit stop().
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(new Map()),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store: gated.store,
+      requestTimeoutMs: 20,
+    });
+
+    controller.start({ from: 0x0000, to: 0xffff });
+    await vi.advanceTimersByTimeAsync(1_200); // past the 1s batch window -- a periodic flush fires.
+    await flush();
+    expect(gated.flushCalls.length).toBeGreaterThanOrEqual(1); // at least one periodic flush has been ISSUED so far.
+
+    gated.holdNextFlush(); // the NEXT flush call (pause()'s own forced one) will hang until released.
+    controller.pause();
+    // pause() only flips a flag read by the in-flight request loop -- the
+    // phase transition (and its forced flush) lands once the CURRENT pending
+    // DID's own timeout resolves and the loop notices, not synchronously.
+    await vi.advanceTimersByTimeAsync(30);
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('paused');
+    const callsAfterPause = gated.flushCalls.length;
+    expect(gated.flushCalls.length).toBeGreaterThanOrEqual(1);
+
+    controller.stop(); // a SECOND forced flush, issued WHILE pause()'s own is still pending on the gate.
+    await flush();
+    // The stop() flush must be QUEUED behind the still-pending pause() flush
+    // -- it CANNOT have started executing yet (the serialized tail runs the
+    // pause() flush's continuation strictly BEFORE stop()'s), so the call
+    // count is UNCHANGED right here -- proving queued-not-dropped is really
+    // sequential, not silently skipped.
+    expect(gated.flushCalls.length).toBe(callsAfterPause);
+
+    gated.release(); // let the held (pause()) flush's storage write settle -- unblocks the queued stop() flush right after.
+    await vi.runAllTimersAsync();
+    await flush();
+
+    // The stop() flush DID eventually run (queued, not dropped) -- the call
+    // count grew, and the run's FINAL persisted status is 'stopped' (stop()'s
+    // own status), landing strictly AFTER the pause() flush it was queued
+    // behind.
+    expect(gated.flushCalls.length).toBeGreaterThan(callsAfterPause);
+    const runId = controller.getCurrentRunId()!;
+    const persisted = await gated.store.getRun(runId);
+    expect(persisted?.status).toBe('stopped');
+  });
+});
+
+/**
+ * F7 fix (P4i-FIX1, binding, after Codex P4hrev2c MEDIUM finding): "unmount
+ * must not overwrite a naturally completed run with status `stopped` --
+ * stop() is a no-op on completed; status transitions are monotone."
+ */
+describe('didSweepController: stop() is a no-op on any terminal state (binding, P4i-FIX1 F7)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('calling stop() after a NATURAL sweepComplete never overwrites the persisted status back to "stopped"', async () => {
+    const store = createInMemoryDidSweepStore();
+    const script = new Map<number, ScriptEntry>([[0x0001, { responses: [positivePdu(0x0001, [0x50])], delayMs: 5 }]]);
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store,
+    });
+
+    controller.start({ from: 0x0001, to: 0x0001 });
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('sweepComplete');
+    const runId = controller.getCurrentRunId()!;
+    expect((await store.getRun(runId))?.status).toBe('complete');
+
+    // Mirrors `DidSweepScreen.tsx`'s own unmount cleanup: `stop()` called
+    // UNCONDITIONALLY, regardless of the current phase.
+    controller.stop();
+    await vi.runAllTimersAsync();
+    await flush();
+
+    expect(controller.getSnapshot().phase).toBe('sweepComplete'); // untouched -- never flipped to 'stopped'.
+    expect((await store.getRun(runId))?.status).toBe('complete'); // the persisted status is likewise untouched.
+  });
+
+  it('calling stop() after observationComplete is ALSO a no-op (never re-releases/re-emits)', async () => {
+    const script = new Map<number, ScriptEntry>([[0x0005, { responses: [positivePdu(0x0005, [0x50])], delayMs: 5 }]]);
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+    controller.start({ from: 0x0005, to: 0x0005 });
+    await vi.runAllTimersAsync();
+    await flush();
+    controller.startObservation(50);
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+
+    const snapshotsSeen: string[] = [];
+    controller.subscribe((s) => snapshotsSeen.push(s.phase));
+    controller.stop();
+    await vi.runAllTimersAsync();
+    await flush();
+
+    expect(controller.getSnapshot().phase).toBe('observationComplete'); // never flipped to 'stopped'.
+    expect(snapshotsSeen.every((p) => p === 'observationComplete')).toBe(true); // stop() never re-emitted anything.
+  });
+
+  it('stop() still works normally (sets "stopped") from every NON-terminal phase -- idle and the terminal states are the ONLY no-ops', () => {
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(new Map()),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+    expect(controller.getSnapshot().phase).toBe('idle');
+    controller.stop(); // idle -- a no-op (pre-existing behavior, unchanged).
+    expect(controller.getSnapshot().phase).toBe('idle');
+  });
+
+  it('a real kill (no stop()) inside the batch window resumes from the LAST actually-committed checkpoint -- never re-sending already-visited DIDs', async () => {
+    const store = createInMemoryDidSweepStore();
+    const script = new Map<number, ScriptEntry>([[0x0001, { responses: [positivePdu(0x0001, [0x50])], mode: 'oneFramePerSend', delayMs: 5 }]]);
+    const controllerA = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store,
+      requestTimeoutMs: 20,
+    });
+
+    controllerA.start({ from: 0x0000, to: 0x0005 });
+    // Past the 1s batch window -- at least one periodic flush commits on its
+    // own, with NO stop()/pause() ever called (models a real process kill:
+    // the app just disappears, mid-sweep, with the periodic checkpoint being
+    // the ONLY thing that survives).
+    await vi.advanceTimersByTimeAsync(1_200);
+    await flush();
+    const runId = controllerA.getCurrentRunId()!;
+    const committedBeforeKill = await store.getRun(runId);
+    expect(committedBeforeKill?.lastDid).not.toBeNull(); // the periodic flush genuinely committed a checkpoint.
+    const committedLastDid = committedBeforeKill!.lastDid!;
+    // "Kill" -- simply stop touching controllerA. NEVER call stop()/pause().
+
+    const transportsBuiltByB: FakeSweepTransport[] = [];
+    const controllerB = createDidSweepController({
+      transportFactory: () => {
+        const t = new FakeSweepTransport(script);
+        transportsBuiltByB.push(t);
+        return t;
+      },
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store,
+      requestTimeoutMs: 20,
+    });
+    await controllerB.resumePersistedRun(runId);
+    await vi.runAllTimersAsync();
+    await flush();
+
+    const [transportB] = transportsBuiltByB;
+    for (let did = 0x0000; did <= committedLastDid; did += 1) {
+      expect(transportB!.sendCallCountByDid.get(did) ?? 0).toBe(0); // never re-sent beyond the last COMMITTED checkpoint.
+    }
+  });
+
+  it('an immediate new Start while the previous run\'s own completion flush still awaits storage never cross-writes the new run (no dropped/skipped responders)', async () => {
+    const gated = createGatedDidSweepStore(createInMemoryDidSweepStore());
+    let sweepCount = 0;
+    const scriptA = new Map<number, ScriptEntry>([[0x0001, { responses: [positivePdu(0x0001, [0x50])], mode: 'oneFramePerSend', delayMs: 5 }]]);
+    const scriptB = new Map<number, ScriptEntry>([[0x0002, { responses: [positivePdu(0x0002, [0x60])], mode: 'oneFramePerSend', delayMs: 5 }]]);
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(sweepCount === 0 ? scriptA : scriptB),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store: gated.store,
+    });
+
+    gated.holdNextFlush(); // run A's OWN natural-completion ('complete') forced flush hangs until released.
+    controller.start({ from: 0x0001, to: 0x0001 });
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('sweepComplete');
+    const runIdA = controller.getCurrentRunId()!;
+    expect(gated.flushCalls).toHaveLength(1); // run A's completion flush -- in flight, held.
+
+    // A quick new Start while that flush STILL awaits storage.
+    sweepCount = 1;
+    controller.start({ from: 0x0002, to: 0x0002 });
+    await vi.runAllTimersAsync();
+    await flush();
+    const runIdB = controller.getCurrentRunId()!;
+    expect(runIdB).not.toBe(runIdA);
+    // Run B's own completion flush is QUEUED behind run A's still-pending
+    // one -- it cannot have executed yet (the serialized tail is strictly
+    // sequential), so only ONE call has actually reached the store so far.
+    expect(gated.flushCalls).toHaveLength(1);
+
+    gated.release(); // let run A's held flush settle -- unblocks run B's queued one right after.
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(gated.flushCalls.length).toBeGreaterThanOrEqual(2);
+
+    // Run A's own persisted state is untouched by anything from run B --
+    // the exact HIGH bug: "a quick new Start ... lets that old flush update
+    // the new global currentRunId/accumulator and overwrite
+    // lastPersistedResponderIndex, potentially marking the new run complete
+    // and permanently skipping its responders."
+    const persistedA = await gated.store.getRun(runIdA);
+    expect(persistedA?.status).toBe('complete');
+    const respondersA = await gated.store.getResponders(runIdA);
+    expect(respondersA.map((r) => r.did)).toEqual([0x0001]); // never gained run B's 0x0002.
+
+    // Run B reaches its OWN correct terminal state -- not silently marked
+    // complete/skipped by a cross-write from run A's stale flush continuation.
+    const persistedB = await gated.store.getRun(runIdB);
+    expect(persistedB?.status).toBe('complete');
+    const respondersB = await gated.store.getResponders(runIdB);
+    expect(respondersB.map((r) => r.did)).toEqual([0x0002]); // run B's own responder was NOT dropped/skipped.
+  });
+});
+
+/**
  * DID sweep — guided candidate observation addendum (2026-08-27, binding —
  * Phase 4i, user clarification): "the OBSERVATION on the filtered candidates
  * must be a visible, guided, repeated re-read" across the 4 fixed phases.
@@ -1386,7 +1687,7 @@ describe('didSweepController: guided candidate observation (binding, P4i)', () =
     await flush();
     expect(controller.getSnapshot().responders).toHaveLength(1);
 
-    const phasesSeen: DidObservationPhaseId[] = [];
+    const phasesSeen: Array<DidObservationPhaseId | 'prePass'> = [];
     controller.subscribe((s) => {
       if (s.guidedPhase !== null && phasesSeen[phasesSeen.length - 1] !== s.guidedPhase) phasesSeen.push(s.guidedPhase);
     });
@@ -1394,15 +1695,18 @@ describe('didSweepController: guided candidate observation (binding, P4i)', () =
     controller.startGuidedObservation();
     expect(controller.getSnapshot().phase).toBe('observing');
 
-    // Bounded advance through all 4 ~6s phases (24s) -- NOT `runAllTimersAsync`
-    // (the transport's own recurring keep-alive timer stays armed while open).
-    for (let i = 0; i < 26 && controller.getSnapshot().phase === 'observing'; i += 1) {
+    // Bounded advance through the F2 pre-pass (round + ~2s gap + round, ~6s)
+    // PLUS all 4 ~6s phases (24s), ~30s total -- NOT `runAllTimersAsync` (the
+    // transport's own recurring keep-alive timer stays armed while open).
+    for (let i = 0; i < 40 && controller.getSnapshot().phase === 'observing'; i += 1) {
       await vi.advanceTimersByTimeAsync(1_000);
       await flush();
     }
 
     expect(controller.getSnapshot().phase).toBe('observationComplete');
-    expect(phasesSeen).toEqual(['baseline', 'brake', 'steering', 'throttle']);
+    // F2 fix (binding): the two-sample changing-value pre-pass runs FIRST,
+    // then the fixed 4-phase plan in order.
+    expect(phasesSeen).toEqual(['prePass', 'baseline', 'brake', 'steering', 'throttle']);
     const summaries = controller.getSnapshot().candidateSummaries;
     expect(summaries).toHaveLength(1);
     expect(summaries[0]?.did).toBe(0x0001);
@@ -1424,7 +1728,10 @@ describe('didSweepController: guided candidate observation (binding, P4i)', () =
     await flush();
 
     controller.startGuidedObservation();
-    await vi.advanceTimersByTimeAsync(2_000); // still mid-"baseline".
+    // F2 fix (binding): the pre-pass (round + ~2s gap + round, ~6s for a
+    // single candidate) runs BEFORE "baseline" -- advance past it, then a
+    // little further into baseline itself.
+    await vi.advanceTimersByTimeAsync(6_500);
     await flush();
     expect(controller.getSnapshot().phase).toBe('observing');
     expect(controller.getSnapshot().guidedPhase).toBe('baseline');
@@ -1437,6 +1744,158 @@ describe('didSweepController: guided candidate observation (binding, P4i)', () =
     expect(controller.getSnapshot().candidateSummaries.length).toBeGreaterThan(0);
   });
 
+  /**
+   * F2 fix (P4i-FIX1, binding, after Codex P4hrev2c HIGH finding #4): "300
+   * candidates at 15 req/s → phase length grows, every DID sampled ≥ 2× per
+   * phase; cursor continuity across phases." Uses `resumePersistedRun` to
+   * seed 300 responders directly (skipping an actual 300-DID sweep pass) --
+   * the guided run itself still goes through the REAL pre-pass + phase
+   * pipeline against a real (65ms/request, ~15.4 req/s) scripted transport.
+   */
+  it('300 candidates at ~15 req/s: the phase length grows well beyond the 6s base, and the cursor advances between phases instead of restarting at the front of the list', async () => {
+    const DID_COUNT = 300;
+    const dids = Array.from({ length: DID_COUNT }, (_, i) => 0x2000 + i);
+    const store = createInMemoryDidSweepStore();
+    await store.createRun({
+      runId: 'run-300',
+      adapterType: 'enet',
+      targetAddress: TARGET_ADDRESS,
+      rangeFrom: dids[0]!,
+      rangeTo: dids[dids.length - 1]!,
+      lastDid: dids[dids.length - 1]!, // already fully swept -- resuming re-sends NOTHING.
+      startedAtUtc: '2026-08-27T18:00:00.000Z',
+      updatedAtUtc: '2026-08-27T18:00:00.000Z',
+      status: 'stopped',
+      visitedCount: DID_COUNT,
+      timeoutCount: 0,
+      unmatchedCount: 0,
+      errorCount: 0,
+      nrcCounts: {},
+    });
+    await store.upsertResponders(
+      'run-300',
+      dids.map((did) => ({ did, raw: Uint8Array.from([did % 2 === 0 ? 0x10 : 0x20]), rttMs: 65 })),
+      '2026-08-27T18:00:05.000Z',
+    );
+
+    // Fast, deterministic responses -- the SIZING formula
+    // (`computeGuidedPhaseDurationMs`) always assumes the SAME fixed ~15
+    // req/s regardless of how fast this test's own transport actually
+    // answers; what this test needs is simply that the pre-pass' own fixed
+    // (also duration-formula-sized) window comfortably covers all 300
+    // candidates twice, so the guided phases still see the FULL 300-DID set.
+    const script = new Map<number, ScriptEntry>(
+      dids.map((did) => [
+        did,
+        { responses: Array.from({ length: 8 }, (_, k) => positivePdu(did, [k % 2 === 0 ? 0x10 : 0x20])), mode: 'oneFramePerSend' as const, delayMs: 20 },
+      ]),
+    );
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store,
+    });
+
+    await controller.resumePersistedRun('run-300');
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('sweepComplete');
+    expect(controller.getSnapshot().responders).toHaveLength(DID_COUNT);
+
+    controller.startGuidedObservation();
+    await flush(); // lets the async connect+channel-creation continuation reach the pre-pass' own first `emit` (microtask-only, no timer needed).
+    expect(controller.getSnapshot().guidedPhase).toBe('prePass');
+
+    // Drain the pre-pass (round + ~2s gap + round -- each round
+    // computeGuidedPhaseDurationMs(300, ..., 1) = ceil(300/15*1000) = 20s, so
+    // ~42s total) in bounded steps (the keep-alive ticker stays armed).
+    for (let i = 0; i < 50 && controller.getSnapshot().guidedPhase === 'prePass'; i += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flush();
+    }
+    expect(controller.getSnapshot().guidedPhase).toBe('baseline'); // the pre-pass finished -- phases have begun.
+    // F2 fix: "show it" -- the auto-raised duration is on the snapshot, and
+    // it is MUCH larger than the fixed 6s base (300 candidates @ ~15 req/s
+    // needs ~40s to guarantee 2 samples/candidate).
+    expect(controller.getSnapshot().guidedPhaseDurationMs).toBeGreaterThan(30_000);
+
+    for (let i = 0; i < 50 && controller.getSnapshot().guidedPhase === 'baseline'; i += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flush();
+    }
+    expect(controller.getSnapshot().guidedPhase).toBe('brake'); // moved on to the next phase.
+
+    const samplesSoFar = controller.getGuidedSamples();
+    const baselineFirstDid = samplesSoFar.find((s) => s.phase === 'baseline')?.did;
+    // Let a little of "brake" run so it has at least one sample of its own.
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flush();
+    const brakeFirstDid = controller.getGuidedSamples().find((s) => s.phase === 'brake')?.did;
+
+    expect(baselineFirstDid).toBeDefined();
+    expect(brakeFirstDid).toBeDefined();
+    // F2 fix (the "persistent cursor" requirement): "brake" does NOT restart
+    // round-robin at the same DID "baseline" started at -- coverage
+    // continues from wherever "baseline" left off. With 300 candidates and a
+    // ~40s phase (only ~2 rounds), a naive non-rotating implementation would
+    // restart both phases at the exact same first DID every time.
+    expect(brakeFirstDid).not.toBe(baselineFirstDid);
+
+    // Every candidate that answered got AT LEAST one sample across baseline
+    // (not permanently starved the way the pre-fix "phase always restarts at
+    // DID #1" defect left the tail of a large candidate list unsampled).
+    const baselineDidsSeen = new Set(samplesSoFar.filter((s) => s.phase === 'baseline').map((s) => s.did));
+    expect(baselineDidsSeen.size).toBeGreaterThan(DID_COUNT / 2); // a full ~2-round phase covers well over half in one round alone.
+
+    controller.stopGuidedObservationEarly();
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+  }, 20_000);
+
+  /**
+   * F3 fix (P4i-FIX1, binding, after Codex P4hrev2c HIGH finding #5):
+   * "controller exposes `getGuidedSamples()` (per DID, per phase, relative
+   * timestamps, raw hex)."
+   */
+  it('getGuidedSamples() returns every phase-tagged sample from the guided run -- never the pre-pass\' own two reads', async () => {
+    const responses = Array.from({ length: 20 }, (_, i) => positivePdu(0x0001, [i % 2 === 0 ? 0x10 : 0x20]));
+    const script = new Map<number, ScriptEntry>([[0x0001, { responses, mode: 'oneFramePerSend', delayMs: 5 }]]);
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+
+    expect(controller.getGuidedSamples()).toEqual([]); // nothing yet.
+
+    controller.start({ from: 0x0001, to: 0x0001 });
+    await vi.runAllTimersAsync();
+    await flush();
+
+    controller.startGuidedObservation();
+    for (let i = 0; i < 40 && controller.getSnapshot().phase === 'observing'; i += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flush();
+    }
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+
+    const samples = controller.getGuidedSamples();
+    expect(samples.length).toBeGreaterThan(0);
+    expect(samples.every((s) => s.did === 0x0001)).toBe(true);
+    // Every sample is tagged with one of the FOUR fixed phases -- the
+    // pre-pass' own two reads are never phase-tagged/included here.
+    const phaseIds = new Set(samples.map((s) => s.phase));
+    for (const phaseId of phaseIds) expect(['baseline', 'brake', 'steering', 'throttle']).toContain(phaseId);
+    for (const sample of samples) {
+      expect(typeof sample.tMs).toBe('number');
+      expect(sample.raw).toBeInstanceOf(Uint8Array);
+    }
+  });
+
   it('startGuidedObservation is a no-op with no responders', () => {
     const controller = createDidSweepController({
       transportFactory: () => new FakeSweepTransport(new Map()),
@@ -1446,5 +1905,70 @@ describe('didSweepController: guided candidate observation (binding, P4i)', () =
     });
     controller.startGuidedObservation();
     expect(controller.getSnapshot().phase).toBe('idle');
+  });
+});
+
+/**
+ * F4 fix (P4i-FIX1, binding, after Codex P4hrev2c MEDIUM finding): "keep-alive
+ * continuity: one TesterPresent ticker across the pre-pass and all phases ...
+ * never > 2 s between keep-alives at phase boundaries. Test with fake clock."
+ * Each guided phase (and the pre-pass' own two rounds) is still a SEPARATE
+ * `runDidObservation` call with its OWN internal 2s ticker that resets at
+ * every call boundary -- without a controller-owned ticker spanning the
+ * whole sequence, the gap right at a phase boundary can reach roughly double
+ * the per-call interval.
+ */
+describe('didSweepController: guided keep-alive continuity across the pre-pass and every phase (binding, P4i-FIX1 F4)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('the gap between successive TesterPresent frames never exceeds 2s, across the pre-pass -> baseline -> brake -> steering -> throttle sequence', async () => {
+    const keepAliveTimestamps: number[] = [];
+    const responses = Array.from({ length: 40 }, (_, i) => positivePdu(0x0001, [i % 2 === 0 ? 0x10 : 0x20]));
+    const script = new Map<number, ScriptEntry>([[0x0001, { responses, mode: 'oneFramePerSend', delayMs: 5 }]]);
+    const controller = createDidSweepController({
+      transportFactory: () => {
+        const transport = new FakeSweepTransport(script);
+        const parser = new HsfzFrameParser();
+        const realSend = transport.send.bind(transport);
+        transport.send = (line: string) => {
+          try {
+            for (const frame of parser.push(binaryStringToBytes(line))) {
+              if (frame.control === HSFZ_CONTROL.DIAGNOSTIC_REQ_RES && (frame.payload[0] ?? 0) === 0x3e) keepAliveTimestamps.push(Date.now());
+            }
+          } catch {
+            // counting only -- never let a parse failure block the real send.
+          }
+          realSend(line);
+        };
+        return transport;
+      },
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+
+    controller.start({ from: 0x0001, to: 0x0001 });
+    await vi.runAllTimersAsync();
+    await flush();
+
+    controller.startGuidedObservation();
+    // Drain the pre-pass + all 4 phases (~30s worth) in bounded 1s steps --
+    // NOT `runAllTimersAsync` (the keep-alive ticker stays armed while open).
+    for (let i = 0; i < 40 && controller.getSnapshot().phase === 'observing'; i += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flush();
+    }
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+
+    expect(keepAliveTimestamps.length).toBeGreaterThan(5); // spans the pre-pass and every phase boundary.
+    for (let i = 1; i < keepAliveTimestamps.length; i += 1) {
+      const gap = keepAliveTimestamps[i]! - keepAliveTimestamps[i - 1]!;
+      expect(gap).toBeLessThanOrEqual(2_000); // "never > 2s between keep-alives at phase boundaries" (binding).
+    }
   });
 });
