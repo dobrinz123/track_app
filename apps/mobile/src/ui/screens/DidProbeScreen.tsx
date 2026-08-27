@@ -139,8 +139,11 @@ async function sendOneProbeRequest(
 }
 
 /**
- * Dev-only (`__DEV__` gated by the route registration, mirrors `DevReplay`)
- * ENET DID/PID probe: the empirical tool for discovering B58/DSC identifiers
+ * Dev-only tool, hidden by default (field revision, 2026-08-27, binding: the
+ * ROUTE is registered in every build, release included -- only its
+ * `SettingsScreen.tsx` entry point is gated on `developerModeEnabled`/
+ * `__DEV__`; `DevReplay` remains the one screen still `__DEV__`-only end to
+ * end). ENET DID/PID probe: the empirical tool for discovering B58/DSC identifiers
  * (contracts.md ENET addendum) by sending ONE request at a time to a target
  * address and reading back the raw response. Every request is built by
  * `didProbe.ts`'s `buildDidProbeRequest`, which re-checks the SAME read-only

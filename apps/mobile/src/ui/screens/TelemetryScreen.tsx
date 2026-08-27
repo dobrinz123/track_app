@@ -5,9 +5,9 @@ import type { Elm327State, TelemetryChannelId, TelemetrySample } from '@circuit/
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, radii, spacing, typography } from '../theme';
-import { settingsStore, telemetryProvider } from '../../session/composition';
+import { gForceProvider, settingsStore, telemetryProvider } from '../../session/composition';
 import { useSettings } from '../hooks/useSettings';
-import { type TelemetryProviderDiagnostics } from '../../session/telemetryProvider';
+import { summarizeGForceSamples, type TelemetryProviderDiagnostics } from '../../session/telemetryProvider';
 import { formatHexByte, resolveEnetChannelSpecs } from '../../session/enetSettingsValidation';
 import { getNetworkInfo, type NetworkInfo } from '../../session/networkInfo';
 
@@ -15,11 +15,24 @@ type Props = NativeStackScreenProps<RootStackParamList, 'Telemetry'>;
 
 type Channel = { id: TelemetryChannelId; label: string; unit: string; decimals: number };
 
-/** The base poll-plan channels `telemetryProvider.ts` always builds every `Elm327Session` with (Telemetry addendum — channel revision). RPM stays on this monitor screen even though it left the dashboard strip -- this is not the strip. latG/longG are analysis-only (LapDetailScreen) and never shown here. */
+/**
+ * The base poll-plan channels `telemetryProvider.ts` always builds every
+ * `Elm327Session` with (Telemetry addendum — channel revision), extended by
+ * the field revision (2026-08-27, binding): `throttlePct` (PID 0x11) is the
+ * throttle PLATE -- the driveway test found it idles at ~14-15% with no
+ * pedal input, relabeled "Throttle plate" to avoid reading as pedal
+ * position; `accelPedalPct` (PID 0x49) is the new, user-facing "how far is
+ * my foot down" channel, labeled "Accelerator pedal". RPM stays on this
+ * monitor screen even though it left the dashboard strip -- this is not the
+ * strip. latG/longG are NOT in this list -- they are shown separately below
+ * (only while the G provider is actually running), never on the driving
+ * dashboard.
+ */
 const BASE_CHANNELS: readonly Channel[] = [
   { id: 'rpm', label: 'Engine RPM', unit: 'rpm', decimals: 0 },
   { id: 'speedKph', label: 'Vehicle speed', unit: 'km/h', decimals: 0 },
-  { id: 'throttlePct', label: 'Throttle', unit: '%', decimals: 0 },
+  { id: 'throttlePct', label: 'Throttle plate', unit: '%', decimals: 0 },
+  { id: 'accelPedalPct', label: 'Accelerator pedal', unit: '%', decimals: 0 },
   { id: 'engineOilC', label: 'Engine oil temp', unit: '°C', decimals: 0 },
   { id: 'coolantC', label: 'Coolant temp', unit: '°C', decimals: 0 },
 ];
@@ -142,6 +155,40 @@ export function TelemetryScreen(_props: Props): React.JSX.Element {
     };
   }, []);
 
+  // Field revision (2026-08-27, binding): "the telemetry monitor shows
+  // latG/longG (phone accelerometer) whenever the G provider is running,
+  // with their observed rate -- recorded-not-displayed still applies to the
+  // DRIVING dashboard, not to the monitor." `gForceProvider` starts/stops
+  // with SESSION recording (composition.ts), independent of this screen's
+  // own OBD start/stop button -- its samples are timestamped here with
+  // `Date.now()` (this screen's OWN observation cadence of the callback
+  // firing, not `TelemetrySample.tMonoMs`'s own -- unrelated -- clock domain)
+  // and fed to `summarizeGForceSamples` (pure, unit-tested) to infer
+  // running/Hz, since `GForceProvider` itself exposes no running-state
+  // getter. The 1s ticker re-renders even without a new sample, so a row
+  // hides again once the provider actually stops.
+  const gSampleTimesRef = React.useRef<{ latG: number[]; longG: number[] }>({ latG: [], longG: [] });
+  const [gValues, setGValues] = React.useState<{ latG?: number; longG?: number }>({});
+  const [, forceGTick] = React.useState(0);
+  React.useEffect(() => {
+    const unsubscribeG = gForceProvider.onSample((sample: TelemetrySample) => {
+      if (sample.channel !== 'latG' && sample.channel !== 'longG') return;
+      const now = Date.now();
+      const times = gSampleTimesRef.current[sample.channel];
+      times.push(now);
+      while (times.length > 0 && now - times[0]! > 2_000) times.shift(); // keep just enough history for the Hz window + stale check.
+      setGValues((prev) => ({ ...prev, [sample.channel]: sample.value }));
+    });
+    const tickTimer = setInterval(() => forceGTick((n) => n + 1), 1_000);
+    return () => {
+      unsubscribeG();
+      clearInterval(tickTimer);
+    };
+  }, []);
+  const latGSummary = summarizeGForceSamples(gSampleTimesRef.current.latG, Date.now());
+  const longGSummary = summarizeGForceSamples(gSampleTimesRef.current.longG, Date.now());
+  const gForceRunning = latGSummary.running || longGSummary.running;
+
   const running = RUNNING_STATES.has(state);
   const isEnet = settings.adapterType === 'enet';
   const channelIds = isEnet
@@ -251,6 +298,31 @@ export function TelemetryScreen(_props: Props): React.JSX.Element {
                 );
               })}
             </View>
+
+            {gForceRunning ? (
+              <View style={styles.card} accessibilityLabel="G-force (phone accelerometer)">
+                {(
+                  [
+                    ['latG', 'Lateral G', latGSummary, gValues.latG] as const,
+                    ['longG', 'Longitudinal G', longGSummary, gValues.longG] as const,
+                  ] as const
+                ).map(([id, label, summary, value]) =>
+                  !summary.running ? null : (
+                    <View key={id} style={styles.channelRow}>
+                      <Text style={styles.channelLabel} maxFontSizeMultiplier={1.3}>
+                        {label}
+                      </Text>
+                      <Text style={styles.channelValue} maxFontSizeMultiplier={1.3}>
+                        {value === undefined ? '—' : `${value.toFixed(2)} g`}
+                      </Text>
+                      <Text style={styles.channelHz} maxFontSizeMultiplier={1.3}>
+                        {summary.hz.toFixed(1)} Hz
+                      </Text>
+                    </View>
+                  ),
+                )}
+              </View>
+            ) : null}
 
             {isEnet ? (
               <View style={styles.card}>

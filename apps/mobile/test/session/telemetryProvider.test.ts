@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Elm327Session, Elm327State, TelemetrySample } from '@circuit/core';
 import { InMemorySettingsStore } from '../../src/session/settingsStore';
-import { buildCustomPids, buildPollPlan, createTelemetryProvider } from '../../src/session/telemetryProvider';
+import {
+  buildCustomPids,
+  buildPollPlan,
+  createTelemetryProvider,
+  currentConfigFingerprint,
+  fingerprintsEqual,
+  summarizeGForceSamples,
+} from '../../src/session/telemetryProvider';
 
 /**
  * F2 MED fix test seam (binding): wraps the REAL `createElm327Session` so a
@@ -23,6 +30,7 @@ describe('buildPollPlan (Telemetry addendum — channel revision, binding)', () 
       { channel: 'rpm', hz: 5 },
       { channel: 'speedKph', hz: 5 },
       { channel: 'throttlePct', hz: 5 },
+      { channel: 'accelPedalPct', hz: 5 },
       { channel: 'engineOilC', hz: 0.5 },
       { channel: 'coolantC', hz: 0.2 },
     ]);
@@ -37,10 +45,40 @@ describe('buildPollPlan (Telemetry addendum — channel revision, binding)', () 
       { channel: 'rpm', hz: 5 },
       { channel: 'speedKph', hz: 5 },
       { channel: 'throttlePct', hz: 5 },
+      { channel: 'accelPedalPct', hz: 5 },
       { channel: 'engineOilC', hz: 0.5 },
       { channel: 'transOilC', hz: 0.5 },
       { channel: 'coolantC', hz: 0.2 },
     ]);
+  });
+
+  it('field revision (2026-08-27, binding): accelPedalPct polls at 5Hz -- distinct from throttlePct (the plate), which the field test found idles at ~14-15% with no pedal input', () => {
+    expect(buildPollPlan('')).toContainEqual({ channel: 'accelPedalPct', hz: 5 });
+  });
+});
+
+describe('summarizeGForceSamples (field revision, 2026-08-27, binding: monitor latG/longG rows)', () => {
+  it('reports NOT running when no samples have ever arrived', () => {
+    expect(summarizeGForceSamples([], 10_000)).toEqual({ hz: 0, running: false });
+  });
+
+  it('reports NOT running once the last sample is older than the stale threshold (default 1500ms) -- the G provider has stopped', () => {
+    const result = summarizeGForceSamples([1_000, 1_040, 1_080], 1_080 + 1_501);
+    expect(result).toEqual({ hz: 0, running: false });
+  });
+
+  it('reports running with the observed Hz over the last window while samples are fresh (~25Hz, 40ms apart)', () => {
+    const now = 2_000;
+    const sampleTimesMs = Array.from({ length: 25 }, (_, i) => now - 1_000 + i * 40); // 25 samples across the last 1000ms window, ~25Hz.
+    const result = summarizeGForceSamples(sampleTimesMs, now);
+    expect(result.running).toBe(true);
+    expect(result.hz).toBeCloseTo(25, 0);
+  });
+
+  it('a single very recent sample still reads as running (not yet stale), even with a low observed Hz', () => {
+    const result = summarizeGForceSamples([9_900], 10_000);
+    expect(result.running).toBe(true);
+    expect(result.hz).toBeGreaterThan(0);
   });
 });
 
@@ -119,6 +157,8 @@ const tracker = vi.hoisted(() => ({
   /** F3 test seam: when true, `connect()` returns a promise this test controls instead of rejecting immediately -- lets a test hold a session in 'connecting' indefinitely to construct a stop()/start() race deterministically. */
   holdConnect: false,
   pendingConnects: [] as Array<{ resolve: () => void; reject: (error: Error) => void }>,
+  /** Field revision (2026-08-27, binding): counts `close()` calls on this mocked transport -- the "adapter-type switch" tests assert the OLD ELM327 socket is actually closed, not merely abandoned. */
+  closeCalls: 0,
 }));
 
 vi.mock('../../src/session/tcpObdTransport', () => ({
@@ -139,7 +179,9 @@ vi.mock('../../src/session/tcpObdTransport', () => ({
     onClose(): () => void {
       return () => undefined;
     }
-    async close(): Promise<void> {}
+    async close(): Promise<void> {
+      tracker.closeCalls += 1;
+    }
   },
 }));
 
@@ -537,5 +579,173 @@ describe('telemetryProvider: ELM327 stop() semantics are byte-identical to pre-P
     expect(provider.getDiagnostics().state).toBe('polling');
     expect(provider.getDiagnostics().errorCount).toBe(3);
     expect(provider.getDiagnostics().lastError).toBe('diagnostic sentinel');
+  });
+});
+
+describe('currentConfigFingerprint / fingerprintsEqual (field revision, 2026-08-27, binding)', () => {
+  it('the fingerprint is {adapterType, host, port} -- host/port sourced from the RIGHT settings field per adapterType', () => {
+    const elmSettings = { adapterType: 'elm327' as const, adapterHost: '192.168.0.10', adapterPort: 35_000, enetHost: '192.168.4.10', enetPort: 6_801 };
+    expect(currentConfigFingerprint(elmSettings)).toEqual({ adapterType: 'elm327', host: '192.168.0.10', port: 35_000 });
+
+    const enetSettings = { adapterType: 'enet' as const, adapterHost: '192.168.0.10', adapterPort: 35_000, enetHost: '192.168.4.10', enetPort: 6_801 };
+    expect(currentConfigFingerprint(enetSettings)).toEqual({ adapterType: 'enet', host: '192.168.4.10', port: 6_801 });
+  });
+
+  it('fingerprintsEqual compares every field -- adapterType, host, AND port', () => {
+    const a = { adapterType: 'elm327' as const, host: '192.168.0.10', port: 35_000 };
+    expect(fingerprintsEqual(a, { ...a })).toBe(true);
+    expect(fingerprintsEqual(a, { ...a, adapterType: 'enet' })).toBe(false);
+    expect(fingerprintsEqual(a, { ...a, host: '192.168.0.11' })).toBe(false);
+    expect(fingerprintsEqual(a, { ...a, port: 35_001 })).toBe(false);
+  });
+});
+
+/**
+ * Field revision (2026-08-27, binding, "adapter-type switch" fix) --
+ * reproduces the EXACT driveway-test bug sequence (ledger FIELD RESULT
+ * 2026-08-27): "switching ELM327 -> ENET without restarting the app left
+ * ENET unable to connect until force-quit." Scout root cause: `start()` was a
+ * plain `if (running) return` (no-op while a dead/stuck generation was still
+ * "running"); the runtime 'failed' handler never reset `running`; a pending
+ * retry timer could resurrect the OLD adapterType; `tcpObdTransport.ts`'s
+ * async-init-failure path can leave the socket referenced with nothing
+ * explicitly closing it.
+ */
+describe('telemetryProvider: field revision -- adapter-type switch takes effect on the next Start, no app restart (binding)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    tracker.connectCalls = 0;
+    tracker.closeCalls = 0;
+    tracker.holdConnect = false;
+    tracker.pendingConnects = [];
+  });
+  afterEach(() => {
+    tracker.holdConnect = false;
+    vi.useRealTimers();
+  });
+
+  it('ELM start fails async (socket held open/stuck connecting) -> user switches adapterType to enet -> Start -> the ELM socket is closed and a fresh ENET session builds and reaches polling', async () => {
+    tracker.holdConnect = true; // the real adapter's connect() never settles on its own -- the exact "socket left open" scenario.
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'elm327' });
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
+    const states: Elm327State[] = [];
+    provider.onStateChange((s) => states.push(s));
+
+    provider.start();
+    await flushMicrotasks();
+    expect(tracker.pendingConnects).toHaveLength(1);
+    expect(states.at(-1)).toBe('connecting');
+    expect(tracker.closeCalls).toBe(0); // not yet -- still genuinely stuck.
+
+    // The user switches to ENET (telemetrySimulate too, so the ENET side
+    // needs no real socket -- telemetrySimulate is NOT part of the
+    // fingerprint, so flipping it alone never triggers the settings-change
+    // watcher; adapterType IS part of it, and DOES).
+    store.update({ adapterType: 'enet', telemetrySimulate: true });
+    await flushMicrotasks();
+
+    // The monitor's own Start button -- must yield a FRESH launch (never a
+    // silent no-op), regardless of whether the settings watcher above
+    // already raced ahead of it. Bounded advance (NOT `runAllTimersAsync()`):
+    // ENET's own poll loop is a RECURRING timer that never "runs out" once
+    // polling -- 1s is comfortably enough for the simulated discovery scan
+    // (a few ms) + connect + first poll tick.
+    provider.start();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flushMicrotasks();
+
+    expect(states.at(-1)).toBe('polling'); // ENET reached polling via SimulatedEnetTransport.
+    expect(provider.getDiagnostics().adapterType).toBe('enet');
+    expect(tracker.closeCalls).toBeGreaterThanOrEqual(1); // the stale ELM socket was explicitly closed.
+
+    // The stale ELM generation's connect() finally settles (late) -- proves
+    // it is fully detached: no further state forwards from it, ENET keeps
+    // polling undisturbed.
+    const stuckElmConnect = tracker.pendingConnects[0]!;
+    const statesBeforeLateSettle = states.length;
+    stuckElmConnect.reject(new Error('stale ELM socket settling late (test double)'));
+    await flushMicrotasks();
+    expect(states.length).toBe(statesBeforeLateSettle);
+    expect(states.at(-1)).toBe('polling');
+
+    await provider.stop(); // cleanup -- releases the (shared, singleton) ENET reservation this test acquired.
+  });
+
+  it('a retry timer scheduled under ELM327 never reopens an ELM socket if adapterType changes before it fires', async () => {
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'elm327' });
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
+
+    provider.start();
+    await flushMicrotasks();
+    expect(tracker.connectCalls).toBe(1);
+    expect(provider.getDiagnostics().state).toBe('failed'); // connect() rejected immediately (holdConnect is false) -- the plain async-failure + retry path.
+
+    // Change adapterType BEFORE the 3s retry delay elapses.
+    store.update({ adapterType: 'enet', telemetrySimulate: true });
+    await flushMicrotasks();
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    await flushMicrotasks();
+
+    expect(tracker.connectCalls).toBe(1); // the pending retry never reopened an ELM socket.
+  });
+
+  it('a config fingerprint change (adapterType/host/port) while a generation is live stops it -- state "stopped", diagnostics "settings changed"', async () => {
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'elm327' });
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
+    const states: Elm327State[] = [];
+    provider.onStateChange((s) => states.push(s));
+
+    provider.start();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushMicrotasks();
+    expect(states.at(-1)).toBe('polling');
+
+    store.update({ adapterHost: '10.0.0.99' }); // SAME adapterType, DIFFERENT host -- still a fingerprint change.
+    await flushMicrotasks();
+
+    expect(states.at(-1)).toBe('stopped');
+    expect(provider.getDiagnostics().lastError).toBe('settings changed');
+  });
+
+  it('start() while already polling with UNCHANGED settings is still a plain no-op (ELM byte-identical otherwise)', async () => {
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'elm327' });
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
+
+    provider.start();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushMicrotasks();
+    expect(provider.getDiagnostics().state).toBe('polling');
+
+    provider.start(); // no settings change at all -- must be a plain no-op, same generation.
+    await flushMicrotasks();
+
+    expect(provider.getDiagnostics().state).toBe('polling');
+  });
+
+  it('an UNRELATED settings change (e.g. units) while polling never stops the generation -- only adapterType/host/port matter', async () => {
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'elm327' });
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
+    const states: Elm327State[] = [];
+    provider.onStateChange((s) => states.push(s));
+
+    provider.start();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushMicrotasks();
+    expect(states.at(-1)).toBe('polling');
+
+    store.update({ units: 'mph' });
+    await flushMicrotasks();
+
+    expect(states.at(-1)).toBe('polling'); // unaffected -- units is not part of the fingerprint.
   });
 });

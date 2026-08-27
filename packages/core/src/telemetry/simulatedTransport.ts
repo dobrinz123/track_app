@@ -6,6 +6,8 @@ export interface SimulatedVehicleScenario {
   rpm(scenarioTimeMs: number): number;
   speedKph(scenarioTimeMs: number): number;
   throttlePct(scenarioTimeMs: number): number;
+  /** Field revision (2026-08-27): the accelerator PEDAL, distinct from `throttlePct` (the plate) -- must idle near 0%, unlike the plate's ~14-15% idle opening. */
+  accelPedalPct(scenarioTimeMs: number): number;
   coolantC(scenarioTimeMs: number): number;
   intakeC(scenarioTimeMs: number): number;
   engineLoadPct(scenarioTimeMs: number): number;
@@ -29,6 +31,10 @@ export const DEFAULT_SIMULATED_VEHICLE_SCENARIO: SimulatedVehicleScenario = {
   rpm: (timeMs) => 850 + 2_700 * wave(timeMs, 4_000),
   speedKph: (timeMs) => 15 + 95 * wave(timeMs, 10_000),
   throttlePct: (timeMs) => 8 + 72 * wave(timeMs + 500, 3_500),
+  // Idles near 0% (field revision: the pedal, not the plate) -- rises with a
+  // shorter floor than throttlePct so the two are visibly distinct in the
+  // dev/preview monitor.
+  accelPedalPct: (timeMs) => 2 + 60 * wave(timeMs + 1_000, 3_500),
   coolantC: (timeMs) => 70 + 25 * Math.min(1, timeMs / 180_000),
   intakeC: (timeMs) => 24 + 7 * wave(timeMs, 30_000),
   engineLoadPct: (timeMs) => 15 + 70 * wave(timeMs + 250, 3_500),
@@ -191,6 +197,7 @@ function jitterScale(channel: Mode01TelemetryChannelId): number {
     case 'engineOilC':
       return 0.1;
     case 'throttlePct':
+    case 'accelPedalPct':
     case 'engineLoadPct':
       return 0.2;
   }
@@ -206,6 +213,8 @@ function encodeResponse(channel: Mode01TelemetryChannelId, value: number): strin
       return `41 0D ${hexByte(value)}`;
     case 'throttlePct':
       return `41 11 ${hexByte((value * 255) / 100)}`;
+    case 'accelPedalPct':
+      return `41 49 ${hexByte((value * 255) / 100)}`;
     case 'coolantC':
       return `41 05 ${hexByte(value + 40)}`;
     case 'intakeC':

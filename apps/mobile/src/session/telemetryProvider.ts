@@ -37,21 +37,25 @@ import {
 export const ENET_ADAPTER_RESERVED_BY_PROBE_DETAIL = 'adapter reserved by probe';
 
 /**
- * Telemetry addendum — channel revision (2026-08-11, binding) poll plan:
- * rpm 5Hz (record-only -- RPM left the strip, it's on the car's own dash),
- * speedKph 5Hz, throttlePct 5Hz, engineOilC 0.5Hz (standard PID 0x5C),
- * transOilC 0.5Hz ONLY when the user has configured a custom PID request
- * (`settings.transOilPidHex` -- empty means "not configured", the entry is
- * omitted entirely rather than relying on `@circuit/core`'s own "unconfigured
- * transOilC is silently ignored" fallback), coolantC 0.2Hz. Exported (pure,
- * no react-native import) so the exact plan built from a given settings value
- * can be pinned by a test.
+ * Telemetry addendum — channel revision (2026-08-11, binding) poll plan,
+ * extended by the field revision (2026-08-27, binding): rpm 5Hz (record-only
+ * -- RPM left the strip, it's on the car's own dash), speedKph 5Hz,
+ * throttlePct 5Hz (the throttle PLATE, PID 0x11), accelPedalPct 5Hz (the
+ * accelerator PEDAL, PID 0x49 -- the field test found the plate idles at
+ * ~14-15% with no pedal input, so the pedal channel is the user-facing one),
+ * engineOilC 0.5Hz (standard PID 0x5C), transOilC 0.5Hz ONLY when the user
+ * has configured a custom PID request (`settings.transOilPidHex` -- empty
+ * means "not configured", the entry is omitted entirely rather than relying
+ * on `@circuit/core`'s own "unconfigured transOilC is silently ignored"
+ * fallback), coolantC 0.2Hz. Exported (pure, no react-native import) so the
+ * exact plan built from a given settings value can be pinned by a test.
  */
 export function buildPollPlan(transOilPidHex: string): Array<{ channel: TelemetryChannelId; hz: number }> {
   const plan: Array<{ channel: TelemetryChannelId; hz: number }> = [
     { channel: 'rpm', hz: 5 },
     { channel: 'speedKph', hz: 5 },
     { channel: 'throttlePct', hz: 5 },
+    { channel: 'accelPedalPct', hz: 5 },
     { channel: 'engineOilC', hz: 0.5 },
   ];
   if (transOilPidHex.trim() !== '') {
@@ -59,6 +63,69 @@ export function buildPollPlan(transOilPidHex: string): Array<{ channel: Telemetr
   }
   plan.push({ channel: 'coolantC', hz: 0.2 });
   return plan;
+}
+
+export interface GForceRowSummary {
+  hz: number;
+  running: boolean;
+}
+
+/**
+ * Field revision (2026-08-27, binding): "the telemetry monitor shows
+ * latG/longG (phone accelerometer) whenever the G provider is running, with
+ * their observed rate." `GForceProvider` (`gforceProvider.ts`) exposes no
+ * running-state getter -- by design, it only ever emits samples while it
+ * runs -- so "running" is inferred here from LIVE sample arrival: a channel
+ * reads as running exactly while a sample has landed within the last
+ * `staleMs` (generous slack over the ~25Hz/40ms update interval for a real
+ * device's jitter/backgrounding). Pure (no react-native import) so it can be
+ * unit-tested directly; `TelemetryScreen.tsx` keeps a small rolling
+ * timestamp buffer per channel and calls this on every render tick.
+ * `sampleTimesMs` is that channel's recent monotonic sample timestamps,
+ * oldest first.
+ */
+export function summarizeGForceSamples(
+  sampleTimesMs: readonly number[],
+  nowMs: number,
+  windowMs = 1_000,
+  staleMs = 1_500,
+): GForceRowSummary {
+  const lastAt = sampleTimesMs.length > 0 ? sampleTimesMs[sampleTimesMs.length - 1] : undefined;
+  if (lastAt === undefined || nowMs - lastAt > staleMs) return { hz: 0, running: false };
+  const recentCount = sampleTimesMs.filter((t) => nowMs - t <= windowMs).length;
+  return { hz: recentCount / (windowMs / 1_000), running: true };
+}
+
+/**
+ * Field revision (2026-08-27, binding, "adapter-type switch" fix): the
+ * settings this provider actually launched the CURRENT generation from --
+ * `adapterType` plus whichever host/port pair that type uses. `start()`
+ * refuses to no-op past a stuck/failed generation whose fingerprint no
+ * longer matches CURRENT settings (root cause of the driveway-test switch
+ * bug: `start()` was a plain `if (running) return`, so switching adapterType
+ * while a dead ELM327 generation was still "running" left `start()` doing
+ * nothing at all).
+ */
+export interface ConfigFingerprint {
+  adapterType: AdapterType;
+  host: string;
+  port: number;
+}
+
+export function currentConfigFingerprint(settings: {
+  adapterType: AdapterType;
+  adapterHost: string;
+  adapterPort: number;
+  enetHost: string;
+  enetPort: number;
+}): ConfigFingerprint {
+  return settings.adapterType === 'enet'
+    ? { adapterType: 'enet', host: settings.enetHost, port: settings.enetPort }
+    : { adapterType: 'elm327', host: settings.adapterHost, port: settings.adapterPort };
+}
+
+export function fingerprintsEqual(a: ConfigFingerprint, b: ConfigFingerprint): boolean {
+  return a.adapterType === b.adapterType && a.host === b.host && a.port === b.port;
 }
 
 /**
@@ -296,11 +363,20 @@ export interface TelemetryProvider {
  * one's `session.stop()` is still pending.
  */
 type SessionGeneration =
-  | { id: number; kind: 'elm327'; session: Elm327Session; unsubscribeSample: () => void; unsubscribeState: () => void }
+  | {
+      id: number;
+      kind: 'elm327';
+      session: Elm327Session;
+      /** Field revision (2026-08-27, binding): THIS generation's own transport, closed via `closeGenTransportQuietly` whenever ITS OWN teardown runs (the 'failed' handler, or `doStop()`) -- generation-scoped by construction, so a STALE generation's transport is closed EXACTLY once, regardless of whether a newer generation has since replaced `current` (the single shared `activeTransport` field this replaces was NOT generation-scoped, and could otherwise close a NEWER generation's transport, or -- for a generation superseded while its own graceful `session.stop()` is still hanging on a never-settling `connect()` -- never close it at all). */
+      transport: ObdTransport;
+      unsubscribeSample: () => void;
+      unsubscribeState: () => void;
+    }
   | {
       id: number;
       kind: 'enet';
       session: EnetSession;
+      transport: ObdTransport;
       /** P4e-FIX4 (binding): THIS generation's own adapter-reservation token -- released only by/for this exact generation, never by owner-kind alone (a stale token from an earlier generation must never release a newer one's claim). */
       enetToken: EnetAdapterToken;
       unsubscribeSample: () => void;
@@ -383,9 +459,76 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
    * previous one is still closing -- the review's exact overlap scenario.
    */
   let stopping: Promise<void> | null = null;
+  /**
+   * Field revision (2026-08-27, binding): the RAW transport the current
+   * generation is built on -- tracked here (not just inside the session)
+   * so the 'failed' handlers below can close it EXPLICITLY, defense-in-depth
+   * against a session/transport whose own async-init failure path leaves the
+   * underlying socket open (scout finding: `tcpObdTransport.ts`'s `connect()`
+   * rejects on a socket 'error'/premature 'close' without ever calling
+   * `socket.destroy()`). Never rejects when closed via `closeActiveTransportQuietly`.
+   */
+  let activeTransport: ObdTransport | null = null;
+  /** The config fingerprint the ACTIVE generation (`current`) was actually launched from -- set at the top of every `launchSession()` call, read by `start()`'s re-entry check and `scheduleRetry`'s fire-time abort check. `null` when no generation has ever launched (fresh provider, or after a full `stop()`). */
+  let activeFingerprint: ConfigFingerprint | null = null;
+  /** Surfaced via `getDiagnostics()`'s `lastError` chain when the settings-change watcher (below) stops a live generation -- cleared at the top of every fresh `launchSession()`, same reset discipline as `reservationBlockedDetail`/`autoDiscoveryFailureDetail`. */
+  let settingsChangedDetail: string | undefined;
+  /**
+   * Field revision (2026-08-27, binding): true for the DURATION of the
+   * provider's OWN `settingsStore.update(applyDiscoveryResult(...))` call
+   * (auto-discovery persisting the host/port it just found) -- the
+   * settings-change watcher below still updates its own fingerprint
+   * bookkeeping through this, but never treats it as a USER-initiated
+   * config change (never stops the generation that just discovered its own
+   * host/port -- discovery applying its own result is not "switching
+   * adapters", it's this SAME generation completing its own connect).
+   */
+  let applyingDiscoveryResultUpdate = false;
+
+  /** Wraps a discovery-result `settingsStore.update()` so the settings-change watcher (below) can tell it apart from a user-initiated Settings-screen edit. */
+  function applyDiscoverySettingsUpdate(patch: Parameters<SettingsStore['update']>[0]): void {
+    applyingDiscoveryResultUpdate = true;
+    try {
+      settingsStore.update(patch);
+    } finally {
+      applyingDiscoveryResultUpdate = false;
+    }
+  }
+
+  /** Closes `transport` best-effort -- a sync throw OR a rejection is swallowed; this is defensive cleanup, never the generation's own graceful stop. */
+  function closeTransportQuietly(transport: ObdTransport): void {
+    try {
+      void Promise.resolve(transport.close()).catch(() => undefined);
+    } catch {
+      // A close() failure (sync throw or rejection) must never propagate.
+    }
+  }
+
+  /** For the narrow window BEFORE a `SessionGeneration` object exists yet (between `buildTransport()` and successfully constructing the session) -- once a generation is installed, ITS OWN `gen.transport` (below) is what every later close goes through, generation-scoped, never this shared field. */
+  function closeActiveTransportQuietly(): void {
+    const transport = activeTransport;
+    activeTransport = null;
+    if (transport !== null) closeTransportQuietly(transport);
+  }
+
+  /** Field revision (2026-08-27, binding): closes EXACTLY this generation's own transport -- generation-scoped by construction (no shared-field race), so a stale generation whose graceful `session.stop()` is still hanging on a never-settling `connect()` (the driveway-test "socket left open" scenario) still gets its OWN transport force-closed, and a newer generation's transport is never touched by an older one's delayed teardown. */
+  function closeGenTransportQuietly(gen: SessionGeneration): void {
+    closeTransportQuietly(gen.transport);
+  }
+
+  function waitMs(delayMs: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, Math.max(0, delayMs)));
+  }
+
+  /** Scout finding (`tcpObdTransport.ts:96-114`): an async connect() failure can leave the socket referenced with nothing having explicitly closed it -- and the session's OWN graceful `stop()` (which awaits its in-flight `run()`) can hang indefinitely if THAT run() is itself stuck awaiting a `connect()` that never settles (the exact "socket left open" driveway-test scenario). Races `gen.session.stop()` against a 200ms timeout (mirrors the sweep controller's own close-race pattern, `didSweepController.ts`) -- whichever settles first wins; if the timeout wins, `gen`'s OWN transport is force-closed directly (generation-scoped, never touches a newer generation's own transport) and this returns anyway, without waiting further for the graceful stop (which may still finish later, on its own, forwarding nothing further once superseded). A normal, already-fast resolve/reject from `gen.session.stop()` is unaffected -- it wins the race well within 200ms. */
+  const SESSION_STOP_RACE_MS = 200;
+  async function stopGenSessionWithTransportRace(gen: SessionGeneration): Promise<void> {
+    await Promise.race([gen.session.stop(), waitMs(SESSION_STOP_RACE_MS).then(() => closeGenTransportQuietly(gen))]);
+  }
 
   /** Shared failure handling for a synchronous `launchSession()` throw, from EITHER `start()`'s own first attempt or the scheduled retry (P4e-FIX4, binding: "retry wraps launchSession() in try/catch"). Resets to a clean, non-running state and reports through the SAME `failed` channel a runtime session failure already uses. */
   function handleLaunchFailure(error: unknown): void {
+    closeActiveTransportQuietly();
     running = false;
     current = null;
     emitState('failed', errorMessage(error));
@@ -593,12 +736,14 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   function buildAndStartEnetSession(id: number, token: EnetAdapterToken): void {
     try {
       const transport = buildTransport();
+      activeTransport = transport;
       const config = buildEnetConfig();
       const next = createEnetSession(transport, config, monotonicNow);
       const gen: SessionGeneration = {
         id,
         kind: 'enet',
         session: next,
+        transport,
         enetToken: token,
         unsubscribeSample: next.onSample((sample) => {
           if (current?.id !== id) return;
@@ -613,6 +758,13 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
             // (its transport already closed) -- release so the probe, or
             // a future fresh start()/retry, can acquire it.
             enetAdapterReservation.release(token);
+            // Field revision (2026-08-27, binding): explicit close, defense-
+            // in-depth (scout finding: an async connect() failure can leave
+            // the socket referenced with nothing having explicitly closed
+            // it) -- generation-scoped (`gen`, not a shared field), same
+            // `current?.id === id` guard above confirms `current === gen`
+            // here, so this can only ever be THIS generation's own transport.
+            closeGenTransportQuietly(gen);
             if (running) {
               // ENET auto-discovery addendum (binding): "if ... the first
               // connect fails, run discovery ONCE (bounded)" -- ONLY when
@@ -702,7 +854,9 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     }
     const hit = result.results.find((r) => r.level === 2);
     if (hit !== undefined) {
-      settingsStore.update(applyDiscoveryResult(hit, new Date().toISOString()));
+      applyDiscoverySettingsUpdate(applyDiscoveryResult(hit, new Date().toISOString()));
+      activeFingerprint = currentConfigFingerprint(settingsStore.getSettings()); // keep in sync with what THIS generation actually ended up using, post-discovery.
+      lastKnownFingerprint = activeFingerprint; // same for the watcher's own baseline (belt-and-braces -- applyingDiscoveryResultUpdate above already covers this specific update).
       // Same "a synchronous construction throw must never escape an async
       // continuation uncaught" rule as `runAutoDiscoveryThenConnect` below --
       // there is no synchronous caller-side try/catch for this path (unlike
@@ -736,7 +890,9 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     }
     const hit = result.results.find((r) => r.level === 2);
     if (hit !== undefined) {
-      settingsStore.update(applyDiscoveryResult(hit, new Date().toISOString()));
+      applyDiscoverySettingsUpdate(applyDiscoveryResult(hit, new Date().toISOString()));
+      activeFingerprint = currentConfigFingerprint(settingsStore.getSettings()); // keep in sync with what THIS generation actually ended up using, post-discovery.
+      lastKnownFingerprint = activeFingerprint; // same for the watcher's own baseline (belt-and-braces -- applyingDiscoveryResultUpdate above already covers this specific update).
       try {
         buildAndStartEnetSession(id, token);
       } catch (error) {
@@ -754,6 +910,11 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     const id = generationCounter;
     reservationBlockedDetail = undefined; // reset -- re-set below only if THIS attempt is blocked.
     autoDiscoveryFailureDetail = undefined; // reset -- re-set below only if THIS attempt's own discovery finds nothing.
+    settingsChangedDetail = undefined; // reset -- a fresh launch supersedes whatever stopped the previous generation.
+    // Field revision (2026-08-27, binding): the fingerprint THIS launch is
+    // actually built from -- `start()`'s re-entry check and `scheduleRetry`'s
+    // fire-time abort check both compare against this.
+    activeFingerprint = currentConfigFingerprint(settingsStore.getSettings());
     // F3 fix: every listener below checks `current?.id === id` before doing
     // anything -- once a NEWER generation has replaced `current` (a fresh
     // `start()`, or this generation's own `stop()`/retry teardown), a late
@@ -813,6 +974,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     // a `transOilPidHex` edit takes effect on the next session, matching
     // every other settings-gated telemetry field.
     const transport = buildTransport();
+    activeTransport = transport;
     const transOilPidHex = settingsStore.getSettings().transOilPidHex;
     const config: Elm327Config = {
       pollPlan: buildPollPlan(transOilPidHex),
@@ -826,6 +988,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       id,
       kind: 'elm327',
       session: next,
+      transport,
       unsubscribeSample: next.onSample((sample) => {
         if (current?.id !== id) return;
         for (const listener of [...sampleListeners]) listener(sample);
@@ -833,7 +996,17 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       unsubscribeState: next.onStateChange((state, detail) => {
         if (current?.id !== id) return;
         emitState(state, detail);
-        if (state === 'failed' && running) scheduleRetry(id);
+        if (state === 'failed') {
+          // Field revision (2026-08-27, binding): explicit close, defense-in-
+          // depth against `tcpObdTransport.ts`'s own async-init-failure path
+          // possibly leaving the socket open (scout finding) -- never rely
+          // SOLELY on the core session having already closed it.
+          // Generation-scoped (`gen`, not a shared field) -- the SAME
+          // `current?.id === id` check above confirms `current === gen`
+          // here, so this can only ever be THIS generation's own transport.
+          closeGenTransportQuietly(gen);
+          if (running) scheduleRetry(id);
+        }
       }),
     };
     current = gen;
@@ -843,6 +1016,13 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   function scheduleRetry(genId: number): void {
     if (retryTimer !== null || retriesUsed >= 1 || !running) return;
     retriesUsed += 1;
+    // Field revision (2026-08-27, binding): captured at SCHEDULE time --
+    // compared against CURRENT settings when the timer actually fires, so a
+    // retry never resurrects the OLD adapterType/host/port after the user
+    // changed settings while it was pending (the settings-change watcher,
+    // below, normally stops the generation outright before this timer would
+    // even fire -- this is the defense-in-depth backstop for that race).
+    const fingerprintAtSchedule = activeFingerprint;
     retryTimer = setTimeout(() => {
       retryTimer = null;
       if (!running) return;
@@ -850,6 +1030,12 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       // was pending) -- the CURRENT generation's own lifecycle owns whatever
       // happens next, not this timer.
       if (current === null || current.id !== genId) return;
+      if (
+        fingerprintAtSchedule !== null &&
+        !fingerprintsEqual(fingerprintAtSchedule, currentConfigFingerprint(settingsStore.getSettings()))
+      ) {
+        return; // settings changed while this retry was pending -- abort; the settings watcher (or a fresh start()) owns what happens next.
+      }
       current.unsubscribeSample();
       current.unsubscribeState();
       current = null;
@@ -869,64 +1055,22 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     }, RETRY_DELAY_MS);
   }
 
-  return {
-    start(): void {
-      if (running) return;
-      if (!settingsStore.getSettings().telemetryEnabled) return;
-      running = true;
-      retriesUsed = 0;
-      // ENET auto-discovery addendum (binding): "runs discovery ONCE per
-      // start" -- reset here (a fresh start()..stop() lifecycle), mirroring
-      // `retriesUsed`'s own reset discipline (NOT reset in `stop()`).
-      autoDiscoveryAttempted = false;
-
-      // F2 fix (MED, binding): a synchronous throw while BUILDING the
-      // session (transport construction, `createElm327Session`'s config
-      // validation) must never leave this provider wedged `running=true`
-      // with no active generation -- L3 (`elm327Session.ts`) now handles
-      // customPids config problems as warnings, never throws, but this
-      // catch stays as the provider's own defense-in-depth backstop
-      // regardless of what a future config-validation change does.
-      // P4e-FIX4 (binding): factored into the shared `handleLaunchFailure`
-      // -- the retry timer callback needs the SAME reset now too.
-      const attempt = (): void => {
-        if (!running) return; // a stop() raced in while this attempt was queued behind `stopping` below.
-        try {
-          launchSession();
-        } catch (error) {
-          handleLaunchFailure(error);
-        }
-      };
-
-      // P4e-FIX4 fix (binding, Codex P4e-REV4 HIGH finding -- "overlapping
-      // provider generations bypass exclusivity"): if a `stop()` is still
-      // tearing down the PREVIOUS generation (its own session.stop() +
-      // reservation release + unsubscribe not yet settled), this start()
-      // queues behind that -- `running=true` already guards a second
-      // concurrent `start()` from queuing twice, and `attempt`'s own
-      // `running` re-check handles a `stop()` that raced in during the
-      // wait. ONLY the ENET path serializes this way: the reservation's
-      // exclusivity is the ENTIRE reason this queuing exists, and only
-      // `adapterType: 'enet'` ever touches it -- the ELM327 path's own
-      // overlap behavior stays EXACTLY as it was before this ticket
-      // (byte-identical, binding), a fresh generation immediately, even
-      // while an earlier stop() is still tearing down. Nothing is awaited
-      // when no stop() is in flight either way -- start() stays
-      // synchronous-looking for every existing caller.
-      if (stopping !== null && settingsStore.getSettings().adapterType === 'enet') {
-        void stopping.then(attempt, attempt);
-      } else {
-        attempt();
-      }
-    },
-
-    async stop(): Promise<void> {
-      running = false;
-      reservationBlockedDetail = undefined;
-      if (retryTimer !== null) {
-        clearTimeout(retryTimer);
-        retryTimer = null;
-      }
+  /**
+   * Field revision (2026-08-27, binding): `stop()`'s own full teardown,
+   * extracted to a standalone function so `start()`'s re-entry check (below)
+   * can reuse it VERBATIM before relaunching -- cancels the retry timer,
+   * aborts discovery, closes the transport (via the generation's own
+   * graceful `session.stop()`), releases the reservation, and clears
+   * `running`/`current`. Exactly `stop()`'s previous body; the public
+   * `stop()` method below is now a thin call to this.
+   */
+  async function doStop(): Promise<void> {
+    running = false;
+    reservationBlockedDetail = undefined;
+    if (retryTimer !== null) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
       // M1 fix (binding, sweep transport interface & lifecycle amendment):
       // "stop() aborts an in-flight discovery, awaits it, and releases the
       // provider token before returning" -- BEFORE the `current === null`
@@ -957,7 +1101,14 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       // behaved for ELM327. `stopping`/the adapter reservation are ENET-only
       // concepts; nothing below applies (or is even touched) for ELM327.
       if (gen.kind !== 'enet') {
-        await gen.session.stop();
+        // Field revision (2026-08-27, binding): races the graceful stop
+        // against a 200ms transport-close timeout -- see
+        // `stopGenSessionWithTransportRace`'s own doc comment. A normal, fast
+        // resolve/reject is unaffected; a HUNG stop (stuck `connect()`, the
+        // driveway-test scenario) still gets `gen`'s OWN transport force-
+        // closed, generation-scoped -- never a shared field that could
+        // otherwise close a NEWER generation's transport instead.
+        await stopGenSessionWithTransportRace(gen);
         gen.unsubscribeSample();
         gen.unsubscribeState();
         if (current === gen) current = null;
@@ -976,7 +1127,10 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
 
       try {
         try {
-          await gen.session.stop();
+          // Field revision (2026-08-27, binding): same 200ms transport-close
+          // race as the ELM327 branch above -- see
+          // `stopGenSessionWithTransportRace`'s own doc comment.
+          await stopGenSessionWithTransportRace(gen);
         } finally {
           // P4e-FIX4 fix (binding): "stop() releases the claim in a finally
           // AFTER the old session's stop settles (rejection included)" --
@@ -1006,6 +1160,111 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
         if (stopping === stoppingPromise) stopping = null;
         resolveStopping();
       }
+  }
+
+  /**
+   * Field revision (2026-08-27, binding, "adapter-type switch" fix):
+   * "settings subscription: adapterType/host/port change while a generation
+   * exists -> stop it (state 'stopped', diagnostics 'settings changed')" --
+   * subscribed ONCE for this provider's whole lifetime (a singleton, exactly
+   * like the provider itself), so a settings change is acted on immediately
+   * rather than waiting for the user to notice a stuck monitor and tap Start
+   * (which `start()`'s own fingerprint check, above, also now handles as a
+   * backup). `settingsStore.subscribe` fires on EVERY `update()` -- an
+   * unrelated field (e.g. `units`) or a change while nothing is live
+   * (`current === null`) is a no-op.
+   */
+  let lastKnownFingerprint: ConfigFingerprint = currentConfigFingerprint(settingsStore.getSettings());
+  settingsStore.subscribe((settings) => {
+    const fingerprint = currentConfigFingerprint(settings);
+    if (fingerprintsEqual(fingerprint, lastKnownFingerprint)) return;
+    lastKnownFingerprint = fingerprint;
+    // Field revision (2026-08-27, binding): the fingerprint bookkeeping above
+    // still updates even for the provider's OWN discovery-result update (so
+    // a LATER genuine user change is compared against the right baseline),
+    // but stopping the generation is skipped for it -- discovery applying
+    // its own just-found host/port is this SAME generation completing its
+    // own connect, never a user-initiated adapter switch.
+    if (applyingDiscoveryResultUpdate) return;
+    if (current === null) return; // nothing live to stop -- the next start() will simply use the new settings.
+    settingsChangedDetail = 'settings changed';
+    void doStop().then(() => emitState('stopped', 'settings changed'));
+  });
+
+  return {
+    start(): void {
+      if (!settingsStore.getSettings().telemetryEnabled) return;
+      const fingerprint = currentConfigFingerprint(settingsStore.getSettings());
+
+      // F2 fix (MED, binding): a synchronous throw while BUILDING the
+      // session (transport construction, `createElm327Session`'s config
+      // validation) must never leave this provider wedged `running=true`
+      // with no active generation -- L3 (`elm327Session.ts`) now handles
+      // customPids config problems as warnings, never throws, but this
+      // catch stays as the provider's own defense-in-depth backstop
+      // regardless of what a future config-validation change does.
+      // P4e-FIX4 (binding): factored into the shared `handleLaunchFailure`
+      // -- the retry timer callback needs the SAME reset now too.
+      const launchFresh = (): void => {
+        running = true;
+        retriesUsed = 0;
+        // ENET auto-discovery addendum (binding): "runs discovery ONCE per
+        // start" -- reset here (a fresh start()..stop() lifecycle), mirroring
+        // `retriesUsed`'s own reset discipline (NOT reset in `stop()`).
+        autoDiscoveryAttempted = false;
+        const attempt = (): void => {
+          if (!running) return; // a stop() raced in while this attempt was queued behind `stopping` below.
+          try {
+            launchSession();
+          } catch (error) {
+            handleLaunchFailure(error);
+          }
+        };
+        // P4e-FIX4 fix (binding, Codex P4e-REV4 HIGH finding -- "overlapping
+        // provider generations bypass exclusivity"): if a `stop()` is still
+        // tearing down the PREVIOUS generation (its own session.stop() +
+        // reservation release + unsubscribe not yet settled), this start()
+        // queues behind that -- `running=true` already guards a second
+        // concurrent `start()` from queuing twice, and `attempt`'s own
+        // `running` re-check handles a `stop()` that raced in during the
+        // wait. ONLY the ENET path serializes this way: the reservation's
+        // exclusivity is the ENTIRE reason this queuing exists, and only
+        // `adapterType: 'enet'` ever touches it -- the ELM327 path's own
+        // overlap behavior stays EXACTLY as it was before this ticket
+        // (byte-identical, binding), a fresh generation immediately, even
+        // while an earlier stop() is still tearing down. Nothing is awaited
+        // when no stop() is in flight either way -- start() stays
+        // synchronous-looking for every existing caller.
+        if (stopping !== null && settingsStore.getSettings().adapterType === 'enet') {
+          void stopping.then(attempt, attempt);
+        } else {
+          attempt();
+        }
+      };
+
+      if (running) {
+        // Field revision (2026-08-27, binding, "adapter-type switch" fix):
+        // the driveway-test bug -- this used to be a PLAIN `if (running)
+        // return`, so a dead/stuck generation (a permanently 'failed' ELM327
+        // session with no retries left, or one built from settings the user
+        // has since changed) made every subsequent Start tap a silent no-op,
+        // even across an adapterType switch. Only a generation that is
+        // BOTH non-terminal AND still matches CURRENT settings stays a
+        // true no-op (unchanged behavior); anything else tears down fully
+        // (cancel retry timer, abort discovery, close the transport, release
+        // the reservation, running=false -- `doStop()`, reused verbatim)
+        // THEN launches fresh from CURRENT settings.
+        const generationIsTerminal = current === null || currentState === 'failed' || currentState === 'stopped';
+        const fingerprintChanged = activeFingerprint !== null && !fingerprintsEqual(activeFingerprint, fingerprint);
+        if (!generationIsTerminal && !fingerprintChanged) return;
+        void doStop().then(launchFresh, launchFresh);
+        return;
+      }
+      launchFresh();
+    },
+
+    stop(): Promise<void> {
+      return doStop();
     },
 
     onSample(cb) {
@@ -1060,7 +1319,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       // ENET auto-discovery addendum (binding): mirrors `reservationBlockedDetail`
       // above -- "discovery: scanned N, none answered" also has no live
       // generation to read a `lastError` FROM.
-      const lastError = reservationBlockedDetail ?? autoDiscoveryFailureDetail ?? base.lastError;
+      const lastError = reservationBlockedDetail ?? autoDiscoveryFailureDetail ?? settingsChangedDetail ?? base.lastError;
       return {
         state: currentState,
         retriesUsed,

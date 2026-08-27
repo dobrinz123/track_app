@@ -716,3 +716,19 @@ adapter, connects, and helps discover identifiers — no manual IP/port/DID typi
   and never overwrite a later terminal state (`stopped` wins over `sweepComplete`).
 - Provider auto-discovery: the network-info read is raced against the abort signal and a 1500 ms timeout;
   `stop()` cannot wait on it indefinitely.
+
+## Telemetry addendum — field revision (2026-08-27, binding — Phase 4g, after the first driveway test)
+Field-verified facts (2026 GR Supra + MHD WiFi Adapter, engine idling): ENET connects on 192.168.4.x:6801, DME
+0x12 answers standard mode-01 PIDs over ENET at ~4.5 Hz/channel with ACK latency ~6/12 ms; PID 0x5C (engine
+oil) answers. Revisions:
+- New channel `accelPedalPct` = mode-01 PID 0x49 "Accelerator pedal position D" (SAE J1979; decode 100/255·A
+  — EMPIRICAL on the Supra: must read ~0 % pedal released and rise with the pedal; the existing `throttlePct`
+  PID 0x11 is the throttle PLATE and idles at ~14–15 %). UI labels: "Accelerator pedal" and "Throttle plate".
+  Poll plan: accelPedalPct 5 Hz on both adapter types (obd01 spec on ENET; mode-01 poll on ELM).
+- The telemetry monitor shows `latG`/`longG` (phone accelerometer) whenever the G provider is running, with
+  their observed rate — recorded-not-displayed still applies to the DRIVING dashboard, not to the monitor.
+- Brake pressure and steering angle have no standard mode-01 PID (Wikipedia OBD-II PIDs table, fetched
+  2026-08-27); they are discovered via the dev DID sweep and enter as `did` specs with provenance.
+- Adapter-type switch must take effect on the next Start without an app restart: any prior generation's
+  socket, retry timer, `stopping` promise, auto-discovery once-flag and reservation must be torn down when
+  `adapterType` (or host/port) changes, and `start()` must always build from the CURRENT settings.

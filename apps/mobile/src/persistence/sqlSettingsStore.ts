@@ -54,6 +54,15 @@ export class SqlSettingsStore implements SettingsStore {
     // `DEFAULT_SETTINGS`, i.e. no row / a corrupt row) so there is only one
     // hydration path to reason about.
     initial = repairPersistedEnetSettings(initial);
+    // Field revision (2026-08-27, binding, "hidden developer mode"): a
+    // present-but-malformed persisted value (e.g. from a corrupt row, or a
+    // future schema change) must never leave dev-only ENET tools visible in
+    // a release build by accident -- repaired back to `false` (never
+    // trusted as truthy) the same defensive way `repairPersistedEnetSettings`
+    // above handles the ENET fields.
+    if (typeof initial.developerModeEnabled !== 'boolean') {
+      initial = { ...initial, developerModeEnabled: false };
+    }
     return new SqlSettingsStore(db, initial);
   }
 

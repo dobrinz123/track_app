@@ -15,6 +15,14 @@ import { LapDetailScreen } from '../screens/LapDetailScreen';
 import { PersonalBestScreen } from '../screens/PersonalBestScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
 import { TelemetryScreen } from '../screens/TelemetryScreen';
+// Field revision (2026-08-27, binding, "hidden developer mode"): DidProbe/
+// DidSweep are NOW ordinary top-level imports -- their routes are registered
+// in every build, release included (only their Settings-screen entry points
+// are gated on `developerModeEnabled`/`__DEV__`, see `SettingsScreen.tsx`).
+// Neither screen imports DevReplay's own dev-only fixtures, so shipping them
+// unconditionally never pulls fixture data into a release bundle.
+import { DidProbeScreen } from '../screens/DidProbeScreen';
+import { DidSweepScreen } from '../screens/DidSweepScreen';
 // F6 fix (B4 residue): NO top-level import of `DevReplayScreen` -- see the
 // inline `require` below for why. `typeof import(...)` (used at that call
 // site) gives full type-checking on the resolved component with zero
@@ -63,43 +71,18 @@ export function RootNavigator(): React.JSX.Element {
       <Stack.Screen name="Settings" component={SettingsScreen} options={{ title: 'Settings' }} />
       <Stack.Screen name="Telemetry" component={TelemetryScreen} options={{ title: 'Telemetry' }} />
       {
-        // ENET telemetry addendum (Phase 4e): the DID-probe screen is a
-        // dev-only diagnostic tool (empirical B58/DSC identifier discovery),
-        // same __DEV__-gated inline `require()` treatment as `DevReplay`
-        // immediately below -- for the SAME reason (F6 fix comment there):
-        // Metro only drops a module from a release bundle when the import
-        // itself is inside the folded `__DEV__` branch, not just the
-        // `<Stack.Screen>` registration.
-        // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
-        __DEV__ ? (
-          <Stack.Screen
-            name="DidProbe"
-            component={
-              // eslint-disable-next-line @typescript-eslint/no-require-imports -- see the comment above: this MUST be a runtime require(), not a top-level import, for Metro to drop the module from a release bundle.
-              (require('../screens/DidProbeScreen') as typeof import('../screens/DidProbeScreen')).DidProbeScreen
-            }
-            options={{ title: 'DID Probe' }}
-          />
-        ) : null
+        // Field revision (2026-08-27, binding, "hidden developer mode"): the
+        // DID-probe screen's ROUTE is now registered in every build --
+        // release included -- unconditionally (only its `SettingsScreen.tsx`
+        // entry point is gated on `developerModeEnabled`/`__DEV__`).
       }
+      <Stack.Screen name="DidProbe" component={DidProbeScreen} options={{ title: 'DID Probe' }} />
       {
-        // ENET auto-discovery & DID sweep addendum (Phase 4f): the dev DID-sweep
-        // screen -- SAME __DEV__-gated inline `require()` treatment as
-        // `DidProbe`/`DevReplay` immediately above/below, for the identical
-        // reason (Metro only drops a module from a release bundle when the
-        // import itself is inside the folded `__DEV__` branch).
-        // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
-        __DEV__ ? (
-          <Stack.Screen
-            name="DidSweep"
-            component={
-              // eslint-disable-next-line @typescript-eslint/no-require-imports -- see the comment above: this MUST be a runtime require(), not a top-level import, for Metro to drop the module from a release bundle.
-              (require('../screens/DidSweepScreen') as typeof import('../screens/DidSweepScreen')).DidSweepScreen
-            }
-            options={{ title: 'DID Sweep' }}
-          />
-        ) : null
+        // ENET auto-discovery & DID sweep addendum (Phase 4f), field revision
+        // (2026-08-27, binding): same unconditional route registration as
+        // `DidProbe` immediately above.
       }
+      <Stack.Screen name="DidSweep" component={DidSweepScreen} options={{ title: 'DID Sweep' }} />
       {
         // B4 fix: DevReplay must not ship in a release build -- SettingsScreen's
         // entry point to it is already __DEV__-gated; this gates the route

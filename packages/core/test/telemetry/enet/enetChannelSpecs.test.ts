@@ -21,14 +21,17 @@ function did(overrides: Partial<EnetChannelSpec> = {}): EnetChannelSpec {
 }
 
 describe('DEFAULT_ENET_CHANNEL_SPECS', () => {
-  it('covers rpm/speedKph/throttlePct/coolantC/engineOilC via obd01, matching pidCodec PIDs', () => {
+  it('covers rpm/speedKph/throttlePct/accelPedalPct/coolantC/engineOilC via obd01, matching pidCodec PIDs', () => {
     const byChannel = new Map(DEFAULT_ENET_CHANNEL_SPECS.map((spec) => [spec.channel, spec]));
     expect(byChannel.get('rpm')).toMatchObject({ mode: 'obd01', requestHex: '0C' });
     expect(byChannel.get('speedKph')).toMatchObject({ mode: 'obd01', requestHex: '0D' });
     expect(byChannel.get('throttlePct')).toMatchObject({ mode: 'obd01', requestHex: '11' });
+    // Field revision (2026-08-27, binding): the accelerator PEDAL (PID 0x49),
+    // distinct from throttlePct's own plate (PID 0x11) above.
+    expect(byChannel.get('accelPedalPct')).toMatchObject({ mode: 'obd01', requestHex: '49' });
     expect(byChannel.get('coolantC')).toMatchObject({ mode: 'obd01', requestHex: '05' });
     expect(byChannel.get('engineOilC')).toMatchObject({ mode: 'obd01', requestHex: '5C' });
-    expect(DEFAULT_ENET_CHANNEL_SPECS).toHaveLength(5);
+    expect(DEFAULT_ENET_CHANNEL_SPECS).toHaveLength(6);
     expect(validateEnetChannelSpecs(DEFAULT_ENET_CHANNEL_SPECS).warnings).toEqual([]);
   });
 });
@@ -74,6 +77,7 @@ describe('validateEnetChannelSpecs', () => {
       'rpm',
       'speedKph',
       'throttlePct',
+      'accelPedalPct',
       'coolantC',
       'intakeC',
       'engineLoadPct',
@@ -152,7 +156,7 @@ describe('validateEnetChannelSpecs', () => {
   it('accepts every DEFAULT_ENET_CHANNEL_SPECS entry against the channel<->PID consistency check', () => {
     // Guards against the consistency check itself being wrong in a way that
     // would reject the built-in defaults.
-    expect(validateEnetChannelSpecs(DEFAULT_ENET_CHANNEL_SPECS).valid).toHaveLength(5);
+    expect(validateEnetChannelSpecs(DEFAULT_ENET_CHANNEL_SPECS).valid).toHaveLength(6);
   });
 
   it('rejects a did spec with a non-integer or negative byteOffset', () => {
@@ -225,6 +229,7 @@ describe('ENET_DEFAULT_CHANNEL_RATES_HZ', () => {
     expect(ENET_DEFAULT_CHANNEL_RATES_HZ.rpm).toBe(5);
     expect(ENET_DEFAULT_CHANNEL_RATES_HZ.speedKph).toBe(5);
     expect(ENET_DEFAULT_CHANNEL_RATES_HZ.throttlePct).toBe(5);
+    expect(ENET_DEFAULT_CHANNEL_RATES_HZ.accelPedalPct).toBe(5); // field revision (2026-08-27, binding).
     expect(ENET_DEFAULT_CHANNEL_RATES_HZ.coolantC).toBe(0.2);
     expect(ENET_DEFAULT_CHANNEL_RATES_HZ.engineOilC).toBe(0.5);
     expect(ENET_DEFAULT_CHANNEL_RATES_HZ.transOilC).toBe(0.5);

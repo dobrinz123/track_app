@@ -11,6 +11,7 @@ describe('mode-01 PID codec', () => {
     ['rpm', '010C'],
     ['speedKph', '010D'],
     ['throttlePct', '0111'],
+    ['accelPedalPct', '0149'],
     ['coolantC', '0105'],
     ['intakeC', '010F'],
     ['engineLoadPct', '0104'],
@@ -28,6 +29,12 @@ describe('mode-01 PID codec', () => {
     ['speedKph', '41 0D FF', 255],
     ['throttlePct', '41 11 00', 0],
     ['throttlePct', '41 11 FF', 100],
+    // Field revision (2026-08-27, binding): PID 0x49 "Accelerator pedal
+    // position D" -- the ticket's own vector: A=0x80 (128) -> 128*100/255 ≈
+    // 50.196..., i.e. 50.2% to 1 decimal place.
+    ['accelPedalPct', '41 49 00', 0],
+    ['accelPedalPct', '41 49 FF', 100],
+    ['accelPedalPct', '41 49 80', 50.196078431372548],
     ['coolantC', '41 05 00', -40],
     ['coolantC', '41 05 FF', 215],
     ['intakeC', '41 0F 00', -40],
@@ -50,6 +57,11 @@ describe('mode-01 PID codec', () => {
 
   it('accepts compact hex', () => {
     expect(decodeMode01Response('rpm', '010C\r410C1AF8')).toBe(1_726);
+  });
+
+  it('P4g field revision: accelPedalPct (PID 0x49) decodes A=0x80 to 50.2% (1dp) -- distinct from throttlePct\'s own PID 0x11', () => {
+    expect(decodeMode01Response('accelPedalPct', '41 49 80')).toBeCloseTo(50.2, 1);
+    expect(encodeMode01Request('accelPedalPct')).toBe('0149'); // NOT '0111' (throttlePct's PID) -- the two channels must never share a request.
   });
 
   it.each(['transOilC', 'latG', 'longG'] as const)(

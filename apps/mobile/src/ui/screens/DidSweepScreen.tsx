@@ -38,8 +38,11 @@ function formatBytesHex(bytes: Uint8Array): string {
 }
 
 /**
- * Dev-only (`__DEV__`-gated route registration, mirrors `DidProbe`/`DevReplay`)
- * DID sweep screen (contracts.md "ENET auto-discovery & DID sweep addendum" +
+ * Dev-only tool, hidden by default (field revision, 2026-08-27, binding: the
+ * ROUTE is registered in every build, release included -- only its
+ * `SettingsScreen.tsx` entry point is gated on `developerModeEnabled`/
+ * `__DEV__`, mirrors `DidProbe`; `DevReplay` remains the one screen still
+ * `__DEV__`-only end to end). DID sweep screen (contracts.md "ENET auto-discovery & DID sweep addendum" +
  * "sweep transport interface & lifecycle amendment", both binding): iterates
  * a configurable DID range, shows live progress and responders, then (after
  * the sweep, or on demand) re-polls the responders found for an observation

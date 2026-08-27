@@ -147,6 +147,50 @@ export interface AppSettings {
    * plain single reconnect retry, with no discovery involved at all.
    */
   enetAutoDiscover: boolean;
+  /**
+   * Field revision (2026-08-27, binding, "hidden developer mode"): when
+   * `true` (or the build is `__DEV__`), `SettingsScreen` shows "Dev: DID
+   * Probe (ENET)"/"Dev: DID Sweep (ENET)" -- the dev-only ENET diagnostic
+   * tools stay REGISTERED as routes in every build, release included (App
+   * Store review sees one binary), only their Settings-screen entry points
+   * are hidden until this is on. Toggled by 7 taps on the About section's
+   * version text within a short window (`registerDevTap`, below) -- never
+   * shown as its own settings row. `DevReplay` is UNAFFECTED: it stays
+   * `__DEV__`-only regardless of this setting. Defaults to `false`.
+   */
+  developerModeEnabled: boolean;
+}
+
+/**
+ * Field revision (2026-08-27, binding): pure tap-counter for the "7 taps on
+ * the About version text toggles developer mode" gesture -- `state` is
+ * `null` before the first tap (or after a toggle just fired, resetting the
+ * count); a tap outside `windowMs` of the previous one restarts the count at
+ * 1 rather than accumulating indefinitely (so idle taps spread across a
+ * session, e.g. 3 taps now and 4 taps an hour later, never silently
+ * accumulate into an accidental toggle). `toggled` is `true` exactly on the
+ * tap that reaches `threshold` -- the caller (`SettingsScreen`) flips
+ * `developerModeEnabled` and shows the toast on THAT tap only, never on
+ * every tap past the threshold while the user keeps tapping.
+ */
+export interface DevTapState {
+  count: number;
+  lastTapAtMs: number;
+}
+
+export const DEV_TAP_THRESHOLD = 7;
+export const DEV_TAP_WINDOW_MS = 2_000;
+
+export function registerDevTap(
+  state: DevTapState | null,
+  nowMs: number,
+  threshold: number = DEV_TAP_THRESHOLD,
+  windowMs: number = DEV_TAP_WINDOW_MS,
+): { state: DevTapState; toggled: boolean } {
+  const withinWindow = state !== null && nowMs - state.lastTapAtMs <= windowMs;
+  const count = withinWindow ? state.count + 1 : 1;
+  const toggled = count >= threshold;
+  return { state: { count: toggled ? 0 : count, lastTapAtMs: nowMs }, toggled };
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -169,6 +213,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   enetChannelSpecsJson: '',
   enetHostProvenance: '',
   enetAutoDiscover: true,
+  developerModeEnabled: false,
 };
 
 /**

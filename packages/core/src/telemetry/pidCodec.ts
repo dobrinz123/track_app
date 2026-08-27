@@ -5,6 +5,7 @@ export type Mode01TelemetryChannelId =
   | 'rpm'
   | 'speedKph'
   | 'throttlePct'
+  | 'accelPedalPct'
   | 'coolantC'
   | 'intakeC'
   | 'engineLoadPct'
@@ -29,6 +30,15 @@ const PID_BY_CHANNEL: Record<Mode01TelemetryChannelId, PidDefinition> = {
   },
   throttlePct: {
     pid: '11',
+    byteCount: 1,
+    decode: ([a = 0]) => (a * 100) / 255,
+  },
+  // Field revision (2026-08-27, binding): "Accelerator pedal position D"
+  // (SAE J1979 PID 0x49) -- EMPIRICAL on the Supra: must read ~0% released
+  // and rise with the pedal (distinct from throttlePct's plate opening,
+  // which idles at ~14-15%). Vector: A=0x80 (128) -> 128*100/255 = 50.2%.
+  accelPedalPct: {
+    pid: '49',
     byteCount: 1,
     decode: ([a = 0]) => (a * 100) / 255,
   },

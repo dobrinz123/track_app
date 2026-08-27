@@ -201,6 +201,38 @@ describe('SqlSettingsStore (against sql.js)', () => {
     expect(settings.enetHostProvenance).toBe('discovered 2026-08-27T00:00:00.000Z');
   });
 
+  /** Field revision (2026-08-27, binding, "hidden developer mode"): a present-but-malformed persisted `developerModeEnabled` must never leave dev-only ENET tools visible in a release build by accident -- repaired back to `false`. */
+  it('a persisted developerModeEnabled that is not a boolean resets to the default (false) on hydration', async () => {
+    const raw = await createRawSqlJsDatabase();
+    const db = wrapExistingSqlJsDatabase(raw);
+    await SqlSessionRepository.create(db);
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'app-settings',
+      JSON.stringify({ developerModeEnabled: 'yes' }),
+    ]);
+
+    const store = await SqlSettingsStore.create(db);
+    expect(store.getSettings().developerModeEnabled).toBe(false);
+  });
+
+  it('developerModeEnabled defaults to false and round-trips through update()/persistence like every other setting', async () => {
+    const raw = await createRawSqlJsDatabase();
+    const db1 = wrapExistingSqlJsDatabase(raw);
+    await SqlSessionRepository.create(db1);
+    const store1 = await SqlSettingsStore.create(db1);
+
+    expect(store1.getSettings().developerModeEnabled).toBe(false);
+    expect(DEFAULT_SETTINGS.developerModeEnabled).toBe(false);
+
+    store1.update({ developerModeEnabled: true });
+    expect(store1.getSettings().developerModeEnabled).toBe(true);
+    await flush();
+
+    const db2 = wrapExistingSqlJsDatabase(raw);
+    const store2 = await SqlSettingsStore.create(db2);
+    expect(store2.getSettings().developerModeEnabled).toBe(true);
+  });
+
   it('enetHostProvenance/enetAutoDiscover round-trip through update()/persistence across a simulated app restart', async () => {
     const raw = await createRawSqlJsDatabase();
     const db1 = wrapExistingSqlJsDatabase(raw);

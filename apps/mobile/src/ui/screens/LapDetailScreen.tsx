@@ -44,6 +44,10 @@ const TELEMETRY_CHART_DISPLAY: Readonly<Record<TelemetryChannelId, { label: stri
     coolantC: { label: 'Coolant', unit: '°C', color: colors.textMuted },
     intakeC: { label: 'Intake air', unit: '°C', color: colors.textMuted },
     engineLoadPct: { label: 'Engine load', unit: '%', color: colors.textMuted },
+    // Field revision (2026-08-27): the new accelerator-pedal channel -- not
+    // yet in `TELEMETRY_CHART_CHANNELS` (out of this ticket's scope), same
+    // exhaustiveness-only placeholder treatment as the row above.
+    accelPedalPct: { label: 'Accelerator pedal', unit: '%', color: colors.textMuted },
   };
 
 /** Thin-bar sparkline for one channel's bucketed lap telemetry. Pure View/Text -- no svg, no new deps (ticket constraint). */

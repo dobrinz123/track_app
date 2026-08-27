@@ -2,7 +2,11 @@
 export type TelemetryChannelId =
   | 'rpm'          // engine RPM            (PID 0x0C, (256A+B)/4)
   | 'speedKph'     // vehicle speed         (PID 0x0D, A)
-  | 'throttlePct'  // throttle position     (PID 0x11, A*100/255)
+  | 'throttlePct'  // throttle PLATE position (PID 0x11, A*100/255) -- idles at ~14-15% open, NOT the pedal
+  | 'accelPedalPct' // accelerator PEDAL position D (PID 0x49, A*100/255, SAE J1979) --
+                    // field revision (2026-08-27): the user-facing "how far is my foot down"
+                    // channel; EMPIRICAL on the Supra -- idles at ~0% and rises with the pedal,
+                    // unlike throttlePct above (the plate's own, engine-computed opening)
   | 'coolantC'     // coolant temperature   (PID 0x05, A-40)
   | 'intakeC'      // intake air temp       (PID 0x0F, A-40)
   | 'engineLoadPct' // calculated load      (PID 0x04, A*100/255)

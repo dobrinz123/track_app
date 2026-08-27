@@ -27,6 +27,7 @@ export const ENET_SPEC_CHANNELS: ReadonlySet<TelemetryChannelId> = new Set([
   'rpm',
   'speedKph',
   'throttlePct',
+  'accelPedalPct',
   'coolantC',
   'intakeC',
   'engineLoadPct',
@@ -49,6 +50,7 @@ export const ENET_DEFAULT_CHANNEL_RATES_HZ: Readonly<Partial<Record<TelemetryCha
   rpm: 5,
   speedKph: 5,
   throttlePct: 5,
+  accelPedalPct: 5,
   coolantC: 0.2,
   engineOilC: 0.5,
   transOilC: 0.5,
@@ -102,6 +104,13 @@ export const DEFAULT_ENET_CHANNEL_SPECS: readonly EnetChannelSpec[] = [
     mode: 'obd01',
     requestHex: '11',
     provenance: 'standard mode-01 PID 0x11; EMPIRICAL whether the DME answers it over ENET (see enet-protocol-research.md #3)',
+  },
+  {
+    channel: 'accelPedalPct',
+    mode: 'obd01',
+    requestHex: '49',
+    provenance:
+      'standard mode-01 PID 0x49 (SAE J1979 "Accelerator pedal position D"); added after the 2026-08-27 driveway test found throttlePct (0x11) is the throttle PLATE, not the pedal -- EMPIRICAL whether the DME answers 0x49 over ENET (not yet field-tested; see enet-protocol-research.md #3)',
   },
   {
     channel: 'coolantC',

@@ -16,7 +16,7 @@ import {
 } from '../../session/composition';
 import { useFacadeState } from '../hooks/useFacadeState';
 import { useSettings } from '../hooks/useSettings';
-import type { AdapterType, SpeedUnits } from '../../session/settingsStore';
+import { registerDevTap, type AdapterType, type DevTapState, type SpeedUnits } from '../../session/settingsStore';
 import { validateCustomPidHex } from '../../session/customPidValidation';
 import {
   applyDiscoveryResult,
@@ -34,6 +34,7 @@ import {
 import { EnetTcpTransport } from '../../session/enetTcpTransport';
 import { getNetworkInfo } from '../../session/networkInfo';
 import { enetAdapterReservation } from '../../session/enetAdapterReservation';
+import Constants from 'expo-constants';
 
 /** Session states that mean "there is an active session in progress" -- the delete-my-data control is hidden/disabled during all of these so it can never race a live write (M3 fix). */
 const ACTIVE_SESSION_STATES = new Set([
@@ -146,6 +147,8 @@ function DiagnosticsRow({ label, value }: { label: string; value: string }): Rea
 export function SettingsScreen({ navigation }: Props): React.JSX.Element {
   const settings = useSettings(settingsStore);
   const facadeState = useFacadeState(facade);
+  // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
+  const isDev = typeof __DEV__ !== 'undefined' ? __DEV__ : false;
   const [confirmingDelete, setConfirmingDelete] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
   const [deleteBanner, setDeleteBanner] = React.useState<'success' | 'error' | null>(null);
@@ -156,6 +159,31 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
   /** CN-FIX5: the delete was REFUSED (a live session / an active dev replay), not attempted-and-failed -- the banner then names the condition instead of prompting a retry. */
   const [deleteRefused, setDeleteRefused] = React.useState(false);
   const [diagnostics, setDiagnostics] = React.useState<LiveDiagnosticsSnapshot | null>(null);
+
+  // Field revision (2026-08-27, binding, "hidden developer mode"): "toggled
+  // by 7 taps on the About version text (toast 'Developer mode on/off')".
+  // `registerDevTap` (pure, `settingsStore.ts`) owns the counting/reset
+  // logic; this screen only drives it from the version text's `onPress` and
+  // shows the resulting toast for a couple of seconds.
+  const [devTapState, setDevTapState] = React.useState<DevTapState | null>(null);
+  const [devModeToast, setDevModeToast] = React.useState<string | null>(null);
+  const devModeToastTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  React.useEffect(
+    () => () => {
+      if (devModeToastTimerRef.current !== null) clearTimeout(devModeToastTimerRef.current);
+    },
+    [],
+  );
+  function handleVersionTap(): void {
+    const { state, toggled } = registerDevTap(devTapState, Date.now());
+    setDevTapState(state);
+    if (!toggled) return;
+    const next = !settings.developerModeEnabled;
+    settingsStore.update({ developerModeEnabled: next });
+    setDevModeToast(next ? 'Developer mode on' : 'Developer mode off');
+    if (devModeToastTimerRef.current !== null) clearTimeout(devModeToastTimerRef.current);
+    devModeToastTimerRef.current = setTimeout(() => setDevModeToast(null), 2_000);
+  }
 
   // F11 fix (WPT3): a local string draft, distinct from the committed
   // `settings.adapterPort` number -- lets the field hold in-progress/empty
@@ -558,9 +586,9 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
                 Vehicle telemetry
               </Text>
               <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
-                Advisory, experimental: reads engine RPM, speed, throttle, engine oil, and coolant temperature
-                from a WiFi OBD-II adapter on your local network. Strictly read-only -- never used for lap
-                timing or safety decisions.
+                Advisory, experimental: reads engine RPM, speed, throttle plate, accelerator pedal, engine oil,
+                and coolant temperature from a WiFi OBD-II adapter on your local network. Strictly read-only --
+                never used for lap timing or safety decisions.
               </Text>
             </View>
             <Switch
@@ -915,6 +943,23 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
             <Text style={styles.aboutText} maxFontSizeMultiplier={1.3}>
               Built with Expo, React Native, and React Navigation, each under their respective open-source licenses.
             </Text>
+            {
+              // Field revision (2026-08-27, binding): the hidden developer-
+              // mode gesture -- 7 taps here within a couple of seconds
+              // toggles it (`registerDevTap`, pure, `settingsStore.ts`).
+              // Deliberately unlabeled as such -- just the version number, no
+              // hint that tapping it does anything.
+            }
+            <Pressable onPress={handleVersionTap} accessibilityRole="text" accessibilityLabel={`Version ${Constants.expoConfig?.version ?? '0.0.0'}`}>
+              <Text style={styles.aboutVersionText} maxFontSizeMultiplier={1.3}>
+                Version {Constants.expoConfig?.version ?? '0.0.0'}
+              </Text>
+            </Pressable>
+            {devModeToast === null ? null : (
+              <Text style={styles.devModeToast} maxFontSizeMultiplier={1.3} accessibilityLiveRegion="polite">
+                {devModeToast}
+              </Text>
+            )}
           </View>
         </View>
 
@@ -1062,8 +1107,12 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
           </Pressable>
         ) : null}
         {
-          // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
-          __DEV__ ? (
+          // Field revision (2026-08-27, binding, "hidden developer mode"):
+          // "when on (or __DEV__), Settings shows 'Dev: DID Probe (ENET)'
+          // and 'Dev: DID Sweep (ENET)'" -- the ROUTE itself is registered in
+          // every build (RootNavigator.tsx); only this entry point is
+          // hidden. `DevReplay` above is UNAFFECTED -- __DEV__-only either way.
+          isDev || settings.developerModeEnabled ? (
           <Pressable
             style={styles.devButton}
             onPress={() => navigation.navigate('DidProbe')}
@@ -1077,9 +1126,9 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
         ) : null}
         {
           // ENET auto-discovery & DID sweep addendum (Phase 4f, binding):
-          // "linked from Settings dev section and the DID probe".
-          // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
-          __DEV__ ? (
+          // "linked from Settings dev section and the DID probe" -- same
+          // hidden-developer-mode gating as DID Probe immediately above.
+          isDev || settings.developerModeEnabled ? (
           <Pressable
             style={styles.devButton}
             onPress={() => navigation.navigate('DidSweep')}
@@ -1212,6 +1261,8 @@ const styles = StyleSheet.create({
   },
   aboutText: { ...typography.caption, color: colors.textSecondary, lineHeight: 18 },
   aboutSubLabel: { ...typography.label, color: colors.textMuted, marginTop: spacing.xs },
+  aboutVersionText: { ...typography.caption, color: colors.textMuted, marginTop: spacing.xs },
+  devModeToast: { ...typography.caption, color: colors.accent, marginTop: spacing.xs },
   diagnosticsHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   refreshText: { ...typography.caption, color: colors.accent },
   diagnosticsRow: { flexDirection: 'row', justifyContent: 'space-between' },
