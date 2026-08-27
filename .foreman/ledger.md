@@ -262,3 +262,8 @@ Plan: research spike (ENET/HSFZ protocol from open sources, ECU addresses, B58 D
 | P4e-REV6 | codex (bounded) | PASS_WITH_NOTES on 23dba91 — both FIX5 items FIXED, zero new findings. |
 | P4e-E2E-3 | LEAD (headless) | PASS on 23dba91 — CONNECTED, 5 channels at plan rates, probe gated. |
 - P4e CLOSED (2026-08-27, autonomous overnight): ENET/HSFZ+UDS telemetry for the MHD WiFi Adapter at 23dba91 — 9 commits over 4703df3, 1205 tests (756 core + 449 mobile), all gates 0; 6 Codex rounds (REV1–REV6: 6+9+3+2+2 findings, all fixed, last round clean), 3 valid headless E2E runs on the simulator. Field-empirical remaining: adapter IP/port, DME mode-01-over-ENET behavior, B58/DSC DIDs (DID-probe screen). No ipa build (awaiting user OK). Report published.
+
+## Phase 4f — ENET auto-discovery & DID sweep (opened 2026-08-27, user directive "mergi cu P4f, autonom")
+Goal: after joining the adapter WiFi (manual on iOS — entitlement), the app finds IP/port itself (TCP scan + HSFZ TesterPresent validation), auto-connects, and a dev DID sweep with heuristics proposes channel specs for one-tap confirmation. Contracts addendum appended (LEAD). Plan: T1 core pure modules → T2 mobile (expo-network, Find adapter, auto-connect, sweep screen, tagging) → Codex cross-review → fix waves → E2E on simulator → report.
+| WP | seat | status |
+| P4f-T1 | sonnet | DISPATCHED — ticket-p4f-t1-core.md |

@@ -625,3 +625,37 @@ export interface EnetChannelSpec {
 - Persisted settings are repaired on hydration: adapterType ∉ enum → 'elm327'; enetPort ∉ 1–65535 →
   6801; tester/target ∉ 0–255 → defaults; specs JSON unparsable → ''.
 - New settings rows must not overflow at 360pt/1.3×: labels shrink/wrap; inputs keep a minimum width.
+
+## ENET auto-discovery & DID sweep addendum (2026-08-27, binding — Phase 4f)
+
+Goal: after the user joins the adapter's WiFi (iOS cannot do that for a sideloaded app), the app finds the
+adapter, connects, and helps discover identifiers — no manual IP/port/DID typing in the common case.
+
+- **Discovery (core, pure orchestrator + injected transport factory/clock)**: candidates in this order —
+  the configured host (if any), `192.168.4.1` (MHD web UI address), the phone subnet's `.1`, then every
+  host of the phone's /24 (skipping the phone itself). Ports tried per host: configured port, then 6801.
+  Per candidate: TCP connect with a short timeout (default 300 ms) → **level 1**; then send ONE
+  whitelisted TesterPresent (0x3E 0x80 to the configured target) and accept any valid HSFZ frame
+  (ACK 0x0002, diagnostic, alive-check, or a decodable error frame) within 500 ms → **level 2**.
+  Concurrency ≤ 16 sockets, total budget ≤ 8 s, deterministic ordering of results (level desc, then
+  candidate order). The result never auto-changes settings unless the user tapped "Find adapter" or
+  auto-connect is on; when applied, host/port are persisted with provenance `discovered <date>`.
+- **Auto-connect**: when telemetry is enabled with adapterType 'enet' and the provider cannot connect to
+  the configured host (or none is configured), it runs discovery ONCE per start (bounded as above) and,
+  on a level-2 hit, applies it and connects. Never loops; failure surfaces in diagnostics.
+- **Network awareness**: the app reads its own IPv4/subnet (`expo-network`, SDK-matched) and shows it on
+  the telemetry screen with a plain hint ("join the adapter's WiFi MHD_XXXX first") when no adapter answers.
+- **DID sweep (dev-only, core planner + mobile screen)**: iterates a configurable DID range (default
+  0x0000–0xFFFF, resumable, pause/stop) sending ONE 0x22 request at a time through the same whitelisted
+  codec and session rules (TesterPresent cadence, 0x78 handling); records every positive 0x62 response
+  (DID, raw bytes, length) and NRC classes for the rest; adaptive pacing from measured round-trip.
+  Exclusive with the provider through the adapter reservation. Progress persists in memory for the run.
+- **Heuristics (core, pure)**: for responders sampled repeatedly (re-poll the responder set at ~1 Hz
+  for the observation window) classify candidates by signal shape: temperature-like (slow monotonic
+  drift, plausible range under u8−40 / u16÷10 decodes), speed-like (correlates with GNSS speed when
+  available), pedal-like (fast bimodal steps), steering-like (zero-centred sign changes). Output is a
+  ranked suggestion list with confidence and the decode used; the user confirms with one tap, which
+  writes an `EnetChannelSpec` with provenance `in-car sweep <date>, DID <hex>, decode <…>` into the
+  channel specs. No suggestion is ever applied without confirmation.
+- Whitelist {0x01, 0x22, 0x3E} is untouched; discovery and sweep cannot send anything else. All new
+  network activity is confined to telemetry-enabled + adapterType 'enet' (discovery) or the dev sweep.
