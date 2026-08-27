@@ -167,13 +167,13 @@ export interface RunDiscoveryInput {
   /** Injected transport factory -- one fresh `ObdTransport` per candidate. Never called more than once per candidate. */
   probe: (host: string, port: number) => ObdTransport;
   clock: MonotonicClock;
-  /** Hard-capped at 16 regardless of what's passed (addendum: "concurrency = min(configured, 16) enforced"). default 16. */
+  /** Hard-capped at 16 regardless of what's passed; a non-finite or < 1 value (e.g. `NaN`) falls back to 16, NOT to zero workers (amendment: "concurrency sanitized (non-finite or < 1 -> 16, capped at 16)"). default 16. */
   concurrency?: number;
   /** default 300 (addendum). */
   connectTimeoutMs?: number;
   /** default 500 (addendum). */
   replyTimeoutMs?: number;
-  /** default 8000 (addendum: "total budget <= 8 s"). */
+  /** Hard-capped at 8000ms regardless of what's passed (amendment: "budgetMs = min(configured, 8000)"); a non-finite or non-positive value falls back to 8000. default 8000. */
   budgetMs?: number;
   testerAddress: number;
   targetAddress: number;
@@ -198,19 +198,30 @@ export interface RunDiscoveryResult {
 }
 
 const HARD_MAX_CONCURRENCY = 16;
-const DEFAULT_CONCURRENCY = 16;
 const DEFAULT_CONNECT_TIMEOUT_MS = 300;
 const DEFAULT_REPLY_TIMEOUT_MS = 500;
 const DEFAULT_BUDGET_MS = 8_000;
 /** Hard ceiling on how long any single `transport.close()` may take before discovery gives up on it and moves on (amendment: "close raced against a 200 ms timeout so a hanging close cannot block"). NOT configurable -- this is a safety net, not a tuning knob. */
 const CLOSE_TIMEOUT_MS = 200;
 
+/** Amendment: "concurrency sanitized (non-finite or < 1 -> 16, capped at 16)". `Math.max(1, NaN)` is itself `NaN` (Math.max/min propagate a NaN operand), so the sanitize check MUST happen before any min/max arithmetic -- an unsanitized `NaN` silently produced zero workers (`Array.from({length: NaN}, ...)` is empty) rather than falling back to a default. */
+function sanitizeConcurrency(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value) || value < 1) return HARD_MAX_CONCURRENCY;
+  return Math.min(HARD_MAX_CONCURRENCY, Math.floor(value));
+}
+
+/** Amendment: "budgetMs = min(configured, 8000)" -- a HARD ceiling regardless of what's configured (60_000 clamps to 8_000, matching every other numeric default's non-finite/non-positive fallback here). */
+function sanitizeBudgetMs(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return DEFAULT_BUDGET_MS;
+  return Math.min(DEFAULT_BUDGET_MS, value);
+}
+
 /** Runs discovery across `candidates`. Never throws on a per-candidate failure -- a refused/timed-out/erroring candidate simply contributes no result. */
 export async function runDiscovery(input: RunDiscoveryInput): Promise<RunDiscoveryResult> {
-  const concurrency = Math.min(HARD_MAX_CONCURRENCY, Math.max(1, input.concurrency ?? DEFAULT_CONCURRENCY));
+  const concurrency = sanitizeConcurrency(input.concurrency);
   const connectTimeoutMs = input.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
   const replyTimeoutMs = input.replyTimeoutMs ?? DEFAULT_REPLY_TIMEOUT_MS;
-  const budgetMs = input.budgetMs ?? DEFAULT_BUDGET_MS;
+  const budgetMs = sanitizeBudgetMs(input.budgetMs);
   const { clock, signal } = input;
   const startedAtMs = clock.now();
   const deadlineMs = startedAtMs + budgetMs;

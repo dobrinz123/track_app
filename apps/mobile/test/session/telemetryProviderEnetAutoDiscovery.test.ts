@@ -25,6 +25,8 @@ const tracker = vi.hoisted(() => ({
   /** `${host}:${port}` -> scripted behavior. Absent entries refuse the connect. */
   script: new Map<string, 'level2' | 'level1' | 'refuse'>(),
   connectedHostPorts: [] as string[],
+  /** M1 (binding): PER host:port artificial connect() delay (real/fake-timer setTimeout) so a test can call `provider.stop()` WHILE a scan is genuinely still in flight for a SPECIFIC candidate, while others (e.g. the directly-configured host) still resolve/reject instantly. Absent entries default to 0 (same as every other test in this file). */
+  connectDelayByHostPort: new Map<string, number>(),
 }));
 
 function key(host: string, port: number): string {
@@ -41,8 +43,10 @@ vi.mock('../../src/session/enetTcpTransport', () => ({
       this.port = config.port;
     }
     async connect(): Promise<void> {
-      const behavior = tracker.script.get(key(this.host, this.port)) ?? 'refuse';
       tracker.connectedHostPorts.push(key(this.host, this.port));
+      const delayMs = tracker.connectDelayByHostPort.get(key(this.host, this.port)) ?? 0;
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      const behavior = tracker.script.get(key(this.host, this.port)) ?? 'refuse';
       if (behavior === 'refuse') {
         throw new Error(`ENET adapter unreachable at ${this.host}:${this.port} (test double)`);
       }
@@ -253,7 +257,7 @@ describe('telemetryProvider: ENET auto-discovery -- no host configured (addendum
     await provider.stop();
   });
 
-  it('telemetrySimulate:true skips discovery entirely (nothing to discover for the simulated transport) -- reaches polling via SimulatedEnetTransport as before', async () => {
+  it('E2E-a (binding, sweep transport interface & lifecycle amendment): telemetrySimulate:true with no host still auto-discovers, via the SIMULATED probe factory (never the real EnetTcpTransport), applies the MHD level-2 hit, and reaches polling', async () => {
     const store = new InMemorySettingsStore();
     store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'enet' });
 
@@ -272,7 +276,35 @@ describe('telemetryProvider: ENET auto-discovery -- no host configured (addendum
     await flushMicrotasks();
 
     expect(states).toContain('polling');
-    expect(tracker.connectedHostPorts).toEqual([]); // the mocked real EnetTcpTransport was never touched at all.
+    expect(tracker.connectedHostPorts).toEqual([]); // the mocked REAL EnetTcpTransport was never touched -- discovery itself ran via the simulated probe factory instead.
+    // The "preview shows a level-2 hit" (E2E-a): the discovery scan (simulated) still finds and applies the MHD default host, even though the SESSION transport (SimulatedEnetTransport) never actually needed it.
+    expect(store.getSettings().enetHost).toBe('192.168.4.1');
+    expect(store.getSettings().enetHostProvenance).toMatch(/^discovered /);
+
+    await provider.stop();
+  });
+
+  it('E2E-a: telemetrySimulate:true with an ALREADY-configured host skips discovery (the direct-connect path, unaffected)', async () => {
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'enet', enetHost: '10.0.0.9' });
+
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: monotonicCounter(),
+      isDev: true,
+      getNetworkInfo: NO_PHONE_INFO,
+    });
+    const states: string[] = [];
+    provider.onStateChange((s) => states.push(s));
+
+    provider.start();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushMicrotasks();
+
+    expect(states).toContain('polling');
+    expect(store.getSettings().enetHost).toBe('10.0.0.9'); // untouched -- discovery never ran.
+    expect(store.getSettings().enetHostProvenance).toBe('');
 
     await provider.stop();
   });
@@ -412,6 +444,88 @@ describe('telemetryProvider: ENET auto-discovery -- "runs discovery ONCE per sta
     expect(store.getSettings().enetHost).toBe('192.168.4.1'); // this SECOND start()'s own fresh discovery attempt found it.
 
     await provider.stop();
+  });
+});
+
+describe('telemetryProvider: M1 -- stop() aborts an in-flight auto-discovery scan (sweep transport interface & lifecycle amendment, binding)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    tracker.script = new Map();
+    tracker.connectedHostPorts = [];
+    tracker.connectDelayByHostPort = new Map();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('stop() during a scan (no-host preamble) aborts it, releases the provider token, and an immediate start() proceeds (no stale-claim refusal)', async () => {
+    tracker.connectDelayByHostPort.set('192.168.4.1:6801', 10_000); // the single MHD candidate's connect() never settles on its own within this test.
+    const reservation = createEnetAdapterReservation();
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet' }); // no host -> immediate discovery.
+
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: monotonicCounter(),
+      isDev: true,
+      getNetworkInfo: NO_PHONE_INFO,
+      enetAdapterReservation: reservation,
+    });
+
+    provider.start();
+    await flushMicrotasks();
+    expect(provider.getDiagnostics().state).toBe('connecting'); // still scanning -- the candidate's connect() is deliberately stuck.
+    expect(reservation.holder()).toBe('provider'); // held for the duration of the scan.
+
+    const stopPromise = provider.stop();
+    // `stop()` itself awaits the abort settling -- the underlying scan's
+    // cancellation is polled every 10ms by `runDiscovery` internally
+    // (core), so a modest fake-timer advance is enough for it to notice and
+    // unwind, without ever waiting out the full (stuck) connect() delay.
+    await vi.advanceTimersByTimeAsync(50);
+    await flushMicrotasks();
+    await stopPromise;
+
+    expect(reservation.holder()).toBeNull(); // released -- no socket/claim outlives stop().
+
+    // Immediate start() proceeds (a fresh scan, not refused by a stale claim).
+    tracker.connectDelayByHostPort.clear();
+    tracker.script.set('192.168.4.1:6801', 'level2');
+    provider.start();
+    await flushMicrotasks();
+    expect(store.getSettings().enetHost).toBe('192.168.4.1');
+
+    await provider.stop();
+  });
+
+  it('stop() during a scan (configured-host-failed continuation) aborts it and releases the provider token', async () => {
+    // The DIRECTLY-configured host fails INSTANTLY (unscripted -> 'refuse',
+    // no delay) -- only the discovery detour's own MHD-default candidate is
+    // stuck, so `stop()` genuinely interrupts the DETOUR's scan, not the
+    // initial direct-connect attempt.
+    tracker.connectDelayByHostPort.set('192.168.4.1:6801', 10_000);
+    const reservation = createEnetAdapterReservation();
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet', enetHost: '10.0.0.5' });
+
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: monotonicCounter(),
+      isDev: true,
+      getNetworkInfo: NO_PHONE_INFO,
+      enetAdapterReservation: reservation,
+    });
+
+    provider.start();
+    await flushMicrotasks(); // the configured host's own connect() fails instantly, kicking off the on-failure discovery detour.
+    expect(reservation.holder()).toBe('provider'); // re-acquired for the detour's own scan -- the WHOLE point of this test: it did NOT stay released/refused.
+
+    const stopPromise = provider.stop();
+    await vi.advanceTimersByTimeAsync(50);
+    await flushMicrotasks();
+    await stopPromise;
+
+    expect(reservation.holder()).toBeNull();
   });
 });
 

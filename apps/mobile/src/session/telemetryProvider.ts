@@ -2,11 +2,13 @@ import {
   buildDiscoveryCandidates,
   createElm327Session,
   createEnetSession,
+  createSimulatedDiscoveryProbeFactory,
   DEFAULT_ENET_CONFIG,
   ENET_DEFAULT_CHANNEL_RATES_HZ,
   runDiscovery,
   SimulatedElm327Transport,
   SimulatedEnetTransport,
+  type DiscoveryAbortSignal,
   type Elm327Config,
   type Elm327Session,
   type Elm327State,
@@ -346,6 +348,18 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
    */
   let autoDiscoveryAttempted = false;
   /**
+   * M1 (binding, sweep transport interface & lifecycle amendment): "provider
+   * auto-discovery is abortable -- `stop()` aborts an in-flight discovery,
+   * awaits it, and releases the provider token before returning." Set for
+   * the DURATION of a `runAutoDiscovery()` call from EITHER the no-host
+   * preamble or the on-failure continuation; `stop()` flips `.aborted` (the
+   * SAME `DiscoveryAbortSignal` `runDiscovery` itself polls) and awaits
+   * `discoveryInFlight` so no socket outlives the `stop()` call, and a
+   * following `start()` is never refused by a stale claim.
+   */
+  let discoveryAbortSignal: { aborted: boolean } | null = null;
+  let discoveryInFlight: Promise<void> | null = null;
+  /**
    * P4e-FIX4 fix (binding, Codex P4e-REV4 HIGH finding -- "overlapping
    * provider generations bypass exclusivity"): while a `stop()` is tearing
    * down the current generation, this is the promise that resolves once
@@ -462,18 +476,40 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   }
 
   /**
+   * E2E-a (binding, sweep transport interface & lifecycle amendment): "under
+   * `telemetrySimulate` (dev) discovery ... uses the simulated probe factory
+   * so the preview demonstrates the full flow" -- scripts the MHD default
+   * host as a level-2 hit (the same fixed address `buildDiscoveryCandidates`
+   * always tries), everything else refused, so a dev running the preview
+   * with no real adapter still sees discovery succeed end to end.
+   */
+  function buildProbeFactory(): (host: string, port: number) => ObdTransport {
+    const settings = settingsStore.getSettings();
+    if (settings.telemetrySimulate && isDev) {
+      return createSimulatedDiscoveryProbeFactory({
+        script: [{ host: '192.168.4.1', behavior: 'level2' }],
+        defaultBehavior: 'refuse',
+      });
+    }
+    return (host, port) => new EnetTcpTransport({ host, port, connectTimeoutMs: 300 });
+  }
+
+  /**
    * Runs `@circuit/core`'s `runDiscovery` against the phone's own subnet plus
    * whatever host is currently configured (addendum: "candidates in this
    * order -- the configured host (if any), 192.168.4.1, the phone subnet's
    * .1, then every host of the phone's /24"), using a REAL `EnetTcpTransport`
-   * probe factory with the addendum's tight default timeouts (300 ms
-   * connect / 500 ms reply / 8 s total budget -- all `runDiscovery`'s own
-   * defaults, left unspecified here). Never throws -- a `getNetworkInfo()` or
+   * probe factory (or the simulated one under `telemetrySimulate`, E2E-a
+   * above) with the addendum's tight default timeouts (300 ms connect / 500 ms
+   * reply / 8 s total budget -- all `runDiscovery`'s own defaults, left
+   * unspecified here). Never throws -- a `getNetworkInfo()` or
    * `runDiscovery()` failure is treated as "found nothing" (an empty result),
    * matching this module's existing "never let telemetry startup throw"
-   * discipline.
+   * discipline. `signal` (M1, binding: "provider auto-discovery is
+   * abortable") is forwarded to `runDiscovery` so `stop()` can cut a scan
+   * short.
    */
-  async function runAutoDiscovery(): Promise<RunDiscoveryResult> {
+  async function runAutoDiscovery(signal: DiscoveryAbortSignal): Promise<RunDiscoveryResult> {
     const settings = settingsStore.getSettings();
     let phoneInfo: Awaited<ReturnType<typeof getNetworkInfo>> = null;
     try {
@@ -481,6 +517,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     } catch {
       phoneInfo = null;
     }
+    if (signal.aborted) return { results: [], scanned: 0, elapsedMs: 0, truncated: true };
     const candidates = buildDiscoveryCandidates({
       configuredHost: settings.enetHost.trim() === '' ? undefined : settings.enetHost,
       configuredPort: settings.enetPort,
@@ -490,10 +527,11 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     try {
       return await runDiscovery({
         candidates,
-        probe: (host, port) => new EnetTcpTransport({ host, port, connectTimeoutMs: 300 }),
+        probe: buildProbeFactory(),
         clock: { now: monotonicNow },
         testerAddress: settings.enetTesterAddress,
         targetAddress: settings.enetTargetAddress,
+        signal,
       });
     } catch {
       return { results: [], scanned: 0, elapsedMs: 0, truncated: false };
@@ -566,6 +604,29 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   }
 
   /**
+   * M1 (binding): wraps `runAutoDiscovery` with the abort/in-flight
+   * bookkeeping `stop()` needs -- see `discoveryAbortSignal`/`discoveryInFlight`'s
+   * own doc comments above. Both auto-discovery call sites (no-host preamble,
+   * on-failure continuation) go through this, never `runAutoDiscovery`
+   * directly, so `stop()` can always find (and abort) whichever one is live.
+   */
+  function runTrackedAutoDiscovery(): Promise<RunDiscoveryResult> {
+    const signal: { aborted: boolean } = { aborted: false };
+    discoveryAbortSignal = signal;
+    const resultPromise = runAutoDiscovery(signal);
+    const settledPromise = resultPromise.then(
+      () => undefined,
+      () => undefined,
+    );
+    discoveryInFlight = settledPromise;
+    void settledPromise.finally(() => {
+      if (discoveryAbortSignal === signal) discoveryAbortSignal = null;
+      if (discoveryInFlight === settledPromise) discoveryInFlight = null;
+    });
+    return resultPromise;
+  }
+
+  /**
    * The "host configured, first connect failed" auto-discovery continuation
    * (addendum). Runs AFTER the failed generation has already released its
    * token (`buildAndStartEnetSession`'s own `onStateChange` handler, just
@@ -591,7 +652,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       emitState('idle', ENET_ADAPTER_RESERVED_BY_PROBE_DETAIL);
       return;
     }
-    const result = await runAutoDiscovery();
+    const result = await runTrackedAutoDiscovery();
     if (!running || current !== null) {
       enetAdapterReservation.release(token);
       return;
@@ -625,7 +686,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
    * before it resolves.
    */
   async function runAutoDiscoveryThenConnect(id: number, token: EnetAdapterToken): Promise<void> {
-    const result = await runAutoDiscovery();
+    const result = await runTrackedAutoDiscovery();
     if (!running || generationCounter !== id) {
       enetAdapterReservation.release(token);
       return;
@@ -683,15 +744,16 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       // immediately when no host is configured" -- checked here, BEFORE ever
       // building a transport (a real `EnetTcpTransport` against host `''`
       // would just fail instantly and pointlessly). Gated on `enetAutoDiscover`
-      // and the real (non-simulated) adapter, same as the on-failure
-      // continuation above.
+      // only -- E2E-a (binding, sweep transport interface & lifecycle
+      // amendment): "Find adapter + auto-connect use
+      // createSimulatedDiscoveryProbeFactory under telemetrySimulate (dev) so
+      // the preview shows a level-2 hit" -- this runs under simulate mode too
+      // (via `runAutoDiscovery()`'s own `buildProbeFactory()` branch), NOT
+      // gated on `usingRealEnetAdapter()` the way the on-failure continuation
+      // still is (that path is moot under simulate anyway: `SimulatedEnetTransport`
+      // never fails to connect, so it's simply never reached there).
       const settingsNow = settingsStore.getSettings();
-      if (
-        settingsNow.enetHost.trim() === '' &&
-        settingsNow.enetAutoDiscover &&
-        usingRealEnetAdapter() &&
-        !autoDiscoveryAttempted
-      ) {
+      if (settingsNow.enetHost.trim() === '' && settingsNow.enetAutoDiscover && !autoDiscoveryAttempted) {
         autoDiscoveryAttempted = true;
         retriesUsed += 1; // spends the one retry/attempt budget, same accounting as the on-failure continuation.
         emitState('connecting');
@@ -822,6 +884,15 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
         clearTimeout(retryTimer);
         retryTimer = null;
       }
+      // M1 fix (binding, sweep transport interface & lifecycle amendment):
+      // "stop() aborts an in-flight discovery, awaits it, and releases the
+      // provider token before returning" -- BEFORE the `current === null`
+      // early return below, since during either auto-discovery phase
+      // `current` IS `null` (no session has been built yet) and this used to
+      // return immediately, leaving the scan (and its sockets, and the held
+      // provider token) running for up to the full discovery budget.
+      if (discoveryAbortSignal !== null) discoveryAbortSignal.aborted = true;
+      if (discoveryInFlight !== null) await discoveryInFlight;
       // F3 fix: capture THIS call's generation locally, synchronously,
       // before awaiting anything -- a `start()` racing in during the
       // `await` below installs a DIFFERENT generation into `current`, whose

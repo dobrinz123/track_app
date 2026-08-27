@@ -33,7 +33,13 @@ Wire the P4f core modules (ticket P4f-T1, committed — API surface below) into 
    extended to the new files; ELM path unchanged (existing tests + explicit "elm327 never runs discovery").
 
 ## API SURFACE FROM P4f-T1
-<<T1_API>>
+From `@circuit/core` (source `packages/core/src/telemetry/enet/{enetDiscovery,didSweep,didHeuristics,simulatedEnetTransport}.ts` — read code + tests):
+- `buildDiscoveryCandidates({configuredHost?, configuredPort?, phoneIpv4?, subnetMask?}) → DiscoveryCandidate[]`;
+  `runDiscovery({candidates, probe: (host, port) => ObdTransport, clock, concurrency?, connectTimeoutMs?, replyTimeoutMs?, budgetMs?, testerAddress, targetAddress, signal?: DiscoveryAbortSignal}) → RunDiscoveryResult {results: DiscoveryProbeResult[] (host, port, level 1|2, rttMs), scanned, elapsedMs, truncated}`.
+- `createDidSweepPlan({from?, to?, priorityRanges?}) → DidSweepPlan` (resumable); `runDidSweep({plan, request: (did) => Promise<UdsParsedResponse|'timeout'>, clock, pacing?: DidSweepPacing, onProgress?, control: DidSweepControl {paused, stopped}}) → RunDidSweepResult {responders: {did, raw, length, rttMs}[], nrcCounts, timeouts, lastDid}`.
+- `classifyResponders(series: DidResponderSeries[], context?) → DidHeuristicSuggestion[]` (kind temperature|speed|pedal|steering|unknown, confidence, decode, rationale); `enetSpecsFromSuggestion(suggestion, channel, date) → EnetChannelSpec`.
+- Simulator: `DEFAULT_ENET_DID_SCENARIO` (3 time-varying responders), `createSimulatedDiscoveryProbeFactory(...)` (level-2 on one host, level-1 on another).
+- Existing: `EnetTcpTransport` (mobile), `enetAdapterReservation` (extend owner union with 'discovery' | 'sweep'), `createEnetSession`, `assertAllowedRequest`, `buildReadDataByIdentifierRequest`, `parseUdsResponse`.
 
 ## CONSTRAINTS
 Only new dependency: `expo-network` (LEAD-approved). Whitelist untouched (core codec). Offline mandate: all new

@@ -201,6 +201,74 @@ describe('runDiscovery', () => {
     expect(peak).toBeGreaterThan(0);
   });
 
+  it('[P4f-FIX2] sanitizes a non-finite concurrency (NaN) to 16 workers, not zero', async () => {
+    let active = 0;
+    let peak = 0;
+    const candidates: DiscoveryCandidate[] = Array.from({ length: 20 }, (_, i) => ({ host: `10.0.9.${i}`, port: 6801 }));
+    const probe = (): ObdTransport =>
+      stubTransport({
+        connect: () =>
+          new Promise((resolve) => {
+            active += 1;
+            peak = Math.max(peak, active);
+            setTimeout(() => {
+              active -= 1;
+              resolve();
+            }, 15);
+          }),
+      });
+
+    const result = await runDiscovery({
+      candidates,
+      probe,
+      clock: new FakeClock(),
+      concurrency: Number.NaN,
+      connectTimeoutMs: 100,
+      replyTimeoutMs: 5,
+      budgetMs: 5_000,
+      testerAddress: 0xf4,
+      targetAddress: 0x12,
+    });
+
+    // Before the fix: `Math.max(1, NaN)` is itself `NaN`, so `Array.from({length: NaN}, ...)` produced ZERO
+    // workers and every candidate was silently left unscanned.
+    expect(peak).toBeGreaterThan(0);
+    expect(peak).toBeLessThanOrEqual(16);
+    expect(result.scanned).toBe(20);
+  });
+
+  it('[P4f-FIX2] hard-caps budgetMs at 8000ms even when a higher value is configured, with a PENDING connect', async () => {
+    vi.useFakeTimers();
+    const clock = new FakeClock();
+    // The connect() never resolves. A one-shot scheduled bump pushes the
+    // injected clock to 9000ms -- past the hard 8000ms ceiling but well
+    // within the (bogus, configured) 60000ms budget. If the cap were NOT
+    // enforced (deadline computed as 60000), the run would still be waiting
+    // (connectTimeoutMs is also 60000). With the cap enforced (deadline =
+    // min(60000, 8000) = 8000), the cancellation poll notices 9000 >= 8000
+    // and the run returns, truncated, well before either configured 60s value.
+    setTimeout(() => clock.advance(9_000), 20);
+    const probe = (): ObdTransport => stubTransport({ connect: () => new Promise(() => {}) });
+
+    const resultPromise = runDiscovery({
+      candidates: [{ host: '10.0.0.1', port: 6801 }],
+      probe,
+      clock,
+      concurrency: 1,
+      connectTimeoutMs: 60_000,
+      replyTimeoutMs: 60_000,
+      budgetMs: 60_000, // configured WAY above the hard 8s ceiling
+      testerAddress: 0xf4,
+      targetAddress: 0x12,
+    });
+
+    await vi.advanceTimersByTimeAsync(200); // nowhere near 60s -- proves the run did not wait for the 60s budget/timeout
+    const result = await resultPromise;
+
+    expect(result.truncated).toBe(true);
+    expect(result.results).toEqual([]);
+  });
+
   it('a probe still "in flight" when the budget expires is cancelled and contributes NO result -- "truncated: true with only completed results"', async () => {
     const clock = new FakeClock();
     const candidates: DiscoveryCandidate[] = Array.from({ length: 5 }, (_, i) => ({ host: `10.0.2.${i}`, port: 6801 }));

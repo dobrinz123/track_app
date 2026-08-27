@@ -202,7 +202,14 @@ export class SimulatedEnetTransport implements ObdTransport {
     queueMicrotask(() => {
       if (this.closed) return;
       if (script === undefined) {
-        this.deliverNegative(testerAddress, sid, 0x11); // serviceNotSupported: no scripted entry for this request.
+        // P4f-FIX2 (binding, E2E finding): an UNKNOWN DID under
+        // ReadDataByIdentifier is `0x31` (requestOutOfRange) per UDS
+        // convention -- "this identifier doesn't exist", not "this SERVICE
+        // isn't supported" (0x11), which would be wrong for a DID sweep: the
+        // adapter plainly DOES support 0x22 (it answers scripted DIDs), it
+        // just doesn't recognize this particular one. obd01's fallback stays
+        // 0x11 (unchanged) -- no ticket/test relies on this branch for did.
+        this.deliverNegative(testerAddress, sid, mode === 'did' ? 0x31 : 0x11);
         return;
       }
       this.deliverScripted(testerAddress, sid, responseSid, script, scenarioTimeMs);

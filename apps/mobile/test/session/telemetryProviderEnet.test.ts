@@ -110,7 +110,7 @@ describe('telemetryProvider: adapterType "enet" with the simulated transport', (
 
   it('reaches polling via SimulatedEnetTransport, delivers samples, and getDiagnostics() reports ENET-only fields', async () => {
     const store = new InMemorySettingsStore();
-    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'enet' });
+    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'enet', enetHost: '192.168.4.20' });
 
     const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
     const samples: TelemetrySample[] = [];
@@ -152,12 +152,13 @@ describe('telemetryProvider: adapterType "enet" with the simulated transport', (
     expect(provider.getDiagnostics().state).toBe('idle');
   });
 
-  it('a channel spec the simulated ECU has no script for is marked UNSUPPORTED (NRC 0x11), without the session going "failed"', async () => {
+  it('a channel spec the simulated ECU has no script for is marked UNSUPPORTED (NRC 0x31), without the session going "failed"', async () => {
     const store = new InMemorySettingsStore();
     store.update({
       telemetryEnabled: true,
       telemetrySimulate: true,
       adapterType: 'enet',
+      enetHost: '192.168.4.20', // E2E-a (binding): auto-discovery now runs under telemetrySimulate too when no host is configured -- an explicit host keeps this test on the pre-existing direct-connect path, unrelated to discovery.
       // P4e-FIX1 (core, binding): `validateEnetChannelSpecs` now enforces
       // obd01 channel<->PID consistency (a bogus obd01 `requestHex` like the
       // old 'AA' here is now REJECTED at validation, never reaching the wire
@@ -165,10 +166,13 @@ describe('telemetryProvider: adapterType "enet" with the simulated transport', (
       // against (no public B58/DSC DID table exists), so it's the legitimate
       // way to reach the wire with a request the simulator has no script for.
       // 'F1A0' matches no entry in `DEFAULT_ENET_SCENARIO` -- `SimulatedEnetTransport`
-      // answers any unscripted request with NRC 0x11 (serviceNotSupported),
-      // exactly the wire behavior a real ECU would produce for a PID/DID it
-      // doesn't support (addendum: "NRC 0x11/0x12/0x31 marks a channel
-      // UNSUPPORTED, removes it from the poll plan, recorded in diagnostics").
+      // answers any unscripted DID (`mode: 'did'`) with NRC 0x31
+      // (requestOutOfRange, the correct UDS NRC for an unknown identifier --
+      // P4f-FIX2-core, binding: "0x11 would be wrong for a DID sweep"; the
+      // unscripted OBD01 case is unchanged at 0x11), exactly the wire
+      // behavior a real ECU would produce for a DID it doesn't support
+      // (addendum: "NRC 0x11/0x12/0x31 marks a channel UNSUPPORTED, removes
+      // it from the poll plan, recorded in diagnostics").
       enetChannelSpecsJson: JSON.stringify([
         {
           channel: 'coolantC',
@@ -191,7 +195,7 @@ describe('telemetryProvider: adapterType "enet" with the simulated transport', (
 
     const diagnostics = provider.getDiagnostics();
     expect(diagnostics.unsupportedChannels).toEqual(['coolantC']);
-    expect(diagnostics.lastNrcByChannel?.coolantC).toBe(0x11);
+    expect(diagnostics.lastNrcByChannel?.coolantC).toBe(0x31);
     // A definitive UNSUPPORTED determination is graceful, not a failure --
     // the session must stay 'polling' (only the tester-present exchange
     // continues once every configured channel has been marked unsupported).
@@ -224,6 +228,7 @@ describe('telemetryProvider: M1 fix -- ENET poll plan derives from resolved spec
       telemetryEnabled: true,
       telemetrySimulate: true,
       adapterType: 'enet',
+      enetHost: '192.168.4.20', // E2E-a (binding): keeps this test on the pre-existing direct-connect path, unrelated to auto-discovery.
       transOilPidHex: '', // explicit: the ELM-era field stays UNSET -- must not matter on the ENET path.
       enetChannelSpecsJson: JSON.stringify([
         { channel: 'intakeC', mode: 'obd01', requestHex: '0F', provenance: 'standard PID' },
@@ -399,7 +404,7 @@ describe('telemetryProvider: ENET state mapping cannot mislabel stopped/failed',
 
   it("a graceful stop() (simulated transport, reaches 'polling' first) ends in 'stopped', never 'failed'", async () => {
     const store = new InMemorySettingsStore();
-    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'enet' });
+    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'enet', enetHost: '192.168.4.20' });
     const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
     const states: string[] = [];
     provider.onStateChange((s) => states.push(s));
@@ -463,7 +468,7 @@ describe('telemetryProvider: createEnetSession constructor assertion', () => {
 
   it('createEnetSession IS called exactly once when adapterType is "enet"', async () => {
     const store = new InMemorySettingsStore();
-    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'enet' });
+    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'enet', enetHost: '192.168.4.20' });
     const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
 
     provider.start();
@@ -576,7 +581,7 @@ describe('telemetryProvider: ENET adapter reservation (P4e-FIX3 H2, binding)', (
   it('"probe refused while provider polling": tryAcquire(\'probe\') fails while the provider holds the reservation', async () => {
     const reservation = createEnetAdapterReservation();
     const store = new InMemorySettingsStore();
-    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'enet' });
+    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'enet', enetHost: '192.168.4.20' });
     const provider = createTelemetryProvider({
       settingsStore: store,
       monotonicNow: monotonicCounter(),
@@ -599,7 +604,7 @@ describe('telemetryProvider: ENET adapter reservation (P4e-FIX3 H2, binding)', (
   it('release on stop(): a polling ENET session releases the reservation when stop() is called', async () => {
     const reservation = createEnetAdapterReservation();
     const store = new InMemorySettingsStore();
-    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'enet' });
+    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'enet', enetHost: '192.168.4.20' });
     const provider = createTelemetryProvider({
       settingsStore: store,
       monotonicNow: monotonicCounter(),
@@ -724,7 +729,7 @@ describe('telemetryProvider: ENET exception paths release the reservation (P4e-F
   it('a synchronous construction throw (createEnetSession) releases the reservation and reports "failed", without throwing OUT of start()', async () => {
     const reservation = createEnetAdapterReservation();
     const store = new InMemorySettingsStore();
-    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'enet' });
+    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'enet', enetHost: '192.168.4.20' });
     vi.mocked(createEnetSession).mockImplementationOnce(() => {
       throw new Error('boom: synchronous ENET construction failure (test double)');
     });
@@ -766,7 +771,7 @@ describe('telemetryProvider: ENET exception paths release the reservation (P4e-F
   it('gen.session.stop() rejecting still releases the reservation (finally) -- provider.stop() itself still propagates the rejection', async () => {
     const reservation = createEnetAdapterReservation();
     const store = new InMemorySettingsStore();
-    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'enet' });
+    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'enet', enetHost: '192.168.4.20' });
     const stopError = new Error('stop failed (test double)');
     vi.mocked(createEnetSession).mockImplementationOnce(() =>
       makeControllableEnetSession({ stopResult: () => Promise.reject(stopError) }),

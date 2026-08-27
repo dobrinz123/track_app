@@ -681,3 +681,25 @@ adapter, connects, and helps discover identifiers — no manual IP/port/DID typi
   `prev ≤ 0 < curr` semantics and contributing to confidence; contradictory evidence lowers confidence.
   `enetSpecsFromSuggestion` validates through `validateEnetChannelSpecs` and rejects forbidden channels,
   out-of-range DIDs and empty dates.
+
+### P4f addendum — sweep transport interface & lifecycle amendment (2026-08-27, binding, after Codex P4f-REV2)
+- Discovery: `budgetMs = min(configured, 8000)`; `concurrency` sanitized (non-finite or < 1 → 16, capped at 16).
+- Sweep low-level interface replaces `sendRequest(pdu)`:
+  `{ send(pdu): Promise<void>; nextResponse(timeoutMs): Promise<Uint8Array | 'timeout'>; keepAlive(pdu): Promise<void> }`.
+  The runner sends the 0x22 PDU once, then awaits `nextResponse`; on NRC 0x78 it awaits again WITHOUT re-sending
+  (bounded extensions); an unmatched response (wrong SID/DID) is counted and the runner keeps awaiting within the
+  remaining timeout (bounded count); the runner issues TesterPresent via `keepAlive` every 2 s (built through the
+  whitelist). Synchronous throws from any interface call are contained (counted as errors, sweep continues or
+  stops per `maxConsecutiveErrors`). The mobile implementation of `nextResponse` returns any diagnostic PDU from
+  the target with swapped addresses — correlation by SID/identifier is the runner's job.
+- Sweep lifecycle (mobile controller owns the transport): acquire the `'sweep'` reservation → open a FRESH
+  transport → run → close the transport → release the reservation (release strictly after close, on every
+  path incl. stop/throw). Start is refused unless the controller is idle/complete; observation from a paused
+  sweep reuses the held claim (no second acquire). Observation polls responders round-robin targeting ~1 Hz per
+  responder (degraded cadence reported when N×RTT > 1 s); GNSS speed context is passed when the app has a live
+  speed source, else omitted and stated in the UI.
+- Provider auto-discovery is abortable: `stop()` aborts an in-flight discovery, awaits it, and releases the
+  provider token before returning.
+- Under `telemetrySimulate` (dev) discovery (Find adapter and auto-connect) uses the simulated probe factory
+  so the preview demonstrates the full flow.
+- Sweep progress text and any long monospace value shrinks/wraps at 360pt/1.3×.

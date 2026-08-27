@@ -24,7 +24,13 @@ import {
   parseHexByteDraft,
   validateEnetChannelSpecsJson,
 } from '../../session/enetSettingsValidation';
-import { buildDiscoveryCandidates, runDiscovery, type DiscoveryProbeResult } from '@circuit/core';
+import {
+  buildDiscoveryCandidates,
+  createSimulatedDiscoveryProbeFactory,
+  runDiscovery,
+  type DiscoveryProbeResult,
+  type ObdTransport,
+} from '@circuit/core';
 import { EnetTcpTransport } from '../../session/enetTcpTransport';
 import { getNetworkInfo } from '../../session/networkInfo';
 import { enetAdapterReservation } from '../../session/enetAdapterReservation';
@@ -344,9 +350,20 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
         phoneIpv4: phoneInfo?.ipv4,
         subnetMask: phoneInfo?.subnetMask,
       });
+      // E2E-a (binding, sweep transport interface & lifecycle amendment):
+      // "Find adapter ... use createSimulatedDiscoveryProbeFactory under
+      // telemetrySimulate (dev) so the preview shows a level-2 hit" -- same
+      // MHD-default-answers-level-2 script `telemetryProvider.ts`'s own
+      // auto-connect uses, so both entry points demo identically.
+      // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
+      const isDev = typeof __DEV__ !== 'undefined' ? __DEV__ : false;
+      const probe: (host: string, port: number) => ObdTransport =
+        current.telemetrySimulate && isDev
+          ? createSimulatedDiscoveryProbeFactory({ script: [{ host: '192.168.4.1', behavior: 'level2' }], defaultBehavior: 'refuse' })
+          : (host, port) => new EnetTcpTransport({ host, port, connectTimeoutMs: 300 });
       const result = await runDiscovery({
         candidates,
-        probe: (host, port) => new EnetTcpTransport({ host, port, connectTimeoutMs: 300 }),
+        probe,
         clock: { now: () => Date.now() },
         testerAddress: current.enetTesterAddress,
         targetAddress: current.enetTargetAddress,

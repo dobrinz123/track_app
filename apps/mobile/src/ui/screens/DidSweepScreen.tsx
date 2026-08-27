@@ -2,12 +2,7 @@ import React from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
-  binaryStringToBytes,
-  bytesToBinaryString,
-  encodeFrame,
   ENET_SPEC_CHANNELS,
-  HSFZ_CONTROL,
-  HsfzFrameParser,
   SimulatedEnetTransport,
   DEFAULT_ENET_DID_SCENARIO,
   type ObdTransport,
@@ -16,16 +11,13 @@ import {
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
-import { settingsStore } from '../../session/composition';
+import { facade, settingsStore } from '../../session/composition';
 import { useSettings } from '../hooks/useSettings';
 import { EnetTcpTransport } from '../../session/enetTcpTransport';
 import { formatHexByte, mergeEnetChannelSpecJson } from '../../session/enetSettingsValidation';
 import { createDidSweepController, type DidSweepSnapshot } from '../../session/didSweepController';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'DidSweep'>;
-
-/** Per-request timeout for the sweep's own raw send/wait primitive -- matches `@circuit/core`'s own `runDidSweep` default (`requestTimeoutMs`, 1000ms) so a stalling ECU never wedges past what the runner itself already bounds each attempt to. */
-const RAW_REQUEST_TIMEOUT_MS = 1_000;
 
 const ENET_TAG_CHANNELS: readonly TelemetryChannelId[] = [...ENET_SPEC_CHANNELS];
 
@@ -46,78 +38,18 @@ function formatBytesHex(bytes: Uint8Array): string {
 }
 
 /**
- * Low-level raw send/wait primitive over an ALREADY-CONNECTED transport --
- * frames `pdu` as one HSFZ diagnostic request and resolves with the first
- * correlated diagnostic-response frame's raw UDS payload bytes, or
- * `'timeout'`. Passed DIRECTLY as `didSweepController.ts`'s `sendRequest`
- * (the controller/core do all the parsing/correlation-by-DID/0x78 handling --
- * this function only correlates by ADDRESS, same as `DidProbeScreen.tsx`'s
- * own `sendOneProbeRequest`). Simplification (documented, dev-tool-only): a
- * 0x78-triggered re-call re-sends `pdu` on the wire rather than merely
- * extending a still-in-flight listener -- harmless for a read-only service,
- * simpler than threading in-flight state across independent calls.
- */
-function sendRawUdsRequest(
-  transport: ObdTransport,
-  testerAddress: number,
-  targetAddress: number,
-): (pdu: Uint8Array) => Promise<Uint8Array | 'timeout'> {
-  return (pdu: Uint8Array): Promise<Uint8Array | 'timeout'> =>
-    new Promise((resolve) => {
-      let settled = false;
-      const parser = new HsfzFrameParser();
-
-      const finish = (value: Uint8Array | 'timeout'): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        unsubscribeData();
-        unsubscribeClose();
-        resolve(value);
-      };
-
-      const timer = setTimeout(() => finish('timeout'), RAW_REQUEST_TIMEOUT_MS);
-
-      const unsubscribeData = transport.onData((chunk) => {
-        if (settled) return;
-        let frames: ReturnType<HsfzFrameParser['push']>;
-        try {
-          frames = parser.push(binaryStringToBytes(chunk));
-        } catch {
-          return;
-        }
-        for (const frame of frames) {
-          if (frame.control !== HSFZ_CONTROL.DIAGNOSTIC_REQ_RES) continue; // ack/alive-check/status -- not the answer.
-          if (frame.source !== targetAddress || frame.target !== testerAddress) continue; // not addressed to/from us.
-          finish(frame.payload);
-          return;
-        }
-      });
-
-      const unsubscribeClose = transport.onClose(() => finish('timeout'));
-
-      try {
-        const frame = encodeFrame({ control: HSFZ_CONTROL.DIAGNOSTIC_REQ_RES, source: testerAddress, target: targetAddress, payload: pdu });
-        transport.send(bytesToBinaryString(frame));
-      } catch {
-        finish('timeout');
-      }
-    });
-}
-
-/**
  * Dev-only (`__DEV__`-gated route registration, mirrors `DidProbe`/`DevReplay`)
- * DID sweep screen (contracts.md "ENET auto-discovery & DID sweep addendum",
- * binding): iterates a configurable DID range, shows live progress and
- * responders, then (after the sweep, or on demand) re-polls the responders
- * found for an observation window and shows heuristic suggestions the user
- * can confirm with one tap ("Tag as <channel>"), writing the resulting spec
- * into `enetChannelSpecsJson`. All state-machine logic lives in
- * `didSweepController.ts` (pure, tested without RN) -- this screen is I/O
- * glue: opens ONE transport for the whole run (real `EnetTcpTransport`, or
- * `SimulatedEnetTransport` scripted with the DID sweep's own scenario when
- * `telemetrySimulate` is on) and a raw send/wait primitive
- * (`sendRawUdsRequest`) passed straight to the controller.
+ * DID sweep screen (contracts.md "ENET auto-discovery & DID sweep addendum" +
+ * "sweep transport interface & lifecycle amendment", both binding): iterates
+ * a configurable DID range, shows live progress and responders, then (after
+ * the sweep, or on demand) re-polls the responders found for an observation
+ * window and shows heuristic suggestions the user can confirm with one tap
+ * ("Tag as <channel>"), writing the resulting spec into `enetChannelSpecsJson`.
+ *
+ * H1/H2 (binding): the CONTROLLER owns the transport's whole lifecycle
+ * (acquire the reservation, open a fresh transport, run, close, release) --
+ * this screen supplies only a `transportFactory` (never connects/closes
+ * anything itself) and renders `controller`'s own snapshot.
  */
 export function DidSweepScreen(_props: Props): React.JSX.Element {
   const settings = useSettings(settingsStore);
@@ -129,46 +61,73 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   const [tagPickerDid, setTagPickerDid] = React.useState<number | null>(null);
   const [tagBanner, setTagBanner] = React.useState<string | null>(null);
 
-  const transportRef = React.useRef<ObdTransport | null>(null);
-  const controllerRef = React.useRef<ReturnType<typeof createDidSweepController> | null>(null);
-  const unsubscribeRef = React.useRef<(() => void) | null>(null);
+  const settingsRef = React.useRef(settings);
+  settingsRef.current = settings;
+
+  // M3 (binding): "pass GNSS speed context if a live speed source exists in
+  // the app" -- `facade`'s `speedKph` is already computed every match tick
+  // (cheap, no new subscription cost this screen introduces beyond one
+  // `facade.subscribe`), so it is wired here rather than omitted. Collected
+  // ONLY while an observation is actually running (cleared at each
+  // `startObservation()`), read by the controller exactly once when the
+  // observation phase finishes.
+  const gnssSpeedSamplesRef = React.useRef<Array<{ tMs: number; v: number }>>([]);
+  const observingRef = React.useRef(false);
+  const observationStartedAtMsRef = React.useRef(0);
 
   React.useEffect(
-    () => () => {
-      // Unmount cleanup: stop a still-running sweep/observation (releases the
-      // reservation) and close whatever transport this screen opened.
-      controllerRef.current?.stop();
-      unsubscribeRef.current?.();
-      void transportRef.current?.close();
-    },
+    () =>
+      facade.subscribe((state) => {
+        if (!observingRef.current || state.speedKph === null) return;
+        gnssSpeedSamplesRef.current.push({ tMs: Date.now() - observationStartedAtMsRef.current, v: state.speedKph });
+      }),
     [],
   );
+
+  const controllerRef = React.useRef<ReturnType<typeof createDidSweepController> | null>(null);
 
   function ensureController(): ReturnType<typeof createDidSweepController> {
     if (controllerRef.current !== null) return controllerRef.current;
     // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
     const isDev = typeof __DEV__ !== 'undefined' ? __DEV__ : false;
-    const transport: ObdTransport =
-      settings.telemetrySimulate && isDev
-        ? new SimulatedEnetTransport({
-            monotonicNow: () => Date.now(),
-            scenario: DEFAULT_ENET_DID_SCENARIO,
-            testerAddress: settings.enetTesterAddress,
-            targetAddress: settings.enetTargetAddress,
-          })
-        : new EnetTcpTransport({ host: settings.enetHost, port: settings.enetPort });
-    transportRef.current = transport;
-
     const controller = createDidSweepController({
-      sendRequest: sendRawUdsRequest(transport, settings.enetTesterAddress, settings.enetTargetAddress),
+      // H1/H2 (binding): a FRESH transport per `start()`/observation-from-
+      // terminal-state -- this factory is called by the controller itself,
+      // never invoked (or connected/closed) here.
+      transportFactory: (): ObdTransport => {
+        const current = settingsRef.current;
+        return current.telemetrySimulate && isDev
+          ? new SimulatedEnetTransport({
+              monotonicNow: () => Date.now(),
+              scenario: DEFAULT_ENET_DID_SCENARIO,
+              testerAddress: current.enetTesterAddress,
+              targetAddress: current.enetTargetAddress,
+            })
+          : new EnetTcpTransport({ host: current.enetHost, port: current.enetPort });
+      },
+      testerAddress: settingsRef.current.enetTesterAddress,
+      targetAddress: settingsRef.current.enetTargetAddress,
       clock: { now: () => Date.now() },
+      gnssSpeedContext: () => ({ gnssSpeedKph: [...gnssSpeedSamplesRef.current] }),
     });
     controllerRef.current = controller;
-    unsubscribeRef.current = controller.subscribe(setSnapshot);
+    controller.subscribe((next) => {
+      observingRef.current = next.phase === 'observing';
+      setSnapshot(next);
+    });
     return controller;
   }
 
-  async function handleStart(): Promise<void> {
+  React.useEffect(
+    () => () => {
+      // Unmount cleanup: stop() closes the transport and releases the
+      // reservation on every path (idempotent if already idle/stopped).
+      controllerRef.current?.stop();
+    },
+    [],
+  );
+
+  function handleStart(): void {
     setRangeError(null);
     setTagBanner(null);
     const from = parseHexRange(fromDraft);
@@ -177,35 +136,18 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
       setRangeError('Enter hex DIDs, 0000-FFFF, for both From and To');
       return;
     }
-    const controller = ensureController();
-    try {
-      await transportRef.current?.connect();
-    } catch (error) {
-      setRangeError(error instanceof Error ? error.message : String(error));
-      // The transport (a one-shot `EnetTcpTransport`) cannot be reused after a
-      // failed connect() -- clear the refs so the next "Start" tap builds a
-      // genuinely fresh transport/controller instead of retrying a dead one.
-      unsubscribeRef.current?.();
-      unsubscribeRef.current = null;
-      controllerRef.current = null;
-      transportRef.current = null;
-      return;
-    }
-    controller.start({ from, to });
+    ensureController().start({ from, to });
   }
 
-  async function handleStop(): Promise<void> {
+  function handleStop(): void {
     controllerRef.current?.stop();
-    await transportRef.current?.close();
-    unsubscribeRef.current?.();
-    unsubscribeRef.current = null;
-    controllerRef.current = null;
-    transportRef.current = null;
   }
 
   function handleStartObservation(): void {
     const seconds = Number.parseInt(observationWindowDraft, 10);
     const windowMs = Number.isFinite(seconds) && seconds > 0 ? seconds * 1_000 : undefined;
+    gnssSpeedSamplesRef.current = [];
+    observationStartedAtMsRef.current = Date.now();
     controllerRef.current?.startObservation(windowMs);
   }
 
@@ -226,7 +168,7 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   const phase = snapshot?.phase ?? 'idle';
   const running = phase === 'sweeping' || phase === 'paused';
   const observing = phase === 'observing';
-  const canStart = phase === 'idle' || phase === 'stopped' || phase === 'sweepComplete';
+  const canStart = phase === 'idle' || phase === 'stopped' || phase === 'sweepComplete' || phase === 'observationComplete';
   const totalNrc = Object.values(snapshot?.nrcCounts ?? {}).reduce((sum, n) => sum + n, 0);
 
   return (
@@ -284,7 +226,7 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
 
           <View style={styles.buttonRow}>
             {canStart ? (
-              <Pressable style={styles.button} onPress={() => void handleStart()} accessibilityRole="button" accessibilityLabel="Start sweep">
+              <Pressable style={styles.button} onPress={handleStart} accessibilityRole="button" accessibilityLabel="Start sweep">
                 <Text style={styles.buttonText} maxFontSizeMultiplier={1.3}>
                   Start
                 </Text>
@@ -305,7 +247,7 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
                     </Text>
                   </Pressable>
                 ) : null}
-                <Pressable style={styles.buttonDanger} onPress={() => void handleStop()} accessibilityRole="button" accessibilityLabel="Stop sweep">
+                <Pressable style={styles.buttonDanger} onPress={handleStop} accessibilityRole="button" accessibilityLabel="Stop sweep">
                   <Text style={styles.buttonDangerText} maxFontSizeMultiplier={1.3}>
                     Stop
                   </Text>
@@ -322,7 +264,7 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
                 {phase.toUpperCase()}
               </Text>
               {snapshot.progress === null ? null : (
-                <Text style={styles.progressValue} maxFontSizeMultiplier={1.3}>
+                <Text style={styles.progressValue} maxFontSizeMultiplier={1.3} numberOfLines={2}>
                   {formatHexDid(snapshot.progress.did)} · {snapshot.progress.index}/{snapshot.progress.total} ·{' '}
                   {snapshot.progress.reqPerSec.toFixed(1)} req/s
                 </Text>
@@ -338,10 +280,10 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
             </View>
             <View style={styles.progressRow}>
               <Text style={styles.progressLabel} maxFontSizeMultiplier={1.3}>
-                NRC / timeouts / unmatched
+                NRC / timeouts
               </Text>
               <Text style={styles.progressValue} maxFontSizeMultiplier={1.3}>
-                {totalNrc} / {snapshot.timeouts} / {snapshot.unmatched}
+                {totalNrc} / {snapshot.timeouts}
               </Text>
             </View>
           </View>
@@ -363,7 +305,7 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
               </View>
             ))}
 
-            {(phase === 'sweepComplete' || phase === 'paused' || phase === 'stopped') && !observing ? (
+            {(phase === 'sweepComplete' || phase === 'paused' || phase === 'stopped' || phase === 'observationComplete') && !observing ? (
               <View style={styles.fieldRow}>
                 <Text style={styles.fieldLabel} maxFontSizeMultiplier={1.3}>
                   Observe window (s)
@@ -377,7 +319,7 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
                 />
               </View>
             ) : null}
-            {(phase === 'sweepComplete' || phase === 'paused' || phase === 'stopped') && !observing ? (
+            {(phase === 'sweepComplete' || phase === 'paused' || phase === 'stopped' || phase === 'observationComplete') && !observing ? (
               <Pressable style={styles.buttonSecondary} onPress={handleStartObservation} accessibilityRole="button" accessibilityLabel="Start observation">
                 <Text style={styles.buttonSecondaryText} maxFontSizeMultiplier={1.3}>
                   Start observation
@@ -388,6 +330,7 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
               <>
                 <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
                   Observing… {(snapshot.observationElapsedMs / 1_000).toFixed(0)}s
+                  {snapshot.observationCadenceDegraded ? ' · cadence degraded (too many responders for ~1 Hz each)' : ''}
                 </Text>
                 <Pressable
                   style={styles.buttonDanger}
@@ -461,6 +404,10 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
           {settings.telemetrySimulate
             ? 'simulated'
             : `${settings.enetHost || '(no host)'} · tester 0x${formatHexByte(settings.enetTesterAddress)} → target 0x${formatHexByte(settings.enetTargetAddress)}`}
+        </Text>
+        <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+          Speed-like suggestions use GNSS speed from the current driving session when one is active; otherwise
+          that shape simply won't score confidently.
         </Text>
         {running || observing ? (
           <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
@@ -543,9 +490,21 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   buttonDangerText: { ...typography.body, color: colors.danger, fontFamily: fontFamily.bodySemibold },
-  progressRow: { flexDirection: 'row', justifyContent: 'space-between', gap: spacing.sm },
+  // L 360pt (binding, Codex P4f-REV2 Low finding): the progress VALUE text
+  // (e.g. "0xFFFF · 65536/65536 · 123.4 req/s") is the longest string this
+  // screen renders in a padded row next to a label -- `flexShrink: 1` lets it
+  // shrink/wrap instead of forcing the row wider than a 360pt screen; the
+  // label side keeps its own `flexShrink: 1` too (both sides may need room).
+  progressRow: { flexDirection: 'row', justifyContent: 'space-between', gap: spacing.sm, flexWrap: 'wrap' },
   progressLabel: { ...typography.caption, color: colors.textMuted, flexShrink: 1 },
-  progressValue: { ...typography.caption, color: colors.textPrimary, fontFamily: fontFamily.monoSemibold, textAlign: 'right' },
+  progressValue: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    fontFamily: fontFamily.monoSemibold,
+    textAlign: 'right',
+    flexShrink: 1,
+    flexGrow: 0,
+  },
   responderRow: { flexDirection: 'row', justifyContent: 'space-between', gap: spacing.sm },
   responderDid: { ...typography.body, color: colors.textPrimary, fontFamily: fontFamily.monoSemibold },
   responderRaw: { ...typography.caption, color: colors.textSecondary, fontFamily: fontFamily.monoSemibold, textAlign: 'right', flexShrink: 1 },

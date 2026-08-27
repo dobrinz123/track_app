@@ -1,34 +1,48 @@
 /**
  * DID sweep planner -- pure orchestrator (contracts.md "ENET auto-discovery &
  * DID sweep addendum", binding, dev-only feature; boundary tightened by the
- * "hard bounds & sweep boundary amendment"). Iterates a configurable DID
+ * "hard bounds & sweep boundary amendment", then again by the "sweep
+ * transport interface & lifecycle amendment"). Iterates a configurable DID
  * range with a single in-flight 0x22 request at a time, recording every
  * correlated positive response and NRC for the rest, with pacing adapted
  * from the measured round-trip.
  *
- * SWEEP BOUNDARY (amendment, binding, BREAKING vs. the P4f-T1 shape): this
- * module now builds the 0x22 request itself, through `assertAllowedRequest`,
- * and the injection point is the LOW-LEVEL `sendRequest(pdu) => Promise<
- * Uint8Array | 'timeout'>` -- one raw UDS response PDU (or `'timeout'`) per
- * call, not a pre-parsed `UdsParsedResponse`. Every response is parsed with
- * the real `parseUdsResponse` and correlated here:
+ * SWEEP TRANSPORT INTERFACE (amendment, binding, BREAKING vs. the prior
+ * `sendRequest(pdu)` shape): the injection point is now
+ *
+ *   { send(pdu): Promise<void>;
+ *     nextResponse(timeoutMs): Promise<Uint8Array | 'timeout'>;
+ *     keepAlive(pdu): Promise<void> }
+ *
+ * The runner sends the 0x22 PDU ONCE via `send`, then awaits `nextResponse`.
+ * Every response is parsed with the real `parseUdsResponse` and correlated
+ * here (the mobile implementation of `nextResponse` returns ANY diagnostic
+ * PDU from the target with swapped addresses -- correlation by SID/
+ * identifier is entirely this runner's job, not the transport's):
  *   - `0x62` + the request's own echoed DID -> a responder (DID stripped).
- *   - `0x7F` with `requestSid === 0x22` and NRC `0x78` -> the wait EXTENDS
- *     (bounded, default 5 extensions: `sendRequest(pdu)` is called again for
- *     the SAME pdu, meaning "keep waiting for this already-sent request").
- *   - `0x7F` with `requestSid === 0x22` and any other NRC -> classified.
+ *   - `0x7F`, `requestSid === 0x22`, NRC `0x78` -> the wait EXTENDS: awaits
+ *     `nextResponse` AGAIN, WITHOUT re-sending (bounded, default 5
+ *     extensions; each extension gets a FRESH `requestTimeoutMs` window,
+ *     matching UDS semantics -- 0x78 means "I need more time", not "ask
+ *     again").
+ *   - `0x7F`, `requestSid === 0x22`, any other NRC -> classified.
  *   - anything else (wrong SID, wrong echoed DID, unparseable bytes,
- *     `requestSid !== 0x22`) -> `unmatched`, no credit either way.
- * A per-request timeout (default 1000ms, `requestTimeoutMs`) is enforced BY
- * THE RUNNER around every `sendRequest` call (including each 0x78
- * extension), so an injected function that never resolves cannot hang the
- * sweep. This structurally guarantees only 0x22 is ever reachable -- the
- * injected function only ever receives a pdu THIS module built and
- * whitelist-checked.
+ *     `requestSid !== 0x22`) -> counted as `unmatched` (a running tally, NOT
+ *     a terminal outcome) and the runner keeps awaiting `nextResponse` within
+ *     the REMAINING (NOT reset) timeout window, bounded (default 3 retries).
+ * A synchronous throw OR a rejection from `send`/`nextResponse`/`keepAlive`
+ * is contained -- never propagates out of `runDidSweep` -- and counted in
+ * `accumulator.errors`; `maxConsecutiveErrors` consecutive interface failures
+ * (across sends, waits, and keep-alives) stop the sweep early (mirrors
+ * `enetSession`'s own error-budget pattern), same as `control.stopped`.
+ * `keepAlive` sends a whitelisted TesterPresent roughly every
+ * `keepAliveIntervalMs` (default 2000) of the injected clock's time, checked
+ * both between DIDs and within a single DID's own 0x78/unmatched retry loop
+ * (so a slow multi-extension exchange still gets its keep-alives).
  */
 
 import type { MonotonicClock } from '../../contracts';
-import { assertAllowedRequest, buildReadDataByIdentifierRequest, parseUdsResponse, UDS_NRC } from './udsCodec';
+import { assertAllowedRequest, buildReadDataByIdentifierRequest, buildTesterPresentRequest, parseUdsResponse, UDS_NRC } from './udsCodec';
 
 export interface DidSweepRange {
   from: number;
@@ -188,41 +202,65 @@ export interface DidSweepAccumulator {
   responders: DidSweepResponder[];
   /** Keyed by NRC value. */
   nrcCounts: Record<number, number>;
+  /** A DID that never resolved to a positive/NRC outcome within its budget -- includes a genuine `nextResponse` timeout, an exhausted 0x78/unmatched budget, and a `send`/`nextResponse` interface failure for that DID. */
   timeouts: number;
-  /** A response that arrived but did not correlate to its own request (wrong SID, wrong echoed DID, unparseable) -- no credit either way, per the amendment. */
+  /** Running count of individual responses that arrived but did not correlate to their own request (wrong SID, wrong echoed DID, unparseable) -- may exceed the number of DIDs swept (several per DID are possible), no credit either way. */
   unmatched: number;
+  /** Running count of `send`/`nextResponse`/`keepAlive` calls that threw synchronously or rejected (amendment: "counted as errors"). */
+  errors: number;
   /** The last DID actually resolved (to ANY outcome) across every run against this accumulator, or `null` if none has been yet. */
   lastDid: number | null;
 }
 
 export function createDidSweepAccumulator(): DidSweepAccumulator {
-  return { responders: [], nrcCounts: {}, timeouts: 0, unmatched: 0, lastDid: null };
+  return { responders: [], nrcCounts: {}, timeouts: 0, unmatched: 0, errors: 0, lastDid: null };
+}
+
+/**
+ * Low-level transport hook (amendment) -- the runner builds/whitelists every
+ * PDU it sends; the transport only ever moves bytes. A synchronous throw or
+ * a rejection from ANY method is contained by the runner (never propagates
+ * out of `runDidSweep`) and counted in `accumulator.errors`.
+ */
+export interface SweepTransport {
+  /** Sends `pdu` once. Resolves once the bytes are handed off (does not itself wait for a reply). */
+  send(pdu: Uint8Array): Promise<void>;
+  /** Resolves with the next diagnostic PDU the transport observes (ANY, with swapped addresses already stripped by the transport -- correlation by SID/identifier is the runner's job), or `'timeout'` once `timeoutMs` elapses with none. */
+  nextResponse(timeoutMs: number): Promise<Uint8Array | 'timeout'>;
+  /** Sends a keep-alive PDU (a whitelisted TesterPresent, built by the runner) without expecting/awaiting a reply. */
+  keepAlive(pdu: Uint8Array): Promise<void>;
 }
 
 export interface RunDidSweepInput {
   plan: DidSweepPlan;
-  /** Low-level transport hook: sends the exact `pdu` bytes (built and whitelist-checked by this module) and resolves with the raw UDS response PDU, or `'timeout'`. May be called more than once per DID (once per 0x78 extension) -- each call is independently timeout-bounded by this runner, so a `sendRequest` that never resolves cannot hang the sweep. */
-  sendRequest: (pdu: Uint8Array) => Promise<Uint8Array | 'timeout'>;
+  transport: SweepTransport;
   clock: MonotonicClock;
   pacing?: DidSweepPacing;
   onProgress?: (progress: DidSweepProgress) => void;
   control: DidSweepControl;
   /** Reused/mutated across resumed calls (amendment: "the runner accepts and returns an accumulator"). A fresh one is created if omitted. */
   accumulator?: DidSweepAccumulator;
-  /** default 1000. Enforced by the runner around every `sendRequest` call (including each 0x78 extension). */
+  /** default 1000. The overall budget for ONE DID's exchange; reset to a FRESH window on each 0x78 extension, NOT reset by an unmatched reply. */
   requestTimeoutMs?: number;
   /** default 5. Bounded count of 0x78 responsePending extensions before the DID is abandoned as a timeout. */
   maxResponsePendingExtensions?: number;
+  /** default 3. Bounded count of unmatched replies tolerated within one DID's remaining timeout window before it's abandoned as a timeout. */
+  maxUnmatchedRetries?: number;
+  /** default 2000. Cadence (on the injected clock) at which a whitelisted TesterPresent is sent via `transport.keepAlive`. */
+  keepAliveIntervalMs?: number;
+  /** default 5. Consecutive `send`/`nextResponse`/`keepAlive` failures (throw or rejection) before the sweep stops itself, same as `control.stopped`. Resets to 0 on any successful interface call. */
+  maxConsecutiveErrors?: number;
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 1_000;
 const DEFAULT_MAX_RESPONSE_PENDING_EXTENSIONS = 5;
+const DEFAULT_MAX_UNMATCHED_RETRIES = 3;
+const DEFAULT_KEEPALIVE_INTERVAL_MS = 2_000;
+const DEFAULT_MAX_CONSECUTIVE_ERRORS = 5;
+/** Small grace added on top of the timeout already passed to `nextResponse` itself -- this runner's OWN backstop against a transport that doesn't honor its `timeoutMs` argument, not a tuning knob. */
+const GUARD_GRACE_MS = 50;
 
-type DidOutcome =
-  | { type: 'responder'; raw: Uint8Array }
-  | { type: 'nrc'; nrc: number }
-  | { type: 'timeout' }
-  | { type: 'unmatched' };
+type DidOutcome = { type: 'responder'; raw: Uint8Array } | { type: 'nrc'; nrc: number } | { type: 'timeout' };
 
 /**
  * Drains `plan` one DID at a time (respecting `control.paused`/`control.stopped`
@@ -237,10 +275,10 @@ type DidOutcome =
 export async function runDidSweep(input: RunDidSweepInput): Promise<DidSweepAccumulator> {
   const acc = input.accumulator ?? createDidSweepAccumulator();
   const requestTimeoutMs = sanitizePositive(input.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
-  const maxResponsePendingExtensions = sanitizeNonNegativeInt(
-    input.maxResponsePendingExtensions,
-    DEFAULT_MAX_RESPONSE_PENDING_EXTENSIONS,
-  );
+  const maxExtensions = sanitizeNonNegativeInt(input.maxResponsePendingExtensions, DEFAULT_MAX_RESPONSE_PENDING_EXTENSIONS);
+  const maxUnmatchedRetries = sanitizeNonNegativeInt(input.maxUnmatchedRetries, DEFAULT_MAX_UNMATCHED_RETRIES);
+  const keepAliveIntervalMs = sanitizePositive(input.keepAliveIntervalMs, DEFAULT_KEEPALIVE_INTERVAL_MS);
+  const maxConsecutiveErrors = Math.max(1, sanitizeNonNegativeInt(input.maxConsecutiveErrors, DEFAULT_MAX_CONSECUTIVE_ERRORS));
 
   const rttMultiplier = sanitizePositive(input.pacing?.rttMultiplier, 1);
   const floorIntervalMs = sanitizeNonNegative(input.pacing?.minIntervalMs, 0);
@@ -252,9 +290,31 @@ export async function runDidSweep(input: RunDidSweepInput): Promise<DidSweepAccu
 
   let lastMeasuredRttMs: number | null = null;
   let nextRequestNotBeforeMs = input.clock.now();
+  let consecutiveErrors = 0;
+  let nextKeepAliveAtMs = input.clock.now() + keepAliveIntervalMs;
+
+  const recordCallOutcome = (ok: boolean): void => {
+    if (ok) {
+      consecutiveErrors = 0;
+    } else {
+      acc.errors += 1;
+      consecutiveErrors += 1;
+    }
+  };
+  const shouldStopForErrors = (): boolean => consecutiveErrors >= maxConsecutiveErrors;
+
+  /** Best-effort keep-alive tick -- checked both between DIDs and inside a single DID's own retry loop, so a slow multi-extension exchange still gets its keep-alives (amendment: "every 2 s"). */
+  const maybeKeepAlive = async (): Promise<void> => {
+    if (input.clock.now() < nextKeepAliveAtMs) return;
+    nextKeepAliveAtMs = input.clock.now() + keepAliveIntervalMs; // scheduled regardless of outcome -- never a tight retry loop on repeated failure.
+    const pdu = buildTesterPresentRequest();
+    assertAllowedRequest(pdu);
+    const result = await guardedCall(() => input.transport.keepAlive(pdu), requestTimeoutMs);
+    recordCallOutcome(result.ok);
+  };
 
   for (;;) {
-    if (input.control.stopped || input.control.paused) break;
+    if (input.control.stopped || input.control.paused || shouldStopForErrors()) break;
     const did = input.plan.peek();
     if (did === null) break;
 
@@ -267,8 +327,21 @@ export async function runDidSweep(input: RunDidSweepInput): Promise<DidSweepAccu
       if (input.control.stopped || input.control.paused) break;
     }
 
+    await maybeKeepAlive();
+    if (shouldStopForErrors()) break; // a keep-alive failure just tipped us over -- stop before sending anything more.
+
     const sentAtMs = input.clock.now();
-    const outcome = await resolveDid(did, input.sendRequest, requestTimeoutMs, maxResponsePendingExtensions);
+    const { outcome, unmatchedCount } = await resolveDid(
+      did,
+      input.transport,
+      input.clock,
+      requestTimeoutMs,
+      maxExtensions,
+      maxUnmatchedRetries,
+      recordCallOutcome,
+      shouldStopForErrors,
+      maybeKeepAlive,
+    );
     const rttMs = Math.max(0, input.clock.now() - sentAtMs);
 
     // The cursor advances only AFTER a result (amendment) -- never before or
@@ -276,11 +349,10 @@ export async function runDidSweep(input: RunDidSweepInput): Promise<DidSweepAccu
     // un-visited for the next resume rather than silently skipping it.
     input.plan.next();
     acc.lastDid = did;
+    acc.unmatched += unmatchedCount;
 
     if (outcome.type === 'timeout') {
       acc.timeouts += 1;
-    } else if (outcome.type === 'unmatched') {
-      acc.unmatched += 1;
     } else if (outcome.type === 'nrc') {
       acc.nrcCounts[outcome.nrc] = (acc.nrcCounts[outcome.nrc] ?? 0) + 1;
       lastMeasuredRttMs = rttMs;
@@ -300,67 +372,135 @@ export async function runDidSweep(input: RunDidSweepInput): Promise<DidSweepAccu
   return acc;
 }
 
-/** Builds the 0x22 request for `did` (whitelist-checked), sends it via `sendRequest`, and correlates the response -- extending the wait on 0x78 (same pdu, up to `maxExtensions` more calls) and resolving `'timeout'` if any single `sendRequest` call (including an extension) doesn't settle within `requestTimeoutMs`. */
+/**
+ * Builds the 0x22 request for `did` (whitelist-checked), sends it ONCE via
+ * `transport.send`, then correlates whatever `transport.nextResponse`
+ * yields -- extending on 0x78 (fresh window, no re-send) and tolerating a
+ * bounded number of unmatched replies within the remaining window. Every
+ * `transport` call is guarded: a synchronous throw, a rejection, or exceeding
+ * its own timeout all resolve the SAME way (never propagate), reported via
+ * `onCallOutcome`. `shouldStopForErrors`/`maybeKeepAlive` are re-checked
+ * between attempts so a long multi-extension exchange still respects the
+ * error budget and keep-alive cadence.
+ */
 async function resolveDid(
   did: number,
-  sendRequest: RunDidSweepInput['sendRequest'],
+  transport: SweepTransport,
+  clock: MonotonicClock,
   requestTimeoutMs: number,
   maxExtensions: number,
-): Promise<DidOutcome> {
+  maxUnmatchedRetries: number,
+  onCallOutcome: (ok: boolean) => void,
+  shouldStopForErrors: () => boolean,
+  maybeKeepAlive: () => Promise<void>,
+): Promise<{ outcome: DidOutcome; unmatchedCount: number }> {
   const pdu = buildReadDataByIdentifierRequest(did);
   assertAllowedRequest(pdu); // hard gate, re-checked even though this builder only ever emits 0x22.
 
-  for (let extension = 0; ; extension += 1) {
-    const raw = await withTimeout(sendRequest(pdu), requestTimeoutMs);
-    if (raw === 'timeout') return { type: 'timeout' };
+  const sendResult = await guardedCall(() => transport.send(pdu), requestTimeoutMs);
+  onCallOutcome(sendResult.ok);
+  if (!sendResult.ok) return { outcome: { type: 'timeout' }, unmatchedCount: 0 };
+
+  let unmatchedCount = 0;
+  let extensionsUsed = 0;
+  let windowDeadlineMs = clock.now() + requestTimeoutMs;
+
+  for (;;) {
+    if (shouldStopForErrors()) return { outcome: { type: 'timeout' }, unmatchedCount };
+    await maybeKeepAlive();
+
+    const remainingMs = Math.max(0, windowDeadlineMs - clock.now());
+    const callResult = await guardedCall(() => transport.nextResponse(remainingMs), remainingMs + GUARD_GRACE_MS);
+    onCallOutcome(callResult.ok);
+    if (!callResult.ok) return { outcome: { type: 'timeout' }, unmatchedCount };
+
+    const raw = callResult.value;
+    if (raw === 'timeout') return { outcome: { type: 'timeout' }, unmatchedCount };
 
     let parsed;
     try {
       parsed = parseUdsResponse(raw);
     } catch {
-      return { type: 'unmatched' }; // correct nothing decodable -- not an answer to this request.
+      unmatchedCount += 1;
+      if (unmatchedCount > maxUnmatchedRetries) return { outcome: { type: 'timeout' }, unmatchedCount };
+      continue; // keep awaiting within the SAME (not reset) remaining window.
     }
 
     if (parsed.kind === 'negative') {
-      if (parsed.requestSid !== 0x22) return { type: 'unmatched' };
-      if (parsed.nrc === UDS_NRC.RESPONSE_PENDING) {
-        if (extension >= maxExtensions) return { type: 'timeout' }; // extension budget exhausted -- give up.
-        continue; // extend: wait again for the SAME already-sent request.
+      if (parsed.requestSid !== 0x22) {
+        unmatchedCount += 1;
+        if (unmatchedCount > maxUnmatchedRetries) return { outcome: { type: 'timeout' }, unmatchedCount };
+        continue;
       }
-      return { type: 'nrc', nrc: parsed.nrc };
+      if (parsed.nrc === UDS_NRC.RESPONSE_PENDING) {
+        extensionsUsed += 1;
+        if (extensionsUsed > maxExtensions) return { outcome: { type: 'timeout' }, unmatchedCount };
+        windowDeadlineMs = clock.now() + requestTimeoutMs; // FRESH window -- 0x78 means "more time", not "ask again".
+        continue; // await nextResponse again WITHOUT re-sending.
+      }
+      return { outcome: { type: 'nrc', nrc: parsed.nrc }, unmatchedCount };
     }
 
     // Positive response: only 0x62 with THIS did's own echoed identifier
     // correlates -- anything else (wrong SID, wrong/missing echoed DID) is a
     // stray answer to some other request, not this one.
-    if (parsed.sid !== 0x62 || parsed.data.length < 2) return { type: 'unmatched' };
+    if (parsed.sid !== 0x62 || parsed.data.length < 2) {
+      unmatchedCount += 1;
+      if (unmatchedCount > maxUnmatchedRetries) return { outcome: { type: 'timeout' }, unmatchedCount };
+      continue;
+    }
     const echoedDid = ((parsed.data[0] ?? 0) << 8) | (parsed.data[1] ?? 0);
-    if (echoedDid !== did) return { type: 'unmatched' };
-    return { type: 'responder', raw: parsed.data.slice(2) };
+    if (echoedDid !== did) {
+      unmatchedCount += 1;
+      if (unmatchedCount > maxUnmatchedRetries) return { outcome: { type: 'timeout' }, unmatchedCount };
+      continue;
+    }
+    return { outcome: { type: 'responder', raw: parsed.data.slice(2) }, unmatchedCount };
   }
 }
 
-/** Races `promise` against `timeoutMs`, resolving `'timeout'` either way (never rejects) -- a `sendRequest` that throws is treated the same as one that never resolves. */
-function withTimeout(promise: Promise<Uint8Array | 'timeout'>, timeoutMs: number): Promise<Uint8Array | 'timeout'> {
+type GuardedCallResult<T> = { ok: true; value: T } | { ok: false };
+
+/**
+ * Invokes `fn` and normalizes EVERY failure mode -- a synchronous throw, an
+ * async rejection, or exceeding `timeoutMs` -- to the SAME `{ok: false}`
+ * shape; never itself throws or rejects. This is what makes a synchronous-
+ * throwing `SweepTransport` implementation safe to call directly (amendment:
+ * "synchronous throws from any interface call are contained").
+ */
+function guardedCall<T>(fn: () => Promise<T>, timeoutMs: number): Promise<GuardedCallResult<T>> {
   return new Promise((resolve) => {
     let settled = false;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      resolve('timeout');
-    }, timeoutMs);
-    promise.then(
+      resolve({ ok: false });
+    }, Math.max(0, timeoutMs));
+
+    let promise: Promise<T>;
+    try {
+      promise = fn();
+    } catch {
+      clearTimeout(timer);
+      if (!settled) {
+        settled = true;
+        resolve({ ok: false });
+      }
+      return;
+    }
+
+    Promise.resolve(promise).then(
       (value) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        resolve(value);
+        resolve({ ok: true, value });
       },
       () => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        resolve('timeout');
+        resolve({ ok: false });
       },
     );
   });
