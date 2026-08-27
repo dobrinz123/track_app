@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ASSUMED_GUIDED_REQ_PER_SEC,
+  computeChangingValuePrePassDurationMs,
   computeDidCandidateSummaries,
   computeGuidedPhaseDurationMs,
   DID_OBSERVATION_PHASES,
@@ -250,5 +251,31 @@ describe('computeGuidedPhaseDurationMs (binding, P4i-FIX1 F2)', () => {
     expect(computeGuidedPhaseDurationMs(300, 6_000, 0)).toBe(6_000);
     expect(computeGuidedPhaseDurationMs(300, 6_000, Number.NaN)).toBe(6_000);
     expect(computeGuidedPhaseDurationMs(300, 6_000, -5)).toBe(6_000);
+  });
+});
+
+/**
+ * R6 (P4i-FIX2, binding, after Codex P4hrev3 NEW MEDIUM "the new pre-pass
+ * countdown is materially wrong"): "real phase duration (2 rounds + gap,
+ * scaled by candidate count)."
+ */
+describe('computeChangingValuePrePassDurationMs (binding, P4i-FIX2 R6)', () => {
+  it('a single candidate: one round stays at its 2s base, doubled, plus the 2s gap -- 6s total (never the old frozen 2000ms)', () => {
+    expect(computeChangingValuePrePassDurationMs(1, 2_000, 2_000, 15)).toBe(6_000);
+  });
+
+  it('300 candidates at 15 req/s: each round grows to 20s (minSamplesPerCandidate 1) -- total 42s', () => {
+    // computeGuidedPhaseDurationMs(300, 2000, 15, 1) = ceil(300/15*1000) = 20000.
+    expect(computeChangingValuePrePassDurationMs(300, 2_000, 2_000, 15)).toBe(42_000);
+  });
+
+  it('defaults to ASSUMED_GUIDED_REQ_PER_SEC when no rate is given', () => {
+    expect(computeChangingValuePrePassDurationMs(300, 2_000, 2_000)).toBe(
+      computeChangingValuePrePassDurationMs(300, 2_000, 2_000, ASSUMED_GUIDED_REQ_PER_SEC),
+    );
+  });
+
+  it('a zero-candidate set still returns twice the (unscaled) base round plus the gap', () => {
+    expect(computeChangingValuePrePassDurationMs(0, 2_000, 2_000, 15)).toBe(6_000);
   });
 });

@@ -425,8 +425,23 @@ export function createSqlDidSweepStore(db: SqlDatabase): DidSweepStore {
     // written inside ONE `withTransactionAsync` BEGIN..COMMIT span -- a real
     // process kill mid-flush can only ever see the run's PRE-flush state or
     // its fully-updated post-flush state, never a partial checkpoint.
+    //
+    // R4 fix (P4i-FIX2, binding, after Codex P4hrev3 NEW MEDIUM "the new
+    // transactional API can create orphan responder rows"): this table has no
+    // FK (see `didSweepSchema.ts`'s own doc comment on why `did_sweep_runs`/
+    // `did_sweep_responders` stay independent `CREATE TABLE IF NOT EXISTS`
+    // statements) -- an EXPLICIT existence check, inside the SAME transaction,
+    // stands in for one: retention (`enforceRetention`) can delete a run row
+    // while an earlier flush for that exact `runId` is still queued behind a
+    // slow write (`didSweepController.ts`'s serialized `persistenceTail`);
+    // when that queued flush finally runs, it must be a complete no-op
+    // (never insert orphan responder rows for a run that no longer exists),
+    // preserving both "no-op if runId doesn't exist" and the five-run
+    // retention promise.
     async flushRunProgress(runId, responders, patch, nowUtc): Promise<void> {
       await db.withTransactionAsync(async () => {
+        const existing = await db.getAllAsync<{ run_id: string }>('SELECT run_id FROM did_sweep_runs WHERE run_id = ? LIMIT 1', [runId]);
+        if (existing.length === 0) return; // the run is gone -- writing responders now would orphan them.
         if (responders.length > 0) await upsertRespondersSql(db, runId, responders, nowUtc);
         const { sets, params } = buildProgressPatchSql(patch, nowUtc);
         if (responders.length > 0) {

@@ -777,3 +777,9 @@ range ≈ 70 min), 608 responders in 21494 DIDs, NRC 20744, timeouts 142; respon
   (0x1000–0x1FFF, 0x4000–0x4FFF are dense on this DME — EMPIRICAL, from the field export).
 - P4h-FIX1 note (2026-08-27): the accelerator PID source is NOT global state — `Elm327Config.accelPedalPidSource` ('5A' | '49') is frozen per session and passed to the codec; pedal diagnostics read `5A` / `49-normalized` / `49-raw` (raw = no valid rest offset learned; offsets ≥ 95 % are invalid; rest = speed < 1 km/h). G-force provider ownership is reference-counted in composition (`acquireGForce/releaseGForce`). Preflight owns exactly one proximity watcher, started after permission and the fix collector, stopped on blur/unmount; with no usable fix (age > 30 s or accuracy > 200 m) the distance is "unknown" and Continue is disabled (Continue-anyway allowed). `rejectCalibration()` cancels an in-flight calibration start under the lifecycle lock.
 - P4h-FIX2 note (2026-08-27): every deferred telemetry launch (public Start, pedal-fallback relaunch) runs through ONE generation-guarded continuation — a Start supersedes a fallback relaunch, never both; a session's G-force release is paired with its own acquisition (disabled/web/recovery sessions never acquire and never release); `rejectCalibration()` also cancels a `beginCalibration()` still QUEUED behind the lifecycle lock.
+
+## Vehicle-agnostic telemetry addendum (2026-08-28, binding)
+No generic module (telemetry provider, corner metrics, export, UI) may hard-code a make/model/engine or a
+brand-specific DID. Brand-specific knowledge lives only in vehicle-profile data (channel maps with provenance,
+first: Toyota Supra B58 via ENET); consumers read channel availability at runtime and degrade gracefully. Tier 0
+(GPS+IMU) must deliver the full beginner-trainer experience with no adapter at all.

@@ -11,6 +11,7 @@ import {
   binaryStringToBytes,
   bytesToBinaryString,
   classifyResponders,
+  computeChangingValuePrePassDurationMs,
   DEFAULT_ENET_DID_SCENARIO,
   encodeFrame,
   HSFZ_CONTROL,
@@ -1972,3 +1973,375 @@ describe('didSweepController: guided keep-alive continuity across the pre-pass a
     }
   });
 });
+
+/**
+ * Ticket P4i-FIX2 (Codex P4hrev3 H3 PARTIAL + 5 NEW MEDIUM). Every test below
+ * targets one of R1-R6 and FAILS against the pre-fix `didSweepController.ts`.
+ */
+describe('didSweepController: R1 -- stop()/pause() await their own terminal flush (binding, P4i-FIX2)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('stop() resolves only AFTER its own terminal flush lands -- the phase still flips to "stopped" synchronously', async () => {
+    const gated = createGatedDidSweepStore(createInMemoryDidSweepStore());
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(new Map()),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store: gated.store,
+      requestTimeoutMs: 20,
+    });
+
+    controller.start({ from: 0x0000, to: 0xffff });
+    await vi.advanceTimersByTimeAsync(30);
+    await flush();
+
+    gated.holdNextFlush(); // stop()'s own forced flush hangs until released.
+    let stopSettled = false;
+    const stopPromise = controller.stop().then(() => {
+      stopSettled = true;
+    });
+    await flush();
+
+    expect(controller.getSnapshot().phase).toBe('stopped'); // the phase flip is unchanged -- immediate.
+    expect(stopSettled).toBe(false); // but the returned promise has NOT resolved -- the checkpoint is still in flight.
+
+    gated.release();
+    await stopPromise;
+    expect(stopSettled).toBe(true); // resolves once the write genuinely lands.
+  });
+
+  it('stop() resolves immediately when there is nothing to persist (no store)', async () => {
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(new Map()),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+    controller.start({ from: 0x0000, to: 0xffff });
+    await flush();
+    await expect(controller.stop()).resolves.toBeUndefined();
+  });
+
+  it('pause() resolves only AFTER the "paused" phase\'s own terminal flush commits', async () => {
+    const gated = createGatedDidSweepStore(createInMemoryDidSweepStore());
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(new Map()),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store: gated.store,
+      requestTimeoutMs: 20,
+    });
+
+    controller.start({ from: 0x0000, to: 0xffff });
+    await vi.advanceTimersByTimeAsync(30);
+    await flush();
+
+    gated.holdNextFlush(); // pause()'s own forced flush hangs until released.
+    let pauseSettled = false;
+    const pausePromise = controller.pause().then(() => {
+      pauseSettled = true;
+    });
+    await vi.advanceTimersByTimeAsync(30); // lets the in-flight (timing-out) DID notice `control.paused`.
+    await flush();
+
+    expect(controller.getSnapshot().phase).toBe('paused'); // the phase flip is unchanged -- unblocked by the still-held flush.
+    expect(pauseSettled).toBe(false);
+
+    gated.release();
+    await pausePromise;
+    expect(pauseSettled).toBe(true);
+    controller.stop();
+    await vi.runAllTimersAsync();
+    await flush();
+  });
+
+  it('a pause() superseded by stop() before the sweep ever reaches "paused" still resolves (never hangs)', async () => {
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(new Map()),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      requestTimeoutMs: 20,
+    });
+    controller.start({ from: 0x0000, to: 0xffff });
+    await flush();
+
+    let pauseSettled = false;
+    const pausePromise = controller.pause().then(() => {
+      pauseSettled = true;
+    });
+    controller.stop(); // supersedes the pause before it is ever noticed.
+    await vi.runAllTimersAsync();
+    await flush();
+    await pausePromise;
+    expect(pauseSettled).toBe(true);
+  });
+
+  // R1's "export document discloses the accepted resume bound" test lives in
+  // `test/session/didSweepExport.test.ts` -- that file already mocks
+  // `expo-file-system`/`expo-sharing` (required to import `didSweepExport.ts`
+  // at all; this file does not, and does not need to for anything else it
+  // tests).
+});
+
+/**
+ * R3 (P4i-FIX2, binding, after Codex P4hrev3 NEW MEDIUM "queued flushes can
+ * double-count responder samples"): "Test: stalled periodic flush + forced
+ * flush -> sampleCount 1" (the ticket's own literal scenario).
+ */
+describe('didSweepController: R3 -- no double-count on a forced flush queued behind a stalled periodic one (binding, P4i-FIX2)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('the one real responder is persisted with sampleCount 1, never 2, when a forced flush is queued behind a still-in-flight periodic one', async () => {
+    const gated = createGatedDidSweepStore(createInMemoryDidSweepStore());
+    const script = new Map<number, ScriptEntry>([[0x0001, { responses: [positivePdu(0x0001, [0x50])], delayMs: 5 }]]);
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store: gated.store,
+      requestTimeoutMs: 20,
+    });
+
+    gated.holdNextFlush(); // the periodic flush (first due, ~1s in) hangs until released.
+    controller.start({ from: 0x0000, to: 0xffff }); // huge, all-timeout range -- never reaches natural completion here.
+    await vi.advanceTimersByTimeAsync(1_200); // the scripted 0x0001 answers, and the 1s batch window elapses.
+    await flush();
+    expect(gated.flushCalls).toHaveLength(1);
+    expect(gated.flushCalls[0]!.responderCount).toBe(1); // the periodic flush's own snapshot captured the one real responder.
+
+    controller.pause(); // queues a SECOND (forced) flush behind the still-held periodic one.
+    await vi.advanceTimersByTimeAsync(30);
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('paused');
+    expect(gated.flushCalls).toHaveLength(1); // the forced flush has NOT run yet -- strictly queued behind the held one.
+
+    gated.release(); // let the periodic flush settle -- the forced flush runs immediately after.
+    await vi.runAllTimersAsync();
+    await flush();
+
+    expect(gated.flushCalls).toHaveLength(2);
+    // R3 (binding): the marker already advanced at the PERIODIC flush's own
+    // snapshot time -- the forced flush's slice is therefore EMPTY. The
+    // pre-fix bug re-sliced the SAME responder a second time here.
+    expect(gated.flushCalls[1]!.responderCount).toBe(0);
+
+    const runId = controller.getCurrentRunId()!;
+    const responders = await gated.store.getResponders(runId);
+    expect(responders).toHaveLength(1);
+    expect(responders[0]!.sampleCount).toBe(1); // never double-counted.
+
+    // Release the (default, module-shared) reservation -- this test left the
+    // controller 'paused' (still holding it), which would otherwise starve
+    // later tests in this file that rely on the SAME shared singleton.
+    controller.stop();
+    await vi.runAllTimersAsync();
+    await flush();
+  });
+});
+
+/**
+ * R4 (P4i-FIX2, binding, after Codex P4hrev3 NEW MEDIUM "the new transactional
+ * API can create orphan responder rows"): covered end-to-end at the store
+ * level in `test/persistence/didSweepStore.test.ts` (`flushRunProgress`
+ * never creates orphan responder rows when the run no longer exists).
+ */
+
+/**
+ * R5 (P4i-FIX2, binding, after Codex P4hrev3 NEW MEDIUM "the continuous
+ * keep-alive ticker can produce an unhandled rejection"): "a failure ends the
+ * guided sequence with a visible error and closes/releases cleanly (no
+ * unhandled rejection). Test with a rejecting transport."
+ */
+describe('didSweepController: R5 -- a rejecting keep-alive ends the guided sequence cleanly (binding, P4i-FIX2)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a TesterPresent send that throws surfaces a visible error, ends the guided run, and releases the reservation -- no unhandled rejection', async () => {
+    const reservation = createEnetAdapterReservation();
+    const responses = Array.from({ length: 30 }, (_, i) => positivePdu(0x0001, [i % 2 === 0 ? 0x10 : 0x20]));
+    const script = new Map<number, ScriptEntry>([[0x0001, { responses, mode: 'oneFramePerSend', delayMs: 5 }]]);
+    const controller = createDidSweepController({
+      transportFactory: () => {
+        const transport = new FakeSweepTransport(script);
+        const parser = new HsfzFrameParser();
+        const realSend = transport.send.bind(transport);
+        // Every TesterPresent (0x3E) send throws -- models a disconnected
+        // ENET socket noticed only when the keep-alive ticker tries to write.
+        transport.send = (line: string) => {
+          const frames = parser.push(binaryStringToBytes(line));
+          for (const frame of frames) {
+            if (frame.control === HSFZ_CONTROL.DIAGNOSTIC_REQ_RES && (frame.payload[0] ?? 0) === 0x3e) {
+              throw new Error('keep-alive send boom (test double)');
+            }
+          }
+          realSend(line);
+        };
+        return transport;
+      },
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      reservation,
+    });
+
+    controller.start({ from: 0x0001, to: 0x0001 });
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().responders).toHaveLength(1);
+
+    controller.startGuidedObservation();
+    for (let i = 0; i < 40 && controller.getSnapshot().phase === 'observing'; i += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flush();
+    }
+
+    // Ends visibly (never hangs, never crashes the test via an unhandled
+    // rejection) -- reaches observationComplete with an error set, and the
+    // reservation is released like every other guided-sequence exit path.
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+    expect(controller.getSnapshot().error).toMatch(/keep-alive/i);
+    expect(reservation.holder()).toBeNull();
+  });
+});
+
+/**
+ * R6 (P4i-FIX2, binding, after Codex P4hrev3 NEW MEDIUM "the new pre-pass
+ * countdown is materially wrong"): real phase duration (2 rounds + gap,
+ * scaled by candidate count) and advancing elapsed/countdown.
+ */
+describe('didSweepController: R6 -- the pre-pass countdown reflects the REAL duration and advances (binding, P4i-FIX2)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('guidedPhaseDurationMs is the two-round-plus-gap total (never the old frozen 2000ms), and guidedPhaseElapsedMs advances through the gap between rounds', async () => {
+    const responses = Array.from({ length: 20 }, (_, i) => positivePdu(0x0001, [i % 2 === 0 ? 0x10 : 0x20]));
+    const script = new Map<number, ScriptEntry>([[0x0001, { responses, mode: 'oneFramePerSend', delayMs: 5 }]]);
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+
+    controller.start({ from: 0x0001, to: 0x0001 });
+    await vi.runAllTimersAsync();
+    await flush();
+
+    controller.startGuidedObservation();
+    await flush();
+    expect(controller.getSnapshot().guidedPhase).toBe('prePass');
+    // computeGuidedPhaseDurationMs(1, 2000, 15, 1) = 2000 (floor stays at the
+    // 2s base for a single candidate) -- total = 2000*2 + 2000(gap) = 6000.
+    expect(controller.getSnapshot().guidedPhaseDurationMs).toBe(6_000);
+    expect(controller.getSnapshot().guidedPhaseElapsedMs).toBe(0);
+
+    // Past the first round (~2s) -- now inside the dead gap, where the
+    // pre-fix controller never advanced elapsed time at all.
+    await vi.advanceTimersByTimeAsync(3_000);
+    await flush();
+    expect(controller.getSnapshot().guidedPhase).toBe('prePass'); // still in the pre-pass (total is 6s).
+    expect(controller.getSnapshot().guidedPhaseElapsedMs).toBeGreaterThan(2_000); // advanced past the first round, INTO the gap.
+    expect(controller.getSnapshot().guidedPhaseElapsedMs).toBeLessThan(6_000);
+
+    for (let i = 0; i < 40 && controller.getSnapshot().phase === 'observing'; i += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flush();
+    }
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+  });
+
+  it('300 candidates: guidedPhaseDurationMs during the pre-pass matches computeChangingValuePrePassDurationMs exactly', async () => {
+    const DID_COUNT = 300;
+    const dids = Array.from({ length: DID_COUNT }, (_, i) => 0x2000 + i);
+    const store = createInMemoryDidSweepStore();
+    await store.createRun({
+      runId: 'run-300',
+      adapterType: 'enet',
+      targetAddress: TARGET_ADDRESS,
+      rangeFrom: dids[0]!,
+      rangeTo: dids[dids.length - 1]!,
+      lastDid: dids[dids.length - 1]!,
+      startedAtUtc: '2026-08-27T18:00:00.000Z',
+      updatedAtUtc: '2026-08-27T18:00:00.000Z',
+      status: 'stopped',
+      visitedCount: DID_COUNT,
+      timeoutCount: 0,
+      unmatchedCount: 0,
+      errorCount: 0,
+      nrcCounts: {},
+    });
+    await store.upsertResponders(
+      'run-300',
+      dids.map((did) => ({ did, raw: Uint8Array.from([did % 2 === 0 ? 0x10 : 0x20]), rttMs: 65 })),
+      '2026-08-27T18:00:05.000Z',
+    );
+    const script = new Map<number, ScriptEntry>(
+      dids.map((did) => [
+        did,
+        { responses: Array.from({ length: 8 }, (_, k) => positivePdu(did, [k % 2 === 0 ? 0x10 : 0x20])), mode: 'oneFramePerSend' as const, delayMs: 20 },
+      ]),
+    );
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store,
+    });
+
+    await controller.resumePersistedRun('run-300');
+    await vi.runAllTimersAsync();
+    await flush();
+
+    controller.startGuidedObservation();
+    await flush();
+    expect(controller.getSnapshot().guidedPhase).toBe('prePass');
+    // Each round: computeGuidedPhaseDurationMs(300, 2000, 15, 1) = ceil(300/15*1000) = 20000; total = 20000*2 + 2000 = 42000.
+    expect(controller.getSnapshot().guidedPhaseDurationMs).toBe(computeChangingValuePrePassDurationMs(300, 2_000, 2_000));
+    expect(controller.getSnapshot().guidedPhaseDurationMs).toBe(42_000);
+
+    for (let i = 0; i < 60 && controller.getSnapshot().guidedPhase === 'prePass'; i += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flush();
+    }
+    expect(controller.getSnapshot().guidedPhase).toBe('baseline'); // the pre-pass finished on schedule.
+
+    controller.stopGuidedObservationEarly();
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+  }, 20_000);
+});
+
+/**
+ * R2 (P4i-FIX2, binding, after Codex P4hrev3 NEW MEDIUM "guided export samples
+ * leak across runs"): "Test: run A guided -> run B shared without guided ->
+ * empty series" (the ticket's own literal scenario) -- moved to
+ * `test/session/didSweepExport.test.ts` (needs `buildDidSweepExportForRun`,
+ * which requires that file's `expo-file-system`/`expo-sharing` mocks; this
+ * file imports neither). `getGuidedSamples()` itself resetting across a
+ * fresh `start()` is still exercised directly wherever else it matters in
+ * this file's own guided-observation tests above.
+ */

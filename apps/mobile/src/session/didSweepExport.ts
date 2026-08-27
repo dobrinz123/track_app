@@ -28,6 +28,19 @@ import type { DidSweepController } from './didSweepController';
 
 export const DID_SWEEP_EXPORT_SCHEMA_VERSION = 1;
 
+/**
+ * R1 fix (P4i-FIX2, binding, after Codex P4hrev3 H3 PARTIAL): Stop/Pause/
+ * natural completion all AWAIT their own terminal persistence flush (see
+ * `didSweepController.ts`'s `maybeFlushPersistence`/`stop()`/`pause()`) --
+ * but a batch window of AT MOST `FLUSH_INTERVAL_MS` (1s) of already-visited
+ * DIDs can still be re-sent if the process is killed OUTSIDE of a normal
+ * Stop/Pause (e.g. the OS kills the app between two periodic flushes). This
+ * residual is ACCEPTED (never eliminated -- doing so would mean flushing
+ * after every single DID, which the addendum's own batching exists to avoid)
+ * and disclosed here, in the export itself, rather than left implicit.
+ */
+export const DID_SWEEP_RESUME_BOUND = '≤1s of DIDs may be re-sent after a hard kill';
+
 export interface DidSweepExportResponder {
   didHex: string;
   length: number;
@@ -70,6 +83,8 @@ export interface DidSweepExportSuggestion {
 export interface DidSweepExportDocument {
   schemaVersion: number;
   generatedAtUtc: string;
+  /** R1 fix (P4i-FIX2, binding): see {@link DID_SWEEP_RESUME_BOUND}'s own doc comment -- the accepted residual re-send window after a hard kill, disclosed to whoever reads this export. */
+  resumeBound: string;
   run: {
     runId: string;
     adapterType: string;
@@ -128,6 +143,7 @@ export function buildDidSweepExportDocument(input: {
   return {
     schemaVersion: DID_SWEEP_EXPORT_SCHEMA_VERSION,
     generatedAtUtc: input.nowIso,
+    resumeBound: DID_SWEEP_RESUME_BOUND,
     run: {
       runId: input.run.runId,
       adapterType: input.run.adapterType,

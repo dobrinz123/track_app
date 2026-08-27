@@ -1,0 +1,2 @@
+# Review ticket P4h-REV3 / P4i-REV2 — Codex read-only bounded re-verify
+Commit ccb2cfc (diff vs 74a21e9). Read-only; do not run tests. Re-verify ONLY the 11 findings of the final "Cross-review result" section in `.foreman/scratch/p4hrev2c-codex-output.log` (5 HIGH + 6 MEDIUM): for each, FIXED / PARTIAL / NOT FIXED with file:line evidence and a concrete failure scenario for anything not FIXED. Then list any NEW defect introduced by the fix diff only (no re-review of unchanged code). Output sections: Table, NEW (HIGH/MEDIUM), Clean.

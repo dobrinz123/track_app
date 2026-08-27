@@ -91,3 +91,17 @@ by session id + monotonic time. Do not invent a second storage.
 - Ledger: `.foreman/ledger.md` "Phase 4e" section onward.
 - Telemetry contracts: `docs/architecture/contracts.md` Telemetry addendum (+ ENET addendum once
   P4e lands). Memory: `user-car-and-obd`, `phase4-obd-telemetry`.
+
+## Scope clarification (user, 2026-08-28)
+The goal is NOT MotorPark-only: corner analysis and the LLM car-limit analysis must work for **every circuit in the catalog** — today Transilvania Motor Ring (`transilvania-motor-ring`, field-validated geometry) and MotorPark România (`motorpark-romania`, OSM geometry, field-unvalidated). Everything in Phase 5 keys on `selectedCircuitId` + the catalog entry's corners; no circuit id may be hard-coded, fixtures/tests must cover both circuits, and the car-envelope model is per car (shared across circuits), while corner metrics/references are per circuit+layout.
+
+## Product constraint: not a Supra app (user, 2026-08-28)
+The product target is an **AI circuit trainer for beginners on any car**. Three data tiers, each useful alone:
+tier 0 phone-only (GPS + IMU: laps, delta, G, inferred braking points, min corner speed, consistency — most of
+the coaching value); tier 1 any ELM327 (standard mode-01: rpm, throttle, pedal, temps); tier 2 brand-specific
+(ENET/UDS DIDs: brake, steering — the Supra B58 is the FIRST vehicle profile, not the foundation).
+Rules: (1) a **vehicle-profile registry** (like the circuit catalog): `{make, model, engine, transport, channel map
+with provenance}` as data files, never constants in generic code; the DID sweep + guided observation are the tool
+for adding cars. (2) Corner analysis / LLM export consume **channels** (respect `unsupportedChannels`) and degrade
+gracefully (no OBD brake → IMU deceleration). (3) The car envelope is **learned from the car's own sessions**
+(max lateral G, braking G, acceleration), never from spec sheets — works for any car.

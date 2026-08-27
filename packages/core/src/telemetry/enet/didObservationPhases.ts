@@ -214,3 +214,26 @@ export function computeGuidedPhaseDurationMs(
   const neededMs = Math.ceil((minSamplesPerCandidate * candidateCount) / assumedReqPerSec * 1_000);
   return Math.max(baseDurationMs, neededMs);
 }
+
+/**
+ * R6 fix (P4i-FIX2, binding, after Codex P4hrev3-REV3 NEW MEDIUM "the new
+ * pre-pass countdown is materially wrong"): the two-sample changing-value
+ * pre-pass' own REAL total duration -- one round's duration (via
+ * {@link computeGuidedPhaseDurationMs} with `minSamplesPerCandidate: 1`,
+ * matching how the controller actually sizes each of its two rounds) counted
+ * TWICE, plus the fixed gap between them. The pre-fix controller advertised a
+ * frozen `2000`ms regardless of candidate count/round duration and never
+ * advanced elapsed time at all -- even a single candidate's ~6s pre-pass
+ * showed a stuck "2s" countdown; a large candidate set could stay there far
+ * longer. Pure/deterministic so the controller's own snapshot (and the core
+ * test below) can assert on the exact total the UI countdown must reflect.
+ */
+export function computeChangingValuePrePassDurationMs(
+  candidateCount: number,
+  roundBaseDurationMs: number,
+  gapMs: number,
+  assumedReqPerSec: number = ASSUMED_GUIDED_REQ_PER_SEC,
+): number {
+  const roundDurationMs = computeGuidedPhaseDurationMs(candidateCount, roundBaseDurationMs, assumedReqPerSec, 1);
+  return roundDurationMs * 2 + gapMs;
+}

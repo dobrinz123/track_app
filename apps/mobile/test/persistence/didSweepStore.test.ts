@@ -197,6 +197,27 @@ describe.each([
     expect(await store.getRun('nope')).toBeNull();
   });
 
+  /**
+   * R4 (P4i-FIX2, binding, after Codex P4hrev3 NEW MEDIUM "the new
+   * transactional API can create orphan responder rows"): "retention delete +
+   * late flush -> no-op" (the ticket's own literal scenario) -- a queued
+   * flush for a `runId` that retention already deleted must never insert
+   * responder rows for a run that no longer exists.
+   */
+  it('flushRunProgress never creates orphan responder rows for a run deleted while the flush was queued (R4, binding)', async () => {
+    const store: DidSweepStore = await makeStore();
+    await store.createRun(freshRun());
+    await store.deleteRun('run-1'); // simulates retention deleting the run while an earlier-queued flush for it was still in flight.
+    await store.flushRunProgress(
+      'run-1',
+      [{ did: 0x2000, raw: Uint8Array.from([0x55]), rttMs: 5 }],
+      { status: 'stopped', lastDid: 0x2000 },
+      '2026-08-27T18:00:05.000Z',
+    );
+    expect(await store.getRun('run-1')).toBeNull();
+    expect(await store.getResponders('run-1')).toEqual([]); // never an orphan responder row.
+  });
+
   it('enforceRetention(5) keeps only the 5 most-recently-updated runs, deleting the rest (and their responders)', async () => {
     const store: DidSweepStore = await makeStore();
     for (let i = 0; i < 7; i += 1) {

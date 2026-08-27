@@ -52,6 +52,7 @@ import {
   binaryStringToBytes,
   buildTesterPresentRequest,
   classifyResponders,
+  computeChangingValuePrePassDurationMs,
   computeDidCandidateSummaries,
   computeGuidedPhaseDurationMs,
   createDidSweepAccumulator,
@@ -336,12 +337,37 @@ export interface DidSweepController {
   getSnapshot(): DidSweepSnapshot;
   /** Refused (no generation bump, no acquire attempt even) unless idle/complete -- see this module's own doc comment (H1). Acquires the reservation, THEN opens a fresh transport. */
   start(range?: { from?: number; to?: number; priorityRanges?: readonly DidSweepRange[] }): void;
-  /** Stops calling `next()` at the next DID boundary -- phase becomes 'paused'. The transport/reservation are NOT touched -- `resume()`/`startObservation()` reuse them. */
-  pause(): void;
+  /**
+   * Stops calling `next()` at the next DID boundary -- phase becomes 'paused'
+   * (as soon as the in-flight request notices, same as before). The
+   * transport/reservation are NOT touched -- `resume()`/`startObservation()`
+   * reuse them.
+   *
+   * R1 fix (P4i-FIX2, binding, after Codex P4hrev3 H3 PARTIAL): returns a
+   * `Promise` that resolves only once THIS pause's own terminal persistence
+   * checkpoint has actually committed (or immediately, if there is nothing to
+   * persist, or the sweep never reaches 'paused' at all -- e.g. a `stop()`
+   * supersedes it first) -- callers that want to know "it's safe now" (the
+   * screen shows "Saving…" meanwhile) can `await` it; the phase itself still
+   * flips to `'paused'` at the same moment it always did (unchanged for
+   * every existing caller that never awaits this).
+   */
+  pause(): Promise<void>;
   /** Resumes a paused sweep on the SAME transport/reservation/accumulator (no reconnect, no re-acquire, no lost results). */
   resume(): void;
-  /** Stops the sweep (or observation) permanently: closes the transport, THEN releases the reservation (H1/H2, binding, strictly in that order, on every path). Idempotent. */
-  stop(): void;
+  /**
+   * Stops the sweep (or observation) permanently: closes the transport, THEN
+   * releases the reservation (H1/H2, binding, strictly in that order, on
+   * every path). Idempotent.
+   *
+   * R1 fix (P4i-FIX2, binding, after Codex P4hrev3 H3 PARTIAL): returns a
+   * `Promise` that resolves once this stop's own terminal persistence
+   * checkpoint has committed (or immediately if there is nothing to persist).
+   * The phase flips to `'stopped'` synchronously, exactly as before --
+   * awaiting this is for callers that need the write itself to be durable
+   * (e.g. before navigating away) and want to show "Saving…" until then.
+   */
+  stop(): Promise<void>;
   /** Starts the observation phase over the responders found so far. From `'paused'`, reuses the held claim/open transport (M2, binding) -- no second acquire, no reconnect. From a terminal state (sweepComplete/stopped/observationComplete), acquires and connects fresh, exactly like `start()`. No-op if there are no responders. */
   startObservation(windowMs?: number): void;
   /** Ends the observation phase early and computes suggestions from whatever was sampled so far. */
@@ -451,7 +477,20 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
   // caller/test that doesn't pass one keeps working byte-identically.
   // -------------------------------------------------------------------
   const RETENTION_RUNS = deps.retentionRuns ?? 5;
-  /** F1 fix (P4i-FIX1, binding, after Codex P4hrev2c): "batch window ≤ 1 s" (was 2s). */
+  /**
+   * F1 fix (P4i-FIX1, binding, after Codex P4hrev2c): "batch window ≤ 1 s" (was 2s).
+   * R1 fix (P4i-FIX2, binding, after Codex P4hrev3 H3 PARTIAL): this batch
+   * window is the ACCEPTED residual noted on the export document itself (see
+   * `didSweepExport.ts`'s `DID_SWEEP_RESUME_BOUND`) -- a real, unattended
+   * process kill (never touching `stop()`/`pause()` at all) can still lose up
+   * to one interval's worth of already-visited DIDs, which are simply
+   * re-swept on resume (harmless: idempotent DID handling, upsert semantics).
+   * What is NOT accepted, and what `stop()`/`pause()` now fix: THEIR OWN
+   * terminal flush being merely enqueued rather than awaited, which could
+   * otherwise leave an explicit Stop/Pause's own checkpoint uncommitted
+   * indefinitely (not bounded by this interval at all) if the app happened to
+   * be killed right after the tap.
+   */
   const FLUSH_INTERVAL_MS = 1_000;
   const FLUSH_RESPONDER_COUNT = 50;
   let currentRunId: string | null = null;
@@ -469,6 +508,21 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
   let persistenceTail: Promise<void> = Promise.resolve();
   /** True while a NON-forced flush is queued/running -- coalesces rapid `onProgress` ticks into whatever is already pending instead of piling up redundant work. A forced flush is NEVER gated by this (always chained). */
   let periodicFlushQueued = false;
+  /**
+   * R1 fix (P4i-FIX2, binding): resolvers for every outstanding public
+   * `pause()` call, waiting on the sweep loop noticing `control.paused` and
+   * `finishSweepRun`'s own 'paused' branch committing its terminal flush.
+   * Resolved (never rejected) either there, or immediately by `stop()` if it
+   * supersedes the pause before the loop ever reaches it -- a `pause()` call
+   * must never hang forever just because the sweep was stopped instead.
+   */
+  let pendingPauseResolvers: Array<() => void> = [];
+
+  function settlePendingPauses(): void {
+    const resolvers = pendingPauseResolvers;
+    pendingPauseResolvers = [];
+    for (const resolve of resolvers) resolve();
+  }
 
   function nowIso(): string {
     return new Date().toISOString();
@@ -496,16 +550,36 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
    * redundant work, but still queues immediately once that one settles if
    * another became due in the meantime -- the LAST persisted state is never
    * more than one flush interval stale.
+   *
+   * R1 fix (P4i-FIX2, binding): returns the QUEUED flush's own `Promise` (or
+   * an already-resolved one when nothing is due/persistence is disabled) so
+   * `stop()`/`pause()`/`finishSweepRun`/`finishObservation` can await their
+   * OWN terminal checkpoint landing, instead of firing-and-forgetting it.
+   *
+   * R3 fix (P4i-FIX2, binding, after Codex P4hrev3 NEW MEDIUM "queued flushes
+   * can double-count responder samples"): `lastPersistedResponderIndex`
+   * advances HERE, synchronously, at SNAPSHOT time -- not after the write
+   * settles. The pre-fix bug: a forced flush queued WHILE an earlier
+   * (periodic) flush's write was still in flight re-sliced
+   * `accumulator.responders` from the SAME stale index (since the earlier
+   * flush hadn't advanced it yet), re-sending the identical responder(s) a
+   * second time (`sample_count` incremented again). Advancing the marker
+   * immediately means ANY later flush call -- forced or not, however many are
+   * still in-flight -- always slices from AFTER what this one already
+   * claimed. If the write later fails, the marker is rolled back (never
+   * advanced past where it would have been had this flush never been
+   * attempted), so a genuinely failed write does not silently drop responders
+   * from the next retry.
    */
-  function maybeFlushPersistence(force: boolean, status: DidSweepRunStatus): void {
-    if (deps.store === undefined || currentRunId === null || accumulator === null) return;
+  function maybeFlushPersistence(force: boolean, status: DidSweepRunStatus): Promise<void> {
+    if (deps.store === undefined || currentRunId === null || accumulator === null) return Promise.resolve();
     const now = deps.clock.now();
     const newResponders = accumulator.responders.slice(lastPersistedResponderIndex);
     const dueByTime = now - lastFlushAtMs >= FLUSH_INTERVAL_MS;
     const dueByCount = newResponders.length >= FLUSH_RESPONDER_COUNT;
-    if (!force && !dueByTime && !dueByCount) return;
+    if (!force && !dueByTime && !dueByCount) return Promise.resolve();
     if (!force) {
-      if (periodicFlushQueued) return; // already one queued/running -- it (or the next due tick after it) will catch up.
+      if (periodicFlushQueued) return persistenceTail; // already one queued/running -- it (or the next due tick after it) will catch up.
       periodicFlushQueued = true;
     }
 
@@ -515,8 +589,12 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
     // every one of those).
     const store = deps.store;
     const runId = currentRunId;
+    const previousPersistedResponderIndex = lastPersistedResponderIndex;
     const flushedThroughIndex = accumulator.responders.length;
     const respondersToWrite = newResponders.map((r) => ({ did: r.did, raw: r.raw, rttMs: r.rttMs }));
+    // R3 fix (binding): advance NOW, before the write even starts -- see this
+    // function's own doc comment.
+    if (respondersToWrite.length > 0) lastPersistedResponderIndex = flushedThroughIndex;
     const patch: DidSweepRunProgressPatch = {
       status,
       lastDid: accumulator.lastDid,
@@ -536,21 +614,25 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
         // both to ITS OWN state, which this (now-stale) flush must never
         // overwrite (the exact REV finding: "a quick new Start ... lets that
         // old flush ... overwrite lastPersistedResponderIndex").
-        if (currentRunId === runId) {
-          if (respondersToWrite.length > 0) lastPersistedResponderIndex = Math.max(lastPersistedResponderIndex, flushedThroughIndex);
-          lastFlushAtMs = deps.clock.now();
-        }
+        if (currentRunId === runId) lastFlushAtMs = deps.clock.now();
       } catch {
         // Best-effort (mirrors `SqlSettingsStore.persist()`'s own discipline)
-        // -- a failed write never affects the LIVE sweep; the next due tick
-        // retries from wherever `lastPersistedResponderIndex` still is.
+        // -- a failed write never affects the LIVE sweep. R3 fix (binding):
+        // roll the marker back to what it was before THIS flush's snapshot,
+        // so the failed slice is retried by the next due flush rather than
+        // silently skipped -- but only if nothing else has moved it further
+        // still (still the SAME run, and no later flush already advanced
+        // past this rollback target).
+        if (currentRunId === runId) lastPersistedResponderIndex = Math.min(lastPersistedResponderIndex, previousPersistedResponderIndex);
       } finally {
         if (!force) periodicFlushQueued = false;
       }
     };
     // Queued, never dropped: chained after whatever is currently in flight,
     // regardless of that prior flush's own outcome.
-    persistenceTail = persistenceTail.then(runOneFlush, runOneFlush);
+    const chained = persistenceTail.then(runOneFlush, runOneFlush);
+    persistenceTail = chained;
+    return chained;
   }
 
   function generateRunId(): string {
@@ -705,19 +787,32 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
    * with the generation re-checked AFTER teardown (REV3, binding), so a
    * `stop()` that raced in while THIS close was still settling (and already
    * emitted its own `'stopped'`+released) is never overwritten here.
+   *
+   * R1 fix (P4i-FIX2, binding): the phase transition itself still emits
+   * SYNCHRONOUSLY, at the exact same point it always did (existing callers
+   * that read the snapshot right after a bounded timer advance are
+   * unaffected) -- but this function's OWN completion now additionally
+   * awaits that terminal flush landing before it returns, and (for the
+   * 'paused' branch) resolves any outstanding public `pause()` promise only
+   * once it has. "Complete must await the terminal flush" (binding): a
+   * natural completion's own async chain is not considered done until the
+   * checkpoint commits, even though the visible phase already flipped.
    */
   async function finishSweepRun(myGeneration: number, outcome: SweepOutcome): Promise<void> {
     if (myGeneration !== generation) return; // stop() already handled teardown/release.
     if (outcome === 'paused') {
-      maybeFlushPersistence(true, 'paused');
+      const flushPromise = maybeFlushPersistence(true, 'paused');
       emit({ phase: 'paused' });
+      await flushPromise;
+      settlePendingPauses();
       return; // transport/reservation stay held -- resume() continues on the SAME channel.
     }
     await teardownActiveTransport();
     if (myGeneration !== generation) return; // stop() raced in while close was settling -- it owns the final phase.
-    maybeFlushPersistence(true, outcome === 'complete' ? 'complete' : 'stopped');
+    const flushPromise = maybeFlushPersistence(true, outcome === 'complete' ? 'complete' : 'stopped');
     emit({ phase: outcome === 'complete' ? 'sweepComplete' : 'stopped' });
     releaseReservation();
+    await flushPromise;
   }
 
   /**
@@ -835,6 +930,24 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
 
   /** Accumulates every phase's samples for the CURRENT guided run -- reset at the start of `runGuidedObservationOnChannel`, read by `computeDidCandidateSummaries` both live (after each sample) and at the end. NEVER includes the pre-pass' own two reads (see `runChangingValuePrePass`) -- only `DID_OBSERVATION_PHASES`-tagged samples (F3: exactly what `getGuidedSamples()` hands the export builder). */
   let guidedSamples: DidPhaseSample[] = [];
+  /**
+   * R2 fix (P4i-FIX2, binding, after Codex P4hrev3 NEW MEDIUM "guided export
+   * samples leak across runs"): the `currentRunId` (or `null` if persistence
+   * is disabled) `guidedSamples` above ACTUALLY belongs to. Reset alongside
+   * `guidedSamples` every time it is cleared (a fresh `start()`, a resumed
+   * run, or a NEW guided run) -- `getGuidedSamples()` returns `[]` whenever
+   * this no longer matches `currentRunId`, so a run that never ran its own
+   * guided observation can never surface a PRIOR run's series in its export
+   * (the exact scenario: run A completes guided observation; run B is
+   * started and shared without running guided observation -- run B's export
+   * must show an EMPTY series, never run A's).
+   */
+  let guidedSamplesRunId: string | null = null;
+
+  function resetGuidedSamples(): void {
+    guidedSamples = [];
+    guidedSamplesRunId = currentRunId;
+  }
 
   // -------------------------------------------------------------------
   // F4 fix (P4i-FIX1, binding, after Codex P4hrev2c MEDIUM finding): "one
@@ -854,17 +967,43 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
   const GUIDED_KEEPALIVE_INTERVAL_MS = 1_500;
   let guidedKeepAliveTimer: ReturnType<typeof setInterval> | null = null;
 
-  function startGuidedKeepAliveTicker(channel: SweepTransport): void {
+  /**
+   * R5 fix (P4i-FIX2, binding, after Codex P4hrev3 NEW MEDIUM "the continuous
+   * keep-alive ticker can produce an unhandled rejection"): `channel.keepAlive`
+   * is ASYNC -- a synchronous `try/catch` around a bare (fire-and-forget)
+   * `void channel.keepAlive(pdu)` call can never contain a REJECTION (only a
+   * synchronous throw, which `keepAlive` never does per the sweep transport
+   * contract), so a transport send failure became an unhandled rejection.
+   * Wrapping the call itself in `Promise.resolve().then(...)` normalizes BOTH
+   * a synchronous throw and an async rejection into the SAME rejected
+   * promise, which `.catch(onGuidedKeepAliveFailure)` below always contains.
+   */
+  function sendGuidedKeepAlive(channel: SweepTransport): Promise<void> {
+    return Promise.resolve().then(() => {
+      const pdu = buildTesterPresentRequest();
+      assertAllowedRequest(pdu);
+      return channel.keepAlive(pdu);
+    });
+  }
+
+  /**
+   * R5 fix (binding): a keep-alive failure is NOT swallowed -- it ends the
+   * guided sequence with a VISIBLE error (the ticket's own wording) and lets
+   * the already-running `runDidObservation` call notice `observationControl.stopped`
+   * at its own next boundary, which reaches `runGuidedObservationOnChannel`'s
+   * normal close-then-release tail (same discipline as `stopGuidedObservationEarly()`)
+   * -- never a second, ad-hoc teardown path here.
+   */
+  function onGuidedKeepAliveFailure(myGeneration: number, error: unknown): void {
+    if (myGeneration !== generation) return; // already superseded (a full stop()) -- that call owns teardown/release/the final phase.
+    observationControl.stopped = true;
+    emit({ error: `DID sweep keep-alive failed -- ending the guided observation: ${error instanceof Error ? error.message : String(error)}` });
+  }
+
+  function startGuidedKeepAliveTicker(myGeneration: number, channel: SweepTransport): void {
     stopGuidedKeepAliveTicker();
     guidedKeepAliveTimer = setInterval(() => {
-      try {
-        const pdu = buildTesterPresentRequest();
-        assertAllowedRequest(pdu);
-        void channel.keepAlive(pdu);
-      } catch {
-        // Best-effort -- core's own per-call ticker is still the
-        // authoritative keep-alive; a failure here never affects the sequence.
-      }
+      void sendGuidedKeepAlive(channel).catch((error) => onGuidedKeepAliveFailure(myGeneration, error));
     }, GUIDED_KEEPALIVE_INTERVAL_MS);
   }
 
@@ -881,8 +1020,21 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
    * with `minSamplesPerCandidate: 1`), returning the LAST correlated sample
    * per DID (a DID that never answered within the pass is simply absent from
    * the returned map).
+   *
+   * R6 fix (P4i-FIX2, binding, after Codex P4hrev3 NEW MEDIUM "the new
+   * pre-pass countdown is materially wrong"): `baseElapsedMs` shifts every
+   * `onSample` tick's own relative `tMs` (which restarts at 0 for THIS round)
+   * into the pre-pass' OVERALL elapsed time -- 0 for the first round, this
+   * round's own duration + the gap for the second -- so the snapshot's
+   * `guidedPhaseElapsedMs` genuinely advances across the WHOLE pre-pass
+   * (round -> gap -> round), never staying frozen.
    */
-  async function sampleOnceRoundRobin(myGeneration: number, channel: SweepTransport, dids: readonly number[]): Promise<Map<number, Uint8Array>> {
+  async function sampleOnceRoundRobin(
+    myGeneration: number,
+    channel: SweepTransport,
+    dids: readonly number[],
+    baseElapsedMs: number,
+  ): Promise<Map<number, Uint8Array>> {
     const samples = new Map<number, Uint8Array>();
     if (dids.length === 0) return samples;
     const durationMs = computeGuidedPhaseDurationMs(dids.length, PRE_PASS_ROUND_BASE_MS, undefined, 1);
@@ -895,8 +1047,10 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       control: observationControl,
       requestTimeoutMs: deps.requestTimeoutMs,
       maxResponsePendingExtensions: deps.maxResponsePendingExtensions,
-      onSample: (did, raw) => {
-        if (myGeneration === generation) samples.set(did, raw);
+      onSample: (did, raw, tMs) => {
+        if (myGeneration !== generation) return;
+        samples.set(did, raw);
+        emit({ guidedPhaseElapsedMs: baseElapsedMs + tMs });
       },
     });
     return samples;
@@ -905,6 +1059,32 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
   const PRE_PASS_ROUND_BASE_MS = 2_000;
   /** "each candidate read twice ~2s apart" (addendum). */
   const PRE_PASS_GAP_MS = 2_000;
+  /** R6 fix (binding): how often the gap-wait ticks `guidedPhaseElapsedMs` forward -- fine enough that a 1s-stepped fake-timer test still observes intermediate progress. */
+  const PRE_PASS_GAP_TICK_MS = 250;
+
+  /**
+   * R6 fix (P4i-FIX2, binding): advances `guidedPhaseElapsedMs` (relative to
+   * the pre-pass' own start, via `baseElapsedMs`) through the dead gap
+   * between the two rounds -- there are no samples during this wait, so
+   * nothing else would otherwise move the countdown forward. Waits the FULL
+   * `durationMs` regardless of `stop()`/`stopGuidedObservationEarly()` (same
+   * discipline the pre-fix `waitMs` already had here -- both flags are
+   * re-checked by the CALLER immediately after this resolves); bounded
+   * (`PRE_PASS_GAP_MS`, 2s), so this never hangs.
+   */
+  function waitWithElapsedTicking(myGeneration: number, baseElapsedMs: number, durationMs: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const startedAtMs = deps.clock.now();
+      const timer = setInterval(() => {
+        const elapsedInGap = Math.min(durationMs, deps.clock.now() - startedAtMs);
+        if (myGeneration === generation) emit({ guidedPhaseElapsedMs: baseElapsedMs + elapsedInGap });
+        if (elapsedInGap >= durationMs) {
+          clearInterval(timer);
+          resolve();
+        }
+      }, PRE_PASS_GAP_TICK_MS);
+    });
+  }
 
   /**
    * F2 fix (P4i-FIX1, binding): "integrate the binding two-sample changing-
@@ -914,15 +1094,25 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
    * now with a production caller)." A DID that never answered in EITHER round
    * (no pair to compare) is simply excluded -- still kept in the full export
    * (the responders table), just never fed to the guided phases.
+   *
+   * R6 fix (P4i-FIX2, binding): the emitted `guidedPhaseDurationMs` is now the
+   * REAL total window -- one round's own (candidate-count-scaled) duration
+   * counted twice, plus the fixed gap (`computeChangingValuePrePassDurationMs`,
+   * the SAME formula `sampleOnceRoundRobin` itself sizes each round with) --
+   * never the old fixed `2000`ms regardless of how long the pre-pass actually
+   * runs. `guidedPhaseElapsedMs` now advances continuously across BOTH rounds
+   * and the gap between them, matching that total.
    */
   async function runChangingValuePrePass(myGeneration: number, channel: SweepTransport, candidateDids: readonly number[]): Promise<number[]> {
     if (candidateDids.length === 0) return [];
-    emit({ guidedPhase: 'prePass', guidedPhaseElapsedMs: 0, guidedPhaseDurationMs: PRE_PASS_ROUND_BASE_MS });
-    const firstRound = await sampleOnceRoundRobin(myGeneration, channel, candidateDids);
+    const roundDurationMs = computeGuidedPhaseDurationMs(candidateDids.length, PRE_PASS_ROUND_BASE_MS, undefined, 1);
+    const totalDurationMs = computeChangingValuePrePassDurationMs(candidateDids.length, PRE_PASS_ROUND_BASE_MS, PRE_PASS_GAP_MS);
+    emit({ guidedPhase: 'prePass', guidedPhaseElapsedMs: 0, guidedPhaseDurationMs: totalDurationMs });
+    const firstRound = await sampleOnceRoundRobin(myGeneration, channel, candidateDids, 0);
     if (myGeneration !== generation || observationControl.stopped) return [...candidateDids];
-    await waitMs(PRE_PASS_GAP_MS);
+    await waitWithElapsedTicking(myGeneration, roundDurationMs, PRE_PASS_GAP_MS);
     if (myGeneration !== generation || observationControl.stopped) return [...candidateDids];
-    const secondRound = await sampleOnceRoundRobin(myGeneration, channel, candidateDids);
+    const secondRound = await sampleOnceRoundRobin(myGeneration, channel, candidateDids, roundDurationMs + PRE_PASS_GAP_MS);
 
     const pairs: DidChangeSamplePair[] = [];
     for (const did of candidateDids) {
@@ -987,7 +1177,7 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
    * from the first DID, so ... only the same first ~95 DIDs are sampled").
    */
   async function runGuidedObservationOnChannel(myGeneration: number, channel: SweepTransport): Promise<void> {
-    guidedSamples = [];
+    resetGuidedSamples();
     const changingDids = await runChangingValuePrePass(myGeneration, channel, observationResponderDids);
     if (myGeneration === generation) observationResponderDids = changingDids;
     let responderOrder = changingDids;
@@ -1015,7 +1205,7 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       if (myGeneration !== generation) return;
       const channel = createRawUdsChannel(transport, deps.testerAddress, deps.targetAddress);
       activeChannel = channel;
-      startGuidedKeepAliveTicker(channel);
+      startGuidedKeepAliveTicker(myGeneration, channel);
       try {
         await runGuidedObservationOnChannel(myGeneration, channel);
       } finally {
@@ -1099,13 +1289,25 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       } else {
         currentRunId = null;
       }
+      // R2 fix (P4i-FIX2, binding): "guidedSamples cleared on every fresh
+      // sweep start / resume, keyed by runId" -- a fresh `start()` never
+      // inherits a PRIOR run's guided observation series.
+      resetGuidedSamples();
       emit({ ...INITIAL_SNAPSHOT, error: null, phase: 'sweeping' });
       void openTransportAndSweep(myGeneration);
     },
 
-    pause(): void {
-      if (snapshot.phase !== 'sweeping') return;
+    pause(): Promise<void> {
+      // R1 fix (P4i-FIX2, binding): `control.paused` is still flipped
+      // synchronously (the request loop notices it at its own next boundary,
+      // exactly as before) -- the returned promise resolves once
+      // `finishSweepRun`'s 'paused' branch actually reaches (and commits) its
+      // own terminal flush, or immediately if pausing never applies here.
+      if (snapshot.phase !== 'sweeping') return Promise.resolve();
       control.paused = true;
+      return new Promise<void>((resolve) => {
+        pendingPauseResolvers.push(resolve);
+      });
     },
 
     resume(): void {
@@ -1120,7 +1322,7 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       });
     },
 
-    stop(): void {
+    stop(): Promise<void> {
       // F7 fix (P4i-FIX1, binding, after Codex P4hrev2c): "stop() is a no-op
       // on completed; status transitions are monotone" -- a no-op on ANY
       // terminal/idle state (`canStart`'s own set: idle/sweepComplete/stopped/
@@ -1131,11 +1333,19 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       // synthetic 'stopped' over an already-`'complete'` run (e.g. from the
       // screen's unmount cleanup firing after a natural completion) would
       // violate that monotone-status invariant.
-      if (canStart(snapshot.phase)) return;
+      if (canStart(snapshot.phase)) return Promise.resolve();
       control.stopped = true;
       observationControl.stopped = true;
       generation += 1; // supersede any in-flight sweep/observation continuation -- ITS OWN teardown/release is now skipped (see the `myGeneration !== generation` guards above), this call owns close-then-release instead.
-      maybeFlushPersistence(true, 'stopped');
+      // R1 fix (P4i-FIX2, binding): a pause() that never got a chance to reach
+      // its own 'paused' branch (this stop() superseded it first) must not
+      // hang forever -- resolve it now, since the sweep will never pause.
+      settlePendingPauses();
+      // R1 fix (P4i-FIX2, binding): `stop()` returns this flush's OWN promise
+      // -- the phase still flips to 'stopped' synchronously below (unchanged
+      // for every existing caller), but a caller that awaits `stop()` only
+      // sees it resolve once the terminal checkpoint has actually committed.
+      const flushPromise = maybeFlushPersistence(true, 'stopped');
       emit({ phase: 'stopped' });
       void (async () => {
         // P4f-FIX4 (binding, HIGH, after Codex REV4): release is UNCONDITIONAL
@@ -1149,6 +1359,7 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
           releaseReservation();
         }
       })();
+      return flushPromise;
     },
 
     startObservation(windowMs = DEFAULT_OBSERVATION_WINDOW_MS): void {
@@ -1224,7 +1435,7 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       observationControl = { paused: false, stopped: false };
       // Addendum (binding, P4i): "the observation phase uses the filtered candidate set" -- length 1-8 bytes, not ASCII-looking (see `didCandidates.ts`).
       observationResponderDids = filterSweepCandidates(snapshot.responders).map((r) => r.did);
-      guidedSamples = [];
+      resetGuidedSamples();
       emit({ phase: 'observing', guidedPhase: null, guidedPhaseElapsedMs: 0, guidedPhaseDurationMs: 0, candidateSummaries: [], error: null });
       void openTransportAndGuidedObserve(myGeneration);
     },
@@ -1288,6 +1499,10 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       currentRunId = runId;
       lastPersistedResponderIndex = restoredResponders.length;
       lastFlushAtMs = deps.clock.now();
+      // R2 fix (P4i-FIX2, binding): "cleared on every fresh sweep start /
+      // resume" -- a resumed run never inherits a PRIOR run's guided
+      // observation series either.
+      resetGuidedSamples();
       emit({
         ...INITIAL_SNAPSHOT,
         error: null,
@@ -1314,7 +1529,13 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
     },
 
     getGuidedSamples(): readonly DidPhaseSample[] {
-      return guidedSamples;
+      // R2 fix (P4i-FIX2, binding): only ever return samples that belong to
+      // the CURRENTLY active run -- see `guidedSamplesRunId`'s own doc
+      // comment. A fresh `start()`/`resumePersistedRun()` already resets both
+      // together, so this is redundant defense-in-depth for any path that
+      // might reassign `currentRunId` without going through
+      // `resetGuidedSamples()`.
+      return guidedSamplesRunId === currentRunId ? guidedSamples : [];
     },
   };
 }

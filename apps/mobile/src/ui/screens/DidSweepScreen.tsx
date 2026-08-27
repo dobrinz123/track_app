@@ -78,6 +78,12 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   const [staticExpanded, setStaticExpanded] = React.useState(false);
   const [shareBanner, setShareBanner] = React.useState<string | null>(null);
   const [sharing, setSharing] = React.useState(false);
+  // R1 fix (P4i-FIX2, binding, after Codex P4hrev3 H3 PARTIAL): "public
+  // stop()/pause() resolve after the checkpoint is committed; screen shows
+  // 'Saving…' until then." The phase itself already flips immediately
+  // (unchanged) -- this is purely a local UI cue for the awaited persistence
+  // write, cleared once the returned promise settles.
+  const [saving, setSaving] = React.useState(false);
   const didSweepStoreRef = React.useRef(createDidSweepStore(getTelemetryReadDb()));
 
   const settingsRef = React.useRef(settings);
@@ -176,8 +182,12 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   React.useEffect(
     () => () => {
       // Unmount cleanup: stop() closes the transport and releases the
-      // reservation on every path (idempotent if already idle/stopped).
-      controllerRef.current?.stop();
+      // reservation on every path (idempotent if already idle/stopped). Its
+      // returned promise (R1 fix, P4i-FIX2) is intentionally not awaited here
+      // -- a cleanup function cannot be async/await anything -- the write is
+      // still queued and will land (this is a dev-only screen; the unmount
+      // path is not the one this ticket's "Saving…" UI cue targets).
+      void controllerRef.current?.stop();
     },
     [],
   );
@@ -233,8 +243,26 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
     ensureController().start({ from, to });
   }
 
-  function handleStop(): void {
-    controllerRef.current?.stop();
+  // R1 fix (P4i-FIX2, binding): `controller.stop()` now returns a promise
+  // that resolves only once its own terminal persistence checkpoint has
+  // committed -- awaited here so the "Saving…" cue reflects the REAL write,
+  // not just the (already-immediate) phase transition.
+  async function handleStop(): Promise<void> {
+    setSaving(true);
+    try {
+      await controllerRef.current?.stop();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handlePause(): Promise<void> {
+    setSaving(true);
+    try {
+      await controllerRef.current?.pause();
+    } finally {
+      setSaving(false);
+    }
   }
 
   function handleStartObservation(): void {
@@ -433,7 +461,7 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
             ) : (
               <>
                 {phase === 'sweeping' ? (
-                  <Pressable style={styles.buttonSecondary} onPress={() => controllerRef.current?.pause()} accessibilityRole="button" accessibilityLabel="Pause sweep">
+                  <Pressable style={styles.buttonSecondary} onPress={() => void handlePause()} disabled={saving} accessibilityRole="button" accessibilityLabel="Pause sweep">
                     <Text style={styles.buttonSecondaryText} maxFontSizeMultiplier={1.3}>
                       Pause
                     </Text>
@@ -446,7 +474,7 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
                     </Text>
                   </Pressable>
                 ) : null}
-                <Pressable style={styles.buttonDanger} onPress={handleStop} accessibilityRole="button" accessibilityLabel="Stop sweep">
+                <Pressable style={styles.buttonDanger} onPress={() => void handleStop()} disabled={saving} accessibilityRole="button" accessibilityLabel="Stop sweep">
                   <Text style={styles.buttonDangerText} maxFontSizeMultiplier={1.3}>
                     Stop
                   </Text>
@@ -454,6 +482,13 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
               </>
             )}
           </View>
+          {/* R1 fix (P4i-FIX2, binding): "screen shows 'Saving…' until [the
+              checkpoint is committed]." */}
+          {saving ? (
+            <Text style={styles.helperText} maxFontSizeMultiplier={1.3} accessibilityLiveRegion="polite">
+              Saving…
+            </Text>
+          ) : null}
         </View>
 
         {snapshot === null ? null : (

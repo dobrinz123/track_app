@@ -40,6 +40,7 @@ import {
   buildDidSweepExportDocument,
   buildDidSweepExportForRun,
   DID_SWEEP_EXPORT_SCHEMA_VERSION,
+  DID_SWEEP_RESUME_BOUND,
   didSweepExportFileName,
   shareDidSweepExport,
   type DidSweepExportDocument,
@@ -168,6 +169,18 @@ describe('buildDidSweepExportDocument (binding, P4i)', () => {
     ]);
   });
 
+  /**
+   * R1 (P4i-FIX2, binding, after Codex P4hrev3 H3 PARTIAL): "document [the
+   * accepted ≤1s batch-window residual] in a comment + contracts-facing note
+   * in the export meta (`resumeBound: "≤1s of DIDs may be re-sent after a
+   * hard kill"`)."
+   */
+  it('discloses the accepted resume bound (R1, binding)', () => {
+    const doc = buildDidSweepExportDocument({ run: run(), responders: [], nowIso: '2026-08-27T19:00:00.000Z' });
+    expect(doc.resumeBound).toBe(DID_SWEEP_RESUME_BOUND);
+    expect(doc.resumeBound).toContain('1s');
+  });
+
   it('suggestions are hex-DID-mapped verbatim', () => {
     const doc = buildDidSweepExportDocument({
       run: run(),
@@ -237,6 +250,57 @@ describe('buildDidSweepExportForRun (binding, P4i-FIX1 F3): the screen/controlle
     // observation series ... observationSeries is always []."
     expect(doc!.observationSeries.length).toBeGreaterThan(0);
     expect(doc!.candidates.length).toBeGreaterThan(0); // candidateSummaries also flow through.
+  });
+
+  /**
+   * R2 (P4i-FIX2, binding, after Codex P4hrev3 NEW MEDIUM "guided export
+   * samples leak across runs"): "Test: run A guided -> run B shared without
+   * guided -> empty series" (the ticket's own literal scenario). Lives here
+   * (rather than `didSweepController.test.ts`) because `buildDidSweepExportForRun`
+   * requires this file's `expo-file-system`/`expo-sharing` mocks.
+   */
+  it('run A completes a guided observation; run B is started fresh (never runs guided) -- run B\'s export has an EMPTY observation series (R2, binding)', async () => {
+    const store = createInMemoryDidSweepStore();
+    const controller = createDidSweepController({
+      transportFactory: () =>
+        new SimulatedEnetTransport({ monotonicNow: () => Date.now(), scenario: DEFAULT_ENET_DID_SCENARIO, testerAddress: TESTER_ADDRESS, targetAddress: TARGET_ADDRESS }),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: { now: () => Date.now() },
+      store,
+    });
+
+    // Run A: sweep the 3 scripted responders, then a full guided observation.
+    controller.start({ from: 0x1e1c, to: 0x1e24 });
+    await vi.runAllTimersAsync();
+    await flush();
+    const runIdA = controller.getCurrentRunId()!;
+
+    controller.startGuidedObservation();
+    for (let i = 0; i < 40 && controller.getSnapshot().phase === 'observing'; i += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flush();
+    }
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+    expect(controller.getGuidedSamples().length).toBeGreaterThan(0); // run A genuinely collected guided samples.
+
+    const docA = await buildDidSweepExportForRun(controller, store, runIdA, '2026-08-27T19:00:00.000Z');
+    expect(docA!.observationSeries.length).toBeGreaterThan(0); // run A's own export legitimately has a series.
+
+    // Run B: a FRESH start() over the SAME range -- never runs guided observation.
+    controller.start({ from: 0x1e1c, to: 0x1e24 });
+    await vi.runAllTimersAsync();
+    await flush();
+    const runIdB = controller.getCurrentRunId()!;
+    expect(runIdB).not.toBe(runIdA);
+    expect(controller.getSnapshot().phase).toBe('sweepComplete'); // never ran (or even started) a guided observation.
+
+    // The exact regression this fixes: run B's export used to still carry
+    // run A's leftover `guidedSamples` under run B's own metadata.
+    expect(controller.getGuidedSamples()).toEqual([]);
+    const docB = await buildDidSweepExportForRun(controller, store, runIdB, '2026-08-27T19:05:00.000Z');
+    expect(docB!.observationSeries).toEqual([]);
+    expect(docB!.candidates).toEqual([]);
   });
 
   it('returns null when runId is not in the store (mirrors the screen\'s own "could not find this run" branch)', async () => {
