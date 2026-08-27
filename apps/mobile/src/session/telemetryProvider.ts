@@ -21,7 +21,11 @@ import { TcpObdTransport } from './tcpObdTransport';
 import { EnetTcpTransport } from './enetTcpTransport';
 import { CUSTOM_PID_VALIDATION_ERROR, isAllowedCustomPidRequest } from './customPidValidation';
 import { resolveEnetChannelSpecs } from './enetSettingsValidation';
-import { enetAdapterReservation as sharedEnetAdapterReservation, type EnetAdapterReservation } from './enetAdapterReservation';
+import {
+  enetAdapterReservation as sharedEnetAdapterReservation,
+  type EnetAdapterReservation,
+  type EnetAdapterToken,
+} from './enetAdapterReservation';
 
 /** User-facing diagnostics note (binding, P4e-FIX3 H2) when the ENET adapter is held by the dev DID-probe screen -- the MHD adapter accepts one ECU client at a time. */
 export const ENET_ADAPTER_RESERVED_BY_PROBE_DETAIL = 'adapter reserved by probe';
@@ -273,7 +277,15 @@ export interface TelemetryProvider {
  */
 type SessionGeneration =
   | { id: number; kind: 'elm327'; session: Elm327Session; unsubscribeSample: () => void; unsubscribeState: () => void }
-  | { id: number; kind: 'enet'; session: EnetSession; unsubscribeSample: () => void; unsubscribeState: () => void };
+  | {
+      id: number;
+      kind: 'enet';
+      session: EnetSession;
+      /** P4e-FIX4 (binding): THIS generation's own adapter-reservation token -- released only by/for this exact generation, never by owner-kind alone (a stale token from an earlier generation must never release a newer one's claim). */
+      enetToken: EnetAdapterToken;
+      unsubscribeSample: () => void;
+      unsubscribeState: () => void;
+    };
 
 export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryProvider {
   const { settingsStore, monotonicNow } = deps;
@@ -296,6 +308,26 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   let generationCounter = 0;
   /** P4e-FIX3 H2: set when `launchSession()`'s ENET branch was blocked by the adapter reservation (the probe holds it) -- surfaced via `getDiagnostics()` even though `current` stays `null` (no active generation to read diagnostics FROM). Cleared as soon as a session is actually launched. */
   let reservationBlockedDetail: string | undefined;
+  /**
+   * P4e-FIX4 fix (binding, Codex P4e-REV4 HIGH finding -- "overlapping
+   * provider generations bypass exclusivity"): while a `stop()` is tearing
+   * down the current generation, this is the promise that resolves once
+   * that teardown (session stop + reservation release + listener
+   * unsubscribe) has fully settled -- NEVER rejects itself (mirrors
+   * `lifecycleLock.ts`'s own "tail" convention: callers only need to know
+   * WHEN it settled, not whether the underlying `stop()` call threw).
+   * `start()` awaits this FIRST when one is in flight, so a fresh generation
+   * is never launched (and never opens a second ENET socket) while the
+   * previous one is still closing -- the review's exact overlap scenario.
+   */
+  let stopping: Promise<void> | null = null;
+
+  /** Shared failure handling for a synchronous `launchSession()` throw, from EITHER `start()`'s own first attempt or the scheduled retry (P4e-FIX4, binding: "retry wraps launchSession() in try/catch"). Resets to a clean, non-running state and reports through the SAME `failed` channel a runtime session failure already uses. */
+  function handleLaunchFailure(error: unknown): void {
+    running = false;
+    current = null;
+    emitState('failed', errorMessage(error));
+  }
 
   function buildTransport(): ObdTransport {
     const settings = settingsStore.getSettings();
@@ -388,11 +420,15 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       // P4e-FIX3 H2 fix (binding): acquired BEFORE building any transport --
       // the MHD adapter accepts one ECU client at a time, and the dev
       // DID-probe screen (`DidProbeScreen.tsx`) shares this SAME reservation.
-      // A blocked acquire never opens a socket: no generation is installed,
-      // the provider stays 'idle' with a diagnostics note, and (when this
-      // call came from the scheduled retry) no further retry is scheduled --
-      // the one retry budget is already spent either way.
-      if (!enetAdapterReservation.tryAcquire('provider')) {
+      // P4e-FIX4 (binding): `tryAcquire` returns a token (or `null`) -- NO
+      // same-owner reacquire, so an overlapping second provider generation
+      // can never ALSO believe it holds the adapter. A blocked acquire
+      // never opens a socket: no generation is installed, the provider
+      // stays 'idle' with a diagnostics note, and (when this call came from
+      // the scheduled retry) no further retry is scheduled -- the one retry
+      // budget is already spent either way.
+      const token = enetAdapterReservation.tryAcquire('provider');
+      if (token === null) {
         current = null;
         reservationBlockedDetail = ENET_ADAPTER_RESERVED_BY_PROBE_DETAIL;
         emitState('idle', ENET_ADAPTER_RESERVED_BY_PROBE_DETAIL);
@@ -402,32 +438,49 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       // ELM327 path below -- nothing here is reachable unless
       // `adapterType === 'enet'`, so the ELM327 path's own behavior (and the
       // tests pinning it) is untouched by this addition.
-      const transport = buildTransport();
-      const config = buildEnetConfig();
-      const next = createEnetSession(transport, config, monotonicNow);
-      const gen: SessionGeneration = {
-        id,
-        kind: 'enet',
-        session: next,
-        unsubscribeSample: next.onSample((sample) => {
-          if (current?.id !== id) return;
-          for (const listener of [...sampleListeners]) listener(sample);
-        }),
-        unsubscribeState: next.onStateChange((state, detail) => {
-          if (current?.id !== id) return;
-          const mapped = ENET_STATE_TO_PROVIDER_STATE[state];
-          emitState(mapped, detail);
-          if (mapped === 'failed') {
-            // A failed session no longer legitimately holds the adapter
-            // (its transport already closed) -- release so the probe, or a
-            // future fresh start()/retry, can acquire it.
-            enetAdapterReservation.release('provider');
-            if (running) scheduleRetry(id);
-          }
-        }),
-      };
-      current = gen;
-      next.start();
+      //
+      // P4e-FIX4 fix (binding, Codex P4e-REV4 HIGH finding -- "provider
+      // exception paths leak the claim"): transport/config/session
+      // construction and `next.start()` are wrapped in try/catch so ANY
+      // throw here releases the just-acquired token before propagating --
+      // otherwise a synchronous construction failure would leave the
+      // reservation held forever (every future probe/provider attempt
+      // refused) with no live generation left to ever release it. The
+      // caller (`start()`'s own catch, or the retry timer's, both via
+      // `handleLaunchFailure`) still resets `running`/emits `'failed'`.
+      try {
+        const transport = buildTransport();
+        const config = buildEnetConfig();
+        const next = createEnetSession(transport, config, monotonicNow);
+        const gen: SessionGeneration = {
+          id,
+          kind: 'enet',
+          session: next,
+          enetToken: token,
+          unsubscribeSample: next.onSample((sample) => {
+            if (current?.id !== id) return;
+            for (const listener of [...sampleListeners]) listener(sample);
+          }),
+          unsubscribeState: next.onStateChange((state, detail) => {
+            if (current?.id !== id) return;
+            const mapped = ENET_STATE_TO_PROVIDER_STATE[state];
+            emitState(mapped, detail);
+            if (mapped === 'failed') {
+              // A failed session no longer legitimately holds the adapter
+              // (its transport already closed) -- release so the probe, or
+              // a future fresh start()/retry, can acquire it.
+              enetAdapterReservation.release(token);
+              if (running) scheduleRetry(id);
+            }
+          }),
+        };
+        current = gen;
+        next.start();
+      } catch (error) {
+        enetAdapterReservation.release(token);
+        current = null;
+        throw error;
+      }
       return;
     }
 
@@ -477,7 +530,19 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       current.unsubscribeSample();
       current.unsubscribeState();
       current = null;
-      launchSession();
+      // P4e-FIX4 fix (binding): the retry timer callback is the ONE
+      // `launchSession()` call site that previously had NO try/catch at
+      // all -- a synchronous construction throw here would have been an
+      // unhandled exception inside a `setTimeout` callback. Routed through
+      // the SAME `handleLaunchFailure` `start()`'s own catch uses, so both
+      // call sites reset to one consistent 'failed' state (the token itself
+      // is already released INSIDE `launchSession()`'s own try/catch before
+      // this one ever sees the error).
+      try {
+        launchSession();
+      } catch (error) {
+        handleLaunchFailure(error);
+      }
     }, RETRY_DELAY_MS);
   }
 
@@ -487,23 +552,44 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       if (!settingsStore.getSettings().telemetryEnabled) return;
       running = true;
       retriesUsed = 0;
-      try {
-        launchSession();
-      } catch (error) {
-        // F2 fix (MED, binding): a synchronous throw while BUILDING the
-        // session (transport construction, `createElm327Session`'s config
-        // validation) must never leave this provider wedged `running=true`
-        // with no active generation -- L3 (`elm327Session.ts`) now handles
-        // customPids config problems as warnings, never throws, but this
-        // catch stays as the provider's own defense-in-depth backstop
-        // regardless of what a future config-validation change does. Resets
-        // fully (mirrors `stop()`'s own cleanup) and reports through the
-        // SAME `failed` state channel a runtime session failure already
-        // uses, so callers observing `onStateChange`/`getDiagnostics` see
-        // one consistent failure path either way.
-        running = false;
-        current = null;
-        emitState('failed', errorMessage(error));
+
+      // F2 fix (MED, binding): a synchronous throw while BUILDING the
+      // session (transport construction, `createElm327Session`'s config
+      // validation) must never leave this provider wedged `running=true`
+      // with no active generation -- L3 (`elm327Session.ts`) now handles
+      // customPids config problems as warnings, never throws, but this
+      // catch stays as the provider's own defense-in-depth backstop
+      // regardless of what a future config-validation change does.
+      // P4e-FIX4 (binding): factored into the shared `handleLaunchFailure`
+      // -- the retry timer callback needs the SAME reset now too.
+      const attempt = (): void => {
+        if (!running) return; // a stop() raced in while this attempt was queued behind `stopping` below.
+        try {
+          launchSession();
+        } catch (error) {
+          handleLaunchFailure(error);
+        }
+      };
+
+      // P4e-FIX4 fix (binding, Codex P4e-REV4 HIGH finding -- "overlapping
+      // provider generations bypass exclusivity"): if a `stop()` is still
+      // tearing down the PREVIOUS generation (its own session.stop() +
+      // reservation release + unsubscribe not yet settled), this start()
+      // queues behind that -- `running=true` already guards a second
+      // concurrent `start()` from queuing twice, and `attempt`'s own
+      // `running` re-check handles a `stop()` that raced in during the
+      // wait. ONLY the ENET path serializes this way: the reservation's
+      // exclusivity is the ENTIRE reason this queuing exists, and only
+      // `adapterType: 'enet'` ever touches it -- the ELM327 path's own
+      // overlap behavior stays EXACTLY as it was before this ticket
+      // (byte-identical, binding), a fresh generation immediately, even
+      // while an earlier stop() is still tearing down. Nothing is awaited
+      // when no stop() is in flight either way -- start() stays
+      // synchronous-looking for every existing caller.
+      if (stopping !== null && settingsStore.getSettings().adapterType === 'enet') {
+        void stopping.then(attempt, attempt);
+      } else {
+        attempt();
       }
     },
 
@@ -520,18 +606,38 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       // listeners this stop() must never touch.
       const gen = current;
       if (gen === null) return;
-      await gen.session.stop();
-      gen.unsubscribeSample();
-      gen.unsubscribeState();
-      // P4e-FIX3 H2 (binding): "provider stop/failed releases" -- a graceful
-      // stop() also releases the adapter reservation this generation
-      // acquired (ELM327 never acquires it at all, so this is a harmless
-      // no-op for that kind).
-      if (gen.kind === 'enet') enetAdapterReservation.release('provider');
-      // Only clear the shared `current` pointer if it's STILL this
-      // generation -- a racing `start()` already replaced it with its own,
-      // which this (now-finished) stop() must leave alone.
-      if (current === gen) current = null;
+
+      // P4e-FIX4 fix (binding): tracked so a `start()` racing in WHILE this
+      // stop() is still tearing down queues behind it instead of opening a
+      // second ENET socket while the first is still closing (the review's
+      // overlap scenario) -- see `stopping`'s own doc comment above.
+      let resolveStopping: () => void = () => undefined;
+      const stoppingPromise = new Promise<void>((resolve) => {
+        resolveStopping = resolve;
+      });
+      stopping = stoppingPromise;
+
+      try {
+        await gen.session.stop();
+      } finally {
+        // P4e-FIX4 fix (binding): "stop() releases the claim in a finally
+        // AFTER the old session's stop settles (rejection included)" --
+        // released via THIS generation's OWN token, so a NEWER generation's
+        // (different) token/claim is never touched even if this stop() is
+        // slow. Cleanup below also moved into this `finally` (previously
+        // only ran when `gen.session.stop()` resolved) -- a rejection must
+        // not leave stale listeners subscribed to a generation nothing else
+        // believes is live any more.
+        if (gen.kind === 'enet') enetAdapterReservation.release(gen.enetToken);
+        gen.unsubscribeSample();
+        gen.unsubscribeState();
+        // Only clear the shared `current` pointer if it's STILL this
+        // generation -- a racing `start()` already replaced it with its
+        // own, which this (now-finished) stop() must leave alone.
+        if (current === gen) current = null;
+        if (stopping === stoppingPromise) stopping = null;
+        resolveStopping();
+      }
     },
 
     onSample(cb) {

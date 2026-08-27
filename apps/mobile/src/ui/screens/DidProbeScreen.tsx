@@ -223,7 +223,13 @@ export function DidProbeScreen(_props: Props): React.JSX.Element {
     // retry can slip through; `tryAcquire` is the single arbiter both this
     // screen and `telemetryProvider.ts` actually check right before opening
     // a socket. Refused with the SAME message the state-based gating shows.
-    if (!enetAdapterReservation.tryAcquire('probe')) {
+    // P4e-FIX4 (binding): `tryAcquire` now returns this ONE request's own
+    // token (or `null`) -- stored locally and passed back to `release`
+    // below, never a bare owner string, so a stale token can never release
+    // a claim a NEWER acquisition (this screen's own next probe, or the
+    // provider) now holds.
+    const reservationToken = enetAdapterReservation.tryAcquire('probe');
+    if (reservationToken === null) {
       setErrorText(DID_PROBE_STOP_TELEMETRY_MESSAGE);
       appendLog({
         mode,
@@ -290,9 +296,10 @@ export function DidProbeScreen(_props: Props): React.JSX.Element {
       });
     } finally {
       // Held for the duration of ONE request (socket open -> close), per
-      // the binding spec -- released here regardless of outcome so the
-      // NEXT probe (or the provider) can acquire it immediately after.
-      enetAdapterReservation.release('probe');
+      // the binding spec -- released via THIS request's own token,
+      // regardless of outcome, so the NEXT probe (or the provider) can
+      // acquire it immediately after.
+      enetAdapterReservation.release(reservationToken);
       setSending(false);
     }
   }

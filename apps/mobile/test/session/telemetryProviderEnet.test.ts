@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { TelemetrySample } from '@circuit/core';
+import type { EnetSession, EnetState, TelemetrySample } from '@circuit/core';
 import { InMemorySettingsStore } from '../../src/session/settingsStore';
 import { createTelemetryProvider } from '../../src/session/telemetryProvider';
 import { createEnetAdapterReservation } from '../../src/session/enetAdapterReservation';
@@ -299,7 +299,21 @@ describe('telemetryProvider: ENET reconnect policy (real-adapter path, mocked En
   });
 });
 
-describe('telemetryProvider: ENET stop()/start() race is generation-scoped (mirrors the ELM327 F3 fix)', () => {
+/**
+ * P4e-FIX4 fix (binding, Codex P4e-REV4 HIGH finding -- "overlapping
+ * provider generations bypass exclusivity"): a `start()` racing in while an
+ * earlier `stop()` is still tearing down used to get its OWN fresh
+ * generation immediately, opening a SECOND ENET socket while the first was
+ * still closing (`enetAdapterReservation.tryAcquire('provider')` treated
+ * this as a harmless same-owner reacquire). This test previously observed
+ * (and asserted as correct) exactly that -- TWO pending connections. That
+ * behavior is now FORBIDDEN: `start()` queues behind the in-flight `stop()`
+ * (tracked via `stopping`) instead, so this test is rewritten to assert the
+ * new, serialized behavior: exactly ONE ENET socket exists at a time, and
+ * the reservation is held by generation 2 only AFTER generation 1's own
+ * `stop()` has fully settled.
+ */
+describe('telemetryProvider: ENET stop()/start() overlap is now serialized (P4e-FIX4, binding)', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     tracker.connectCalls = 0;
@@ -311,10 +325,16 @@ describe('telemetryProvider: ENET stop()/start() race is generation-scoped (mirr
     vi.useRealTimers();
   });
 
-  it('a start() during a still-pending stop() gets a fresh ENET generation the old stop() cannot detach -- the OLD session\'s late "stopped" is dropped, and the NEW session keeps forwarding state after', async () => {
+  it("the review's overlap scenario: stop() then immediate start() -- exactly ONE ENET socket exists at a time; the reservation is held by generation 2 only after the old stop() settles", async () => {
+    const reservation = createEnetAdapterReservation();
     const store = new InMemorySettingsStore();
     store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet' });
-    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: monotonicCounter(),
+      isDev: true,
+      enetAdapterReservation: reservation,
+    });
     const states: string[] = [];
     provider.onStateChange((s) => states.push(s));
 
@@ -323,30 +343,36 @@ describe('telemetryProvider: ENET stop()/start() race is generation-scoped (mirr
     await flushMicrotasks();
     expect(tracker.pendingConnects).toHaveLength(1);
     const gen1Connect = tracker.pendingConnects[0]!;
+    expect(reservation.holder()).toBe('provider');
 
     const stopPromise = provider.stop();
     await flushMicrotasks();
 
-    // A start() while that stop() is still in flight gets generation 2.
+    // A start() while that stop() is still tearing down must NOT open a
+    // second socket -- it queues behind the in-flight stop() instead.
     provider.start();
     await flushMicrotasks();
-    expect(tracker.pendingConnects).toHaveLength(2);
-    const gen2Connect = tracker.pendingConnects[1]!;
-    expect(states).toEqual(['idle', 'connecting', 'connecting']);
+    expect(tracker.pendingConnects).toHaveLength(1); // still just gen1 -- no overlap.
 
+    // Settling gen1's connect() (stopRequested already true) lets its own
+    // session resolve down to 'stopped' -- which is what unblocks stop().
     gen1Connect.reject(new Error('gen1 connect aborted'));
     await stopPromise;
     await flushMicrotasks();
 
-    // Generation 1's late 'stopped' must be DROPPED -- it must not appear
-    // now that generation 2 is the genuinely-live session.
-    expect(states).toEqual(['idle', 'connecting', 'connecting']);
+    // The reservation is released as gen1's stop() settles, and ONLY THEN
+    // does the queued start() proceed -- opening gen2's own socket and
+    // re-acquiring the reservation, never before.
+    expect(tracker.pendingConnects).toHaveLength(2);
+    const gen2Connect = tracker.pendingConnects[1]!;
+    expect(reservation.holder()).toBe('provider'); // held by generation 2 now.
+    expect(states).toEqual(['idle', 'connecting', 'stopped', 'connecting']);
 
-    // Generation 2 is still alive and must keep forwarding its OWN events.
+    // Generation 2 is alive and keeps forwarding its OWN events.
     gen2Connect.reject(new Error('gen2 connect also fails'));
     await flushMicrotasks();
 
-    expect(states).toEqual(['idle', 'connecting', 'connecting', 'failed']);
+    expect(states).toEqual(['idle', 'connecting', 'stopped', 'connecting', 'failed']);
     expect(provider.getDiagnostics().state).toBe('failed');
 
     await provider.stop();
@@ -499,7 +525,8 @@ describe('telemetryProvider: ENET adapter reservation (P4e-FIX3 H2, binding)', (
 
     // The probe now acquires it -- standing in for the user pressing Send
     // on the dev screen while the provider sits in 'failed'.
-    expect(reservation.tryAcquire('probe')).toBe(true);
+    const probeToken = reservation.tryAcquire('probe');
+    expect(probeToken).not.toBeNull();
 
     // The scheduled retry fires 3s later.
     await vi.advanceTimersByTimeAsync(3_000);
@@ -517,13 +544,14 @@ describe('telemetryProvider: ENET adapter reservation (P4e-FIX3 H2, binding)', (
     await flushMicrotasks();
     expect(tracker.connectCalls).toBe(1);
 
-    reservation.release('probe');
+    reservation.release(probeToken!);
     await provider.stop();
   });
 
   it('the provider does not open a socket at all when the probe already holds the reservation at start()', async () => {
     const reservation = createEnetAdapterReservation();
-    expect(reservation.tryAcquire('probe')).toBe(true);
+    const probeToken = reservation.tryAcquire('probe');
+    expect(probeToken).not.toBeNull();
 
     const store = new InMemorySettingsStore();
     store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet' });
@@ -541,7 +569,7 @@ describe('telemetryProvider: ENET adapter reservation (P4e-FIX3 H2, binding)', (
     expect(provider.getDiagnostics().state).toBe('idle');
     expect(provider.getDiagnostics().lastError).toBe('adapter reserved by probe');
 
-    reservation.release('probe');
+    reservation.release(probeToken!);
     await provider.stop();
   });
 
@@ -563,7 +591,7 @@ describe('telemetryProvider: ENET adapter reservation (P4e-FIX3 H2, binding)', (
     expect(provider.getDiagnostics().state).toBe('polling');
     expect(reservation.holder()).toBe('provider');
 
-    expect(reservation.tryAcquire('probe')).toBe(false);
+    expect(reservation.tryAcquire('probe')).toBeNull();
 
     await provider.stop();
   });
@@ -634,5 +662,165 @@ describe('telemetryProvider: ENET adapter reservation (P4e-FIX3 H2, binding)', (
 
     await provider.stop();
     expect(reservation.holder()).toBe('probe'); // still untouched after stop().
+  });
+});
+
+/** A minimal hand-built `EnetSession` double whose `stop()` this test controls directly (the real `EnetSessionEngine` essentially never rejects its own `stop()`, since it catches transport-close failures internally) -- lets a test prove the reservation is released even when the underlying session's `stop()` rejects. */
+function makeControllableEnetSession(config: { stopResult: () => Promise<void> }): EnetSession {
+  const stateListeners = new Set<(state: EnetState, detail?: string) => void>();
+  return {
+    start(): void {
+      queueMicrotask(() => {
+        for (const listener of [...stateListeners]) listener('polling');
+      });
+    },
+    stop(): Promise<void> {
+      return config.stopResult();
+    },
+    onSample(): () => void {
+      return () => undefined;
+    },
+    onStateChange(cb: (state: EnetState, detail?: string) => void): () => void {
+      stateListeners.add(cb);
+      return () => stateListeners.delete(cb);
+    },
+    getDiagnostics() {
+      return {
+        observedHzByChannel: {},
+        errorCount: 0,
+        supportedChannels: [],
+        unsupportedChannels: [],
+        lastNrcByChannel: {},
+        framesTx: 0,
+        framesRx: 0,
+        aliveChecksAnswered: 0,
+        unmatchedResponses: 0,
+        malformedResponses: 0,
+        decodeErrors: 0,
+      };
+    },
+  };
+}
+
+/**
+ * P4e-FIX4 fix (binding, Codex P4e-REV4 HIGH finding -- "provider exception
+ * paths leak the claim"): a synchronous construction/start() throw, or a
+ * rejecting `session.stop()`, or a retry's own construction throw, must
+ * ALWAYS release whatever token this attempt held -- otherwise the
+ * reservation is stuck forever and every future probe/provider attempt is
+ * refused with no live generation left to ever release it.
+ */
+describe('telemetryProvider: ENET exception paths release the reservation (P4e-FIX4, binding)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    tracker.connectCalls = 0;
+    tracker.holdConnect = false;
+    vi.mocked(createEnetSession).mockClear();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a synchronous construction throw (createEnetSession) releases the reservation and reports "failed", without throwing OUT of start()', async () => {
+    const reservation = createEnetAdapterReservation();
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'enet' });
+    vi.mocked(createEnetSession).mockImplementationOnce(() => {
+      throw new Error('boom: synchronous ENET construction failure (test double)');
+    });
+
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: monotonicCounter(),
+      isDev: true,
+      enetAdapterReservation: reservation,
+    });
+    const states: string[] = [];
+    const details: Array<string | undefined> = [];
+    provider.onStateChange((s, d) => {
+      states.push(s);
+      details.push(d);
+    });
+
+    expect(() => provider.start()).not.toThrow();
+    await flushMicrotasks();
+
+    expect(reservation.holder()).toBeNull();
+    expect(states.at(-1)).toBe('failed');
+    expect(details.at(-1)).toContain('boom: synchronous ENET construction failure');
+    expect(provider.getDiagnostics().state).toBe('failed');
+
+    // Not wedged: a fresh start() (now reaching the real, non-throwing
+    // implementation) proceeds normally instead of being swallowed by a
+    // stale `if (running) return;` guard, and successfully re-acquires.
+    provider.start();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushMicrotasks();
+    expect(provider.getDiagnostics().state).toBe('polling');
+    expect(reservation.holder()).toBe('provider');
+
+    await provider.stop();
+  });
+
+  it('gen.session.stop() rejecting still releases the reservation (finally) -- provider.stop() itself still propagates the rejection', async () => {
+    const reservation = createEnetAdapterReservation();
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: true, adapterType: 'enet' });
+    const stopError = new Error('stop failed (test double)');
+    vi.mocked(createEnetSession).mockImplementationOnce(() =>
+      makeControllableEnetSession({ stopResult: () => Promise.reject(stopError) }),
+    );
+
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: monotonicCounter(),
+      isDev: true,
+      enetAdapterReservation: reservation,
+    });
+
+    provider.start();
+    await flushMicrotasks();
+    expect(reservation.holder()).toBe('provider');
+
+    await expect(provider.stop()).rejects.toThrow('stop failed');
+    expect(reservation.holder()).toBeNull();
+  });
+
+  it('a retry launch that throws (createEnetSession fails on the retry\'s own attempt) releases the reservation and reports "failed"', async () => {
+    const reservation = createEnetAdapterReservation();
+    const store = new InMemorySettingsStore();
+    // telemetrySimulate:false -> the mocked (always-failing-to-connect)
+    // EnetTcpTransport from the top of this file, so the FIRST attempt
+    // reaches 'failed' and schedules the one retry on its own.
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet' });
+
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: monotonicCounter(),
+      isDev: true,
+      enetAdapterReservation: reservation,
+    });
+    const states: string[] = [];
+    provider.onStateChange((s) => states.push(s));
+
+    provider.start();
+    await flushMicrotasks();
+    expect(states.at(-1)).toBe('failed');
+    expect(reservation.holder()).toBeNull(); // released on 'failed', BEFORE the retry even fires.
+
+    // The scheduled retry's OWN createEnetSession call throws synchronously.
+    vi.mocked(createEnetSession).mockImplementationOnce(() => {
+      throw new Error('boom: retry construction failure (test double)');
+    });
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    await flushMicrotasks();
+
+    expect(reservation.holder()).toBeNull();
+    expect(states.at(-1)).toBe('failed');
+    expect(provider.getDiagnostics().state).toBe('failed');
+
+    await provider.stop();
   });
 });
