@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   binaryStringToBytes,
   bytesToBinaryString,
+  DEFAULT_ENET_DID_SCENARIO,
   encodeFrame,
   HSFZ_CONTROL,
   HsfzFrameParser,
   parseUdsResponse,
+  SimulatedEnetTransport,
   type ObdTransport,
 } from '@circuit/core';
 import { createDidSweepController, createRawUdsChannel } from '../../src/session/didSweepController';
@@ -353,54 +355,18 @@ describe('didSweepController: H1/H2 lifecycle -- the controller owns the transpo
   });
 });
 
-describe('didSweepController: H3 -- correlation/0x78 correctness against HEAD\'s exact failing scenarios', () => {
+describe('didSweepController: H3 -- keep-alive wiring against the core runner (binding)', () => {
+  // NOTE (P4f-T3, binding): the wrong-SID/0x78 correlation tests that used to
+  // live here were REMOVED -- that logic now lives entirely in
+  // `@circuit/core`'s `runDidSweep` (its own test suite covers 0x78
+  // extension-without-resend and unmatched-frame skipping). What remains
+  // here tests the WIRING between this module's `createRawUdsChannel` and
+  // the core runner's `keepAlive` calls, which core cannot cover on its own.
   beforeEach(() => {
     vi.useFakeTimers();
   });
   afterEach(() => {
     vi.useRealTimers();
-  });
-
-  it('a wrong-SID frame immediately followed by the correct 0x62 response (SAME chunk) still yields the responder -- the real answer is never discarded', async () => {
-    const script = new Map<number, ScriptEntry>([[0x1234, { responses: [wrongSidPdu(), positivePdu(0x1234, [0x77])], delayMs: 5 }]]);
-    const controller = createDidSweepController({
-      transportFactory: () => new FakeSweepTransport(script),
-      testerAddress: TESTER_ADDRESS,
-      targetAddress: TARGET_ADDRESS,
-      clock: monotonicCounter(),
-    });
-
-    controller.start({ from: 0x1234, to: 0x1234 });
-    await vi.runAllTimersAsync();
-    await flush();
-
-    const snapshot = controller.getSnapshot();
-    expect(snapshot.phase).toBe('sweepComplete');
-    expect(snapshot.responders).toHaveLength(1);
-    expect(snapshot.responders[0]!.raw).toEqual(Uint8Array.from([0x77]));
-  });
-
-  it('NRC 0x78 (responsePending) extends the wait WITHOUT re-sending the request -- exactly ONE physical send() for the DID', async () => {
-    const script = new Map<number, ScriptEntry>([
-      [0x0005, { responses: [negativePdu(0x78), negativePdu(0x78), positivePdu(0x0005, [0x42])], delayMs: 5 }],
-    ]);
-    let transport: FakeSweepTransport | null = null;
-    const controller = createDidSweepController({
-      transportFactory: () => {
-        transport = new FakeSweepTransport(script);
-        return transport;
-      },
-      testerAddress: TESTER_ADDRESS,
-      targetAddress: TARGET_ADDRESS,
-      clock: monotonicCounter(),
-    });
-
-    controller.start({ from: 0x0005, to: 0x0005 });
-    await vi.runAllTimersAsync();
-    await flush();
-
-    expect(controller.getSnapshot().responders).toHaveLength(1);
-    expect(transport!.sendCallCountByDid.get(0x0005)).toBe(1); // NOT re-sent for either 0x78 extension.
   });
 
   it('the keep-alive cadence issues TesterPresent (0x3E) periodically while the transport is open', async () => {
@@ -417,13 +383,59 @@ describe('didSweepController: H3 -- correlation/0x78 correctness against HEAD\'s
 
     controller.start({ from: 0x0000, to: 0xffff }); // long sweep -- stays open long enough for keep-alive to fire.
     await flush(3);
-    await vi.advanceTimersByTimeAsync(2_000);
+    // Comfortably past the 2s keep-alive cadence (core's own default) -- each
+    // unscripted DID takes up to ~1s to time out, so this covers at least a
+    // couple of DIDs' worth of the core runner's own between-DID keep-alive
+    // check with margin, rather than sitting right on the 2000ms boundary.
+    await vi.advanceTimersByTimeAsync(3_500);
     await flush();
 
     expect(transport!.keepAliveSendCount).toBeGreaterThanOrEqual(1);
     controller.stop();
     await vi.runAllTimersAsync();
     await flush();
+  });
+});
+
+describe('didSweepController: P4f-T3 -- end-to-end delegation through a REAL SimulatedEnetTransport (binding)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('sweeps a range covering the scripted DID scenario through the actual createRawUdsChannel + core runDidSweep pipeline -- finds all 3 scripted responders and racks up NRC counts for the unscripted ones', async () => {
+    // 0x1E1C..0x1E24 (9 DIDs) covers all 3 of `DEFAULT_ENET_DID_SCENARIO`'s
+    // scripted responders (1E1C, 1E20, 1E24) plus 6 unscripted DIDs in
+    // between that the simulator answers with NRC 0x31 (requestOutOfRange) --
+    // this is a genuine integration test: no hand-built FakeSweepTransport,
+    // no local correlation logic anywhere in this call stack, just the real
+    // `createRawUdsChannel` wrapping a REAL `@circuit/core` `SimulatedEnetTransport`
+    // and the real, committed `runDidSweep`.
+    const controller = createDidSweepController({
+      transportFactory: () =>
+        new SimulatedEnetTransport({
+          monotonicNow: () => Date.now(),
+          scenario: DEFAULT_ENET_DID_SCENARIO,
+          testerAddress: TESTER_ADDRESS,
+          targetAddress: TARGET_ADDRESS,
+        }),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+
+    controller.start({ from: 0x1e1c, to: 0x1e24 });
+    await vi.runAllTimersAsync();
+    await flush();
+
+    const snapshot = controller.getSnapshot();
+    expect(snapshot.phase).toBe('sweepComplete');
+    expect(snapshot.responders).toHaveLength(3);
+    expect(snapshot.responders.map((r) => r.did).sort((a, b) => a - b)).toEqual([0x1e1c, 0x1e20, 0x1e24]);
+    const totalNrcCount = Object.values(snapshot.nrcCounts).reduce((sum, count) => sum + count, 0);
+    expect(totalNrcCount).toBeGreaterThan(0); // the 6 unscripted DIDs each answer NRC 0x31.
   });
 });
 
