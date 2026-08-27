@@ -2779,3 +2779,224 @@ describe('didSweepController: X3 -- pre-pass/phase elapsed advances on a wall-cl
     expect(controller.getSnapshot().phase).toBe('observationComplete');
   });
 });
+
+/**
+ * Y1 (P4i-FIX4, binding, after Codex P4irev4 X1 PARTIAL): "`persisting` must
+ * reflect ALL outstanding flushes for the current run: keep a counter/set of
+ * pending flush ids; emit persisting:false only when the count reaches zero
+ * (a Resume while a pause flush is pending must not let an earlier
+ * settlement clear the flag while a later flush is pending). Test: pause
+ * (flush A pending, slow store) -> Resume -> natural completion queues B ->
+ * A settles -> persisting stays true until B settles; Share stays disabled
+ * until then" (the ticket's own literal scenario).
+ */
+describe('didSweepController: Y1 -- persisting reflects ALL outstanding flushes, not just the most recently settled one (P4i-FIX4)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('pause() flush A held -> resume() -> natural completion queues flush B -> A settles (still held B pending) -> persisting stays TRUE -- only flips false once B ALSO settles', async () => {
+    const gated = createGatedDidSweepStore(createInMemoryDidSweepStore());
+    const controller = createDidSweepController({
+      // Nothing ever answers -- every DID times out, so `pause()` (called
+      // while 0x0000 is still in flight) pauses before 0x0001 is ever
+      // visited, and a subsequent `resume()` naturally completes as soon as
+      // 0x0001 ALSO times out (the range is exactly {0x0000, 0x0001}).
+      transportFactory: () => new FakeSweepTransport(new Map()),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store: gated.store,
+      requestTimeoutMs: 20,
+    });
+
+    gated.holdNextFlush(); // flush A (pause's own forced flush) hangs until released below -- a SLOW store, per the ticket's own scenario.
+    controller.start({ from: 0x0000, to: 0x0001 });
+    await vi.advanceTimersByTimeAsync(5); // 0x0000's request is issued and in flight -- pause() below races ahead of its own timeout.
+
+    const pausePromise = controller.pause();
+    await vi.advanceTimersByTimeAsync(30); // 0x0000 times out, the loop notices `paused`, finishSweepRun('paused') issues flush A (now held).
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('paused');
+    expect(controller.getSnapshot().persisting).toBe(true);
+    expect(gated.flushCalls).toHaveLength(1); // flush A's own call has started (and is now held) -- 0x0001 was never visited.
+
+    // Resume on the SAME transport/accumulator/generation (M2) -- `resume()`
+    // never bumps `generation`, which is exactly what let the pre-fix bug
+    // conflate A's and B's own settlements.
+    gated.holdNextFlush(); // arm the hold for flush B too -- it will not actually be CALLED until A's own (still-held) write settles (persistenceTail serializes them).
+    controller.resume();
+    await vi.advanceTimersByTimeAsync(30); // 0x0001 (the only DID left) times out -- the plan is exhausted, natural completion fires.
+    await flush();
+
+    expect(controller.getSnapshot().phase).toBe('sweepComplete'); // phase flips synchronously, unchanged -- Share gating is on `persisting`, not `phase`.
+    expect(controller.getSnapshot().persisting).toBe(true); // still saving -- flush A is held, flush B is QUEUED behind it (not yet even called).
+    expect(gated.flushCalls).toHaveLength(1); // B has not executed its own write yet -- still queued behind the held A.
+
+    gated.release(); // A's write now proceeds and SUCCEEDS; B's (queued) write starts right after, immediately hits the NEWLY re-armed hold.
+    await flush();
+
+    // THE FIX: A settling must never clear `persisting` while B is still
+    // outstanding -- the pre-fix bug emitted `persisting: false` the instant
+    // THIS (A's) flush settled, regardless of B.
+    expect(gated.flushCalls).toHaveLength(2); // B's own call has now started (and is held).
+    expect(controller.getSnapshot().persisting).toBe(true); // <-- the whole point of Y1: still true, B not done yet.
+    expect(controller.getSnapshot().persistError).toBeNull(); // A's own result (success) -- never a stale failure.
+
+    gated.release(); // B's write now proceeds and succeeds.
+    await flush();
+
+    expect(controller.getSnapshot().persisting).toBe(false); // BOTH settled now -- count reached zero.
+    expect(controller.getSnapshot().persistError).toBeNull();
+    await expect(pausePromise).resolves.toBeUndefined(); // pause()'s own promise resolves once ITS OWN flush (A) landed -- unaffected by B.
+
+    controller.stop();
+    await vi.runAllTimersAsync();
+    await flush();
+  });
+});
+
+/**
+ * Y2 test support: like {@link createHoldThenFailStore}, but holds-then-fails
+ * the FIRST call, then (once released) fails the SECOND call IMMEDIATELY (no
+ * hold needed -- by construction it is already serialized strictly after the
+ * first via `persistenceTail`), then delegates every call after that straight
+ * to `inner` (succeeds). This reproduces the ticket's own "A and B both fail"
+ * scenario deterministically: B's own forced flush is invoked (and captures
+ * its OWN, disjoint `newResponders` snapshot) WHILE A is still held -- i.e.
+ * strictly BEFORE A's failure (and its `pendingRetrySlices` entry) exists --
+ * exactly like the queued-behind-a-held-flush mechanics {@link createHoldThenFailStore}
+ * already exercises for X2, just carried one flush further.
+ */
+function createHoldThenFailTwiceStore(inner: DidSweepStore): {
+  store: DidSweepStore;
+  calls: Array<{ dids: number[] }>;
+  releaseA: () => void;
+} {
+  let releaseGate: (() => void) | null = null;
+  let callIndex = 0;
+  const calls: Array<{ dids: number[] }> = [];
+  const store: DidSweepStore = {
+    ...inner,
+    async flushRunProgress(runId, responders, patch, nowUtc) {
+      const idx = callIndex;
+      callIndex += 1;
+      calls.push({ dids: responders.map((r) => r.did) });
+      if (idx === 0) {
+        await new Promise<void>((resolve) => {
+          releaseGate = resolve;
+        });
+        throw new Error('disk full (test double, A)');
+      }
+      if (idx === 1) throw new Error('disk full (test double, B)');
+      return inner.flushRunProgress(runId, responders, patch, nowUtc);
+    },
+  };
+  return {
+    store,
+    calls,
+    releaseA: () => {
+      releaseGate?.();
+      releaseGate = null;
+    },
+  };
+}
+
+/**
+ * Y2 (P4i-FIX4, binding, after Codex P4irev4 X2 PARTIAL): "failed slices are
+ * a LIST (pendingRetrySlices[]), all retried once in the next flush (merged
+ * into that flush's transaction), never overwritten. Test: A and B both fail
+ * -> next flush re-sends both slices exactly once; sampleCount unchanged"
+ * (the ticket's own literal scenario).
+ */
+describe('didSweepController: Y2 -- failed retry slices are a LIST -- two independently-failed flushes are BOTH retried, neither ever overwritten (P4i-FIX4)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('A (0x0001) and B (0x0014) each fail on their OWN forced flush, queued back to back while A is still held; the NEXT flush folds in BOTH slices exactly once -- sampleCount stays 1 for each, never dropped, never double-counted', async () => {
+    const failing = createHoldThenFailTwiceStore(createInMemoryDidSweepStore());
+    const script = new Map<number, ScriptEntry>([
+      [0x0001, { responses: [positivePdu(0x0001, [0x50])], delayMs: 5 }],
+      [0x0014, { responses: [positivePdu(0x0014, [0x60])], delayMs: 5 }],
+    ]);
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store: failing.store,
+      requestTimeoutMs: 20,
+    });
+
+    controller.start({ from: 0x0000, to: 0xffff });
+    await vi.advanceTimersByTimeAsync(30); // 0x0000 times out, 0x0001 answers.
+    await flush();
+    expect(controller.getSnapshot().responders).toHaveLength(1);
+
+    // Flush A: forced (pause), claims JUST 0x0001 -- now HELD (about to fail).
+    void controller.pause().catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(30); // lets the in-flight (unscripted) DID notice `paused`.
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('paused');
+    expect(failing.calls).toHaveLength(1);
+    expect(failing.calls[0]!.dids).toEqual([0x0001]);
+
+    // Resume on the SAME transport/accumulator (M2) and let 0x0014 answer --
+    // A is STILL held (not yet failed), so `pendingRetrySlices` is still
+    // empty and no periodic flush is "due by retry" during this window.
+    controller.resume();
+    await vi.advanceTimersByTimeAsync(700); // stays well under FLUSH_INTERVAL_MS (1s) elapsed since start.
+    await flush();
+    expect(controller.getSnapshot().responders).toHaveLength(2);
+
+    // Flush B: forced (pause again), claims JUST 0x0014. A is STILL held, so
+    // B's own snapshot (retrySlices=[], newResponders=[0x0014]) is captured
+    // BEFORE A's failure -- and its own write is chained strictly AFTER A's
+    // on `persistenceTail`, so it has not executed yet.
+    void controller.pause().catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(30);
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('paused');
+    expect(failing.calls).toHaveLength(1); // B's own write has not run yet -- still queued behind the held A.
+
+    // Release A: A's write proceeds and FAILS (pushing its own [0x0001]
+    // slice); B's already-queued (already-sliced) write runs right after,
+    // immediately, and ALSO FAILS (pushing its own [0x0014] slice). Pre-fix,
+    // B's failure would OVERWRITE A's still-untouched `pendingRetrySlice` via
+    // a raw assignment, losing 0x0001 forever; fixed, both now sit side by
+    // side in the list.
+    failing.releaseA();
+    await flush();
+    expect(failing.calls).toHaveLength(2);
+    expect(failing.calls[0]!.dids).toEqual([0x0001]);
+    expect(failing.calls[1]!.dids).toEqual([0x0014]);
+
+    // Flush C: the retry -- resume then let one more (unscripted) DID time
+    // out, which triggers a PERIODIC flush that is "due by retry" (both
+    // slices are pending); this call SUCCEEDS and must fold in BOTH A and B.
+    controller.resume();
+    await vi.advanceTimersByTimeAsync(30);
+    await flush();
+
+    expect(failing.calls).toHaveLength(3);
+    expect(failing.calls[2]!.dids).toEqual([0x0001, 0x0014]); // BOTH failed slices folded into the one retry attempt, in order, neither dropped.
+
+    const runId = controller.getCurrentRunId()!;
+    const responders = await failing.store.getResponders(runId);
+    const r1 = responders.find((r) => r.did === 0x0001);
+    const r2 = responders.find((r) => r.did === 0x0014);
+    expect(r1?.sampleCount).toBe(1); // persisted exactly once (via the retry) -- A's own failed attempt never reached the real store.
+    expect(r2?.sampleCount).toBe(1); // persisted exactly once (via the retry) -- B's own failed attempt never reached the real store either.
+
+    controller.stop();
+    await vi.runAllTimersAsync();
+    await flush();
+  });
+});
