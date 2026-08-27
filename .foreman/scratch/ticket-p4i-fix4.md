@@ -1,0 +1,6 @@
+# Ticket P4i-FIX4 — Codex REV4 residuals (2 items), tests first, small
+Source: `.foreman/scratch/p4irev4-codex-output.log` (Table: X1 PARTIAL, X2 PARTIAL). HEAD 5fc3069.
+Y1 `persisting` must reflect ALL outstanding flushes for the current run: keep a counter/set of pending flush ids; emit `persisting:false` only when the count reaches zero (a Resume while a pause flush is pending must not let an earlier settlement clear the flag while a later flush is pending). Test: pause (flush A pending, slow store) → Resume → natural completion queues B → A settles → persisting stays true until B settles; Share stays disabled until then.
+Y2 failed slices are a LIST (`pendingRetrySlices[]`), all retried once in the next flush (merged into that flush's transaction), never overwritten. Test: A and B both fail → next flush re-sends both slices exactly once; sampleCount unchanged.
+Gates (real exit codes): typecheck, test, lint, expo export iOS all 0.
+WRITE SET: apps/mobile/src/session/didSweepController.ts, apps/mobile/src/ui/screens/DidSweepScreen.tsx (only if needed), apps/mobile/test/session/didSweepController.test.ts. No commit, no agents, no Expo server. Report DONE/DONE_WITH_CONCERNS/BLOCKED with evidence + totals.

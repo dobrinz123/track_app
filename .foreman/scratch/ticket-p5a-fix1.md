@@ -1,0 +1,15 @@
+# Ticket P5a-FIX1 — Codex P5a-REV1 fix wave (analysis engine), tests first, packages/core ONLY
+Source: `.foreman/scratch/p5arev1-codex-output.log` (final "codex" section: 8 HIGH, 6 MEDIUM, Test gaps). Spec: docs/architecture/analysis-engine.md; binding: contracts.md "Phase 5 REVISION". HEAD 5fc3069.
+HIGH (all required):
+H1 Corner metrics must consume the 1 m grid (resample first, then metrics) — no raw-sample quantisation. Test: 1 Hz @ 40 m/s lap → brake point resolution ≤ 2 m.
+H2 Wrap-around delta arithmetic: segment crossing S/F adds the lap-end delta term. Test asserts the positive sign for a slower-everywhere lap on a 950→50 m sector.
+H3 A corner spanning S/F is joined (end-of-array + start-of-array runs) — never truncated; test no longer codifies CORNER_TRUNCATED as success.
+H4 Corner windows L_b/L_e derived from the corner's speed drop (spec §2.4), with sane min/max; a brake onset 360 m before a fast corner is observable; a kink does not swallow 300 m of straight.
+H5 Unavailable safety checks never yield "clean": lap → `unverified` (not clean, not anomalous); `analyzeSession` propagates unavailable checks into `limitations[]`; unverified laps do not feed the reference/envelope.
+H6 Yaw anomaly per spec: use `yawRateDps` when present (else course heading), compare against centreline curvature × speed (implied yaw) — spike = |measured − implied| beyond a threshold, sample-rate independent (duration-based, ≥ 0.2 s), keep the implausible-lateral-g guard.
+H7 Exactly two clean laps → time-loss analysis exists (compare the non-reference lap vs the reference; median rule only for ≥ 3). Test at exactly 2.
+H8 Throttle-on searched only after s_vmin; an available-but-non-triggering pedal falls back to throttle plate, then longG.
+MEDIUM (all required): M1 projection hysteresis returns monotone distances (clamp the emitted value too; test consecutive distances with an injected back-step); M2 t(s) integrated as ΣΔs/v(s) from a smoothed speed profile with Δs/Δt fallback when Doppler speed is missing; M3 "sustained 300 ms" measured by duration, IMU brake estimator cross-checked with dv/ds; M4 sector time loss uses the same comparison as the corner ranking (representative lap vs best-clean reference); M5 negative deltas rendered as gains ("ai câștigat" / "you gained"), never "lost −0.20 s"; M6 non-finite lap metadata rejected before reference selection (NaN/Infinity durations → lap incomplete); M7 consistency score declares its evidence basis (components used) and is only compared across corners with the same basis.
+Test gaps to close: zero-speed intervals, sparse GPS without Doppler, NaN/Infinity durations, non-monotonic timestamps, 1.5–2.0 s gaps, duplicate lap ids, negative-delta wording, tier-1 throttle-on/full-throttle, tier-2 brake/steering/turn-in/smoothness, friction-circle magnitude.
+Gates (repo root, real exit codes): typecheck, test, lint all 0.
+WRITE SET: packages/core/src/coaching/**, packages/core/test/coaching/**. Nothing else. No commit, no agents, no Expo server. Report DONE/DONE_WITH_CONCERNS/BLOCKED with per-finding evidence + totals.

@@ -1,0 +1,2 @@
+# Review ticket P4i-REV4 — Codex read-only bounded re-verify of P4i-FIX3
+Commit 5fc3069 (diff vs 9b4d643, apps/mobile DID-sweep files only). Read-only; do not run tests. Re-verify ONLY the 3 items of `.foreman/scratch/ticket-p4i-fix3.md` (X1 terminal flush failure visible + persisting state gating Share; X2 slice-aware retry; X3 wall-clock elapsed ticker): FIXED / PARTIAL / NOT FIXED with file:line evidence and a concrete failure scenario for anything not FIXED, then any NEW HIGH/MEDIUM defect introduced by this diff only. Output: Table, NEW, Clean.
