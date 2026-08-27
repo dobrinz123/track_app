@@ -4,6 +4,7 @@ import {
   createElm327Session,
   decodeMode01Response,
   DEFAULT_SIMULATED_VEHICLE_SCENARIO,
+  setAccelPedalPidSource,
   SimulatedElm327Transport,
   type Elm327Config,
   type Elm327Session,
@@ -169,6 +170,82 @@ describe('SimulatedElm327Transport', () => {
     expect(diagnostics.lastError).toContain('coolantC');
     expect(samples.some((sample) => sample.channel === 'rpm')).toBe(true);
     expect(samples.some((sample) => sample.channel === 'coolantC')).toBe(false);
+  });
+
+  /**
+   * Field revision 2 (2026-08-27, binding — Phase 4h, P4h ticket item 3):
+   * `noDataOnPids` is PID-keyed (unlike `noDataOnChannels`, which is
+   * channel-keyed and would refuse EVERY PID mapping to that channel) --
+   * this is what lets a test script "0x5A NRC'd, 0x49 still answers" for
+   * `accelPedalPct`, the exact scenario `telemetryProvider.ts`'s pedal
+   * fallback needs to react to. Restores `setAccelPedalPidSource('5A')`
+   * afterward so this test's choice never leaks into another test file's
+   * run (module-level mutable state, shared across the whole process).
+   */
+  describe('noDataOnPids (Field revision 2, binding: pedal 0x5A NRC / 0x49 fallback simulation)', () => {
+    afterEach(() => {
+      setAccelPedalPidSource('5A');
+    });
+
+    it('refuses ONLY the scripted PID (0x5A) for accelPedalPct -- switching the source to 0x49 (unscripted) then answers normally', async () => {
+      vi.useFakeTimers();
+      const clock = new FakeClock();
+      const transport = new SimulatedElm327Transport({
+        monotonicNow: () => clock.now(),
+        noDataOnPids: ['5A'],
+        seed: 7,
+      });
+      setAccelPedalPidSource('5A'); // primary source -- matches the DEFAULT, explicit for clarity.
+      const session = createElm327Session(
+        transport,
+        config({ pollPlan: [{ channel: 'accelPedalPct', hz: 1 }] }),
+        () => clock.now(),
+      );
+      const samples: TelemetrySample[] = [];
+      session.onSample((sample) => samples.push(sample));
+      await startUntil(session, 'polling');
+
+      for (let index = 0; index < 4; index += 1) {
+        clock.advance(500);
+        await vi.advanceTimersByTimeAsync(500);
+      }
+      await session.stop();
+
+      expect(samples).toHaveLength(0); // 0x5A was scripted NO DATA -- no accelPedalPct sample ever arrived.
+      expect(session.getDiagnostics().errorCount).toBeGreaterThan(0);
+      expect(session.getDiagnostics().lastError).toContain('accelPedalPct');
+    });
+
+    it('the SAME scripted noDataOnPids leaves 0x49 (unscripted) answering normally -- proves the refusal is PID-keyed, not channel-keyed', async () => {
+      vi.useFakeTimers();
+      const clock = new FakeClock();
+      const transport = new SimulatedElm327Transport({
+        monotonicNow: () => clock.now(),
+        noDataOnPids: ['5A'],
+        seed: 7,
+      });
+      setAccelPedalPidSource('49'); // the mobile provider's fallback -- a FRESH session built with the switched source.
+      const session = createElm327Session(
+        transport,
+        config({ pollPlan: [{ channel: 'accelPedalPct', hz: 1 }] }),
+        () => clock.now(),
+      );
+      const samples: TelemetrySample[] = [];
+      session.onSample((sample) => samples.push(sample));
+      await startUntil(session, 'polling');
+
+      for (let index = 0; index < 4; index += 1) {
+        clock.advance(500);
+        await vi.advanceTimersByTimeAsync(500);
+      }
+      await session.stop();
+
+      expect(samples.length).toBeGreaterThan(0);
+      expect(samples.every((sample) => sample.channel === 'accelPedalPct' && Number.isFinite(sample.value))).toBe(
+        true,
+      );
+      expect(session.getDiagnostics().errorCount).toBe(0);
+    });
   });
 
   it('drives the session to failed on disconnectAfterNCommands, with no unhandled rejection', async () => {

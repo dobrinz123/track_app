@@ -1,8 +1,9 @@
-import React, { useEffect, useMemo, useRef } from 'react';
-import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useKeepAwake } from 'expo-keep-awake';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
+import type { NavigationAction } from '@react-navigation/native';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, radii, spacing, typography } from '../theme';
 import { ProgressRing } from '../components/ProgressRing';
@@ -10,6 +11,11 @@ import { LongPressButton } from '../components/LongPressButton';
 import { StatusBanner } from '../components/StatusBanner';
 import { facade, settingsStore } from '../../session/composition';
 import { resolveSelectedCircuit } from '../../session/circuitCatalog';
+import {
+  CALIBRATION_CANCEL_CONFIRM_BODY,
+  CALIBRATION_CANCEL_CONFIRM_TITLE,
+  shouldConfirmCalibrationExit,
+} from '../../session/calibrationEscape';
 import { useFacadeState } from '../hooks/useFacadeState';
 import { useSettings } from '../hooks/useSettings';
 import { TrackMapView } from '../components/TrackMapView';
@@ -44,6 +50,60 @@ export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Elemen
       navigation.replace('CalibrationResult');
     }
   }, [navigation, state.calibrationResult]);
+
+  // Field revision 2 (2026-08-27, binding — Phase 4h, "calibration escape"):
+  // the header back button and swipe-back gesture are now ENABLED (this
+  // screen used to set `headerBackVisible:false, gestureEnabled:false` in
+  // `RootNavigator.tsx`, blocking any escape except the sticky-footer
+  // button below) -- overridden here, at runtime, via `setOptions` so the
+  // navigator's own static route config (outside this file's write scope)
+  // never needs touching.
+  useEffect(() => {
+    navigation.setOptions({ headerBackVisible: true, gestureEnabled: true });
+  }, [navigation]);
+
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
+  // Both a `GO_BACK` navigation action (header chevron tap OR the edge-swipe
+  // gesture -- React Navigation dispatches the SAME action for either) are
+  // intercepted below; this holds that pending action so confirming can
+  // replay it via `navigation.dispatch`, rather than re-deriving a target
+  // route.
+  const pendingBackActionRef = useRef<NavigationAction | null>(null);
+
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('beforeRemove', (e) => {
+      // Field revision 2 (binding): only an implicit back (header/gesture,
+      // action type `GO_BACK`) is intercepted -- this screen's OWN
+      // programmatic navigations (`navigation.replace(...)`, from either the
+      // sticky Cancel button below or the calibration-complete effect
+      // above) dispatch a `REPLACE` action, which `shouldConfirmCalibrationExit`
+      // never flags, so they proceed unconfirmed exactly as before.
+      if (!shouldConfirmCalibrationExit(e.data.action.type === 'GO_BACK' ? 'header-back' : 'calibration-complete')) {
+        return;
+      }
+      e.preventDefault();
+      pendingBackActionRef.current = e.data.action;
+      setConfirmingCancel(true);
+    });
+    return unsubscribe;
+  }, [navigation]);
+
+  const confirmCancelExit = useCallback(() => {
+    facade.rejectCalibration();
+    setConfirmingCancel(false);
+    const action = pendingBackActionRef.current;
+    pendingBackActionRef.current = null;
+    if (action !== null) {
+      navigation.dispatch(action);
+    } else {
+      navigation.replace('CalibrationInstructions');
+    }
+  }, [navigation]);
+
+  const dismissCancelExit = useCallback(() => {
+    pendingBackActionRef.current = null;
+    setConfirmingCancel(false);
+  }, []);
 
   const coverageFraction = state.calibration?.coverageFraction ?? 0;
   const onTrack = state.calibration?.onTrack ?? true;
@@ -85,81 +145,124 @@ export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Elemen
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
-      <View style={styles.container}>
-        <Text style={styles.title} maxFontSizeMultiplier={1.3}>
-          Calibrating…
-        </Text>
-        <Text style={styles.subtitle} maxFontSizeMultiplier={1.3}>
-          Drive one steady lap
-        </Text>
+      {/* Field revision 2 (2026-08-27, binding — Phase 4h, "calibration
+          escape"): "Cancel button below the fold ... user felt stuck" --
+          the variable-height content above now scrolls INSIDE its own
+          `ScrollView`, while the footer below (the sticky "Cancel
+          Calibration" button, or its confirm prompt) sits OUTSIDE it, in
+          this fixed `flex:1` column -- so it stays visible without
+          scrolling regardless of screen height (pinned at 360x640 and
+          above). */}
+      <View style={styles.outer}>
+        <ScrollView contentContainerStyle={styles.container}>
+          <Text style={styles.title} maxFontSizeMultiplier={1.3}>
+            Calibrating…
+          </Text>
+          <Text style={styles.subtitle} maxFontSizeMultiplier={1.3}>
+            Drive one steady lap
+          </Text>
 
-        {/* C7 fix: a failed async command (e.g. GNSS start failure) surfaces
-            here inline -- never a modal. */}
-        {state.lastError !== null ? <StatusBanner variant="error" message={state.lastError} /> : null}
+          {/* C7 fix: a failed async command (e.g. GNSS start failure) surfaces
+              here inline -- never a modal. */}
+          {state.lastError !== null ? <StatusBanner variant="error" message={state.lastError} /> : null}
 
-        <View style={styles.ringWrap}>
-          <ProgressRing
-            progress={coverageFraction}
-            size={220}
-            accessibilityLabel={`Calibration coverage ${percent} percent`}
+          <View style={styles.ringWrap}>
+            <ProgressRing
+              progress={coverageFraction}
+              size={220}
+              accessibilityLabel={`Calibration coverage ${percent} percent`}
+            >
+              <Text style={styles.percent} maxFontSizeMultiplier={1.3}>
+                {percent}%
+              </Text>
+              <Text style={styles.percentLabel} maxFontSizeMultiplier={1.3}>
+                COVERAGE
+              </Text>
+            </ProgressRing>
+          </View>
+
+          <View
+            style={[styles.onTrackBadge, { borderColor: onTrack ? colors.success : colors.warning }]}
+            accessibilityLabel={onTrack ? 'On track' : 'Off track, move back onto the racing line'}
           >
-            <Text style={styles.percent} maxFontSizeMultiplier={1.3}>
-              {percent}%
+            <View style={[styles.onTrackDot, { backgroundColor: onTrack ? colors.success : colors.warning }]} />
+            <Text
+              style={[styles.onTrackText, { color: onTrack ? colors.success : colors.warning }]}
+              maxFontSizeMultiplier={1.3}
+            >
+              {onTrack ? 'ON TRACK' : 'OFF TRACK'}
             </Text>
-            <Text style={styles.percentLabel} maxFontSizeMultiplier={1.3}>
-              COVERAGE
+          </View>
+
+          {/* V3 binding design: live track-map + offset/position info row, diagnosing
+              OSM-centerline mismatches on-site (field context: "off track" while the
+              driver was actually on the circuit). */}
+          <View style={styles.infoRow}>
+            <Text
+              style={[styles.infoText, offsetOverCorridor && styles.infoTextAlert]}
+              maxFontSizeMultiplier={1.3}
+            >
+              {lateralM === undefined ? 'Offset: — m' : `Offset: ${Math.abs(lateralM).toFixed(1)} m`}
             </Text>
-          </ProgressRing>
-        </View>
+            <Text style={styles.infoText} maxFontSizeMultiplier={1.3}>
+              {distanceM === undefined ? 'Position: — km' : `Position: ${(distanceM / 1_000).toFixed(1)} km`}
+            </Text>
+          </View>
+          <View style={[styles.mapWrap, { width: mapWidth, height: mapHeight }]}>
+            <TrackMapView
+              centerline={selected.runtime.centerline}
+              startFinishLocal={selected.runtime.startFinishGate.a}
+              rawLocal={rawLocal}
+              matchedLocal={matchedLocal}
+              onTrack={onTrack}
+            />
+          </View>
+        </ScrollView>
 
-        <View
-          style={[styles.onTrackBadge, { borderColor: onTrack ? colors.success : colors.warning }]}
-          accessibilityLabel={onTrack ? 'On track' : 'Off track, move back onto the racing line'}
-        >
-          <View style={[styles.onTrackDot, { backgroundColor: onTrack ? colors.success : colors.warning }]} />
-          <Text
-            style={[styles.onTrackText, { color: onTrack ? colors.success : colors.warning }]}
-            maxFontSizeMultiplier={1.3}
-          >
-            {onTrack ? 'ON TRACK' : 'OFF TRACK'}
-          </Text>
-        </View>
-
-        {/* V3 binding design: live track-map + offset/position info row, diagnosing
-            OSM-centerline mismatches on-site (field context: "off track" while the
-            driver was actually on the circuit). */}
-        <View style={styles.infoRow}>
-          <Text
-            style={[styles.infoText, offsetOverCorridor && styles.infoTextAlert]}
-            maxFontSizeMultiplier={1.3}
-          >
-            {lateralM === undefined ? 'Offset: — m' : `Offset: ${Math.abs(lateralM).toFixed(1)} m`}
-          </Text>
-          <Text style={styles.infoText} maxFontSizeMultiplier={1.3}>
-            {distanceM === undefined ? 'Position: — km' : `Position: ${(distanceM / 1_000).toFixed(1)} km`}
-          </Text>
-        </View>
-        <View style={[styles.mapWrap, { width: mapWidth, height: mapHeight }]}>
-          <TrackMapView
-            centerline={selected.runtime.centerline}
-            startFinishLocal={selected.runtime.startFinishGate.a}
-            rawLocal={rawLocal}
-            matchedLocal={matchedLocal}
-            onTrack={onTrack}
-          />
-        </View>
-
-        <View style={styles.cancelWrap}>
-          <LongPressButton
-            label="Cancel Calibration"
-            accessibilityLabel="Cancel calibration, press and hold"
-            onLongPressComplete={() => {
-              facade.rejectCalibration();
-              navigation.replace('CalibrationInstructions');
-            }}
-            durationMs={1200}
-            danger
-          />
+        <View style={styles.footer}>
+          {confirmingCancel ? (
+            <View style={styles.confirmCard}>
+              <Text style={styles.confirmTitle} maxFontSizeMultiplier={1.3}>
+                {CALIBRATION_CANCEL_CONFIRM_TITLE}
+              </Text>
+              <Text style={styles.confirmBody} maxFontSizeMultiplier={1.3}>
+                {CALIBRATION_CANCEL_CONFIRM_BODY}
+              </Text>
+              <View style={styles.confirmButtonsRow}>
+                <Pressable
+                  style={styles.keepGoingButton}
+                  onPress={dismissCancelExit}
+                  accessibilityRole="button"
+                  accessibilityLabel="Keep calibrating"
+                >
+                  <Text style={styles.keepGoingButtonText} maxFontSizeMultiplier={1.3}>
+                    Keep Calibrating
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={styles.confirmCancelButton}
+                  onPress={confirmCancelExit}
+                  accessibilityRole="button"
+                  accessibilityLabel="Confirm cancel calibration"
+                >
+                  <Text style={styles.confirmCancelButtonText} maxFontSizeMultiplier={1.3}>
+                    Cancel Calibration
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : (
+            <LongPressButton
+              label="Cancel Calibration"
+              accessibilityLabel="Cancel calibration, press and hold"
+              onLongPressComplete={() => {
+                facade.rejectCalibration();
+                navigation.replace('CalibrationInstructions');
+              }}
+              durationMs={1200}
+              danger
+            />
+          )}
         </View>
       </View>
     </SafeAreaView>
@@ -168,7 +271,10 @@ export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Elemen
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
-  container: { flex: 1, justifyContent: 'center', padding: spacing.lg, gap: spacing.lg },
+  // Field revision 2 (binding): the fixed outer column -- the scrollable
+  // content area above, the sticky footer (never scrolls away) below.
+  outer: { flex: 1 },
+  container: { flexGrow: 1, justifyContent: 'center', padding: spacing.lg, gap: spacing.lg },
   title: { ...typography.title, fontSize: 26, color: colors.textPrimary },
   subtitle: { ...typography.body, color: colors.textSecondary },
   // The ring itself is a circular graphic, not text content -- kept centered as a widget
@@ -193,5 +299,37 @@ const styles = StyleSheet.create({
   // Explicit pixel size set inline per-render (P1 fix, above) -- `width: '100%'` here
   // is just the pre-computation fallback for the very first paint.
   mapWrap: { width: '100%' },
-  cancelWrap: { marginTop: spacing.xl, width: '100%' },
+  // Field revision 2 (binding, "calibration escape"): OUTSIDE the
+  // ScrollView, in `outer`'s fixed column -- always visible without
+  // scrolling ("pinned above the map / sticky footer").
+  footer: { width: '100%', padding: spacing.lg, paddingTop: spacing.md },
+  confirmCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.danger,
+    padding: spacing.md,
+    gap: spacing.sm,
+  },
+  confirmTitle: { ...typography.subtitle, color: colors.textPrimary },
+  confirmBody: { ...typography.caption, color: colors.textSecondary },
+  confirmButtonsRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.xs },
+  keepGoingButton: {
+    flex: 1,
+    borderRadius: radii.lg,
+    paddingVertical: spacing.md,
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  keepGoingButtonText: { ...typography.subtitle, color: colors.textPrimary },
+  confirmCancelButton: {
+    flex: 1,
+    borderRadius: radii.lg,
+    paddingVertical: spacing.md,
+    alignItems: 'center',
+    backgroundColor: colors.danger,
+  },
+  confirmCancelButtonText: { ...typography.subtitle, color: colors.onAccent },
 });

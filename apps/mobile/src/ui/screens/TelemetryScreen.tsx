@@ -5,11 +5,34 @@ import type { Elm327State, TelemetryChannelId, TelemetrySample } from '@circuit/
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, radii, spacing, typography } from '../theme';
-import { gForceProvider, settingsStore, telemetryProvider } from '../../session/composition';
+import { facade, gForceProvider, settingsStore, telemetryProvider } from '../../session/composition';
+import { useFacadeState } from '../hooks/useFacadeState';
 import { useSettings } from '../hooks/useSettings';
 import { summarizeGForceSamples, type TelemetryProviderDiagnostics } from '../../session/telemetryProvider';
 import { formatHexByte, resolveEnetChannelSpecs } from '../../session/enetSettingsValidation';
 import { getNetworkInfo, type NetworkInfo } from '../../session/networkInfo';
+
+/**
+ * Field revision 2 (2026-08-27, binding — Phase 4h, "G in the monitor"):
+ * session states that mean "a driving session currently owns the G-force
+ * provider" -- mirrors `SettingsScreen.tsx`'s OWN identically-named local
+ * constant (kept separately per-screen, same convention that file already
+ * uses, rather than a shared export). This monitor's Stop button must NOT
+ * stop `gForceProvider` while any of these are live -- the driving session
+ * needs latG/longG samples for the WHOLE session, this screen's own
+ * OBD Start/Stop is unrelated.
+ */
+const ACTIVE_SESSION_STATES = new Set([
+  'preflight',
+  'awaitingCalibration',
+  'calibrating',
+  'calibrationReview',
+  'armed',
+  'outLap',
+  'timing',
+  'inPit',
+  'paused',
+]);
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Telemetry'>;
 
@@ -117,6 +140,8 @@ function formatNrc(nrc: number): string {
  */
 export function TelemetryScreen(_props: Props): React.JSX.Element {
   const settings = useSettings(settingsStore);
+  const facadeState = useFacadeState(facade);
+  const drivingSessionActive = ACTIVE_SESSION_STATES.has(facadeState.sessionState);
   const [state, setState] = React.useState<Elm327State>('idle');
   const [detail, setDetail] = React.useState<string | undefined>(undefined);
   const [lastValues, setLastValues] = React.useState<Partial<Record<TelemetryChannelId, number>>>({});
@@ -199,8 +224,17 @@ export function TelemetryScreen(_props: Props): React.JSX.Element {
   function toggleConnection(): void {
     if (running) {
       void telemetryProvider.stop();
+      // Field revision 2 (2026-08-27, binding — Phase 4h, "G in the
+      // monitor"): Stop only stops `gForceProvider` when no DRIVING session
+      // is currently using it -- a live session (`composition.ts`) owns its
+      // latG/longG samples for the session's whole duration, independent of
+      // this screen's own OBD Start/Stop.
+      if (!drivingSessionActive) void gForceProvider.stop();
     } else {
       telemetryProvider.start();
+      // `gForceProvider.start()` is a no-op if already running (a driving
+      // session may already own it) -- idempotent either way.
+      gForceProvider.start();
     }
   }
 
@@ -275,10 +309,18 @@ export function TelemetryScreen(_props: Props): React.JSX.Element {
                 const hz = diagnostics.observedHzByChannel[id];
                 const unsupported = isEnet && unsupportedSet.has(id);
                 const nrc = diagnostics.lastNrcByChannel?.[id];
+                // Field revision 2 (2026-08-27, binding — Phase 4h): "the
+                // monitor label shows '(rel.)' or '(0x49 norm.)'" -- which
+                // accelPedalPct source is CURRENTLY active (diagnostics
+                // always report one of the two, never absent).
+                const label =
+                  id === 'accelPedalPct'
+                    ? `${channel.label} ${diagnostics.pedalSource === '49-normalized' ? '(0x49 norm.)' : '(rel.)'}`
+                    : channel.label;
                 return (
                   <View key={id} style={styles.channelRow}>
                     <Text style={styles.channelLabel} maxFontSizeMultiplier={1.3}>
-                      {channel.label}
+                      {label}
                     </Text>
                     {unsupported ? (
                       <Text style={styles.channelUnsupported} maxFontSizeMultiplier={1.3}>

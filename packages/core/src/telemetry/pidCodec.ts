@@ -17,6 +17,40 @@ interface PidDefinition {
   decode(bytes: readonly number[]): number;
 }
 
+/**
+ * Field revision 2 (2026-08-27, binding — Phase 4h, pedal PID fallback):
+ * "primary source PID 0x5A ... if the DME answers NRC/unsupported for 0x5A,
+ * fall back to 0x49." Both PIDs share the IDENTICAL decode formula
+ * (100/255·A) -- only the PID byte itself differs -- so `accelPedalPct`'s
+ * `PID_BY_CHANNEL` entry below reads this mutable module-level flag via a
+ * getter, rather than a fixed literal like every other channel.
+ *
+ * WHY mutable module state, here specifically: `elm327Session.ts` (not in
+ * this ticket's write scope) calls `encodeMode01Request(channel)` exactly
+ * ONCE per channel, at session CONSTRUCTION time, to build that channel's
+ * fixed poll command for the session's entire lifetime -- there is no
+ * per-poll re-evaluation to hook a runtime PID switch into. The mobile
+ * provider (`telemetryProvider.ts`) is therefore the only thing that CAN
+ * "switch" the source: it calls {@link setAccelPedalPidSource} then tears
+ * down and relaunches a FRESH session, which reads the flag anew at ITS OWN
+ * construction. Correctness relies on the provider never flipping this flag
+ * while an existing session built from the OLD value is still alive/polling
+ * (true in practice: the switch only ever happens after that session has
+ * fully stopped) -- see `telemetryProvider.ts`'s own pedal-fallback comment.
+ */
+export type AccelPedalPidSource = '5A' | '49';
+let accelPedalPidSource: AccelPedalPidSource = '5A';
+
+/** Sets which PID {@link encodeMode01Request}/{@link decodeMode01Response} use for `accelPedalPct` -- see the module-state doc comment above for why, and its caller-discipline requirement. */
+export function setAccelPedalPidSource(source: AccelPedalPidSource): void {
+  accelPedalPidSource = source;
+}
+
+/** Current `accelPedalPct` PID source (test/diagnostic visibility). */
+export function getAccelPedalPidSource(): AccelPedalPidSource {
+  return accelPedalPidSource;
+}
+
 const PID_BY_CHANNEL: Record<Mode01TelemetryChannelId, PidDefinition> = {
   rpm: {
     pid: '0C',
@@ -37,8 +71,16 @@ const PID_BY_CHANNEL: Record<Mode01TelemetryChannelId, PidDefinition> = {
   // (SAE J1979 PID 0x49) -- EMPIRICAL on the Supra: must read ~0% released
   // and rise with the pedal (distinct from throttlePct's plate opening,
   // which idles at ~14-15%). Vector: A=0x80 (128) -> 128*100/255 = 50.2%.
+  //
+  // Field revision 2 (2026-08-27, binding): primary source is now PID 0x5A
+  // ("Relative accelerator pedal position", 0 at rest -- EMPIRICAL on the
+  // Supra); 0x49 is the fallback when the DME answers NRC/unsupported for
+  // 0x5A. `pid` is a GETTER reading the mutable module flag above -- see its
+  // own doc comment for why.
   accelPedalPct: {
-    pid: '49',
+    get pid() {
+      return accelPedalPidSource;
+    },
     byteCount: 1,
     decode: ([a = 0]) => (a * 100) / 255,
   },
@@ -70,6 +112,16 @@ const CHANNEL_BY_REQUEST = new Map<string, Mode01TelemetryChannelId>(
     channel as Mode01TelemetryChannelId,
   ]),
 );
+// Field revision 2 (binding): `accelPedalPct` has TWO valid source PIDs
+// (0x5A primary, 0x49 fallback) -- the map-building line above only ever
+// captured whichever ONE was active in `accelPedalPidSource` at MODULE LOAD
+// time, so the other must be added explicitly here, unconditionally,
+// regardless of the mutable flag's current value. This is what lets
+// `channelForMode01Request`/`isMode01TelemetryChannel`-driven consumers
+// (notably `enetChannelSpecs.ts`'s spec validator) recognize EITHER PID as
+// a legitimate `accelPedalPct` request at any time.
+CHANNEL_BY_REQUEST.set('0149', 'accelPedalPct');
+CHANNEL_BY_REQUEST.set('015A', 'accelPedalPct');
 
 /** Encodes the binding mode-01 live-data request for a telemetry channel. */
 export function encodeMode01Request(channel: Mode01TelemetryChannelId): string {

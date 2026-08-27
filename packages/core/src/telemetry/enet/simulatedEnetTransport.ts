@@ -70,11 +70,35 @@ export const DEFAULT_ENET_SCENARIO: readonly EnetSimulatedChannelScript[] = [
   { mode: 'obd01', requestHex: '0C', encodeDataBytes: (t) => twoBytesBE((850 + 2_700 * wave(t, 4_000)) * 4) },
   { mode: 'obd01', requestHex: '0D', encodeDataBytes: (t) => oneByte(15 + 95 * wave(t, 10_000)) },
   { mode: 'obd01', requestHex: '11', encodeDataBytes: (t) => oneByte(((8 + 72 * wave(t + 500, 3_500)) * 255) / 100) },
-  // Field revision: the accelerator PEDAL (PID 0x49) -- idles near 0%,
-  // distinct from PID 0x11's own throttle-plate opening above.
-  { mode: 'obd01', requestHex: '49', encodeDataBytes: (t) => oneByte(((2 + 60 * wave(t + 1_000, 3_500)) * 255) / 100) },
+  // Field revision 2 (2026-08-27, binding — Phase 4h): the accelerator
+  // PEDAL is now PID 0x5A (primary source, matches `DEFAULT_ENET_CHANNEL_SPECS`)
+  // -- idles near 0%, distinct from PID 0x11's own throttle-plate opening
+  // above. 0x49 is the mobile provider's fallback (see
+  // `ACCEL_PEDAL_FALLBACK_ENET_SCRIPT` below) -- NOT scripted here by
+  // default, since the default scenario answers the PRIMARY source.
+  { mode: 'obd01', requestHex: '5A', encodeDataBytes: (t) => oneByte(((2 + 60 * wave(t + 1_000, 3_500)) * 255) / 100) },
   { mode: 'obd01', requestHex: '05', encodeDataBytes: (t) => oneByte(70 + 25 * Math.min(1, t / 180_000) + 40) },
   { mode: 'obd01', requestHex: '5C', encodeDataBytes: (t) => oneByte(defaultEngineOilC(t) + 40) },
+];
+
+/**
+ * Field revision 2 (2026-08-27, binding — Phase 4h, P4h ticket item 3):
+ * scripts "0x5A NRC'd, 0x49 still answers" for `accelPedalPct` -- the exact
+ * scenario `telemetryProvider.ts`'s ENET pedal fallback needs to react to
+ * (`session.getDiagnostics().unsupportedChannels`). A test builds its own
+ * scenario array as `[...DEFAULT_ENET_SCENARIO.filter(s => s.requestHex !==
+ * '5A'), ...ACCEL_PEDAL_FALLBACK_ENET_SCRIPT]` to get every other default
+ * channel PLUS this pair.
+ */
+export const ACCEL_PEDAL_NRC_UNSUPPORTED = 0x11;
+export const ACCEL_PEDAL_FALLBACK_ENET_SCRIPT: readonly EnetSimulatedChannelScript[] = [
+  { mode: 'obd01', requestHex: '5A', encodeDataBytes: () => oneByte(0), nrc: ACCEL_PEDAL_NRC_UNSUPPORTED },
+  // A ~15% rest offset (EMPIRICAL on the Supra, per contracts.md), rising to ~55% -- the SAME shape as the 0x5A script above, just with 0x49's own non-zero rest floor.
+  {
+    mode: 'obd01',
+    requestHex: '49',
+    encodeDataBytes: (t) => oneByte(((15 + 40 * wave(t + 1_000, 3_500)) * 255) / 100),
+  },
 ];
 
 /**

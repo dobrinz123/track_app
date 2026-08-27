@@ -740,3 +740,19 @@ force-close, `current` cleared, reservation released for ENET). This deliberatel
 "ELM byte-identical on rejecting stop" rule: the rejection still propagates to the caller, but state is no
 longer left attached. `start()` awaits any in-flight teardown and coalesces concurrent Starts; the coalescing
 latch MUST clear after every launch attempt (success or failure) so later Starts are never swallowed.
+
+## Field revision 2 (2026-08-27, binding — Phase 4h, after driveway test 2)
+- **Distance guard**: Preflight computes the distance from the current GNSS fix to the selected circuit's S/F
+  gate; if > 3 km (constant `CIRCUIT_PROXIMITY_WARN_KM`) the preflight shows "You are X km from <circuit> —
+  calibration needs you on the circuit" with "Back" (default) and "Continue anyway" (testing). No fix yet →
+  the existing GNSS wait applies.
+- **Calibration escape**: "Cancel Calibration" is always visible without scrolling (pinned above the map /
+  sticky footer), and the header back gesture is allowed with a confirm ("Cancel calibration?"). Cancel ends
+  the session cleanly (existing controller path).
+- **Accelerator pedal**: primary source PID 0x5A "Relative accelerator pedal position" (100/255·A, 0 at rest
+  — EMPIRICAL on the Supra); if the DME answers NRC/unsupported for 0x5A, fall back to 0x49 with a learned
+  rest offset (minimum of the first 10 s of samples while speed = 0, re-learned per session; value =
+  max(0, raw − offset) rescaled to 0–100). Diagnostics show which source is active. Channel id stays
+  `accelPedalPct`; the monitor label shows "(rel.)" or "(0x49 norm.)".
+- **G in the monitor**: the telemetry monitor's Start also starts the phone accelerometer provider (and
+  Stop stops it unless a driving session owns it), so latG/longG rows are live outside a session.

@@ -1,4 +1,5 @@
 import {
+  ACCEL_PEDAL_FALLBACK_ENET_SPEC,
   buildDiscoveryCandidates,
   createElm327Session,
   createEnetSession,
@@ -6,6 +7,7 @@ import {
   DEFAULT_ENET_CONFIG,
   ENET_DEFAULT_CHANNEL_RATES_HZ,
   runDiscovery,
+  setAccelPedalPidSource,
   SimulatedElm327Transport,
   SimulatedEnetTransport,
   type DiscoveryAbortSignal,
@@ -32,6 +34,12 @@ import {
   type EnetAdapterReservation,
   type EnetAdapterToken,
 } from './enetAdapterReservation';
+import {
+  INITIAL_PEDAL_OFFSET_LEARNER,
+  normalizeAccelPedalPct,
+  registerPedalOffsetSample,
+  type PedalOffsetLearner,
+} from './pedalNormalization';
 
 /** User-facing diagnostics note (binding, P4e-FIX3 H2) when the ENET adapter is held by the dev DID-probe screen -- the MHD adapter accepts one ECU client at a time. */
 export const ENET_ADAPTER_RESERVED_BY_PROBE_DETAIL = 'adapter reserved by probe';
@@ -340,6 +348,16 @@ export interface TelemetryProviderDiagnostics {
   ackLatencyMsP95?: number;
   /** ENET-only: hex dump of the most recently received HSFZ frame (the dev DID-probe screen's own tool, also surfaced here for the monitor). */
   lastRawFrameHex?: string;
+  /**
+   * Field revision 2 (2026-08-27, binding — Phase 4h): which PID source
+   * `accelPedalPct` is CURRENTLY built from -- `'5A'` (primary,
+   * "Relative accelerator pedal position", 0 at rest) or `'49-normalized'`
+   * (fallback, rest-offset normalized -- the DME answered NRC/unsupported
+   * for 0x5A). Always present (both ELM327 and ENET): `'5A'` before any
+   * generation has ever launched, or before the fallback has ever
+   * triggered.
+   */
+  pedalSource: '5A' | '49-normalized';
 }
 
 /**
@@ -508,6 +526,35 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
    * adapters", it's this SAME generation completing its own connect).
    */
   let applyingDiscoveryResultUpdate = false;
+  /**
+   * Field revision 2 (2026-08-27, binding — Phase 4h, pedal PID fallback):
+   * which `accelPedalPct` source THIS `start()`..`stop()` lifecycle is
+   * currently using -- surfaced verbatim via `getDiagnostics().pedalSource`.
+   * Reset to `'5A'` in `launchFresh()` (a genuinely fresh Start always tries
+   * the primary source again); UNCHANGED across `triggerPedalFallback`'s own
+   * internal teardown-and-relaunch (the fallback, once triggered, sticks
+   * for the rest of this lifecycle -- see `pedalFallbackAttempted` below).
+   */
+  let pedalSource: '5A' | '49-normalized' = '5A';
+  /**
+   * "runs the fallback check ONCE per start() lifecycle" -- mirrors
+   * `autoDiscoveryAttempted`'s own reset discipline (reset ONLY in
+   * `launchFresh()`, never per-generation), so a generation that itself
+   * fails/retries for an UNRELATED reason after already falling back never
+   * re-attempts 0x5A (which just proved unsupported) or re-triggers a
+   * second fallback relaunch.
+   */
+  let pedalFallbackAttempted = false;
+  /** Learned 0x49 rest offset for the CURRENT (post-fallback) generation -- re-learned per session per contracts.md ("re-learned per session"), so reset both in `launchFresh()` and inside `triggerPedalFallback()` (a fresh generation, even mid-lifecycle). */
+  let pedalOffsetLearner: PedalOffsetLearner = INITIAL_PEDAL_OFFSET_LEARNER;
+  /** Whether ANY `accelPedalPct` sample has arrived for the CURRENT generation -- reset at the top of every `launchSession()` call (per-generation, unlike the lifecycle-scoped fields above). Read by the ELM327-only fallback-check timer below: no sample within the grace window is treated as "0x5A unsupported" (ELM327 has no structured per-channel NRC diagnostics, unlike ENET's `unsupportedChannels`). */
+  let pedalSampleSeenThisGeneration = false;
+  /** The most recently observed `speedKph` sample's value, across whichever generation is current -- feeds the "at rest" gate for `registerPedalOffsetSample` (`pedalNormalization.ts`). Not reset per-generation: a fresh generation's own first speedKph sample overwrites it within one poll tick regardless. */
+  let latestSpeedKph: number | undefined;
+  /** ELM327-only one-shot timer (see `pedalSampleSeenThisGeneration`'s doc comment) -- started when an ELM327 generation reaches 'polling' while still on the primary (0x5A) source; cancelled in `doStop()` alongside `retryTimer` so a stale generation's check can never fire after teardown. */
+  let pedalFallbackCheckTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Grace window (ms) an ELM327 generation is given, after reaching 'polling' on the primary (0x5A) source, before an ABSENT `accelPedalPct` sample is treated as "DME answered NO DATA" and the fallback triggers. Comfortably under the poll plan's own 5Hz cadence for this channel (several polls' worth of margin against ordinary jitter), and short enough that a genuinely unsupported PID is caught quickly rather than being silently mistaken for "still connecting". */
+  const PEDAL_FALLBACK_CHECK_DELAY_MS = 8_000;
 
   /** Wraps a discovery-result `settingsStore.update()` so the settings-change watcher (below) can tell it apart from a user-initiated Settings-screen edit. */
   function applyDiscoverySettingsUpdate(patch: Parameters<SettingsStore['update']>[0]): void {
@@ -556,6 +603,88 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     running = false;
     current = null;
     emitState('failed', errorMessage(error));
+  }
+
+  /**
+   * Field revision 2 (2026-08-27, binding — Phase 4h, pedal PID fallback):
+   * "if the DME answers NRC/unsupported for 0x5A, fall back to 0x49." Both
+   * detection paths (ENET's structured `unsupportedChannels` diagnostics,
+   * ELM327's grace-window timer) call this exactly once per `start()`
+   * lifecycle (`pedalFallbackAttempted` guards re-entry). Switches the
+   * module-level source, resets the offset learner for the FRESH session
+   * about to launch, then reuses the FULL `doStop()` teardown protocol
+   * (unified `stopping` promise, generation-scoped transport close,
+   * reservation release) before relaunching -- calling `launchSession()`
+   * directly (NOT `launchFresh()`) so `pedalSource`/`pedalFallbackAttempted`
+   * survive this internal relaunch even though it's mid-lifecycle.
+   */
+  function triggerPedalFallback(): void {
+    if (pedalFallbackAttempted) return;
+    pedalFallbackAttempted = true;
+    pedalSource = '49-normalized';
+    pedalOffsetLearner = INITIAL_PEDAL_OFFSET_LEARNER;
+    // Read by the ELM327 branch's NEXT `createElm327Session` construction
+    // (`encodeMode01Request`/`decodeMode01Response` inside it) -- a no-op
+    // for ENET, whose fallback instead comes from swapping in
+    // `ACCEL_PEDAL_FALLBACK_ENET_SPEC` at `buildEnetConfig()` time, below.
+    setAccelPedalPidSource('49');
+    if (pedalFallbackCheckTimer !== null) {
+      clearTimeout(pedalFallbackCheckTimer);
+      pedalFallbackCheckTimer = null;
+    }
+    // `doStop()` always sets `running = false` at its own top (regardless
+    // of WHY it was called), so `running` alone cannot tell "an UNRELATED
+    // stop() also happened concurrently" apart from "nothing else
+    // intervened" -- mirrors `scheduleRetry`'s own discipline instead:
+    // capture the fingerprint THIS generation was launched from, and only
+    // relaunch if it's unchanged by the time this internal teardown
+    // settles (an actual settings change in that window means the watcher
+    // already owns whatever comes next).
+    const fingerprintAtTrigger = activeFingerprint;
+    const relaunch = (): void => {
+      if (
+        fingerprintAtTrigger !== null &&
+        !fingerprintsEqual(fingerprintAtTrigger, currentConfigFingerprint(settingsStore.getSettings()))
+      ) {
+        return;
+      }
+      // Unconditional, same as `launchFresh()`'s own `running = true` --
+      // this internal relaunch is not gated behind the (already-cleared-by-
+      // doStop) `running` flag.
+      running = true;
+      try {
+        launchSession();
+      } catch (error) {
+        handleLaunchFailure(error);
+      }
+    };
+    void doStop().then(relaunch, relaunch);
+  }
+
+  /**
+   * Shared sample-forwarding path for BOTH generation kinds (ELM327's branch
+   * in `launchSession()`, ENET's in `buildAndStartEnetSession`) -- tracks
+   * the latest `speedKph` (the offset learner's "at rest" gate) and, for
+   * `accelPedalPct` specifically, marks a sample as seen for THIS generation
+   * (the ELM327 fallback-check timer's own signal) and applies the
+   * rest-offset normalization when `pedalSource` is the fallback. Callers
+   * still do their OWN `current?.id === id` staleness check before calling
+   * this -- it forwards unconditionally once called.
+   */
+  function forwardTelemetrySample(sample: TelemetrySample): void {
+    if (sample.channel === 'speedKph') latestSpeedKph = sample.value;
+    if (sample.channel === 'accelPedalPct') {
+      pedalSampleSeenThisGeneration = true;
+      if (pedalSource === '49-normalized') {
+        pedalOffsetLearner = registerPedalOffsetSample(pedalOffsetLearner, sample.value, latestSpeedKph, sample.tMonoMs);
+        const offset = pedalOffsetLearner.minRestValue ?? 0;
+        const normalized = normalizeAccelPedalPct(sample.value, offset);
+        const normalizedSample: TelemetrySample = { ...sample, value: normalized };
+        for (const listener of [...sampleListeners]) listener(normalizedSample);
+        return;
+      }
+    }
+    for (const listener of [...sampleListeners]) listener(sample);
   }
 
   function buildTransport(): ObdTransport {
@@ -617,7 +746,16 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
    */
   function buildEnetConfig(): EnetConfig {
     const settings = settingsStore.getSettings();
-    const channelSpecs = resolveEnetChannelSpecs(settings.enetChannelSpecsJson);
+    let channelSpecs = resolveEnetChannelSpecs(settings.enetChannelSpecsJson);
+    // Field revision 2 (binding, pedal PID fallback): once the fallback has
+    // triggered for this lifecycle, EVERY subsequent ENET (re)launch --
+    // including this one -- swaps the fallback (0x49) spec in for whatever
+    // `accelPedalPct` spec the settings resolved to (built-in default, or a
+    // user `did`/`obd01` override) -- the primary 0x5A source already
+    // proved NRC'd/unsupported, so there is no reason to poll it again.
+    if (pedalSource === '49-normalized') {
+      channelSpecs = [...channelSpecs.filter((spec) => spec.channel !== 'accelPedalPct'), ACCEL_PEDAL_FALLBACK_ENET_SPEC];
+    }
     return {
       channelSpecs,
       pollPlan: buildEnetPollPlan(channelSpecs),
@@ -771,7 +909,17 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
         enetToken: token,
         unsubscribeSample: next.onSample((sample) => {
           if (current?.id !== id) return;
-          for (const listener of [...sampleListeners]) listener(sample);
+          forwardTelemetrySample(sample);
+          // Field revision 2 (binding, pedal PID fallback): ENET has
+          // STRUCTURED per-channel diagnostics (`unsupportedChannels`) --
+          // once the DME NRCs the primary 0x5A request, the engine marks
+          // the channel unsupported and never polls it again, so THIS
+          // check (not a grace-window timer, unlike ELM327 below) is the
+          // reliable, immediate signal. Cheap enough to run on every
+          // sample tick; guarded so it only ever fires once per lifecycle.
+          if (pedalSource === '5A' && !pedalFallbackAttempted && next.getDiagnostics().unsupportedChannels.includes('accelPedalPct')) {
+            triggerPedalFallback();
+          }
         }),
         unsubscribeState: next.onStateChange((state, detail) => {
           if (current?.id !== id) return;
@@ -961,6 +1109,11 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     reservationBlockedDetail = undefined; // reset -- re-set below only if THIS attempt is blocked.
     autoDiscoveryFailureDetail = undefined; // reset -- re-set below only if THIS attempt's own discovery finds nothing.
     settingsChangedDetail = undefined; // reset -- a fresh launch supersedes whatever stopped the previous generation.
+    // Field revision 2 (binding, pedal PID fallback): per-GENERATION (unlike
+    // `pedalSource`/`pedalFallbackAttempted`, which are lifecycle-scoped) --
+    // this FRESH generation has not seen a sample yet, whichever source it
+    // ends up polling.
+    pedalSampleSeenThisGeneration = false;
     // Field revision (2026-08-27, binding): the fingerprint THIS launch is
     // actually built from -- `start()`'s re-entry check and `scheduleRetry`'s
     // fire-time abort check both compare against this.
@@ -1026,6 +1179,13 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     const transport = buildTransport();
     activeTransport = transport;
     const transOilPidHex = settingsStore.getSettings().transOilPidHex;
+    // Field revision 2 (binding, pedal PID fallback): read by
+    // `createElm327Session` below (via `pidCodec.ts`'s
+    // `encodeMode01Request`/`decodeMode01Response`, both consulted at
+    // session construction) -- ELM327 has no runtime PID-switch mechanism of
+    // its own, so this must be set BEFORE constructing a session that
+    // should poll the fallback.
+    setAccelPedalPidSource(pedalSource === '49-normalized' ? '49' : '5A');
     const config: Elm327Config = {
       pollPlan: buildPollPlan(transOilPidHex),
       customPids: buildCustomPids(transOilPidHex),
@@ -1041,11 +1201,25 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       transport,
       unsubscribeSample: next.onSample((sample) => {
         if (current?.id !== id) return;
-        for (const listener of [...sampleListeners]) listener(sample);
+        forwardTelemetrySample(sample);
       }),
       unsubscribeState: next.onStateChange((state, detail) => {
         if (current?.id !== id) return;
         emitState(state, detail);
+        if (state === 'polling' && pedalSource === '5A' && !pedalFallbackAttempted) {
+          // Field revision 2 (binding, pedal PID fallback): ELM327 has no
+          // structured per-channel diagnostics (unlike ENET's
+          // `unsupportedChannels`) -- a grace-window timer is the only
+          // available signal that the primary (0x5A) source is unsupported
+          // ("DME answers NO DATA", per contracts.md). `pedalSampleSeenThisGeneration`
+          // was already reset for this generation at the top of `launchSession()`.
+          pedalFallbackCheckTimer = setTimeout(() => {
+            pedalFallbackCheckTimer = null;
+            if (current?.id !== id) return; // stale -- a newer generation (or no generation) now owns this decision.
+            if (pedalSampleSeenThisGeneration) return; // 0x5A IS answering -- nothing to do.
+            triggerPedalFallback();
+          }, PEDAL_FALLBACK_CHECK_DELAY_MS);
+        }
         if (state === 'failed') {
           // Field revision (2026-08-27, binding): explicit close, defense-in-
           // depth against `tcpObdTransport.ts`'s own async-init-failure path
@@ -1131,6 +1305,15 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     if (retryTimer !== null) {
       clearTimeout(retryTimer);
       retryTimer = null;
+    }
+    // Field revision 2 (binding, pedal PID fallback): cancels the ELM327
+    // fallback-check timer, same reset discipline as `retryTimer` above --
+    // a stale timer would be self-guarded by its own `current?.id !== id`
+    // check regardless, but clearing it here (like `retryTimer`) means a
+    // fully-stopped provider never has anything pending at all.
+    if (pedalFallbackCheckTimer !== null) {
+      clearTimeout(pedalFallbackCheckTimer);
+      pedalFallbackCheckTimer = null;
     }
       // M1 fix (binding, sweep transport interface & lifecycle amendment):
       // "stop() aborts an in-flight discovery, awaits it, and releases the
@@ -1309,6 +1492,13 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     // start" -- reset here (a fresh start()..stop() lifecycle), mirroring
     // `retriesUsed`'s own reset discipline (NOT reset in `stop()`).
     autoDiscoveryAttempted = false;
+    // Field revision 2 (binding, pedal PID fallback): a genuinely FRESH
+    // Start always tries the primary (0x5A) source again, same reset
+    // discipline as `autoDiscoveryAttempted` above -- NOT reset by
+    // `triggerPedalFallback()`'s own internal (mid-lifecycle) relaunch.
+    pedalSource = '5A';
+    pedalFallbackAttempted = false;
+    pedalOffsetLearner = INITIAL_PEDAL_OFFSET_LEARNER;
     try {
       launchSession();
     } catch (error) {
@@ -1432,6 +1622,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
           ...(diag.ackLatencyMsP50 === undefined ? {} : { ackLatencyMsP50: diag.ackLatencyMsP50 }),
           ...(diag.ackLatencyMsP95 === undefined ? {} : { ackLatencyMsP95: diag.ackLatencyMsP95 }),
           ...(diag.lastRawFrameHex === undefined ? {} : { lastRawFrameHex: diag.lastRawFrameHex }),
+          pedalSource,
         };
       }
       const base = current?.session.getDiagnostics() ?? { observedHzByChannel: {}, errorCount: 0 };
@@ -1451,6 +1642,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
         errorCount: base.errorCount,
         ...(lastError === undefined ? {} : { lastError }),
         adapterType,
+        pedalSource,
       };
     },
   };

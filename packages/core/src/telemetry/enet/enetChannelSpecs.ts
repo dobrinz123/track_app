@@ -108,9 +108,9 @@ export const DEFAULT_ENET_CHANNEL_SPECS: readonly EnetChannelSpec[] = [
   {
     channel: 'accelPedalPct',
     mode: 'obd01',
-    requestHex: '49',
+    requestHex: '5A',
     provenance:
-      'standard mode-01 PID 0x49 (SAE J1979 "Accelerator pedal position D"); added after the 2026-08-27 driveway test found throttlePct (0x11) is the throttle PLATE, not the pedal -- EMPIRICAL whether the DME answers 0x49 over ENET (not yet field-tested; see enet-protocol-research.md #3)',
+      'Field revision 2 (2026-08-27, binding): standard mode-01 PID 0x5A ("Relative accelerator pedal position") -- primary source, EMPIRICAL on the Supra (0 at rest, unlike 0x49\'s ~15% rest offset). Supersedes the 0x49 default this spec previously used (added after the driveway test found throttlePct/0x11 is the throttle PLATE, not the pedal) -- 0x49 remains the mobile provider\'s fallback source (`telemetryProvider.ts`) when the DME answers NRC/unsupported for 0x5A over ENET; EMPIRICAL whether the DME answers 0x5A over ENET at all (not yet field-tested; see enet-protocol-research.md #3).',
   },
   {
     channel: 'coolantC',
@@ -125,6 +125,25 @@ export const DEFAULT_ENET_CHANNEL_SPECS: readonly EnetChannelSpec[] = [
     provenance: 'standard mode-01 PID 0x5C; EMPIRICAL whether the DME answers it over ENET (see enet-protocol-research.md #3)',
   },
 ];
+
+/**
+ * Field revision 2 (2026-08-27, binding — Phase 4h, pedal PID fallback):
+ * the `accelPedalPct` spec the mobile provider (`telemetryProvider.ts`)
+ * swaps in for the primary 0x5A spec above when the DME answers
+ * NRC/unsupported for 0x5A over ENET (`session.getDiagnostics().unsupportedChannels`
+ * -- see `enetSession.ts`). Exported so the provider never hand-builds a
+ * raw `requestHex`/`provenance` pair itself; the resulting raw pedal
+ * percentage still needs the SAME rest-offset normalization the ELM327
+ * fallback path uses (`pedalNormalization.ts`, mobile) -- 0x49's rest
+ * offset is not 0 like 0x5A's.
+ */
+export const ACCEL_PEDAL_FALLBACK_ENET_SPEC: EnetChannelSpec = {
+  channel: 'accelPedalPct',
+  mode: 'obd01',
+  requestHex: '49',
+  provenance:
+    'Field revision 2 (2026-08-27, binding): standard mode-01 PID 0x49 fallback source -- used when the DME answers NRC/unsupported for the primary 0x5A ("Relative accelerator pedal position") over ENET. Decoded with the SAME rest-offset normalization as the ELM327 fallback path (telemetryProvider.ts / pedalNormalization.ts) -- 0x49 has a non-zero rest offset (~15% EMPIRICAL on the Supra), unlike 0x5A.',
+};
 
 export interface EnetChannelSpecValidation {
   valid: EnetChannelSpec[];

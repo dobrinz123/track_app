@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  ACCEL_PEDAL_FALLBACK_ENET_SPEC,
   DEFAULT_ENET_CHANNEL_SPECS,
   decodeEnetChannelValue,
   ENET_DEFAULT_CHANNEL_RATES_HZ,
@@ -26,9 +27,11 @@ describe('DEFAULT_ENET_CHANNEL_SPECS', () => {
     expect(byChannel.get('rpm')).toMatchObject({ mode: 'obd01', requestHex: '0C' });
     expect(byChannel.get('speedKph')).toMatchObject({ mode: 'obd01', requestHex: '0D' });
     expect(byChannel.get('throttlePct')).toMatchObject({ mode: 'obd01', requestHex: '11' });
-    // Field revision (2026-08-27, binding): the accelerator PEDAL (PID 0x49),
-    // distinct from throttlePct's own plate (PID 0x11) above.
-    expect(byChannel.get('accelPedalPct')).toMatchObject({ mode: 'obd01', requestHex: '49' });
+    // Field revision 2 (2026-08-27, binding — Phase 4h): the accelerator
+    // PEDAL is now PID 0x5A (primary source), distinct from throttlePct's
+    // own plate (PID 0x11) above; 0x49 is the mobile provider's fallback --
+    // see the dedicated describe block below.
+    expect(byChannel.get('accelPedalPct')).toMatchObject({ mode: 'obd01', requestHex: '5A' });
     expect(byChannel.get('coolantC')).toMatchObject({ mode: 'obd01', requestHex: '05' });
     expect(byChannel.get('engineOilC')).toMatchObject({ mode: 'obd01', requestHex: '5C' });
     expect(DEFAULT_ENET_CHANNEL_SPECS).toHaveLength(6);
@@ -157,6 +160,29 @@ describe('validateEnetChannelSpecs', () => {
     // Guards against the consistency check itself being wrong in a way that
     // would reject the built-in defaults.
     expect(validateEnetChannelSpecs(DEFAULT_ENET_CHANNEL_SPECS).valid).toHaveLength(6);
+  });
+
+  /**
+   * Field revision 2 (2026-08-27, binding — Phase 4h, P4h ticket item 3):
+   * `accelPedalPct` now has TWO valid source PIDs -- the consistency check
+   * must accept EITHER, since the mobile provider swaps `ACCEL_PEDAL_FALLBACK_ENET_SPEC`
+   * (0x49) in for the primary 0x5A default when the DME NRCs 0x5A.
+   */
+  it('accepts ACCEL_PEDAL_FALLBACK_ENET_SPEC (0x49) as a valid accelPedalPct spec, same as the 0x5A default', () => {
+    const result = validateEnetChannelSpecs([ACCEL_PEDAL_FALLBACK_ENET_SPEC]);
+    expect(result.valid).toEqual([ACCEL_PEDAL_FALLBACK_ENET_SPEC]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('ACCEL_PEDAL_FALLBACK_ENET_SPEC decodes identically to the primary spec (same formula, different PID byte)', () => {
+    const primary = DEFAULT_ENET_CHANNEL_SPECS.find((spec) => spec.channel === 'accelPedalPct')!;
+    expect(primary.requestHex).toBe('5A');
+    expect(ACCEL_PEDAL_FALLBACK_ENET_SPEC.requestHex).toBe('49');
+    const bytes = Uint8Array.from([0x80]);
+    expect(decodeEnetChannelValue(ACCEL_PEDAL_FALLBACK_ENET_SPEC, bytes)).toBeCloseTo(
+      decodeEnetChannelValue(primary, bytes),
+      8,
+    );
   });
 
   it('rejects a did spec with a non-integer or negative byteOffset', () => {

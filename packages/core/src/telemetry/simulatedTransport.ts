@@ -20,6 +20,18 @@ export interface SimulatedElm327TransportConfig {
   seed?: number;
   chunkFragmentation?: boolean;
   noDataOnChannels?: readonly TelemetryChannelId[];
+  /**
+   * Field revision 2 (2026-08-27, binding — Phase 4h, pedal PID fallback):
+   * simulates a specific standard-PID BYTE (2 uppercase hex chars, e.g.
+   * `'5A'`) answering "NO DATA" regardless of which channel it was asked
+   * for -- distinct from `noDataOnChannels` above (which is channel-keyed,
+   * so it would refuse EVERY PID that decodes into that channel). This is
+   * what lets a test script "0x5A NRC'd, 0x49 still answers" for
+   * `accelPedalPct` -- the mobile provider's PID-switch fallback needs the
+   * TWO PIDS for the SAME channel to behave differently, which
+   * `noDataOnChannels` cannot express.
+   */
+  noDataOnPids?: readonly string[];
   /** The command after this many completed sends disconnects before replying. */
   disconnectAfterNCommands?: number;
   /** Literal prefix, byte values, or a deterministic number of garbage bytes. */
@@ -51,6 +63,7 @@ export class SimulatedElm327Transport implements ObdTransport {
   private readonly closeListeners = new Set<(error?: Error) => void>();
   private readonly scenario: SimulatedVehicleScenario;
   private readonly noDataOnChannels: ReadonlySet<TelemetryChannelId>;
+  private readonly noDataOnPids: ReadonlySet<string>;
   private readonly prng: SeededPrng;
   private connected = false;
   private closed = false;
@@ -72,6 +85,7 @@ export class SimulatedElm327Transport implements ObdTransport {
     }
     this.scenario = config.scenario ?? DEFAULT_SIMULATED_VEHICLE_SCENARIO;
     this.noDataOnChannels = new Set(config.noDataOnChannels ?? []);
+    this.noDataOnPids = new Set((config.noDataOnPids ?? []).map((pid) => pid.toUpperCase()));
     this.prng = new SeededPrng(config.seed ?? 1);
   }
 
@@ -139,6 +153,15 @@ export class SimulatedElm327Transport implements ObdTransport {
   private buildPidResponse(command: string): string {
     const channel = channelForMode01Request(command);
     if (channel === undefined) return '?';
+    // Field revision 2 (binding): the ACTUAL PID byte the caller asked for
+    // -- `command` is `01<PID>` (see `pidCodec.ts`'s `encodeMode01Request`)
+    // -- so the response always echoes whichever PID was really requested,
+    // never a channel-hardcoded one. This matters for `accelPedalPct`
+    // specifically: the SAME channel now has two valid source PIDs (0x5A
+    // primary, 0x49 fallback), and `noDataOnPids` below needs to refuse ONE
+    // of them while the other still answers normally.
+    const requestedPidHex = command.replace(/^01/i, '').toUpperCase();
+    if (this.noDataOnPids.has(requestedPidHex)) return 'NO DATA';
     if (this.noDataOnChannels.has(channel)) return 'NO DATA';
 
     const scenarioTimeMs = Math.max(0, this.config.monotonicNow() - this.connectedAtMonoMs);
@@ -147,7 +170,7 @@ export class SimulatedElm327Transport implements ObdTransport {
         ? (this.scenario.engineOilC ?? defaultEngineOilC)(scenarioTimeMs)
         : this.scenario[channel](scenarioTimeMs);
     const jittered = value + jitterScale(channel) * (this.prng.next() * 2 - 1);
-    return encodeResponse(channel, jittered);
+    return encodeResponse(channel, requestedPidHex, jittered);
   }
 
   private garbagePrefix(): string {
@@ -203,7 +226,15 @@ function jitterScale(channel: Mode01TelemetryChannelId): number {
   }
 }
 
-function encodeResponse(channel: Mode01TelemetryChannelId, value: number): string {
+/**
+ * Field revision 2 (binding): `requestedPidHex` is echoed back verbatim as
+ * the response's PID byte -- for every channel except `accelPedalPct` this
+ * is always the SAME literal as before (each channel had exactly one PID),
+ * but `accelPedalPct` now has two valid source PIDs (0x5A/0x49, identical
+ * decode formula) and the response must echo whichever one was actually
+ * asked, not a hardcoded one.
+ */
+function encodeResponse(channel: Mode01TelemetryChannelId, requestedPidHex: string, value: number): string {
   switch (channel) {
     case 'rpm': {
       const raw = Math.max(0, Math.min(65_535, Math.round(value * 4)));
@@ -214,7 +245,7 @@ function encodeResponse(channel: Mode01TelemetryChannelId, value: number): strin
     case 'throttlePct':
       return `41 11 ${hexByte((value * 255) / 100)}`;
     case 'accelPedalPct':
-      return `41 49 ${hexByte((value * 255) / 100)}`;
+      return `41 ${requestedPidHex} ${hexByte((value * 255) / 100)}`;
     case 'coolantC':
       return `41 05 ${hexByte(value + 40)}`;
     case 'intakeC':

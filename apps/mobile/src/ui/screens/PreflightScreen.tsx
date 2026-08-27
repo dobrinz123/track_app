@@ -3,6 +3,7 @@ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import {
+  GnssLocationProvider,
   LOCATION_PERMISSION_RATIONALE,
   PRECISE_LOCATION_INSTRUCTIONS,
   requestForegroundLocationPermission,
@@ -12,7 +13,10 @@ import {
 import type { RootStackParamList } from '../navigation/types';
 import { colors, radii, spacing, typography } from '../theme';
 import { StatusBanner } from '../components/StatusBanner';
-import { facade } from '../../session/composition';
+import { facade, settingsStore } from '../../session/composition';
+import { useSettings } from '../hooks/useSettings';
+import { resolveSelectedCircuit } from '../../session/circuitCatalog';
+import { evaluateCircuitProximity } from '../../session/circuitProximity';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Preflight'>;
 
@@ -65,6 +69,18 @@ export function PreflightScreen({ navigation }: Props): React.JSX.Element {
   const [status, setStatus] = useState<'running' | 'done'>('running');
   const [report, setReport] = useState<PreflightReport | null>(null);
   const [runToken, setRunToken] = useState(0);
+  // Field revision 2 (2026-08-27, binding — Phase 4h, distance guard): the
+  // driver's own current GNSS fix, used ONLY for the proximity check below --
+  // `report.gnssFix` (the existing preflight collector) never carries
+  // lat/lon, so this is a SEPARATE, purpose-built watcher (own
+  // `GnssLocationProvider`, started/stopped with this screen's own
+  // lifetime), not a change to `preflight.ts`'s own collector.
+  const [currentFix, setCurrentFix] = useState<{ lat: number; lon: number } | null>(null);
+  // Field revision 2 (binding): "Continue anyway" (testing) bypasses the
+  // warning for the REST of this screen's lifetime, without re-triggering it
+  // on the next render (e.g. a fresh, still-far-away fix arriving).
+  const [proximityAcknowledged, setProximityAcknowledged] = useState(false);
+  const settings = useSettings(settingsStore);
 
   useEffect(() => {
     facade.startPreflight();
@@ -95,8 +111,31 @@ export function PreflightScreen({ navigation }: Props): React.JSX.Element {
     };
   }, [runToken]);
 
-  const retry = useCallback(() => setRunToken((n) => n + 1), []);
+  useEffect(() => {
+    const provider = new GnssLocationProvider();
+    const unsubscribe = provider.subscribe((sample) => setCurrentFix({ lat: sample.lat, lon: sample.lon }));
+    void provider.start();
+    return () => {
+      unsubscribe();
+      void provider.stop();
+    };
+  }, []);
+
+  const retry = useCallback(() => {
+    setProximityAcknowledged(false);
+    setRunToken((n) => n + 1);
+  }, []);
   const rows = report ? reportToRows(report) : [];
+
+  // Field revision 2 (2026-08-27, binding — Phase 4h): "calibration started
+  // 61 km from MotorPark (OFF TRACK...) ... user felt stuck." Only evaluated
+  // once the rest of preflight has passed -- a failing check (e.g. no fix
+  // yet) keeps the EXISTING failure/wait UI untouched, per contracts.md's
+  // "No fix yet -> the existing GNSS wait applies".
+  const selectedCircuit = resolveSelectedCircuit(settings);
+  const proximity =
+    report?.pass === true ? evaluateCircuitProximity(currentFix, selectedCircuit.profile.startFinishGate) : null;
+  const showProximityWarning = proximity !== null && proximity.shouldWarn && !proximityAcknowledged;
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -155,6 +194,15 @@ export function PreflightScreen({ navigation }: Props): React.JSX.Element {
         ) : null}
         {report && report.pass ? <StatusBanner variant="success" message="All checks passed." /> : null}
 
+        {showProximityWarning && proximity?.distanceKm !== null && proximity?.distanceKm !== undefined ? (
+          <View style={styles.proximityCard} accessibilityLiveRegion="polite">
+            <Text style={styles.proximityText} maxFontSizeMultiplier={1.3}>
+              You are {Math.round(proximity.distanceKm)} km from {selectedCircuit.profile.displayName} — calibration
+              needs you on the circuit.
+            </Text>
+          </View>
+        ) : null}
+
         <Pressable
           style={[styles.button, styles.secondaryButton]}
           onPress={retry}
@@ -167,7 +215,34 @@ export function PreflightScreen({ navigation }: Props): React.JSX.Element {
           </Text>
         </Pressable>
 
-        {report?.pass ? (
+        {showProximityWarning ? (
+          <>
+            {/* Field revision 2 (binding): "Back" (default) and "Continue anyway" (testing) -- Back is the primary/emphasized action since calibration off-circuit is the mistake path, "Continue anyway" is the deliberate override for testing. */}
+            <Pressable
+              style={[styles.button, styles.primaryButton]}
+              onPress={() => navigation.goBack()}
+              accessibilityRole="button"
+              accessibilityLabel="Back"
+            >
+              <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.3}>
+                Back
+              </Text>
+            </Pressable>
+            <Pressable
+              style={[styles.button, styles.secondaryButton]}
+              onPress={() => {
+                setProximityAcknowledged(true);
+                navigation.navigate('CalibrationInstructions');
+              }}
+              accessibilityRole="button"
+              accessibilityLabel="Continue anyway"
+            >
+              <Text style={styles.secondaryButtonText} maxFontSizeMultiplier={1.3}>
+                Continue anyway
+              </Text>
+            </Pressable>
+          </>
+        ) : report?.pass ? (
           <Pressable
             style={[styles.button, styles.primaryButton]}
             onPress={() => navigation.navigate('CalibrationInstructions')}
@@ -220,6 +295,14 @@ const styles = StyleSheet.create({
     gap: spacing.xs,
   },
   failureText: { ...typography.body, color: colors.textSecondary },
+  proximityCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: colors.warning,
+    padding: spacing.md,
+  },
+  proximityText: { ...typography.body, color: colors.textPrimary },
   button: { borderRadius: radii.lg, paddingVertical: spacing.md, alignItems: 'center' },
   primaryButton: { backgroundColor: colors.accent },
   primaryButtonText: { ...typography.subtitle, color: colors.onAccent },
