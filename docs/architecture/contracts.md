@@ -732,3 +732,11 @@ oil) answers. Revisions:
 - Adapter-type switch must take effect on the next Start without an app restart: any prior generation's
   socket, retry timer, `stopping` promise, auto-discovery once-flag and reservation must be torn down when
   `adapterType` (or host/port) changes, and `start()` must always build from the CURRENT settings.
+
+### Telemetry field revision — teardown unification note (2026-08-27, binding, after Codex P4g-REV2)
+ELM327 and ENET generations share ONE teardown path: on `stop()` (including a REJECTING `session.stop()`) the
+generation is fully cleaned up (listeners unsubscribed, transport closed via graceful-stop raced with a 200 ms
+force-close, `current` cleared, reservation released for ENET). This deliberately supersedes the earlier
+"ELM byte-identical on rejecting stop" rule: the rejection still propagates to the caller, but state is no
+longer left attached. `start()` awaits any in-flight teardown and coalesces concurrent Starts; the coalescing
+latch MUST clear after every launch attempt (success or failure) so later Starts are never swallowed.

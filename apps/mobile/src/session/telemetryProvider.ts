@@ -1113,6 +1113,17 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
    * graceful `session.stop()`), releases the reservation, and clears
    * `running`/`current`. Exactly `stop()`'s previous body; the public
    * `stop()` method below is now a thin call to this.
+   *
+   * BEHAVIOR NOTE (binding, P4g-FIX1 H1 unification -- contracts.md tracks
+   * this too): on a REJECTING ELM327 `session.stop()`, cleanup (listener
+   * unsubscribe, `current` cleared) now happens regardless -- it is NO
+   * LONGER byte-identical to the pre-P4e-FIX4 behavior that deliberately
+   * left listeners subscribed and `current` attached on a rejection (see the
+   * git-historical "P4e-FIX5" test, since REPLACED). The rejection itself
+   * still propagates unchanged to `doStop()`'s own caller; only the cleanup
+   * that used to be skipped on that path now always runs, matching ENET's
+   * long-standing behavior. This is a deliberate consequence of unifying
+   * teardown across both adapter kinds, not a regression.
    */
   async function doStop(): Promise<void> {
     running = false;
@@ -1251,15 +1262,33 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       if (discoveryToAwait !== null) await discoveryToAwait;
       if (current === null) return; // nothing live to stop -- the next start() will simply use the new settings.
       settingsChangedDetail = 'settings changed';
+      // P4g-FIX2 (binding, H1 residual -- Codex P4g-REV2 PARTIAL): captured
+      // HERE, synchronously, before awaiting `doStop()` -- `generationCounter`
+      // is bumped by EVERY `launchSession()` call, including a queued Start's
+      // launch that lands in the "no host configured" discovery preamble
+      // (which deliberately leaves `current === null` for the whole scan).
+      // The prior guard (`current === null` alone, after the await) missed
+      // EXACTLY that case: a queued ENET Start with an empty host can enter
+      // discovery while this `doStop()` is still tearing down the OLD ELM
+      // generation, and `current` stays `null` throughout that scan -- so a
+      // bare `current === null` check after the await still (wrongly) saw
+      // "nothing live" and emitted a stale 'stopped' over the newer,
+      // in-flight discovery. Comparing `generationCounter` catches this: any
+      // fresh launch attempt (discovery or not) bumps it, so this stale
+      // continuation is suppressed even while `current` is still `null`.
+      const generationCounterBeforeStop = generationCounter;
       await doStop();
       // P4g-FIX1 (binding, H1): guard this stale continuation by generation
-      // -- if a NEWER generation was installed while `doStop()` was
-      // tearing down (e.g. a queued `start()` that was waiting on
-      // `stopping`, which resolves and relaunches BEFORE this `await
-      // doStop()` itself settles -- see `stopping`'s resolution ordering),
-      // `current` is no longer `null` here, and emitting 'stopped' would
-      // incorrectly overwrite that newer generation's own live state.
-      if (current === null) emitState('stopped', 'settings changed');
+      // -- if a NEWER generation (or a newer launch ATTEMPT, discovery
+      // included) was installed/started while `doStop()` was tearing down
+      // (e.g. a queued `start()` that was waiting on `stopping`, which
+      // resolves and relaunches BEFORE this `await doStop()` itself
+      // settles -- see `stopping`'s resolution ordering), emitting 'stopped'
+      // here would incorrectly overwrite that newer attempt's own live
+      // state.
+      if (current === null && generationCounter === generationCounterBeforeStop) {
+        emitState('stopped', 'settings changed');
+      }
     };
     void stopLiveGeneration();
   });
@@ -1316,8 +1345,16 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
         const generationIsTerminal = current === null || currentState === 'failed' || currentState === 'stopped';
         const fingerprintChanged = activeFingerprint !== null && !fingerprintsEqual(activeFingerprint, fingerprint);
         if (!generationIsTerminal && !fingerprintChanged) return;
+        // P4g-FIX2 (binding, H1 -- Codex P4g-REV2 HIGH "starting never
+        // clears"): `starting` must hold THIS SAME promise object `p` --
+        // assigning it the RESULT of `.finally()` (a distinct, newly
+        // constructed promise) instead made `starting === p` permanently
+        // false inside the finally callback below, so `starting` never
+        // cleared and every Start after the first queued launch was a
+        // silent no-op forever, even long after the launch had settled.
         const p = doStop().then(launchFresh, launchFresh);
-        starting = p.finally(() => {
+        starting = p;
+        void p.finally(() => {
           if (starting === p) starting = null;
         });
         return;
@@ -1336,8 +1373,13 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       // own teardown, meant an ELM-stuck-in-connect generation followed by
       // switching to ENET and pressing Start did not wait for anything).
       if (stopping !== null) {
+        // P4g-FIX2 (binding, H1 -- Codex P4g-REV2 HIGH "starting never
+        // clears"): same identity fix as the `running` branch above --
+        // `starting` holds `p` itself, not `.finally()`'s own distinct
+        // returned promise.
         const p = stopping.then(launchFresh, launchFresh);
-        starting = p.finally(() => {
+        starting = p;
+        void p.finally(() => {
           if (starting === p) starting = null;
         });
         return;

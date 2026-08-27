@@ -536,6 +536,180 @@ describe('telemetryProvider: P4g-FIX1 H1 -- unified teardown ordering and Start 
   });
 });
 
+/**
+ * P4g-FIX2 (binding, H1 -- Codex P4g-REV2 HIGH "starting never clears"): the
+ * queued-Start coalescing guard assigned `starting = p.finally(() => { if
+ * (starting === p) ... })` -- `.finally()` returns a DISTINCT promise object
+ * from `p`, so `starting` held that distinct object while the closure
+ * compared against `p` itself; the comparison was permanently false and
+ * `starting` never returned to `null`. Every Start after the FIRST ever
+ * queued launch (behind `stopping`, or behind a teardown-then-relaunch)
+ * became a silent no-op forever, even long after that launch had settled
+ * (succeeded, failed, or been stopped). Fixed by assigning `starting = p`
+ * itself and chaining the clearing `.finally()` as a side effect, never
+ * reassigning `starting` to its return value.
+ */
+describe('telemetryProvider: P4g-FIX2 H1 -- the `starting` coalescing latch clears correctly after a queued launch settles', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    tracker.connectCalls = 0;
+    tracker.closeCalls = 0;
+    tracker.holdConnect = false;
+    tracker.resolveConnect = false;
+    tracker.pendingConnects = [];
+  });
+  afterEach(() => {
+    tracker.holdConnect = false;
+    vi.useRealTimers();
+  });
+
+  it('after a queued Start completes and the resulting session later FAILS, a subsequent new Start still launches (not a permanent no-op)', async () => {
+    tracker.holdConnect = true; // gen1 stuck connecting.
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'elm327' });
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
+    const states: Elm327State[] = [];
+    provider.onStateChange((s) => states.push(s));
+
+    provider.start();
+    await flushMicrotasks();
+    expect(tracker.connectCalls).toBe(1);
+
+    const stopPromise = provider.stop(); // gen1 stuck -- doStop() sets `stopping`, races the 200ms force-close.
+    await flushMicrotasks();
+
+    provider.start(); // the QUEUED Start -- exercises the `starting` latch.
+    await flushMicrotasks();
+
+    // gen2's own connect() will reject immediately (not held) once it fires,
+    // so this queued launch runs its course to a genuine terminal 'failed'.
+    tracker.holdConnect = false;
+    await vi.advanceTimersByTimeAsync(200); // force-close settles `stopping` -- the queued launch (gen2) now runs.
+    await flushMicrotasks();
+
+    expect(tracker.connectCalls).toBe(2); // gen2's own connect() attempt.
+    expect(states.at(-1)).toBe('failed'); // gen2 failed (terminal) -- `starting` must be null again by now.
+
+    await stopPromise.catch(() => undefined);
+
+    // PRIOR bug: `starting` never cleared -- this call would be a silent
+    // no-op forever, and `connectCalls` would stay at 2.
+    provider.start();
+    await flushMicrotasks();
+
+    expect(tracker.connectCalls).toBe(3); // a genuinely FRESH (third) launch -- the latch released (PRIOR bug: this stayed at 2 forever).
+
+    await provider.stop();
+  });
+
+  it('three sequential start/stop cycles, each queued behind a teardown, ALL launch -- the latch never accumulates across cycles', async () => {
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'elm327' });
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
+
+    for (let cycle = 1; cycle <= 3; cycle += 1) {
+      tracker.holdConnect = true;
+      provider.start();
+      await flushMicrotasks();
+      expect(tracker.connectCalls).toBe(cycle * 2 - 1); // this cycle's OWN first (stuck) generation.
+
+      const stopPromise = provider.stop(); // queues `stopping` behind the stuck generation.
+      await flushMicrotasks();
+
+      provider.start(); // queued behind `stopping` -- MUST launch this cycle's second generation, not silently no-op.
+      tracker.holdConnect = false; // this cycle's SECOND generation's own connect() rejects immediately once it fires.
+      await vi.advanceTimersByTimeAsync(200); // force-close settles `stopping` -- the queued launch runs.
+      await flushMicrotasks();
+
+      expect(tracker.connectCalls).toBe(cycle * 2); // this cycle's second generation genuinely launched.
+
+      await stopPromise.catch(() => undefined);
+      await provider.stop(); // fully settle before the NEXT cycle.
+    }
+  });
+});
+
+/**
+ * P4g-FIX2 (binding, H1 residual -- Codex P4g-REV2 PARTIAL): the settings
+ * watcher's stale-continuation guard compared only `current === null` after
+ * its own `await doStop()` -- but `current` stays `null` for the ENTIRE
+ * duration of the ENET "no host configured" discovery preamble (by design),
+ * so a queued Start that lands in THAT preamble while the watcher's own
+ * `doStop()` is still resolving left `current === null` at the exact moment
+ * the watcher checked it, and the watcher wrongly emitted a stale 'stopped'
+ * over the newer, in-flight discovery. Fixed by ALSO comparing
+ * `generationCounter` (captured before the await) -- any fresh launch
+ * attempt, discovery included, bumps it even while `current` stays `null`.
+ */
+describe('telemetryProvider: P4g-FIX2 H1 residual -- the settings watcher never emits a stale "stopped" over a newer in-flight discovery', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    tracker.connectCalls = 0;
+    tracker.closeCalls = 0;
+    tracker.holdConnect = false;
+    tracker.resolveConnect = false;
+    tracker.pendingConnects = [];
+  });
+  afterEach(() => {
+    tracker.holdConnect = false;
+    vi.useRealTimers();
+  });
+
+  it('ELM teardown (via a settings-change adapterType switch) -> a queued ENET Start with an EMPTY host enters discovery -> the watcher\'s own stale continuation does NOT emit "stopped" over it', async () => {
+    tracker.holdConnect = true; // gen1 (ELM) genuinely stuck connecting -- the teardown below races the 200ms force-close.
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'elm327' });
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
+    const states: Elm327State[] = [];
+    provider.onStateChange((s) => states.push(s));
+
+    provider.start();
+    await flushMicrotasks();
+    expect(states.at(-1)).toBe('connecting'); // gen1 stuck.
+
+    // Settings change to ENET, empty host, simulated (so discovery runs via
+    // the simulated probe factory, needing no network mocks in this file) --
+    // triggers the watcher's OWN doStop() on gen1, which is genuinely stuck
+    // racing the 200ms force-close.
+    store.update({ adapterType: 'enet', telemetrySimulate: true });
+    await flushMicrotasks();
+    expect(tracker.closeCalls).toBe(0); // gen1's teardown is still in flight.
+
+    // A Start pressed WHILE that teardown is still racing -- queues behind
+    // the SAME `stopping` the watcher's own doStop() set.
+    provider.start();
+    await flushMicrotasks();
+
+    // The 200ms force-close settles `stopping` -- BOTH the queued Start's
+    // own launch (which lands in the no-host ENET discovery preamble,
+    // leaving `current === null` for the scan's duration) AND the watcher's
+    // stale continuation resolve around this same point.
+    await vi.advanceTimersByTimeAsync(200);
+    await flushMicrotasks();
+
+    expect(tracker.closeCalls).toBeGreaterThanOrEqual(1); // gen1's stuck ELM transport was force-closed.
+    // PRIOR bug: the watcher's continuation saw `current === null` (true --
+    // the discovery preamble deliberately leaves it null) and emitted a
+    // stale 'stopped', clobbering the newer, in-flight discovery's own
+    // diagnostics. Fixed: `generationCounter` moved on (the queued Start's
+    // own launchSession() call), so the watcher correctly stays silent.
+    expect(states).not.toContain('stopped');
+    expect(provider.getDiagnostics().state).not.toBe('stopped');
+
+    // Let the simulated discovery scan complete, connect, and reach polling
+    // -- proves the ENET generation was never interrupted by the stale
+    // 'stopped' along the way, either.
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flushMicrotasks();
+
+    expect(states).not.toContain('stopped');
+    expect(states.at(-1)).toBe('polling');
+    expect(provider.getDiagnostics().adapterType).toBe('enet');
+
+    await provider.stop();
+  });
+});
+
 describe('telemetryProvider: onStateChange replays the current state on subscribe (F10 fix)', () => {
   beforeEach(() => {
     vi.useFakeTimers();
