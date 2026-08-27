@@ -19,10 +19,15 @@ import { useSettings } from '../hooks/useSettings';
 import type { AdapterType, SpeedUnits } from '../../session/settingsStore';
 import { validateCustomPidHex } from '../../session/customPidValidation';
 import {
+  applyDiscoveryResult,
   formatHexByte,
   parseHexByteDraft,
   validateEnetChannelSpecsJson,
 } from '../../session/enetSettingsValidation';
+import { buildDiscoveryCandidates, runDiscovery, type DiscoveryProbeResult } from '@circuit/core';
+import { EnetTcpTransport } from '../../session/enetTcpTransport';
+import { getNetworkInfo } from '../../session/networkInfo';
+import { enetAdapterReservation } from '../../session/enetAdapterReservation';
 
 /** Session states that mean "there is an active session in progress" -- the delete-my-data control is hidden/disabled during all of these so it can never race a live write (M3 fix). */
 const ACTIVE_SESSION_STATES = new Set([
@@ -299,6 +304,79 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
     }
   }
 
+  // ENET auto-discovery addendum (binding, Phase 4f): "Find adapter" --
+  // acquires the shared reservation under the 'discovery' owner (refused
+  // while the provider/probe hold it, same single-client rule as everything
+  // else that touches the adapter), runs `runDiscovery` against a REAL probe
+  // factory, and lets the user apply one result with a tap. `discoveryAbort`
+  // is a plain mutable object (not a real `AbortController` -- `runDiscovery`
+  // only ever reads `.aborted`) so the Cancel button can bound an in-flight
+  // run early.
+  const [discoveryRunning, setDiscoveryRunning] = React.useState(false);
+  const [discoveryResults, setDiscoveryResults] = React.useState<readonly DiscoveryProbeResult[] | null>(null);
+  const [discoveryError, setDiscoveryError] = React.useState<string | null>(null);
+  const discoveryAbortRef = React.useRef<{ aborted: boolean } | null>(null);
+  const discoveryTokenRef = React.useRef<ReturnType<typeof enetAdapterReservation.tryAcquire>>(null);
+
+  async function startFindAdapter(): Promise<void> {
+    setDiscoveryError(null);
+    setDiscoveryResults(null);
+    const token = enetAdapterReservation.tryAcquire('discovery');
+    if (token === null) {
+      setDiscoveryError('The adapter is in use (telemetry or the DID probe/sweep) -- stop it first.');
+      return;
+    }
+    discoveryTokenRef.current = token;
+    const signal = { aborted: false };
+    discoveryAbortRef.current = signal;
+    setDiscoveryRunning(true);
+    try {
+      const current = settingsStore.getSettings();
+      let phoneInfo: Awaited<ReturnType<typeof getNetworkInfo>> = null;
+      try {
+        phoneInfo = await getNetworkInfo();
+      } catch {
+        phoneInfo = null;
+      }
+      const candidates = buildDiscoveryCandidates({
+        configuredHost: current.enetHost.trim() === '' ? undefined : current.enetHost,
+        configuredPort: current.enetPort,
+        phoneIpv4: phoneInfo?.ipv4,
+        subnetMask: phoneInfo?.subnetMask,
+      });
+      const result = await runDiscovery({
+        candidates,
+        probe: (host, port) => new EnetTcpTransport({ host, port, connectTimeoutMs: 300 }),
+        clock: { now: () => Date.now() },
+        testerAddress: current.enetTesterAddress,
+        targetAddress: current.enetTargetAddress,
+        signal,
+      });
+      setDiscoveryResults(result.results);
+      if (result.results.length === 0) {
+        setDiscoveryError(`No adapter answered (scanned ${result.scanned}).`);
+      }
+    } catch (error) {
+      setDiscoveryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (discoveryTokenRef.current !== null) {
+        enetAdapterReservation.release(discoveryTokenRef.current);
+        discoveryTokenRef.current = null;
+      }
+      discoveryAbortRef.current = null;
+      setDiscoveryRunning(false);
+    }
+  }
+
+  function cancelFindAdapter(): void {
+    if (discoveryAbortRef.current !== null) discoveryAbortRef.current.aborted = true;
+  }
+
+  function applyDiscoveredResult(result: DiscoveryProbeResult): void {
+    settingsStore.update(applyDiscoveryResult(result, new Date().toISOString()));
+    setDiscoveryResults(null);
+  }
+
   // MUST DO #3 -- read-on-focus + manual refresh only, never a polling
   // timer, so this adds no background work while a session is timing.
   useFocusEffect(
@@ -573,7 +651,13 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
                     <TextInput
                       style={styles.fieldInput}
                       value={settings.enetHost}
-                      onChangeText={(text) => settingsStore.update({ enetHost: text })}
+                      onChangeText={(text) =>
+                        // A manual edit invalidates whatever provenance the
+                        // current value carried (a prior "Find adapter" tap,
+                        // or the auto-discovery detour) -- back to "entered
+                        // manually" (empty provenance).
+                        settingsStore.update({ enetHost: text, enetHostProvenance: '' })
+                      }
                       placeholder="read from adapter's web UI"
                       placeholderTextColor={colors.textMuted}
                       autoCapitalize="none"
@@ -582,6 +666,11 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
                       accessibilityLabel="ENET adapter host"
                     />
                   </View>
+                  {settings.enetHostProvenance.trim() === '' ? null : (
+                    <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                      {settings.enetHostProvenance}
+                    </Text>
+                  )}
                   <View style={styles.fieldRow}>
                     <Text style={styles.fieldLabel} maxFontSizeMultiplier={1.3}>
                       Adapter port
@@ -669,6 +758,74 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
                     Advanced, vehicle-specific: a JSON array of channel requests (obd01 PID or mode-22 DID, with
                     provenance for any DID entry). Leave blank to use the built-in defaults.
                   </Text>
+
+                  <View style={styles.toggleRow}>
+                    <View style={styles.toggleTextGroup}>
+                      <Text style={styles.toggleTitle} maxFontSizeMultiplier={1.3}>
+                        Auto-discover on connect
+                      </Text>
+                      <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                        When on, telemetry scans for the adapter (once) if no host is set or the first connect
+                        fails, and applies a confident hit automatically.
+                      </Text>
+                    </View>
+                    <Switch
+                      value={settings.enetAutoDiscover}
+                      onValueChange={(value) => settingsStore.update({ enetAutoDiscover: value })}
+                      trackColor={{ false: colors.border, true: colors.accentDim }}
+                      thumbColor={settings.enetAutoDiscover ? colors.accent : colors.textMuted}
+                      accessibilityRole="switch"
+                      accessibilityLabel="Auto-discover ENET adapter on connect"
+                      accessibilityState={{ checked: settings.enetAutoDiscover }}
+                    />
+                  </View>
+
+                  {discoveryRunning ? (
+                    <Pressable
+                      style={styles.cancelButton}
+                      onPress={cancelFindAdapter}
+                      accessibilityRole="button"
+                      accessibilityLabel="Cancel discovery"
+                    >
+                      <Text style={styles.cancelButtonText} maxFontSizeMultiplier={1.3}>
+                        Cancel (scanning…)
+                      </Text>
+                    </Pressable>
+                  ) : (
+                    <Pressable
+                      style={styles.telemetryLinkRow}
+                      onPress={() => void startFindAdapter()}
+                      accessibilityRole="button"
+                      accessibilityLabel="Find adapter"
+                    >
+                      <Text style={styles.telemetryLinkText} maxFontSizeMultiplier={1.3}>
+                        Find adapter
+                      </Text>
+                    </Pressable>
+                  )}
+                  {discoveryError === null ? null : (
+                    <Text style={styles.errorBanner} maxFontSizeMultiplier={1.3} accessibilityLiveRegion="polite">
+                      {discoveryError}
+                    </Text>
+                  )}
+                  {discoveryResults === null || discoveryResults.length === 0
+                    ? null
+                    : discoveryResults.map((result) => (
+                        <Pressable
+                          key={`${result.host}:${result.port}`}
+                          style={styles.discoveryResultRow}
+                          onPress={() => applyDiscoveredResult(result)}
+                          accessibilityRole="button"
+                          accessibilityLabel={`Apply ${result.host}:${result.port}, level ${result.level}`}
+                        >
+                          <Text style={styles.discoveryResultText} maxFontSizeMultiplier={1.3}>
+                            {result.host}:{result.port} · level {result.level} · {result.rttMs.toFixed(0)}ms
+                          </Text>
+                          <Text style={styles.discoveryApplyText} maxFontSizeMultiplier={1.3}>
+                            Apply
+                          </Text>
+                        </Pressable>
+                      ))}
                 </>
               )}
 
@@ -901,6 +1058,22 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
             </Text>
           </Pressable>
         ) : null}
+        {
+          // ENET auto-discovery & DID sweep addendum (Phase 4f, binding):
+          // "linked from Settings dev section and the DID probe".
+          // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
+          __DEV__ ? (
+          <Pressable
+            style={styles.devButton}
+            onPress={() => navigation.navigate('DidSweep')}
+            accessibilityRole="button"
+            accessibilityLabel="Open ENET DID sweep"
+          >
+            <Text style={styles.devButtonText} maxFontSizeMultiplier={1.3}>
+              Dev: DID Sweep (ENET)
+            </Text>
+          </Pressable>
+        ) : null}
       </ScrollView>
     </SafeAreaView>
   );
@@ -991,6 +1164,19 @@ const styles = StyleSheet.create({
     textAlignVertical: 'top',
   },
   warningBanner: { ...typography.caption, color: colors.warning },
+  discoveryResultRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: spacing.sm,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+  },
+  discoveryResultText: { ...typography.caption, color: colors.textPrimary, fontFamily: fontFamily.monoSemibold, flexShrink: 1 },
+  discoveryApplyText: { ...typography.caption, color: colors.accent, fontFamily: fontFamily.bodySemibold },
   telemetryLinkRow: {
     borderRadius: radii.sm,
     borderWidth: 1,

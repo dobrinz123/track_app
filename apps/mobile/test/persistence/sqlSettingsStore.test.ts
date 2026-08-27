@@ -184,4 +184,39 @@ describe('SqlSettingsStore (against sql.js)', () => {
     expect(settings.enetTesterAddress).toBe(0xf1);
     expect(settings.enetTargetAddress).toBe(0x10);
   });
+
+  /** ENET auto-discovery & DID sweep addendum (binding, Phase 4f): the two new settings this ticket introduces get the same hydration-repair treatment as every other ENET field above. */
+  it('a persisted enetAutoDiscover that is not a boolean resets to the default (true) on hydration; a present, valid enetHostProvenance survives', async () => {
+    const raw = await createRawSqlJsDatabase();
+    const db = wrapExistingSqlJsDatabase(raw);
+    await SqlSessionRepository.create(db);
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'app-settings',
+      JSON.stringify({ enetAutoDiscover: 'yes', enetHostProvenance: 'discovered 2026-08-27T00:00:00.000Z' }),
+    ]);
+
+    const store = await SqlSettingsStore.create(db);
+    const settings = store.getSettings();
+    expect(settings.enetAutoDiscover).toBe(true);
+    expect(settings.enetHostProvenance).toBe('discovered 2026-08-27T00:00:00.000Z');
+  });
+
+  it('enetHostProvenance/enetAutoDiscover round-trip through update()/persistence across a simulated app restart', async () => {
+    const raw = await createRawSqlJsDatabase();
+    const db1 = wrapExistingSqlJsDatabase(raw);
+    await SqlSessionRepository.create(db1);
+    const store1 = await SqlSettingsStore.create(db1);
+
+    expect(store1.getSettings().enetAutoDiscover).toBe(true);
+    expect(store1.getSettings().enetHostProvenance).toBe('');
+
+    store1.update({ enetHost: '192.168.4.7', enetPort: 6801, enetHostProvenance: 'discovered 2026-08-27T00:00:00.000Z', enetAutoDiscover: false });
+    await flush();
+
+    const db2 = wrapExistingSqlJsDatabase(raw);
+    const store2 = await SqlSettingsStore.create(db2);
+    expect(store2.getSettings().enetHost).toBe('192.168.4.7');
+    expect(store2.getSettings().enetHostProvenance).toBe('discovered 2026-08-27T00:00:00.000Z');
+    expect(store2.getSettings().enetAutoDiscover).toBe(false);
+  });
 });

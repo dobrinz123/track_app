@@ -14,4 +14,5 @@ export type RootStackParamList = {
   Telemetry: undefined;
   DevReplay: undefined;
   DidProbe: undefined;
+  DidSweep: undefined;
 };

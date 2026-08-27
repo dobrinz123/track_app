@@ -9,6 +9,7 @@ import { settingsStore, telemetryProvider } from '../../session/composition';
 import { useSettings } from '../hooks/useSettings';
 import { type TelemetryProviderDiagnostics } from '../../session/telemetryProvider';
 import { formatHexByte, resolveEnetChannelSpecs } from '../../session/enetSettingsValidation';
+import { getNetworkInfo, type NetworkInfo } from '../../session/networkInfo';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Telemetry'>;
 
@@ -109,6 +110,21 @@ export function TelemetryScreen(_props: Props): React.JSX.Element {
   const [diagnostics, setDiagnostics] = React.useState<TelemetryProviderDiagnostics>(() =>
     telemetryProvider.getDiagnostics(),
   );
+  // ENET auto-discovery addendum (binding): "the app reads its own
+  // IPv4/subnet ... and shows it on the telemetry screen". Read once on
+  // mount -- `getNetworkInfo()` never throws (web preview / no native module
+  // both resolve `null`), so `phoneInfo` simply stays `null` in those cases
+  // and the row below reads "unknown" rather than ever erroring the screen.
+  const [phoneInfo, setPhoneInfo] = React.useState<NetworkInfo | null>(null);
+  React.useEffect(() => {
+    let cancelled = false;
+    void getNetworkInfo().then((info) => {
+      if (!cancelled) setPhoneInfo(info);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   React.useEffect(() => {
     const unsubscribeState = telemetryProvider.onStateChange((nextState, nextDetail) => {
@@ -190,7 +206,20 @@ export function TelemetryScreen(_props: Props): React.JSX.Element {
                   </Text>
                 </View>
               ) : null}
+              <View style={styles.channelRow}>
+                <Text style={styles.channelLabel} maxFontSizeMultiplier={1.3}>
+                  Phone network
+                </Text>
+                <Text style={styles.channelValue} maxFontSizeMultiplier={1.3}>
+                  {phoneInfo === null ? 'unknown' : phoneInfo.ipv4}
+                </Text>
+              </View>
             </View>
+            {isEnet && !RUNNING_STATES.has(state) ? (
+              <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                Join the adapter&apos;s WiFi (MHD_XXXX) first.
+              </Text>
+            ) : null}
 
             <View style={styles.card}>
               {channelIds.map((id) => {

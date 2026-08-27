@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  applyDiscoveryResult,
   ENET_CHANNEL_SPECS_JSON_ERROR,
   formatHexByte,
   HEX_BYTE_VALIDATION_ERROR,
+  mergeEnetChannelSpecJson,
   parseHexByteDraft,
   repairPersistedEnetSettings,
   resolveEnetChannelSpecs,
@@ -292,5 +294,76 @@ describe('repairPersistedEnetSettings (P4e-FIX2 L1, binding: settings hydration 
       enetTargetAddress: 0x10,
     };
     expect(repairPersistedEnetSettings(persisted)).toEqual(persisted);
+  });
+
+  // ENET auto-discovery & DID sweep addendum (binding, Phase 4f).
+  it('enetHostProvenance that is not a string resets to the default ("")', () => {
+    const persisted = { ...DEFAULT_SETTINGS, enetHostProvenance: 42 as never };
+    expect(repairPersistedEnetSettings(persisted).enetHostProvenance).toBe('');
+  });
+
+  it('a valid enetHostProvenance string is left untouched', () => {
+    const persisted = { ...DEFAULT_SETTINGS, enetHostProvenance: 'discovered 2026-08-27T00:00:00.000Z' };
+    expect(repairPersistedEnetSettings(persisted).enetHostProvenance).toBe('discovered 2026-08-27T00:00:00.000Z');
+  });
+
+  it('enetAutoDiscover that is not a boolean resets to the default (true)', () => {
+    for (const bad of ['true' as never, 1 as never, null as never]) {
+      const persisted = { ...DEFAULT_SETTINGS, enetAutoDiscover: bad };
+      expect(repairPersistedEnetSettings(persisted).enetAutoDiscover).toBe(true);
+    }
+  });
+
+  it('enetAutoDiscover:false (a real boolean) is left untouched, not reset to the default', () => {
+    const persisted = { ...DEFAULT_SETTINGS, enetAutoDiscover: false };
+    expect(repairPersistedEnetSettings(persisted).enetAutoDiscover).toBe(false);
+  });
+});
+
+describe('applyDiscoveryResult (ENET auto-discovery addendum, binding: "host/port persisted with provenance discovered <date>")', () => {
+  it('builds the exact settings patch: host, port, and a "discovered <date>" provenance stamp', () => {
+    const patch = applyDiscoveryResult({ host: '192.168.4.1', port: 6801 }, '2026-08-27T12:00:00.000Z');
+    expect(patch).toEqual({
+      enetHost: '192.168.4.1',
+      enetPort: 6801,
+      enetHostProvenance: 'discovered 2026-08-27T12:00:00.000Z',
+    });
+  });
+});
+
+describe('mergeEnetChannelSpecJson (DID sweep addendum, binding: "Tag as <channel>" merge/validate)', () => {
+  const newSpec = {
+    channel: 'coolantC' as const,
+    mode: 'did' as const,
+    requestHex: '1E1C',
+    decode: { byteOffset: 0, byteLength: 1 as const, scale: 1, offset: -40 },
+    provenance: 'in-car sweep 2026-08-27, DID 0x1E1C, decode u8-40',
+  };
+
+  it('merges onto an empty existing draft ("" -> one entry, not the five built-in defaults)', () => {
+    const json = mergeEnetChannelSpecJson('', newSpec);
+    expect(JSON.parse(json)).toEqual([newSpec]);
+  });
+
+  it('merges onto a malformed existing draft the SAME way -- never silently substitutes the built-in defaults', () => {
+    const json = mergeEnetChannelSpecJson('{not json', newSpec);
+    expect(JSON.parse(json)).toEqual([newSpec]);
+  });
+
+  it('appends alongside a different existing channel', () => {
+    const existing = JSON.stringify([{ channel: 'rpm', mode: 'obd01', requestHex: '0C', provenance: 'ok' }]);
+    const json = mergeEnetChannelSpecJson(existing, newSpec);
+    const parsed = JSON.parse(json) as Array<{ channel: string }>;
+    expect(parsed.map((s) => s.channel).sort()).toEqual(['coolantC', 'rpm']);
+  });
+
+  it('REPLACES (last-one-wins) an existing entry for the SAME channel, never duplicating it', () => {
+    const existing = JSON.stringify([
+      { channel: 'coolantC', mode: 'obd01', requestHex: '05', provenance: 'standard PID' },
+    ]);
+    const json = mergeEnetChannelSpecJson(existing, newSpec);
+    const parsed = JSON.parse(json) as Array<{ channel: string; mode: string }>;
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]!.mode).toBe('did');
   });
 });

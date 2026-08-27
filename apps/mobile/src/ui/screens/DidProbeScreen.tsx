@@ -160,7 +160,8 @@ async function sendOneProbeRequest(
  * state change racing the button press). Uses `SimulatedEnetTransport` when
  * `telemetrySimulate` is on (dev only), same as the telemetry monitor.
  */
-export function DidProbeScreen(_props: Props): React.JSX.Element {
+export function DidProbeScreen(props: Props): React.JSX.Element {
+  const { navigation } = props;
   const settings = useSettings(settingsStore);
   const [providerState, setProviderState] = React.useState<Elm327State>('idle');
   const [mode, setMode] = React.useState<DidProbeMode>('did');
@@ -318,6 +319,17 @@ export function DidProbeScreen(_props: Props): React.JSX.Element {
           else is refused, not bypassed.
         </Text>
 
+        <Pressable
+          style={styles.sweepLinkRow}
+          onPress={() => navigation.navigate('DidSweep')}
+          accessibilityRole="button"
+          accessibilityLabel="Open ENET DID sweep"
+        >
+          <Text style={styles.sweepLinkText} maxFontSizeMultiplier={1.3}>
+            Sweep a DID range instead →
+          </Text>
+        </Pressable>
+
         {gating.allowed ? null : (
           <View style={styles.disabledCard}>
             <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
@@ -447,6 +459,14 @@ const styles = StyleSheet.create({
   container: { padding: spacing.lg, gap: spacing.md },
   title: { ...typography.title, color: colors.textPrimary },
   helperText: { ...typography.caption, color: colors.textMuted, lineHeight: 18 },
+  sweepLinkRow: {
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: colors.accent,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+  },
+  sweepLinkText: { ...typography.body, color: colors.accent, fontFamily: fontFamily.bodySemibold },
   sectionLabel: { ...typography.label, color: colors.textMuted, marginTop: spacing.sm },
   disabledCard: {
     backgroundColor: colors.surface,

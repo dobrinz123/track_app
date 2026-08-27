@@ -17,7 +17,7 @@
  */
 
 import type { TelemetryChannelId } from '../contracts';
-import type { EnetChannelDecodeSpec, EnetChannelSpec } from './enetChannelSpecs';
+import { validateEnetChannelSpecs, type EnetChannelDecodeSpec, type EnetChannelSpec } from './enetChannelSpecs';
 
 export type DidHeuristicDecode = 'u8-40' | 'u16/10' | 'u8' | 'i16';
 export type DidHeuristicKind = 'temperature' | 'speed' | 'pedal' | 'steering' | 'unknown';
@@ -86,7 +86,7 @@ function classifyOne(entry: DidResponderSeries, context: DidHeuristicContext): D
   if (u8Raw !== null) candidates.push(scoreSpeed(u8Raw, times, context, 'u8'));
   if (u16Div10 !== null) candidates.push(scoreSpeed(u16Div10, times, context, 'u16/10'));
 
-  if (u8Raw !== null) candidates.push(scoreBimodal(u8Raw, 'u8'));
+  if (u8Raw !== null) candidates.push(scoreBimodal(u8Raw, times, 'u8'));
 
   if (i16Raw !== null) candidates.push(scoreSteering(i16Raw, 'i16'));
 
@@ -166,6 +166,13 @@ function decodeSeries(
 
 // ---------- Shape scoring ----------
 
+/** Minimum observation window (amendment: "slow monotonic drift over >= 30 s") -- a drift measured over anything shorter proves nothing about SLOWNESS regardless of how clean the trend looks (3 samples 1ms apart trivially "monotonic"). */
+const TEMPERATURE_MIN_DURATION_MS = 30_000;
+/** Maximum |slope| in decoded-units-per-second (amendment: "|slope| <= 2 C/s") -- both u8-40 and u16/10 decode to the SAME physical unit (deg C), so one bound serves both decodes. */
+const TEMPERATURE_MAX_SLOPE_PER_SEC = 2;
+/** Minimum fraction of steps that must agree with the overall trend's sign (amendment: "monotonic ratio >= 0.8") -- a HARD gate, not a soft multiplier: below this, the series just isn't "monotonic" in the sense the addendum means. */
+const TEMPERATURE_MIN_MONOTONIC_RATIO = 0.8;
+
 function scoreTemperature(
   values: readonly number[],
   times: readonly number[],
@@ -175,6 +182,16 @@ function scoreTemperature(
 ): Candidate {
   const n = values.length;
   if (n < 3) return { kind: 'temperature', decode, confidence: 0, rationale: 'too few samples' };
+
+  const durationMs = (times[n - 1] ?? 0) - (times[0] ?? 0);
+  if (durationMs < TEMPERATURE_MIN_DURATION_MS) {
+    return {
+      kind: 'temperature',
+      decode,
+      confidence: 0,
+      rationale: `observation window ${durationMs}ms is under the ${TEMPERATURE_MIN_DURATION_MS}ms minimum for "slow" drift`,
+    };
+  }
 
   const first = values[0] ?? 0;
   const last = values[n - 1] ?? 0;
@@ -197,11 +214,18 @@ function scoreTemperature(
   const absTrend = Math.abs(trend);
   const smoothness = sumAbsDiff > 0 ? Math.min(1, absTrend / sumAbsDiff) : absTrend > 0 ? 1 : 0;
   const hasDrift = absTrend >= 1;
+  const slopePerSec = trend / (durationMs / 1_000);
+  const slopeOk = Math.abs(slopePerSec) <= TEMPERATURE_MAX_SLOPE_PER_SEC;
+  const monotonicOk = monotonicFraction >= TEMPERATURE_MIN_MONOTONIC_RATIO;
 
-  const confidence = inPlausibleRange && hasDrift ? clamp01(monotonicFraction * smoothness) : 0;
-  const rationale = `range [${min.toFixed(1)}, ${actualMax.toFixed(1)}] over ${(times[n - 1] ?? 0) - (times[0] ?? 0)}ms, drift ${trend.toFixed(1)}, monotonic ${(monotonicFraction * 100).toFixed(0)}%`;
+  const confidence =
+    inPlausibleRange && hasDrift && slopeOk && monotonicOk ? clamp01(monotonicFraction * smoothness) : 0;
+  const rationale = `range [${min.toFixed(1)}, ${actualMax.toFixed(1)}] over ${durationMs}ms, slope ${slopePerSec.toFixed(3)}/s, monotonic ${(monotonicFraction * 100).toFixed(0)}%`;
   return { kind: 'temperature', decode, confidence, rationale };
 }
+
+/** Least-squares gain must land within this fraction of 1 (amendment: "within +/-25% of 1") -- correlation alone can be near-perfect while the decoded NUMBER is simply wrong (e.g. reads 2x the actual km/h), which is not a usable speed channel regardless of how well it tracks shape. */
+const SPEED_GAIN_TOLERANCE = 0.25;
 
 function scoreSpeed(
   values: readonly number[],
@@ -215,11 +239,42 @@ function scoreSpeed(
   }
   const matched = times.map((t) => nearestValue(gnss, t));
   const r = pearsonCorrelation(values, matched);
-  const confidence = Number.isFinite(r) ? clamp01(r) : 0;
-  return { kind: 'speed', decode, confidence, rationale: `correlation with GNSS speed r=${Number.isFinite(r) ? r.toFixed(2) : 'n/a'}` };
+  if (!Number.isFinite(r)) {
+    return { kind: 'speed', decode, confidence: 0, rationale: 'no variation to correlate against GNSS speed' };
+  }
+
+  // Least-squares gain fitting `values ~= gain * matched` (through the
+  // origin -- 0 decoded is 0 km/h for every decode this module tries).
+  const sumXX = matched.reduce((sum, x) => sum + x * x, 0);
+  const sumXY = matched.reduce((sum, x, i) => sum + x * (values[i] ?? 0), 0);
+  const gain = sumXX > 0 ? sumXY / sumXX : NaN;
+  const gainOk = Number.isFinite(gain) && Math.abs(gain - 1) <= SPEED_GAIN_TOLERANCE;
+
+  if (!gainOk) {
+    return {
+      kind: 'speed',
+      decode,
+      confidence: 0,
+      rationale: `correlation r=${r.toFixed(2)} but decode scale is wrong (gain ${Number.isFinite(gain) ? gain.toFixed(2) : 'n/a'}, need within +/-${SPEED_GAIN_TOLERANCE * 100}% of 1)`,
+    };
+  }
+
+  // Confidence scaled by residual (amendment): even a gain-correct decode
+  // that scatters far from the GNSS reference isn't a confident speed match.
+  const residuals = values.map((v, i) => v - gain * (matched[i] ?? 0));
+  const residualRms = Math.sqrt(residuals.reduce((sum, e) => sum + e * e, 0) / residuals.length);
+  const referenceScale = Math.max(1, rms(matched));
+  const residualScore = clamp01(1 - residualRms / referenceScale);
+
+  const confidence = clamp01(clamp01(r) * residualScore);
+  const rationale = `correlation r=${r.toFixed(2)}, gain=${gain.toFixed(2)}, residual RMS=${residualRms.toFixed(2)}`;
+  return { kind: 'speed', decode, confidence, rationale };
 }
 
-function scoreBimodal(values: readonly number[], decode: DidHeuristicDecode): Candidate {
+/** Maximum time gap allowed between two temporally-ADJACENT samples that fall in different clusters (amendment: "fast steps (<= 2 s) between two plateaus"). Two widely-time-spaced samples landing in different clusters proves nothing about transition SPEED -- it could equally be a slow ramp we merely undersampled -- so that case must not be credited as "fast". */
+const PEDAL_MAX_TRANSITION_MS = 2_000;
+
+function scoreBimodal(values: readonly number[], times: readonly number[], decode: DidHeuristicDecode): Candidate {
   const n = values.length;
   if (n < 6) return { kind: 'pedal', decode, confidence: 0, rationale: 'too few samples' };
 
@@ -243,8 +298,33 @@ function scoreBimodal(values: readonly number[], decode: DidHeuristicDecode): Ca
   const spread = (stdev(low) + stdev(high)) / 2;
   const tightness = clamp01(1 - spread / (range || 1));
 
+  // Cluster threshold sits in the gap itself (values <= threshold -> "low").
+  const threshold = ((sorted[splitIndex - 1] ?? 0) + (sorted[splitIndex] ?? 0)) / 2;
+  let maxTransitionMs = 0;
+  let sawTransition = false;
+  for (let i = 1; i < n; i += 1) {
+    const prevLow = (values[i - 1] ?? 0) <= threshold;
+    const currLow = (values[i] ?? 0) <= threshold;
+    if (prevLow !== currLow) {
+      sawTransition = true;
+      maxTransitionMs = Math.max(maxTransitionMs, (times[i] ?? 0) - (times[i - 1] ?? 0));
+    }
+  }
+  const transitionsAreFast = sawTransition && maxTransitionMs <= PEDAL_MAX_TRANSITION_MS;
+
+  if (!transitionsAreFast) {
+    return {
+      kind: 'pedal',
+      decode,
+      confidence: 0,
+      rationale: sawTransition
+        ? `slowest observed transition ${maxTransitionMs}ms exceeds the ${PEDAL_MAX_TRANSITION_MS}ms "fast step" bound`
+        : 'no plateau-to-plateau transition observed in time order',
+    };
+  }
+
   const confidence = balance >= 0.15 ? clamp01(gapRatio * tightness * (balance / 0.5)) : 0;
-  const rationale = `bimodal gap ${maxGap.toFixed(1)}/${range.toFixed(1)} range, clusters ${low.length}/${high.length}, tightness ${tightness.toFixed(2)}`;
+  const rationale = `bimodal gap ${maxGap.toFixed(1)}/${range.toFixed(1)} range, clusters ${low.length}/${high.length}, tightness ${tightness.toFixed(2)}, max transition ${maxTransitionMs}ms`;
   return { kind: 'pedal', decode, confidence, rationale };
 }
 
@@ -254,10 +334,15 @@ function scoreBimodal(values: readonly number[], decode: DidHeuristicDecode): Ca
  * handful of times across an observation window (once per corner), most
  * samples sitting solidly on one side or the other in between. The
  * discriminating property is that BOTH signs occur in a healthy proportion
- * (`balance`, unlike a one-sided temperature/pedal-style signal) and the
- * mean sits near zero -- at least one actual crossing (`signChanges >= 1`)
- * is required as a gate so a signal that merely dips slightly negative once
- * from noise doesn't qualify.
+ * (`balance`, unlike a one-sided temperature/pedal-style signal), the mean
+ * sits near zero, AND the series actually crosses zero at least once.
+ *
+ * A crossing is counted with `prev <= 0 < curr` (amendment) -- NOT
+ * `prev * curr < 0` -- so a sample landing on EXACT zero between a negative
+ * and a positive neighbor (`[-100, 0, 100]`) still counts: `prev*curr<0`
+ * would miss it entirely (0 * anything = 0, never < 0). The crossing count
+ * itself CONTRIBUTES to confidence (not merely a pass/fail gate) via
+ * `crossingScore`.
  */
 function scoreSteering(values: readonly number[], decode: DidHeuristicDecode): Candidate {
   const n = values.length;
@@ -267,7 +352,7 @@ function scoreSteering(values: readonly number[], decode: DidHeuristicDecode): C
   const actualMax = Math.max(...values.map((v) => Math.abs(v)));
   if (actualMax === 0) return { kind: 'steering', decode, confidence: 0, rationale: 'constant zero' };
 
-  let signChanges = 0;
+  let crossings = 0;
   let positiveCount = 0;
   let negativeCount = 0;
   for (const value of values) {
@@ -277,18 +362,23 @@ function scoreSteering(values: readonly number[], decode: DidHeuristicDecode): C
   for (let i = 1; i < n; i += 1) {
     const prev = values[i - 1] ?? 0;
     const curr = values[i] ?? 0;
-    if (prev * curr < 0) signChanges += 1;
+    if (prev <= 0 && curr > 0) crossings += 1;
   }
 
-  if (signChanges === 0) {
-    return { kind: 'steering', decode, confidence: 0, rationale: 'never crosses zero' };
+  if (crossings === 0) {
+    return { kind: 'steering', decode, confidence: 0, rationale: 'never crosses zero (prev <= 0 < curr)' };
   }
 
   const balance = (2 * Math.min(positiveCount, negativeCount)) / n; // 1.0 = perfectly split between + and -
   const meanNearZeroScore = clamp01(1 - Math.abs(mean) / actualMax);
+  // At least 1 crossing already gated entry above (0.5 baseline credit for
+  // that alone); each additional crossing (up to 3) raises this further,
+  // since repeated crossings are stronger evidence of a genuinely
+  // oscillating (rather than one-off) signal.
+  const crossingScore = clamp01(0.5 + 0.5 * Math.min(1, crossings / 3));
 
-  const confidence = clamp01(balance * (0.5 + 0.5 * meanNearZeroScore));
-  const rationale = `mean ${mean.toFixed(1)} (max |v| ${actualMax.toFixed(1)}), ${signChanges} sign change(s), +/- balance ${(balance * 100).toFixed(0)}%`;
+  const confidence = clamp01(0.4 * balance + 0.3 * meanNearZeroScore + 0.3 * crossingScore);
+  const rationale = `mean ${mean.toFixed(1)} (max |v| ${actualMax.toFixed(1)}), ${crossings} crossing(s), +/- balance ${(balance * 100).toFixed(0)}%`;
   return { kind: 'steering', decode, confidence, rationale };
 }
 
@@ -305,6 +395,12 @@ function stdev(values: readonly number[]): number {
   const mean = values.reduce((sum, v) => sum + v, 0) / n;
   const variance = values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / n;
   return Math.sqrt(variance);
+}
+
+function rms(values: readonly number[]): number {
+  const n = values.length;
+  if (n === 0) return 0;
+  return Math.sqrt(values.reduce((sum, v) => sum + v * v, 0) / n);
 }
 
 function pearsonCorrelation(a: readonly number[], b: readonly number[]): number {
@@ -357,18 +453,37 @@ const DECODE_SPECS: Readonly<Record<DidHeuristicDecode, EnetChannelDecodeSpec>> 
  * specs"). `channel` is the caller's mapping from the suggestion's `kind` to
  * an actual `TelemetryChannelId` (the confirmation UI's job, not this pure
  * module's -- a `kind` alone is not a channel).
+ *
+ * Validates before returning anything (amendment: "validates through
+ * `validateEnetChannelSpecs` and rejects forbidden channels, out-of-range
+ * DIDs and empty dates") -- throws rather than silently handing back a spec
+ * that would just be dropped with a warning downstream.
  */
 export function enetSpecsFromSuggestion(
   suggestion: DidHeuristicSuggestion,
   channel: TelemetryChannelId,
   date: string,
 ): EnetChannelSpec {
+  if (!Number.isInteger(suggestion.did) || suggestion.did < 0 || suggestion.did > 0xffff) {
+    throw new RangeError(`enetSpecsFromSuggestion: DID out of range [0, 0xFFFF]: ${suggestion.did}`);
+  }
+  if (date.trim() === '') {
+    throw new Error('enetSpecsFromSuggestion: date must not be empty');
+  }
+
   const didHex = `0x${suggestion.did.toString(16).toUpperCase().padStart(4, '0')}`;
-  return {
+  const spec: EnetChannelSpec = {
     channel,
     mode: 'did',
     requestHex: suggestion.did.toString(16).toUpperCase().padStart(4, '0'),
     decode: DECODE_SPECS[suggestion.decode],
     provenance: `in-car sweep ${date}, DID ${didHex}, decode ${suggestion.decode}`,
   };
+
+  const { valid, warnings } = validateEnetChannelSpecs([spec]);
+  const validated = valid[0];
+  if (validated === undefined) {
+    throw new Error(`enetSpecsFromSuggestion: produced an invalid channel spec (${warnings.join('; ')})`);
+  }
+  return validated;
 }

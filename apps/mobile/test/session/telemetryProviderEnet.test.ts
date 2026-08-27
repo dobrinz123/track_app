@@ -271,7 +271,7 @@ describe('telemetryProvider: ENET reconnect policy (real-adapter path, mocked En
 
   it("reaches 'failed', retries exactly ONCE after 3s, then stays failed (no further retries) -- SAME policy as ELM327", async () => {
     const store = new InMemorySettingsStore();
-    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet' });
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet', enetAutoDiscover: false });
 
     const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
     const states: string[] = [];
@@ -328,7 +328,7 @@ describe('telemetryProvider: ENET stop()/start() overlap is now serialized (P4e-
   it("the review's overlap scenario: stop() then immediate start() -- exactly ONE ENET socket exists at a time; the reservation is held by generation 2 only after the old stop() settles", async () => {
     const reservation = createEnetAdapterReservation();
     const store = new InMemorySettingsStore();
-    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet' });
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet', enetAutoDiscover: false });
     const provider = createTelemetryProvider({
       settingsStore: store,
       monotonicNow: monotonicCounter(),
@@ -417,7 +417,7 @@ describe('telemetryProvider: ENET state mapping cannot mislabel stopped/failed',
 
   it("a failing real-adapter connect() ends in 'failed', never 'stopped'", async () => {
     const store = new InMemorySettingsStore();
-    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet' });
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet', enetAutoDiscover: false });
     const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
     const states: string[] = [];
     provider.onStateChange((s) => states.push(s));
@@ -505,7 +505,7 @@ describe('telemetryProvider: ENET adapter reservation (P4e-FIX3 H2, binding)', (
   it("the review's exact race: provider fails and releases -> probe acquires -> the scheduled retry does NOT open a socket", async () => {
     const reservation = createEnetAdapterReservation();
     const store = new InMemorySettingsStore();
-    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet' });
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet', enetAutoDiscover: false });
 
     const provider = createTelemetryProvider({
       settingsStore: store,
@@ -554,7 +554,7 @@ describe('telemetryProvider: ENET adapter reservation (P4e-FIX3 H2, binding)', (
     expect(probeToken).not.toBeNull();
 
     const store = new InMemorySettingsStore();
-    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet' });
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet', enetAutoDiscover: false });
     const provider = createTelemetryProvider({
       settingsStore: store,
       monotonicNow: monotonicCounter(),
@@ -620,7 +620,7 @@ describe('telemetryProvider: ENET adapter reservation (P4e-FIX3 H2, binding)', (
   it('release on failed: a provider that reaches "failed" WITHOUT ever calling stop() still releases the reservation', async () => {
     const reservation = createEnetAdapterReservation();
     const store = new InMemorySettingsStore();
-    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet' });
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet', enetAutoDiscover: false });
     const provider = createTelemetryProvider({
       settingsStore: store,
       monotonicNow: monotonicCounter(),
@@ -793,7 +793,7 @@ describe('telemetryProvider: ENET exception paths release the reservation (P4e-F
     // telemetrySimulate:false -> the mocked (always-failing-to-connect)
     // EnetTcpTransport from the top of this file, so the FIRST attempt
     // reaches 'failed' and schedules the one retry on its own.
-    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet' });
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet', enetAutoDiscover: false });
 
     const provider = createTelemetryProvider({
       settingsStore: store,

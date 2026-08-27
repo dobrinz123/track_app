@@ -127,6 +127,26 @@ export interface AppSettings {
    * crash.
    */
   enetChannelSpecsJson: string;
+  /**
+   * ENET auto-discovery & DID sweep addendum (binding, Phase 4f): where
+   * `enetHost`/`enetPort` came from -- `''` (the default) means "entered
+   * manually" (or never set); `discovered <date>` (ISO date) means a "Find
+   * adapter" tap or the provider's own auto-discovery-on-connect-failure
+   * detour applied a discovery hit. Display-only (SettingsScreen shows it
+   * next to the host/port fields) -- never read by `telemetryProvider.ts`'s
+   * connection logic itself.
+   */
+  enetHostProvenance: string;
+  /**
+   * ENET auto-discovery addendum (binding, Phase 4f): when `true` (the
+   * default) and `adapterType === 'enet'`, `telemetryProvider.ts` runs
+   * discovery ONCE per `start()` -- immediately when no host is configured,
+   * or after the first connect attempt to a configured host fails -- and
+   * applies a level-2 hit automatically. `false` reverts to the pre-addendum
+   * behavior: a configured host is dialed directly, and a failure gets the
+   * plain single reconnect retry, with no discovery involved at all.
+   */
+  enetAutoDiscover: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -147,6 +167,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   enetTesterAddress: 0xf4,
   enetTargetAddress: 0x12,
   enetChannelSpecsJson: '',
+  enetHostProvenance: '',
+  enetAutoDiscover: true,
 };
 
 /**

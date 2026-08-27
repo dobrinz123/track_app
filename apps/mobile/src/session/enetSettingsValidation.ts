@@ -16,6 +16,7 @@ import {
   DEFAULT_ENET_CHANNEL_SPECS,
   ENET_SPEC_CHANNELS,
   validateEnetChannelSpecs,
+  type DiscoveryProbeResult,
   type EnetChannelSpec,
 } from '@circuit/core';
 import { DEFAULT_SETTINGS, type AdapterType, type AppSettings } from './settingsStore';
@@ -291,5 +292,73 @@ export function repairPersistedEnetSettings(settings: AppSettings): AppSettings 
       ? enetChannelSpecsJsonRaw
       : '';
 
-  return { ...settings, adapterType, enetPort, enetTesterAddress, enetTargetAddress, enetChannelSpecsJson };
+  // ENET auto-discovery & DID sweep addendum (binding, Phase 4f): the two new
+  // settings this ticket introduces get the SAME "reset a present-but-invalid
+  // value back to its default" repair treatment as every other ENET field
+  // above -- `enetHostProvenance` is display-only free text (any string is
+  // structurally valid; only a non-string survivor is invalid), `enetAutoDiscover`
+  // must be a real boolean.
+  const enetHostProvenanceRaw: unknown = settings.enetHostProvenance;
+  const enetHostProvenance = typeof enetHostProvenanceRaw === 'string' ? enetHostProvenanceRaw : DEFAULT_SETTINGS.enetHostProvenance;
+
+  const enetAutoDiscoverRaw: unknown = settings.enetAutoDiscover;
+  const enetAutoDiscover = typeof enetAutoDiscoverRaw === 'boolean' ? enetAutoDiscoverRaw : DEFAULT_SETTINGS.enetAutoDiscover;
+
+  return {
+    ...settings,
+    adapterType,
+    enetPort,
+    enetTesterAddress,
+    enetTargetAddress,
+    enetChannelSpecsJson,
+    enetHostProvenance,
+    enetAutoDiscover,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// ENET auto-discovery & DID sweep addendum (binding, Phase 4f): pure helpers
+// shared by SettingsScreen's "Find adapter" flow, `telemetryProvider.ts`'s own
+// auto-discovery detour, and the DID-sweep screen's "Tag as <channel>" flow.
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds the settings patch a chosen discovery result applies -- host/port
+ * plus a `discovered <date>` provenance stamp (contracts.md addendum: "when
+ * applied, host/port are persisted with provenance `discovered <date>`").
+ * Pure (no I/O, no `Date.now()` call of its own -- `nowIso` is injected so
+ * this is deterministically testable) so both the manual "Find adapter" tap
+ * and the provider's own auto-apply-on-level-2-hit detour produce the
+ * IDENTICAL patch shape from the identical inputs.
+ */
+export function applyDiscoveryResult(
+  result: Pick<DiscoveryProbeResult, 'host' | 'port'>,
+  nowIso: string,
+): Pick<AppSettings, 'enetHost' | 'enetPort' | 'enetHostProvenance'> {
+  return {
+    enetHost: result.host,
+    enetPort: result.port,
+    enetHostProvenance: `discovered ${nowIso}`,
+  };
+}
+
+/**
+ * Merges a single (user-confirmed) `EnetChannelSpec` into an existing
+ * `enetChannelSpecsJson` draft -- the DID-sweep screen's "Tag as <channel>"
+ * flow (contracts.md addendum: "writes the spec ... into `enetChannelSpecsJson`
+ * (merge, validate, persist) with provenance"). Parses `existingJson` the SAME
+ * way the Settings screen's own draft validation does (`validateEnetChannelSpecsJson`,
+ * NOT `resolveEnetChannelSpecs` -- an empty/malformed existing draft merges
+ * onto an EMPTY base, never silently expanding to the five built-in defaults
+ * re-interpreted as explicit user entries), replaces any existing entry for
+ * the SAME channel (last-one-wins, matching `@circuit/core`'s own
+ * `validateEnetChannelSpecs` de-dupe rule) rather than duplicating it, then
+ * re-validates the combined list before returning. Never throws.
+ */
+export function mergeEnetChannelSpecJson(existingJson: string, newSpec: EnetChannelSpec): string {
+  const parsedExisting = validateEnetChannelSpecsJson(existingJson);
+  const baseSpecs = parsedExisting.ok ? parsedExisting.specs : [];
+  const withoutSameChannel = baseSpecs.filter((spec) => spec.channel !== newSpec.channel);
+  const { valid } = validateEnetChannelSpecs([...withoutSameChannel, newSpec]);
+  return JSON.stringify(valid);
 }

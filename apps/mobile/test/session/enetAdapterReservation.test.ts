@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createEnetAdapterReservation } from '../../src/session/enetAdapterReservation';
+import { createEnetAdapterReservation, type EnetAdapterOwner } from '../../src/session/enetAdapterReservation';
 
 describe('enetAdapterReservation (P4e-FIX3 H2 / P4e-FIX4 token model, binding: single-client adapter reservation)', () => {
   it('tryAcquire succeeds when the adapter is free, returning a token, and holder() reflects it', () => {
@@ -81,7 +81,7 @@ describe('enetAdapterReservation (P4e-FIX3 H2 / P4e-FIX4 token model, binding: s
 
   it('subscribe() replays the current holder synchronously, and notifies on every change', () => {
     const reservation = createEnetAdapterReservation();
-    const seen: Array<'provider' | 'probe' | null> = [];
+    const seen: Array<EnetAdapterOwner | null> = [];
     const unsubscribe = reservation.subscribe((holder) => seen.push(holder));
     expect(seen).toEqual([null]); // replayed immediately.
 
@@ -99,7 +99,7 @@ describe('enetAdapterReservation (P4e-FIX3 H2 / P4e-FIX4 token model, binding: s
   it('subscribe() does NOT notify for a refused same-owner reacquire attempt (no spurious change event)', () => {
     const reservation = createEnetAdapterReservation();
     reservation.tryAcquire('provider');
-    const seen: Array<'provider' | 'probe' | null> = [];
+    const seen: Array<EnetAdapterOwner | null> = [];
     reservation.subscribe((holder) => seen.push(holder));
     expect(seen).toEqual(['provider']);
 
@@ -145,6 +145,26 @@ describe('enetAdapterReservation (P4e-FIX3 H2 / P4e-FIX4 token model, binding: s
 
     // The real (first) token still correctly releases the actual claim.
     reservation.release(firstToken!);
+    expect(reservation.holder()).toBeNull();
+  });
+
+  /** ENET auto-discovery & DID sweep addendum (binding, Phase 4f): the two new owner kinds share this SAME exclusive reservation, mutually exclusive with every other owner (and each other). */
+  it("'discovery' and 'sweep' are valid owners, mutually exclusive with 'provider'/'probe'/each other, same as any other owner pair", () => {
+    const reservation = createEnetAdapterReservation();
+    const discoveryToken = reservation.tryAcquire('discovery');
+    expect(discoveryToken).not.toBeNull();
+    expect(reservation.holder()).toBe('discovery');
+    expect(reservation.tryAcquire('provider')).toBeNull();
+    expect(reservation.tryAcquire('probe')).toBeNull();
+    expect(reservation.tryAcquire('sweep')).toBeNull();
+
+    reservation.release(discoveryToken!);
+    const sweepToken = reservation.tryAcquire('sweep');
+    expect(sweepToken).not.toBeNull();
+    expect(reservation.holder()).toBe('sweep');
+    expect(reservation.tryAcquire('discovery')).toBeNull();
+
+    reservation.release(sweepToken!);
     expect(reservation.holder()).toBeNull();
   });
 
@@ -226,7 +246,7 @@ describe('enetAdapterReservation (P4e-FIX3 H2 / P4e-FIX4 token model, binding: s
     const reservation = createEnetAdapterReservation();
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
-      const seen: Array<'provider' | 'probe' | null> = [];
+      const seen: Array<EnetAdapterOwner | null> = [];
       reservation.subscribe(() => {
         throw new Error('boom (test double)');
       });

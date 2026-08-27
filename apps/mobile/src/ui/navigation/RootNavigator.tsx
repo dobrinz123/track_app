@@ -83,6 +83,24 @@ export function RootNavigator(): React.JSX.Element {
         ) : null
       }
       {
+        // ENET auto-discovery & DID sweep addendum (Phase 4f): the dev DID-sweep
+        // screen -- SAME __DEV__-gated inline `require()` treatment as
+        // `DidProbe`/`DevReplay` immediately above/below, for the identical
+        // reason (Metro only drops a module from a release bundle when the
+        // import itself is inside the folded `__DEV__` branch).
+        // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
+        __DEV__ ? (
+          <Stack.Screen
+            name="DidSweep"
+            component={
+              // eslint-disable-next-line @typescript-eslint/no-require-imports -- see the comment above: this MUST be a runtime require(), not a top-level import, for Metro to drop the module from a release bundle.
+              (require('../screens/DidSweepScreen') as typeof import('../screens/DidSweepScreen')).DidSweepScreen
+            }
+            options={{ title: 'DID Sweep' }}
+          />
+        ) : null
+      }
+      {
         // B4 fix: DevReplay must not ship in a release build -- SettingsScreen's
         // entry point to it is already __DEV__-gated; this gates the route
         // registration itself too.

@@ -21,6 +21,11 @@ const ENET_SOURCE_FILES = [
   '../../src/ui/screens/DidProbeScreen.tsx',
   '../../src/ui/screens/SettingsScreen.tsx',
   '../../src/ui/screens/TelemetryScreen.tsx',
+  // ENET auto-discovery & DID sweep addendum (binding, Phase 4f): the new
+  // files this ticket adds.
+  '../../src/session/networkInfo.ts',
+  '../../src/session/didSweepController.ts',
+  '../../src/ui/screens/DidSweepScreen.tsx',
 ];
 
 const FORBIDDEN_PATTERNS: ReadonlyArray<{ label: string; pattern: RegExp }> = [

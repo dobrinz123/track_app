@@ -41,7 +41,17 @@
  * react-native, no react import -- directly importable by vitest.
  */
 
-export type EnetAdapterOwner = 'provider' | 'probe';
+/**
+ * ENET auto-discovery & DID sweep addendum (binding, Phase 4f): two more
+ * owner kinds share this SAME single-client reservation -- `'discovery'`
+ * (Settings' manual "Find adapter" button, `runDiscovery` against the real
+ * network) and `'sweep'` (the dev DID-sweep screen). `telemetryProvider.ts`'s
+ * own auto-discovery-on-connect-failure path acquires under the EXISTING
+ * `'provider'` owner (it IS the provider attempting to connect, just via a
+ * discovery detour first) -- it never uses the `'discovery'` owner, which is
+ * reserved for the user-initiated Settings button.
+ */
+export type EnetAdapterOwner = 'provider' | 'probe' | 'discovery' | 'sweep';
 
 /** Opaque -- callers must not construct one, only store what `tryAcquire` returns and pass it back to `release`. */
 export type EnetAdapterToken = symbol;

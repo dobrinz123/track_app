@@ -659,3 +659,25 @@ adapter, connects, and helps discover identifiers — no manual IP/port/DID typi
   channel specs. No suggestion is ever applied without confirmation.
 - Whitelist {0x01, 0x22, 0x3E} is untouched; discovery and sweep cannot send anything else. All new
   network activity is confined to telemetry-enabled + adapterType 'enet' (discovery) or the dev sweep.
+
+### P4f addendum — hard bounds & sweep boundary amendment (2026-08-27, binding, after Codex P4f-REV1)
+- Discovery hard bounds: concurrency = min(configured, 16) enforced; at budget expiry or abort, no new probe
+  starts AND every active transport is closed immediately (close raced against a 200 ms timeout so a hanging
+  close cannot block); the run returns `truncated: true` with only completed results; abort is checked
+  synchronously before any send. Level 2 counts only ACK / diagnostic / alive-check / decodable error frames
+  ('other' controls stay level 1). Candidates: IPs canonicalized (trim, octet range 0–255, no leading zeros
+  ambiguity) and compared canonically; the phone's /24 is always enumerated regardless of the reported mask.
+- Sweep boundary: `runDidSweep` builds each 0x22 request itself through `assertAllowedRequest` and takes a
+  low-level `sendRequest(pdu) → Promise<Uint8Array | 'timeout'>`; every response is parsed with the real UDS
+  parser and correlated (0x62 + echoed DID → stripped payload; 0x7F with requestSid 0x22 → NRC; anything
+  else → `unmatched`, no credit); 0x78 extends the wait (bounded, default 5 extensions); a per-request
+  timeout (default 1000 ms) lives in the runner. Pause is re-checked after every wait; the cursor advances
+  only after a result; results accumulate across resumes (the runner accepts and returns an accumulator).
+  Priority ranges are validated (finite integers) and clipped to the plan range; pacing is clamped to
+  5–2000 ms and non-finite values fall back to defaults.
+- Heuristics use time: temperature = slow monotonic drift over ≥ 30 s (|slope| ≤ 2 °C/s, monotonic ratio ≥ 0.8);
+  pedal = fast steps (≤ 2 s) between two plateaus; speed = correlation AND scale fit (least-squares gain
+  within ±25 % of 1 after decode; confidence scaled by residual); steering = zero crossings counted with
+  `prev ≤ 0 < curr` semantics and contributing to confidence; contradictory evidence lowers confidence.
+  `enetSpecsFromSuggestion` validates through `validateEnetChannelSpecs` and rejects forbidden channels,
+  out-of-range DIDs and empty dates.

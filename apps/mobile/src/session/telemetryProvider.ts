@@ -1,8 +1,10 @@
 import {
+  buildDiscoveryCandidates,
   createElm327Session,
   createEnetSession,
   DEFAULT_ENET_CONFIG,
   ENET_DEFAULT_CHANNEL_RATES_HZ,
+  runDiscovery,
   SimulatedElm327Transport,
   SimulatedEnetTransport,
   type Elm327Config,
@@ -13,6 +15,7 @@ import {
   type EnetSession,
   type EnetState,
   type ObdTransport,
+  type RunDiscoveryResult,
   type TelemetryChannelId,
   type TelemetrySample,
 } from '@circuit/core';
@@ -20,7 +23,8 @@ import type { AdapterType, SettingsStore } from './settingsStore';
 import { TcpObdTransport } from './tcpObdTransport';
 import { EnetTcpTransport } from './enetTcpTransport';
 import { CUSTOM_PID_VALIDATION_ERROR, isAllowedCustomPidRequest } from './customPidValidation';
-import { resolveEnetChannelSpecs } from './enetSettingsValidation';
+import { applyDiscoveryResult, resolveEnetChannelSpecs } from './enetSettingsValidation';
+import { getNetworkInfo } from './networkInfo';
 import {
   enetAdapterReservation as sharedEnetAdapterReservation,
   type EnetAdapterReservation,
@@ -129,6 +133,20 @@ export interface TelemetryProviderDeps {
    * instance `DidProbeScreen.tsx` imports directly.
    */
   enetAdapterReservation?: EnetAdapterReservation;
+  /**
+   * ENET auto-discovery addendum (binding, Phase 4f): test-only injection
+   * seam (mirrors `isDev`/`enetAdapterReservation` above) for the phone
+   * network read the auto-discovery preamble/continuation uses to build
+   * discovery candidates. Production omits this and gets the real
+   * `getNetworkInfo` (`./networkInfo`, a lazy `expo-network` import).
+   * Overriding it in tests avoids ever touching the real dynamic import --
+   * which, loaded cold under `vi.useFakeTimers()` combined with a
+   * pure-microtask flush (this suite's own convention), resolves via real
+   * Node module-loading I/O that such a flush never yields to, stalling the
+   * whole auto-discovery chain indefinitely rather than merely resolving
+   * slowly.
+   */
+  getNetworkInfo?: () => Promise<import('./networkInfo').NetworkInfo | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +310,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
   const isDev = deps.isDev ?? (typeof __DEV__ !== 'undefined' ? __DEV__ : false);
   const enetAdapterReservation = deps.enetAdapterReservation ?? sharedEnetAdapterReservation;
+  const readNetworkInfo = deps.getNetworkInfo ?? getNetworkInfo;
   const sampleListeners = new Set<(s: TelemetrySample) => void>();
   const stateListeners = new Set<(state: Elm327State, detail?: string) => void>();
 
@@ -308,6 +327,24 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   let generationCounter = 0;
   /** P4e-FIX3 H2: set when `launchSession()`'s ENET branch was blocked by the adapter reservation (the probe holds it) -- surfaced via `getDiagnostics()` even though `current` stays `null` (no active generation to read diagnostics FROM). Cleared as soon as a session is actually launched. */
   let reservationBlockedDetail: string | undefined;
+  /**
+   * ENET auto-discovery addendum (binding, Phase 4f): mirrors
+   * `reservationBlockedDetail` above, for the "discovery ran but found no
+   * level-2 hit" terminal detail (`discovery: scanned N, none answered`) --
+   * surfaced via `getDiagnostics()` even though `current` stays `null` (no
+   * session was ever built). Reset alongside `reservationBlockedDetail` at
+   * the top of every fresh `launchSession()` attempt.
+   */
+  let autoDiscoveryFailureDetail: string | undefined;
+  /**
+   * ENET auto-discovery addendum (binding): "runs discovery ONCE per start"
+   * -- bounded per `start()`..`stop()` lifecycle, NOT per `launchSession()`
+   * call (which the scheduled retry also invokes), so a start() that already
+   * spent its one discovery attempt (whether it found a hit or not) never
+   * runs a second one on any later failure within the SAME lifecycle. Reset
+   * only in `start()`, mirroring `retriesUsed`'s own reset discipline.
+   */
+  let autoDiscoveryAttempted = false;
   /**
    * P4e-FIX4 fix (binding, Codex P4e-REV4 HIGH finding -- "overlapping
    * provider generations bypass exclusivity"): while a `stop()` is tearing
@@ -406,10 +443,213 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     for (const listener of [...stateListeners]) listener(state, detail);
   }
 
+  /**
+   * ENET auto-discovery addendum (binding): discovery only ever makes sense
+   * against the REAL adapter over the REAL local network -- `SimulatedEnetTransport`
+   * doesn't use `enetHost`/`enetPort` at all, so running discovery ahead of it
+   * (or after its own -- never-failing-to-connect -- "handshake") would be
+   * pure overhead with nothing to discover. Mirrors `buildTransport()`'s own
+   * `telemetrySimulate && isDev` branch exactly, so the two can never disagree
+   * about which case is "the real adapter".
+   */
+  function usingRealEnetAdapter(): boolean {
+    return !(settingsStore.getSettings().telemetrySimulate && isDev);
+  }
+
+  /** `discovery: scanned N, none answered` -- the exact diagnostics detail the ticket's binding text names for "auto-discovery ran, found no level-2 hit". */
+  function discoveryNoneAnsweredDetail(result: RunDiscoveryResult): string {
+    return `discovery: scanned ${result.scanned}, none answered`;
+  }
+
+  /**
+   * Runs `@circuit/core`'s `runDiscovery` against the phone's own subnet plus
+   * whatever host is currently configured (addendum: "candidates in this
+   * order -- the configured host (if any), 192.168.4.1, the phone subnet's
+   * .1, then every host of the phone's /24"), using a REAL `EnetTcpTransport`
+   * probe factory with the addendum's tight default timeouts (300 ms
+   * connect / 500 ms reply / 8 s total budget -- all `runDiscovery`'s own
+   * defaults, left unspecified here). Never throws -- a `getNetworkInfo()` or
+   * `runDiscovery()` failure is treated as "found nothing" (an empty result),
+   * matching this module's existing "never let telemetry startup throw"
+   * discipline.
+   */
+  async function runAutoDiscovery(): Promise<RunDiscoveryResult> {
+    const settings = settingsStore.getSettings();
+    let phoneInfo: Awaited<ReturnType<typeof getNetworkInfo>> = null;
+    try {
+      phoneInfo = await readNetworkInfo();
+    } catch {
+      phoneInfo = null;
+    }
+    const candidates = buildDiscoveryCandidates({
+      configuredHost: settings.enetHost.trim() === '' ? undefined : settings.enetHost,
+      configuredPort: settings.enetPort,
+      phoneIpv4: phoneInfo?.ipv4,
+      subnetMask: phoneInfo?.subnetMask,
+    });
+    try {
+      return await runDiscovery({
+        candidates,
+        probe: (host, port) => new EnetTcpTransport({ host, port, connectTimeoutMs: 300 }),
+        clock: { now: monotonicNow },
+        testerAddress: settings.enetTesterAddress,
+        targetAddress: settings.enetTargetAddress,
+      });
+    } catch {
+      return { results: [], scanned: 0, elapsedMs: 0, truncated: false };
+    }
+  }
+
+  /**
+   * Builds the transport/config/session for generation `id` and wires it up
+   * -- extracted from `launchSession()`'s own ENET branch (P4e-FIX4 shape
+   * unchanged) so both the SYNCHRONOUS immediate-connect path and the
+   * auto-discovery ASYNC continuation below share the exact same
+   * construction/wiring code. `token` is this generation's own adapter
+   * reservation, already held by the caller -- released here (and rethrown)
+   * on any construction failure.
+   */
+  function buildAndStartEnetSession(id: number, token: EnetAdapterToken): void {
+    try {
+      const transport = buildTransport();
+      const config = buildEnetConfig();
+      const next = createEnetSession(transport, config, monotonicNow);
+      const gen: SessionGeneration = {
+        id,
+        kind: 'enet',
+        session: next,
+        enetToken: token,
+        unsubscribeSample: next.onSample((sample) => {
+          if (current?.id !== id) return;
+          for (const listener of [...sampleListeners]) listener(sample);
+        }),
+        unsubscribeState: next.onStateChange((state, detail) => {
+          if (current?.id !== id) return;
+          const mapped = ENET_STATE_TO_PROVIDER_STATE[state];
+          emitState(mapped, detail);
+          if (mapped === 'failed') {
+            // A failed session no longer legitimately holds the adapter
+            // (its transport already closed) -- release so the probe, or
+            // a future fresh start()/retry, can acquire it.
+            enetAdapterReservation.release(token);
+            if (running) {
+              // ENET auto-discovery addendum (binding): "if ... the first
+              // connect fails, run discovery ONCE (bounded)" -- ONLY when
+              // auto-discovery is on, only against the real adapter, and
+              // only once per start() lifecycle; every other case (already
+              // attempted this start(), simulated transport, or the setting
+              // turned off) keeps the pre-addendum plain single-retry policy
+              // exactly as it was.
+              if (
+                settingsStore.getSettings().adapterType === 'enet' &&
+                settingsStore.getSettings().enetAutoDiscover &&
+                usingRealEnetAdapter() &&
+                !autoDiscoveryAttempted
+              ) {
+                autoDiscoveryAttempted = true;
+                retriesUsed += 1; // the one auto-discovery attempt spends the SAME retry budget the plain reconnect would have.
+                void runAutoDiscoveryOnFailure(id);
+              } else {
+                scheduleRetry(id);
+              }
+            }
+          }
+        }),
+      };
+      current = gen;
+      next.start();
+    } catch (error) {
+      enetAdapterReservation.release(token);
+      current = null;
+      throw error;
+    }
+  }
+
+  /**
+   * The "host configured, first connect failed" auto-discovery continuation
+   * (addendum). Runs AFTER the failed generation has already released its
+   * token (`buildAndStartEnetSession`'s own `onStateChange` handler, just
+   * above) -- re-acquires a fresh one to run the discovery probes under, same
+   * as the provider's own normal acquire. A level-2 hit is applied
+   * (persisted, with provenance) and connected immediately; no hit (or the
+   * reservation being unavailable to re-acquire) surfaces as 'failed' with
+   * the discovery diagnostics detail, and schedules NOTHING further --
+   * "never loops".
+   */
+  async function runAutoDiscoveryOnFailure(id: number): Promise<void> {
+    if (!running || current === null || current.id !== id) return; // a fresh start()/stop() already superseded this generation.
+    // Mirrors `scheduleRetry`'s own timer-callback cleanup: detach the failed
+    // generation's listeners and clear `current` BEFORE running discovery, so
+    // a late event from it can never forward, and `runAutoDiscoveryThenConnect`'s
+    // eventual `buildAndStartEnetSession` call installs a genuinely fresh one.
+    current.unsubscribeSample();
+    current.unsubscribeState();
+    current = null;
+    const token = enetAdapterReservation.tryAcquire('provider');
+    if (token === null) {
+      autoDiscoveryFailureDetail = ENET_ADAPTER_RESERVED_BY_PROBE_DETAIL;
+      emitState('idle', ENET_ADAPTER_RESERVED_BY_PROBE_DETAIL);
+      return;
+    }
+    const result = await runAutoDiscovery();
+    if (!running || current !== null) {
+      enetAdapterReservation.release(token);
+      return;
+    }
+    const hit = result.results.find((r) => r.level === 2);
+    if (hit !== undefined) {
+      settingsStore.update(applyDiscoveryResult(hit, new Date().toISOString()));
+      // Same "a synchronous construction throw must never escape an async
+      // continuation uncaught" rule as `runAutoDiscoveryThenConnect` below --
+      // there is no synchronous caller-side try/catch for this path (unlike
+      // `start()`'s own `attempt()`), so it is handled here explicitly.
+      try {
+        buildAndStartEnetSession(id, token);
+      } catch (error) {
+        handleLaunchFailure(error);
+      }
+      return;
+    }
+    enetAdapterReservation.release(token);
+    autoDiscoveryFailureDetail = discoveryNoneAnsweredDetail(result);
+    emitState('failed', autoDiscoveryFailureDetail);
+  }
+
+  /**
+   * The "no host configured at all" auto-discovery preamble (addendum: "run
+   * discovery ONCE ... immediately when no host is configured"). Holds the
+   * SAME token `launchSession()` already acquired for generation `id`
+   * throughout the probe phase (nobody else may open a competing ENET client
+   * while the provider itself is scanning for one to use) -- released only if
+   * discovery finds no level-2 hit, or if a `stop()`/fresh `start()` races in
+   * before it resolves.
+   */
+  async function runAutoDiscoveryThenConnect(id: number, token: EnetAdapterToken): Promise<void> {
+    const result = await runAutoDiscovery();
+    if (!running || generationCounter !== id) {
+      enetAdapterReservation.release(token);
+      return;
+    }
+    const hit = result.results.find((r) => r.level === 2);
+    if (hit !== undefined) {
+      settingsStore.update(applyDiscoveryResult(hit, new Date().toISOString()));
+      try {
+        buildAndStartEnetSession(id, token);
+      } catch (error) {
+        handleLaunchFailure(error);
+      }
+      return;
+    }
+    enetAdapterReservation.release(token);
+    autoDiscoveryFailureDetail = discoveryNoneAnsweredDetail(result);
+    emitState('failed', autoDiscoveryFailureDetail);
+  }
+
   function launchSession(): void {
     generationCounter += 1;
     const id = generationCounter;
     reservationBlockedDetail = undefined; // reset -- re-set below only if THIS attempt is blocked.
+    autoDiscoveryFailureDetail = undefined; // reset -- re-set below only if THIS attempt's own discovery finds nothing.
     // F3 fix: every listener below checks `current?.id === id` before doing
     // anything -- once a NEWER generation has replaced `current` (a fresh
     // `start()`, or this generation's own `stop()`/retry teardown), a late
@@ -439,48 +679,26 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       // `adapterType === 'enet'`, so the ELM327 path's own behavior (and the
       // tests pinning it) is untouched by this addition.
       //
-      // P4e-FIX4 fix (binding, Codex P4e-REV4 HIGH finding -- "provider
-      // exception paths leak the claim"): transport/config/session
-      // construction and `next.start()` are wrapped in try/catch so ANY
-      // throw here releases the just-acquired token before propagating --
-      // otherwise a synchronous construction failure would leave the
-      // reservation held forever (every future probe/provider attempt
-      // refused) with no live generation left to ever release it. The
-      // caller (`start()`'s own catch, or the retry timer's, both via
-      // `handleLaunchFailure`) still resets `running`/emits `'failed'`.
-      try {
-        const transport = buildTransport();
-        const config = buildEnetConfig();
-        const next = createEnetSession(transport, config, monotonicNow);
-        const gen: SessionGeneration = {
-          id,
-          kind: 'enet',
-          session: next,
-          enetToken: token,
-          unsubscribeSample: next.onSample((sample) => {
-            if (current?.id !== id) return;
-            for (const listener of [...sampleListeners]) listener(sample);
-          }),
-          unsubscribeState: next.onStateChange((state, detail) => {
-            if (current?.id !== id) return;
-            const mapped = ENET_STATE_TO_PROVIDER_STATE[state];
-            emitState(mapped, detail);
-            if (mapped === 'failed') {
-              // A failed session no longer legitimately holds the adapter
-              // (its transport already closed) -- release so the probe, or
-              // a future fresh start()/retry, can acquire it.
-              enetAdapterReservation.release(token);
-              if (running) scheduleRetry(id);
-            }
-          }),
-        };
-        current = gen;
-        next.start();
-      } catch (error) {
-        enetAdapterReservation.release(token);
-        current = null;
-        throw error;
+      // ENET auto-discovery addendum (binding): "run discovery ONCE ...
+      // immediately when no host is configured" -- checked here, BEFORE ever
+      // building a transport (a real `EnetTcpTransport` against host `''`
+      // would just fail instantly and pointlessly). Gated on `enetAutoDiscover`
+      // and the real (non-simulated) adapter, same as the on-failure
+      // continuation above.
+      const settingsNow = settingsStore.getSettings();
+      if (
+        settingsNow.enetHost.trim() === '' &&
+        settingsNow.enetAutoDiscover &&
+        usingRealEnetAdapter() &&
+        !autoDiscoveryAttempted
+      ) {
+        autoDiscoveryAttempted = true;
+        retriesUsed += 1; // spends the one retry/attempt budget, same accounting as the on-failure continuation.
+        emitState('connecting');
+        void runAutoDiscoveryThenConnect(id, token);
+        return;
       }
+      buildAndStartEnetSession(id, token);
       return;
     }
 
@@ -552,6 +770,10 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       if (!settingsStore.getSettings().telemetryEnabled) return;
       running = true;
       retriesUsed = 0;
+      // ENET auto-discovery addendum (binding): "runs discovery ONCE per
+      // start" -- reset here (a fresh start()..stop() lifecycle), mirroring
+      // `retriesUsed`'s own reset discipline (NOT reset in `stop()`).
+      autoDiscoveryAttempted = false;
 
       // F2 fix (MED, binding): a synchronous throw while BUILDING the
       // session (transport construction, `createElm327Session`'s config
@@ -716,7 +938,10 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       // generation exists to read a `lastError` FROM in that case).
       // `reservationBlockedDetail` is only ever set for the ENET path, so
       // this never applies to (or changes) the ELM327 diagnostics shape.
-      const lastError = reservationBlockedDetail ?? base.lastError;
+      // ENET auto-discovery addendum (binding): mirrors `reservationBlockedDetail`
+      // above -- "discovery: scanned N, none answered" also has no live
+      // generation to read a `lastError` FROM.
+      const lastError = reservationBlockedDetail ?? autoDiscoveryFailureDetail ?? base.lastError;
       return {
         state: currentState,
         retriesUsed,
