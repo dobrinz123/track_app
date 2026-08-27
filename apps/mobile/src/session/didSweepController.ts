@@ -330,13 +330,34 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
   }
 
   /**
+   * P4f-FIX4 (binding, HIGH, after Codex REV4): `transport.close()` may throw
+   * SYNCHRONOUSLY (never returning a promise at all), not only reject one --
+   * calling it directly inside `Promise.race([transport.close().catch(...), ...])`
+   * only contains a REJECTION (the `.catch` is on the promise IT returns); a
+   * synchronous throw happens before `.catch` can even be attached, so it
+   * would propagate out of `teardownActiveTransport`'s `try/finally` (finally
+   * runs, but the throw is re-raised after it) and reject `teardownInFlight`
+   * -- every awaiter (`stop()` included) would then never reach its own
+   * release. This wrapper never rejects, regardless of how `close()` fails.
+   */
+  function closeQuietly(transport: ObdTransport): Promise<void> {
+    try {
+      return Promise.resolve(transport.close()).catch(() => undefined);
+    } catch {
+      return Promise.resolve();
+    }
+  }
+
+  /**
    * Closes the active transport (if any) -- does NOT touch the reservation
    * (callers release separately, strictly AFTER this resolves). REV3
    * (binding): retains `activeTransport`/`activeChannel` until `close()`
    * settles (or the 200ms race elapses), NEVER before, and a concurrent call
    * while one is already running joins the SAME promise rather than starting
    * a second (redundant) close or -- the original bug -- finding the
-   * reference already nulled and returning as a no-op.
+   * reference already nulled and returning as a no-op. `closeQuietly` (above)
+   * guarantees the returned promise NEVER rejects (REV4, binding) -- every
+   * caller can safely `await` this without its own try/catch.
    */
   function teardownActiveTransport(): Promise<void> {
     if (teardownInFlight !== null) return teardownInFlight;
@@ -344,10 +365,7 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
     if (transport === null) return Promise.resolve();
     const promise = (async () => {
       try {
-        await Promise.race([
-          transport.close().catch(() => undefined),
-          waitMs(TEARDOWN_RACE_MS),
-        ]);
+        await Promise.race([closeQuietly(transport), waitMs(TEARDOWN_RACE_MS)]);
       } finally {
         activeTransport = null;
         activeChannel = null;
@@ -607,8 +625,16 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       generation += 1; // supersede any in-flight sweep/observation continuation -- ITS OWN teardown/release is now skipped (see the `myGeneration !== generation` guards above), this call owns close-then-release instead.
       emit({ phase: 'stopped' });
       void (async () => {
-        await teardownActiveTransport();
-        releaseReservation();
+        // P4f-FIX4 (binding, HIGH, after Codex REV4): release is UNCONDITIONAL
+        // -- a `finally`, not a second sequential statement -- so it always
+        // runs even if something besides `teardownActiveTransport()` itself
+        // (already made non-rejecting, see `closeQuietly`) were ever to throw
+        // here; the claim must never outlive this `stop()` call.
+        try {
+          await teardownActiveTransport();
+        } finally {
+          releaseReservation();
+        }
       })();
     },
 

@@ -374,7 +374,7 @@ export interface RunDidObservationInput {
   targetHz?: number;
   pacing?: DidSweepPacing;
   control: DidSweepControl;
-  /** Invoked for every correlated 0x62 response (DID-stripped payload), in addition to being accumulated into the returned `series`. */
+  /** Invoked for every correlated 0x62 response (DID-stripped payload), in addition to being accumulated into the returned `series`. `tMs` is RELATIVE to the observation's own start (same domain as `result.startedAtMs` -- see its doc). */
   onSample?: (did: number, raw: Uint8Array, tMs: number) => void;
   /** default 1000. Same meaning as `RunDidSweepInput.requestTimeoutMs`, applied per responder poll. */
   requestTimeoutMs?: number;
@@ -389,8 +389,21 @@ export interface RunDidObservationInput {
 }
 
 export interface RunDidObservationResult {
-  /** One entry per input responder (same order), each ready to feed straight into `classifyResponders`. */
+  /**
+   * One entry per input responder (same order), each ready to feed straight
+   * into `classifyResponders`. **`samples[].tMs` is RELATIVE to the
+   * observation's own start (`tMs = clock.now() - startedAtMs` at the moment
+   * each response was correlated), NOT the injected clock's absolute value**
+   * -- callers commonly line this series up against a GNSS-speed context (or
+   * anything else) captured relative to when observation began, and the
+   * clock's own origin is arbitrary (uptime, epoch, a test's `FakeClock`
+   * starting wherever it likes). Using the clock's absolute value here would
+   * silently corrupt that alignment for any non-zero clock origin (Codex
+   * P4f-REV4).
+   */
   series: DidResponderSeries[];
+  /** The injected clock's absolute value when this observation began -- the anchor `series[].samples[].tMs` (and every `onSample` `tMs`) is relative to, for a caller that needs to convert back to the clock's own absolute domain. */
+  startedAtMs: number;
   /** Consecutive-interface-failure count across the whole window (see `RunDidSweepInput.maxConsecutiveErrors`'s doc for what counts as an "error"). */
   errors: number;
   /** True if ANY full round (one poll of every responder) took longer than `1000 / targetHz` ms. */
@@ -416,7 +429,7 @@ const PAUSE_POLL_INTERVAL_MS = 50;
  */
 export async function runDidObservation(input: RunDidObservationInput): Promise<RunDidObservationResult> {
   if (input.responders.length === 0) {
-    return { series: [], errors: 0, cadenceDegraded: false };
+    return { series: [], startedAtMs: input.clock.now(), errors: 0, cadenceDegraded: false };
   }
 
   const requestTimeoutMs = sanitizePositive(input.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
@@ -481,7 +494,14 @@ export async function runDidObservation(input: RunDidObservationInput): Promise<
       const now = input.clock.now();
       if (now < nextRequestNotBeforeMs) {
         await waitMs(nextRequestNotBeforeMs - now);
+        // Re-checked after every wait (Codex P4f-REV4 fix, same discipline as
+        // `runDidSweep`'s own pacing-wait recheck): `stopped`, THEN the
+        // window deadline, THEN `paused` -- all three must be re-verified
+        // right here, not just `stopped`, or one extra request could still
+        // be sent to a responder after pause/expiry landed mid-wait.
         if (input.control.stopped) break outer;
+        if (input.clock.now() >= endAtMs) break outer;
+        if (await waitWhilePaused()) break outer;
       }
 
       await maybeKeepAlive();
@@ -502,7 +522,9 @@ export async function runDidObservation(input: RunDidObservationInput): Promise<
       const rttMs = Math.max(0, input.clock.now() - sentAtMs);
 
       if (outcome.type === 'responder') {
-        const tMs = input.clock.now();
+        // RELATIVE to `startedAtMs` (Codex P4f-REV4) -- never the clock's own
+        // absolute value; see `RunDidObservationResult.series`'s doc.
+        const tMs = input.clock.now() - startedAtMs;
         samplesByDid.get(did)?.push({ tMs, raw: outcome.raw });
         input.onSample?.(did, outcome.raw, tMs);
         lastMeasuredRttMs = rttMs;
@@ -526,7 +548,7 @@ export async function runDidObservation(input: RunDidObservationInput): Promise<
   }
 
   const series: DidResponderSeries[] = input.responders.map((did) => ({ did, samples: samplesByDid.get(did) ?? [] }));
-  return { series, errors, cadenceDegraded };
+  return { series, startedAtMs, errors, cadenceDegraded };
 }
 
 interface ErrorBudget {

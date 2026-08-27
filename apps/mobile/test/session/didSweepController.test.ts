@@ -1,7 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+// P4f-FIX4 (binding): `classifyResponders` is wrapped (never replaced -- still
+// delegates to the REAL implementation) so the "time domain" test below can
+// assert on the exact `series`/`context` it was called with, without
+// duplicating `@circuit/core`'s own heuristic logic here.
+vi.mock('@circuit/core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@circuit/core')>();
+  return { ...actual, classifyResponders: vi.fn(actual.classifyResponders) };
+});
 import {
   binaryStringToBytes,
   bytesToBinaryString,
+  classifyResponders,
   DEFAULT_ENET_DID_SCENARIO,
   encodeFrame,
   HSFZ_CONTROL,
@@ -836,6 +845,141 @@ describe('didSweepController: P4f-FIX3 -- lifecycle race hardening (binding, aft
     expect(reservation.holder()).toBeNull(); // the claim was NOT leaked.
     expect(controller.getSnapshot().phase).toBe('stopped');
     expect(controller.getSnapshot().error).toMatch(/onData registration boom/);
+  });
+});
+
+describe('didSweepController: P4f-FIX4 -- close() failure containment (binding, after Codex P4f-REV4 HIGH)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a transport whose close() throws SYNCHRONOUSLY never blocks teardown -- stop() still releases the claim and reaches a terminal phase', async () => {
+    const reservation = createEnetAdapterReservation();
+    const controller = createDidSweepController({
+      transportFactory: () => {
+        const transport = new FakeSweepTransport(new Map());
+        // A NON-async override: throws BEFORE returning anything, unlike
+        // `async close() { throw ... }` (which the language automatically
+        // turns into a REJECTED promise, not a synchronous throw) -- this is
+        // the exact REV4 scenario: `Promise.race([transport.close().catch(...), ...])`
+        // only contains a rejection; a throw during the `transport.close()`
+        // expression itself happens before `.catch` can even attach.
+        transport.close = (): Promise<void> => {
+          throw new Error('close boom (test double, sync)');
+        };
+        return transport;
+      },
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      reservation,
+    });
+
+    controller.start({ from: 0x0000, to: 0xffff }); // a long sweep -- stays open so stop() can race in while connected.
+    await flush();
+    expect(reservation.holder()).toBe('sweep');
+
+    controller.stop();
+    await flush();
+
+    // The REV4 bug: `teardownActiveTransport`'s promise REJECTED here (the
+    // synchronous throw propagated past the `try/finally`'s lack of a
+    // `catch`), so `stop()`'s own `await teardownActiveTransport(); releaseReservation();`
+    // never reached the release line -- the claim leaked and the phase
+    // update after it never ran either.
+    expect(reservation.holder()).toBeNull(); // released despite the synchronous throw.
+    expect(controller.getSnapshot().phase).toBe('stopped'); // terminal, not stuck mid-teardown.
+  });
+
+  it('a transport whose close() REJECTS (async throw) is likewise contained -- release still happens', async () => {
+    const reservation = createEnetAdapterReservation();
+    const controller = createDidSweepController({
+      transportFactory: () => {
+        const transport = new FakeSweepTransport(new Map());
+        transport.close = async (): Promise<void> => {
+          throw new Error('close boom (test double, async)');
+        };
+        return transport;
+      },
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      reservation,
+    });
+
+    controller.start({ from: 0x0000, to: 0xffff });
+    await flush();
+    expect(reservation.holder()).toBe('sweep');
+
+    controller.stop();
+    await flush();
+
+    expect(reservation.holder()).toBeNull();
+    expect(controller.getSnapshot().phase).toBe('stopped');
+  });
+});
+
+describe('didSweepController: P4f-FIX4 -- observation time domain (binding, after Codex P4f-REV4 MEDIUM)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    // A deliberately HUGE, non-zero clock origin -- if `observationElapsedMs`
+    // or the series fed to `classifyResponders` ever regressed to the raw
+    // (absolute) clock value again, this would immediately show up as a
+    // multi-billion-ms number instead of a small one.
+    vi.setSystemTime(new Date(10_000_000_000));
+    vi.mocked(classifyResponders).mockClear();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('observationElapsedMs stays small (relative to observation start) and classifyResponders receives a DID series whose tMs is in the SAME small relative domain as the injected GNSS context -- never the huge absolute clock origin', async () => {
+    const script = new Map<number, ScriptEntry>([[0x0001, { responses: [positivePdu(0x0001, [0x50])], delayMs: 5 }]]);
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      // A small, relative-domain GNSS sample -- exactly the shape
+      // `DidSweepScreen.tsx`'s own `gnssSpeedSamplesRef` produces (tMs
+      // measured from ITS OWN `observationStartedAtMsRef`, never the raw
+      // clock). If the DID series' tMs were still absolute, these two series
+      // could never be compared on the same axis.
+      gnssSpeedContext: () => ({ gnssSpeedKph: [{ tMs: 200, v: 42 }] }),
+    });
+
+    controller.start({ from: 0x0001, to: 0x0001 });
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().responders).toHaveLength(1);
+
+    controller.startObservation(2_000);
+    await vi.advanceTimersByTimeAsync(500);
+    await flush();
+
+    // The REV4 bug: core used to hand back the RAW (absolute) clock value as
+    // `tMs`, which this controller copied straight into `observationElapsedMs`
+    // -- with the huge origin set above, that would read as ~10_000_000_xxx,
+    // not a small number of milliseconds into a 2s window.
+    expect(controller.getSnapshot().observationElapsedMs).toBeGreaterThanOrEqual(0);
+    expect(controller.getSnapshot().observationElapsedMs).toBeLessThan(2_000);
+
+    controller.stopObservationEarly();
+    await vi.runAllTimersAsync();
+    await flush();
+
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+    expect(classifyResponders).toHaveBeenCalledTimes(1);
+    const [series] = vi.mocked(classifyResponders).mock.calls[0]!;
+    const didSamples = series.find((entry) => entry.did === 0x0001)?.samples ?? [];
+    expect(didSamples.length).toBeGreaterThan(0);
+    for (const sample of didSamples) {
+      expect(sample.tMs).toBeGreaterThanOrEqual(0);
+      expect(sample.tMs).toBeLessThan(2_000); // small/relative -- NOT the ~10_000_000_000 absolute clock origin.
+    }
   });
 });
 

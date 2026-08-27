@@ -48,14 +48,15 @@ function makeTransport(overrides: {
 
 describe('runDidObservation', () => {
   it('returns an empty result immediately for zero responders', async () => {
+    const clock = new FakeClock(500); // non-zero origin -- startedAtMs must reflect it
     const result = await runDidObservation({
       responders: [],
       transport: makeTransport(),
-      clock: new FakeClock(),
+      clock,
       durationMs: 10_000,
       control: control(),
     });
-    expect(result).toEqual({ series: [], errors: 0, cadenceDegraded: false });
+    expect(result).toEqual({ series: [], startedAtMs: 500, errors: 0, cadenceDegraded: false });
   });
 
   it('[REV3] keep-alive fires during a 10s window of FAST responses -- owned by the one loop, not reset per poll', async () => {
@@ -235,5 +236,110 @@ describe('runDidObservation', () => {
     await resultPromise;
 
     expect(seen).toEqual([1, 2]); // DID 3/4 never polled once stopped mid-round
+  });
+
+  it('[P4f-REV4] with a NON-ZERO clock origin, sample tMs is RELATIVE to observation start (starts near 0), not the clock\'s absolute value', async () => {
+    vi.useFakeTimers();
+    const clock = new FakeClock(1_000_000); // large non-zero origin (e.g. device uptime)
+    const onSampleTimes: number[] = [];
+    const transport = makeTransport({
+      send: () => {
+        clock.advance(10); // small, realistic per-request advance
+      },
+      nextResponse: (_t, sentPdus) => positiveRaw(didOf(sentPdus[sentPdus.length - 1]!), [1]),
+    });
+
+    const resultPromise = runDidObservation({
+      responders: [0x10],
+      transport,
+      clock,
+      durationMs: 100,
+      control: control(),
+      onSample: (_did, _raw, tMs) => onSampleTimes.push(tMs),
+    });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.startedAtMs).toBe(1_000_000); // the anchor -- the clock's own absolute origin
+    const [series] = result.series;
+    expect(series?.samples.length).toBeGreaterThan(0);
+    for (const sample of series?.samples ?? []) {
+      // RELATIVE to observation start -- nowhere near the clock's 1,000,000ms
+      // absolute origin. Before the fix this was `clock.now()` directly,
+      // i.e. ~1,000,000+, corrupting any relative-time alignment (GNSS
+      // context, `classifyResponders` nearest-neighbor matching).
+      expect(sample.tMs).toBeLessThan(200);
+      expect(sample.tMs).toBeGreaterThanOrEqual(0);
+    }
+    expect(onSampleTimes.every((t) => t < 200)).toBe(true);
+    expect(onSampleTimes).toEqual(series?.samples.map((s) => s.tMs));
+  });
+
+  it('[P4f-REV4] a pacing wait rechecks paused -- no extra request is sent after pause lands mid-wait', async () => {
+    vi.useFakeTimers();
+    const clock = new FakeClock();
+    const ctl = control();
+    const seen: number[] = [];
+    // did 1 responds instantly; a large pacing floor then forces a real wait
+    // before did 2 -- during which we flip `paused` (mid-wait, AFTER the
+    // top-of-iteration checks already passed with paused=false).
+    setTimeout(() => {
+      ctl.paused = true;
+    }, 20);
+    const transport = makeTransport({
+      send: (pdu) => {
+        seen.push(didOf(pdu));
+      },
+      nextResponse: (_t, sentPdus) => positiveRaw(didOf(sentPdus[sentPdus.length - 1]!), [1]),
+    });
+
+    const resultPromise = runDidObservation({
+      responders: [1, 2],
+      transport,
+      clock,
+      durationMs: 10_000, // generous -- must not expire on its own during this test (isolates the paused recheck from the deadline recheck)
+      control: ctl,
+      pacing: { minIntervalMs: 2_000 }, // forces a long pacing wait after did 1
+    });
+
+    // Let the FULL 2000ms pacing wait complete, plus several 50ms pause-poll
+    // cycles -- all while `paused` has been true since t=20ms.
+    await vi.advanceTimersByTimeAsync(2_500);
+    expect(seen).toEqual([1]); // did 2 must NOT have been sent -- the post-wait recheck caught `paused`
+
+    ctl.stopped = true; // release the (otherwise indefinite, since this clock never elapses on its own) pause loop, purely to let the promise settle for cleanup
+    await vi.runAllTimersAsync();
+    await resultPromise;
+    expect(seen).toEqual([1]); // still just the one -- no extra send slipped through
+  });
+
+  it('[P4f-REV4] a pacing wait rechecks the duration deadline -- expiry mid-wait sends no further request', async () => {
+    vi.useFakeTimers();
+    const clock = new FakeClock();
+    const seen: number[] = [];
+    // did 1 resolves at clock=0; the pacing floor (2000ms) forces a wait, but
+    // a one-shot scheduled bump pushes the clock past the 1000ms window
+    // DURING that wait (not before it starts, and not via the top-of-
+    // iteration deadline check, which would still see clock=0 at that point).
+    setTimeout(() => clock.advance(1_500), 20);
+    const transport = makeTransport({
+      send: (pdu) => {
+        seen.push(didOf(pdu));
+      },
+      nextResponse: (_t, sentPdus) => positiveRaw(didOf(sentPdus[sentPdus.length - 1]!), [1]),
+    });
+
+    const resultPromise = runDidObservation({
+      responders: [1, 2],
+      transport,
+      clock,
+      durationMs: 1_000,
+      control: control(),
+      pacing: { minIntervalMs: 2_000 },
+    });
+    await vi.runAllTimersAsync();
+    await resultPromise;
+
+    expect(seen).toEqual([1]); // did 2 never sent -- the window expired mid-wait
   });
 });
