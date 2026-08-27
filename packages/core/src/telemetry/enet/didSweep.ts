@@ -389,6 +389,20 @@ export interface RunDidObservationInput {
   control: DidSweepControl;
   /** Invoked for every correlated 0x62 response (DID-stripped payload), in addition to being accumulated into the returned `series`. `tMs` is RELATIVE to the observation's own start (same domain as `result.startedAtMs` -- see its doc). */
   onSample?: (did: number, raw: Uint8Array, tMs: number) => void;
+  /**
+   * Invoked SYNCHRONOUSLY, exactly once, at the precise moment this runner
+   * captures `startedAtMs` (before the first send) -- with that SAME value,
+   * not a separately-read one. A caller (e.g. the mobile controller) that
+   * instead reads its own clock separately to establish its anchor -- even a
+   * moment earlier or later -- can end up with a DIFFERENT value than the
+   * one this runner actually anchors every sample's relative `tMs` to,
+   * producing a clock skew against anything else the caller lines samples up
+   * against (a GNSS-speed series, say). `onStarted` exists so the caller's
+   * anchor and this runner's anchor are structurally the SAME value, never
+   * two independent reads of a clock that may have moved between them
+   * (Codex P4f-REV6).
+   */
+  onStarted?: (startedAtMs: number) => void;
   /** default 1000. Same meaning as `RunDidSweepInput.requestTimeoutMs`, applied per responder poll. */
   requestTimeoutMs?: number;
   /** default 5. */
@@ -442,7 +456,9 @@ const PAUSE_POLL_INTERVAL_MS = 50;
  */
 export async function runDidObservation(input: RunDidObservationInput): Promise<RunDidObservationResult> {
   if (input.responders.length === 0) {
-    return { series: [], startedAtMs: input.clock.now(), errors: 0, cadenceDegraded: false };
+    const startedAtMsForEmptyRun = input.clock.now();
+    input.onStarted?.(startedAtMsForEmptyRun);
+    return { series: [], startedAtMs: startedAtMsForEmptyRun, errors: 0, cadenceDegraded: false };
   }
 
   const requestTimeoutMs = sanitizePositive(input.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
@@ -477,6 +493,10 @@ export async function runDidObservation(input: RunDidObservationInput): Promise<
   for (const did of input.responders) samplesByDid.set(did, []);
 
   const startedAtMs = input.clock.now();
+  // Synchronous, at the EXACT moment of capture, before any send -- so a
+  // caller's own anchor is structurally this SAME value, never a second
+  // independent clock read (Codex P4f-REV6).
+  input.onStarted?.(startedAtMs);
   const endAtMs = startedAtMs + Math.max(0, input.durationMs);
   let cadenceDegraded = false;
   let lastMeasuredRttMs: number | null = null;

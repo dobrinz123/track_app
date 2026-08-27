@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import type { MonotonicClock } from '../../../src/contracts';
 import { classifyResponders } from '../../../src/telemetry/enet/didHeuristics';
 import { runDidObservation, type DidSweepControl, type SweepTransport } from '../../../src/telemetry/enet/didSweep';
 import { FakeClock } from '../../controller/testSupport';
@@ -16,6 +17,31 @@ function didOf(pdu: Uint8Array): number {
 }
 function control(overrides: Partial<DidSweepControl> = {}): DidSweepControl {
   return { paused: false, stopped: false, ...overrides };
+}
+
+/**
+ * A `MonotonicClock` that advances by `stepMs` on EVERY single `.now()` call
+ * (unlike `FakeClock`, which only moves via explicit `.advance()`) --
+ * deliberately hostile to any code path that reads the clock more than once
+ * expecting the same "current" value. `reads` records every value the clock
+ * has ever actually returned, in call order, so a test can independently
+ * verify which real clock reading a later computed value (e.g. a sample's
+ * `tMs`) must have come from.
+ */
+function makeTickingClock(stepMs: number): { clock: MonotonicClock; reads: number[] } {
+  const reads: number[] = [];
+  let t = 0;
+  return {
+    reads,
+    clock: {
+      now: () => {
+        const value = t;
+        reads.push(value);
+        t += stepMs;
+        return value;
+      },
+    },
+  };
 }
 
 /** Same shape/contract as `didSweep.test.ts`'s double: records every `send`/`keepAlive` pdu, delegates `nextResponse` to a per-test handler. */
@@ -455,5 +481,50 @@ describe('runDidObservation', () => {
     await vi.runAllTimersAsync();
     await resultPromise;
     expect(seen).toEqual([1]); // no DID request was ever sent while paused
+  });
+
+  it('[P4f-REV6] onStarted receives EXACTLY result.startedAtMs, the same anchor used for samples’ relative tMs, even with a clock that advances between every read', async () => {
+    vi.useFakeTimers();
+    const { clock, reads } = makeTickingClock(7);
+    let observedStartedAtMs: number | undefined;
+    let onStartedCallCount = 0;
+    const transport = makeTransport({
+      nextResponse: (_t, sentPdus) => positiveRaw(didOf(sentPdus[sentPdus.length - 1]!), [1]),
+    });
+
+    const resultPromise = runDidObservation({
+      responders: [0x10],
+      transport,
+      clock,
+      durationMs: 50, // small on purpose -- the ticking clock's own reads (several per iteration) exceed this within the first round, so the run ends without ever needing a real pacing wait
+      control: control(),
+      onStarted: (startedAtMs) => {
+        onStartedCallCount += 1;
+        observedStartedAtMs = startedAtMs;
+      },
+    });
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(onStartedCallCount).toBe(1);
+    expect(observedStartedAtMs).toBeDefined();
+    // The core requirement: `onStarted` gets the EXACT SAME value the result
+    // itself reports -- never a value computed from a second, independent
+    // clock read (which, on THIS clock, would differ from the first by at
+    // least one multiple of 7ms).
+    expect(observedStartedAtMs).toBe(result.startedAtMs);
+
+    const [series] = result.series;
+    const sample = series?.samples[0];
+    expect(sample).toBeDefined();
+    // Reconstruct the RAW absolute clock reading the sample's `tMs` must have
+    // been computed against (`tMs = rawReading - startedAtMs`), and confirm
+    // it is one of the clock's own ACTUAL recorded reads -- proving
+    // `observedStartedAtMs` (== `onStarted`'s value) really is the anchor
+    // this runner used for the sample's relative `tMs`, not merely a value
+    // that happens to look plausible.
+    const reconstructedRawReading = (observedStartedAtMs ?? Number.NaN) + (sample?.tMs ?? Number.NaN);
+    expect(reads).toContain(reconstructedRawReading);
+    expect(reconstructedRawReading).toBeGreaterThan(observedStartedAtMs ?? Number.NaN); // the sample was correlated strictly after the anchor was captured
   });
 });

@@ -1068,6 +1068,119 @@ describe('didSweepController: P4f-FIX5 -- observation anchor accounts for the co
   });
 });
 
+describe('didSweepController: P4f-FIX6 -- anchor sourced ONLY from core onStarted; reset across re-observation (binding, after Codex P4f-REV6)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("the reported anchor equals core's OWN startedAtMs call exactly -- never a separately-read clock.now() -- even under a clock that returns a DIFFERENT value on every single call", async () => {
+    // A clock that advances by 1 on EVERY call, even synchronous back-to-back
+    // ones -- makes ANY extra call (e.g. a controller-side `deps.clock.now()`
+    // read BEFORE calling `runDidObservation`, the REV6 defect) produce a
+    // deterministically DIFFERENT value than core's own internal capture,
+    // regardless of real/fake wall-clock time.
+    function skewingClock(): { now: () => number } {
+      let t = 0;
+      return { now: () => { t += 1; return t; } };
+    }
+    const clock = skewingClock();
+
+    const script = new Map<number, ScriptEntry>([[0x0001, { responses: [positivePdu(0x0001, [0x50])], delayMs: 5 }]]);
+    let reportedAnchor: number | null = null;
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock,
+      onObservationStarted: (anchor) => {
+        reportedAnchor = anchor.wallClockMs;
+      },
+    });
+
+    controller.start({ from: 0x0001, to: 0x0001 });
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().responders).toHaveLength(1);
+
+    // ONE consuming read, marking "the tap" -- nothing else touches this
+    // clock between this call and `startObservation()`'s own async
+    // continuation reaching core's `runDidObservation`.
+    const beforeTap = clock.now();
+    controller.startObservation(50);
+    await vi.runAllTimersAsync();
+    await flush();
+
+    // Core's OWN (unavoidable, already core-tested) call sequence inside
+    // `runDidObservation` before `onStarted` fires is exactly 2 calls: the
+    // keep-alive ticker's construction (`createKeepAliveTicker`), then
+    // `startedAtMs` itself. With NO controller-side call in between (the
+    // fix), the reported anchor is EXACTLY `beforeTap + 2` -- a REGRESSED
+    // controller re-adding its own separate read before calling
+    // `runDidObservation` would consume one of those slots itself, reporting
+    // `beforeTap + 1` instead (one tick EARLIER than core's true `startedAtMs`,
+    // which every sample's relative `tMs` is actually anchored to).
+    expect(reportedAnchor).toBe(beforeTap + 2);
+    expect(controller.getSnapshot().observationAnchorWallClockMs).toBe(reportedAnchor);
+
+    controller.stop();
+    await vi.runAllTimersAsync();
+    await flush();
+  });
+
+  it('starting another observation from observationComplete resets observationAnchorWallClockMs to null until the NEW run\'s onStarted fires (LOW, binding, after Codex P4f-REV6)', async () => {
+    const script = new Map<number, ScriptEntry>([[0x0001, { responses: [positivePdu(0x0001, [0x50])], delayMs: 5 }]]);
+    let transportCallCount = 0;
+    const controller = createDidSweepController({
+      transportFactory: () => {
+        transportCallCount += 1;
+        // Sweep (1st) and the FIRST observation-open (2nd) connect
+        // instantly; the SECOND observation-open (3rd, re-observing from
+        // 'observationComplete') has a connect delay so the test can observe
+        // the reset-to-null window before the new anchor lands.
+        const connectDelayMs = transportCallCount >= 3 ? 500 : 0;
+        return new FakeSweepTransport(script, { connectDelayMs });
+      },
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+
+    controller.start({ from: 0x0001, to: 0x0001 });
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().responders).toHaveLength(1);
+
+    controller.startObservation(1_000);
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+    const firstAnchor = controller.getSnapshot().observationAnchorWallClockMs;
+    expect(firstAnchor).not.toBeNull();
+
+    // A SECOND observation from 'observationComplete' (terminal state -- the
+    // "open fresh" branch, mirroring `start()`). The REV6 LOW bug: this
+    // branch's own `emit({phase:'observing', ...})` did not reset
+    // `observationAnchorWallClockMs`, so the PREVIOUS run's stale anchor
+    // stayed visible through the entire (here, 500ms) reconnect.
+    controller.startObservation(1_000);
+    expect(controller.getSnapshot().observationAnchorWallClockMs).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(500); // the simulated reconnect delay elapses.
+    await flush();
+
+    const secondAnchor = controller.getSnapshot().observationAnchorWallClockMs;
+    expect(secondAnchor).not.toBeNull();
+    expect(secondAnchor).not.toBe(firstAnchor); // a genuinely NEW anchor, not the stale one.
+
+    controller.stop();
+    await vi.runAllTimersAsync();
+    await flush();
+  });
+});
+
 /** Sanity check that the scripted PDUs above really parse the way this test file assumes. */
 describe('didSweepController test fixtures: sanity', () => {
   it('positivePdu/negativePdu/wrongSidPdu round-trip through the real parseUdsResponse', () => {

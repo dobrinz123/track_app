@@ -261,19 +261,21 @@ export interface DidSweepControllerDeps {
    */
   gnssSpeedContext?: () => DidHeuristicContext;
   /**
-   * P4f-FIX5 (binding, after Codex P4f-REV5): fired ONCE per observation run,
-   * at the EXACT moment the core observation loop begins -- i.e. right
-   * before the `runDidObservation` call, AFTER the transport has finished
-   * connecting (or immediately, resuming from paused, where no connect delay
-   * applies). `anchor.wallClockMs` is `deps.clock.now()` captured at that
-   * instant -- the SAME clock instance/reading `runDidObservation` itself
-   * anchors `result.startedAtMs`/every relative `tMs` to. A caller collecting
-   * its OWN wall-clock-timestamped series (e.g. GNSS speed) to feed
-   * `gnssSpeedContext` MUST re-baseline against THIS anchor, not against
-   * whenever it happened to call `startObservation()` -- anchoring at the tap
-   * instead silently offsets every sample by the connection delay, corrupting
-   * `classifyResponders`' nearest-time correlation (the exact REV5 defect
-   * this callback exists to let the caller avoid).
+   * P4f-FIX5/FIX6 (binding, after Codex P4f-REV5/REV6): fired ONCE per
+   * observation run, forwarding core `runDidObservation`'s OWN `onStarted`
+   * callback verbatim -- `anchor.wallClockMs` is EXACTLY the `startedAtMs`
+   * value core captured (synchronously, before its first send), never a
+   * separately-read `deps.clock.now()` here (REV6: two independent reads of
+   * the same clock instance can still disagree if it advances between the
+   * calls). This fires AFTER the transport has finished connecting (or
+   * immediately, resuming from paused, where no connect delay applies). A
+   * caller collecting its OWN wall-clock-timestamped series (e.g. GNSS
+   * speed) to feed `gnssSpeedContext` MUST re-baseline against THIS anchor,
+   * not against whenever it happened to call `startObservation()` --
+   * anchoring at the tap instead silently offsets every sample by the
+   * connection delay, corrupting `classifyResponders`' nearest-time
+   * correlation (the REV5 defect this callback exists to let the caller
+   * avoid; REV6 closed the remaining double-clock-read skew).
    */
   onObservationStarted?: (anchor: { wallClockMs: number }) => void;
 }
@@ -544,20 +546,6 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
    * ever being overwritten by this call's classify tail.
    */
   async function runObservationOnChannel(myGeneration: number, channel: SweepTransport, windowMs: number): Promise<void> {
-    // P4f-FIX5 (binding, after Codex P4f-REV5): captured HERE -- right before
-    // the core loop actually begins, i.e. AFTER `openTransportAndObserve`'s
-    // own `await transport.connect()` (or immediately, resuming from paused,
-    // where there is no connect delay) -- NEVER at `startObservation()`'s own
-    // synchronous call, which happens BEFORE that connect delay elapses. This
-    // is the SAME clock instance/reading `runDidObservation` itself anchors
-    // `result.startedAtMs` to, so a caller re-baselining its own wall-clock
-    // series (e.g. GNSS speed) against this anchor lines up exactly with
-    // every relative `tMs` this call reports (onSample and `result.series`
-    // alike) -- fixing the connection-delay offset REV5 found.
-    const anchorWallClockMs = deps.clock.now();
-    if (myGeneration === generation) emit({ observationAnchorWallClockMs: anchorWallClockMs });
-    deps.onObservationStarted?.({ wallClockMs: anchorWallClockMs });
-
     const result = await runDidObservation({
       responders: observationResponderDids,
       transport: channel,
@@ -567,6 +555,18 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       control: observationControl,
       requestTimeoutMs: deps.requestTimeoutMs,
       maxResponsePendingExtensions: deps.maxResponsePendingExtensions,
+      // P4f-FIX6 (binding, after Codex P4f-REV6): the ONLY source of the
+      // anchor -- core's OWN clock read, handed back synchronously at the
+      // EXACT instant it captures `startedAtMs` (before the first send),
+      // never a SEPARATELY-read `deps.clock.now()` here (the REV6 defect:
+      // two independent reads of the same clock instance can still disagree
+      // if it advances between the calls). This guarantees the controller's
+      // anchor and every relative `tMs` this run reports (`onSample` and
+      // `result.series` alike) are structurally the SAME value.
+      onStarted: (startedAtMs) => {
+        if (myGeneration === generation) emit({ observationAnchorWallClockMs: startedAtMs });
+        deps.onObservationStarted?.({ wallClockMs: startedAtMs });
+      },
       onSample: (_did, _raw, tMs) => {
         if (myGeneration !== generation) return;
         emit({ observationElapsedMs: tMs });
@@ -709,7 +709,7 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       token = acquired;
       observationControl = { paused: false, stopped: false };
       observationResponderDids = snapshot.responders.map((r) => r.did);
-      emit({ phase: 'observing', observationElapsedMs: 0, observationCadenceDegraded: false, error: null });
+      emit({ phase: 'observing', observationElapsedMs: 0, observationCadenceDegraded: false, observationAnchorWallClockMs: null, error: null });
       void openTransportAndObserve(myGeneration, windowMs);
     },
 
