@@ -208,6 +208,78 @@ function createGatedDidSweepStore(inner: DidSweepStore): {
   };
 }
 
+/**
+ * X1/X2 fix (P4i-FIX3, binding) test support: wraps a real `DidSweepStore`
+ * whose `flushRunProgress` calls FAIL (reject, never touching the inner
+ * store) exactly on the call indices `failOnCallIndex` names -- every other
+ * call proceeds to the real, underlying store. Every attempted call
+ * (regardless of outcome) is recorded in `calls`, in order, with the exact
+ * responder DIDs it tried to write -- lets a test assert PRECISELY which
+ * slice each flush attempted, the ticket's own "A claims 0-1, B claims 1-2"
+ * scenario.
+ */
+function createFlakyDidSweepStore(
+  inner: DidSweepStore,
+  failOnCallIndex: ReadonlySet<number>,
+): { store: DidSweepStore; calls: Array<{ dids: number[] }> } {
+  let callIndex = 0;
+  const calls: Array<{ dids: number[] }> = [];
+  const store: DidSweepStore = {
+    ...inner,
+    async flushRunProgress(runId, responders, patch, nowUtc) {
+      const idx = callIndex;
+      callIndex += 1;
+      calls.push({ dids: responders.map((r) => r.did) });
+      if (failOnCallIndex.has(idx)) throw new Error(`flush #${idx} boom (test double)`);
+      return inner.flushRunProgress(runId, responders, patch, nowUtc);
+    },
+  };
+  return { store, calls };
+}
+
+/**
+ * X2 fix (P4i-FIX3, binding) test support: like {@link createGatedDidSweepStore},
+ * but the ONE held call FAILS (rejects) once released, instead of succeeding
+ * -- models "flush A hangs, then genuinely fails" (never reaching the real
+ * underlying store for that one attempt). Every call after the held one
+ * behaves normally (delegates straight to `inner`).
+ */
+function createHoldThenFailStore(inner: DidSweepStore): {
+  store: DidSweepStore;
+  holdNextFlush: () => void;
+  release: () => void;
+  calls: Array<{ dids: number[] }>;
+} {
+  let releaseGate: (() => void) | null = null;
+  let holdNext = false;
+  const calls: Array<{ dids: number[] }> = [];
+  const store: DidSweepStore = {
+    ...inner,
+    async flushRunProgress(runId, responders, patch, nowUtc) {
+      calls.push({ dids: responders.map((r) => r.did) });
+      if (holdNext) {
+        holdNext = false;
+        await new Promise<void>((resolve) => {
+          releaseGate = resolve;
+        });
+        throw new Error('disk full (test double)'); // the HELD call always fails once released.
+      }
+      return inner.flushRunProgress(runId, responders, patch, nowUtc);
+    },
+  };
+  return {
+    store,
+    holdNextFlush: () => {
+      holdNext = true;
+    },
+    release: () => {
+      releaseGate?.();
+      releaseGate = null;
+    },
+    calls,
+  };
+}
+
 describe('createRawUdsChannel (H3, binding): address-swap-only correlation, FIFO in-order delivery', () => {
   it('nextResponse does NOT filter by SID/DID -- a wrong-SID frame is delivered on the FIRST call, the correct one on the SECOND, both from one chunk, in order', async () => {
     const dataListeners: Array<(chunk: string) => void> = [];
@@ -2345,3 +2417,365 @@ describe('didSweepController: R6 -- the pre-pass countdown reflects the REAL dur
  * fresh `start()` is still exercised directly wherever else it matters in
  * this file's own guided-observation tests above.
  */
+
+/**
+ * X1 (P4i-FIX3, binding, after Codex P4irev3 R1 PARTIAL): "stop()/pause()
+ * reject (or resolve with {persisted:false, error}) when the terminal
+ * flushRunProgress fails ... Natural completion: emit sweepComplete only
+ * AFTER the terminal flush settles ... Tests: rejecting store on
+ * stop/pause/complete."
+ */
+describe('didSweepController: X1 -- a failing terminal flush is VISIBLE, never silently swallowed (P4i-FIX3)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('stop() REJECTS when its own terminal flush fails, and snapshot.persistError is set -- the phase still flips to "stopped" synchronously (results stay in memory)', async () => {
+    const failing = createFlakyDidSweepStore(createInMemoryDidSweepStore(), new Set([0])); // the ONE (and only) flush call this run ever issues fails.
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(new Map()),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store: failing.store,
+    });
+
+    controller.start({ from: 0x0000, to: 0xffff });
+    await flush();
+    expect(controller.getSnapshot().persistError).toBeNull();
+
+    await expect(controller.stop()).rejects.toThrow(/save failed/i);
+    expect(controller.getSnapshot().phase).toBe('stopped'); // unchanged -- still synchronous.
+    expect(controller.getSnapshot().persistError).toMatch(/disk full|boom/i);
+  });
+
+  it('pause() REJECTS when its own terminal flush fails, and snapshot.persistError is set', async () => {
+    const failing = createFlakyDidSweepStore(createInMemoryDidSweepStore(), new Set([0]));
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(new Map()),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store: failing.store,
+      requestTimeoutMs: 20,
+    });
+
+    controller.start({ from: 0x0000, to: 0xffff });
+    await flush();
+
+    const pausePromise = controller.pause();
+    // Attach the rejection matcher SYNCHRONOUSLY, before advancing any fake
+    // timers -- so the promise is never briefly unobserved (no spurious
+    // "handled asynchronously" warning) once it actually settles below.
+    const rejection = expect(pausePromise).rejects.toThrow(/save failed/i);
+    // pause() only flips a flag read by the in-flight request loop -- the
+    // phase transition (and its forced flush) lands once the CURRENT pending
+    // DID's own timeout resolves and the loop notices, not synchronously.
+    await vi.advanceTimersByTimeAsync(30);
+    await flush();
+    await rejection;
+    expect(controller.getSnapshot().phase).toBe('paused');
+    expect(controller.getSnapshot().persistError).toMatch(/disk full|boom/i);
+
+    controller.stop();
+    await vi.runAllTimersAsync();
+    await flush();
+  });
+
+  it('natural completion issues its OWN terminal flush visibly ("persisting" -- the ticket\'s own "saving state" alternative) and surfaces the failure via persistError once it settles', async () => {
+    let releaseGate: (() => void) | null = null;
+    const store: DidSweepStore = {
+      ...createInMemoryDidSweepStore(),
+      async flushRunProgress() {
+        await new Promise<void>((resolve) => {
+          releaseGate = resolve;
+        });
+        throw new Error('disk full (test double)');
+      },
+    };
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(new Map()), // 0x0001 unscripted -- times out quickly, reaching natural completion.
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store,
+      requestTimeoutMs: 20,
+    });
+
+    controller.start({ from: 0x0001, to: 0x0001 });
+    await vi.advanceTimersByTimeAsync(30); // the one DID times out -- the sweep is done, teardown begins, the terminal flush is now issued and HELD.
+    await flush();
+
+    // The phase itself flips synchronously (unchanged -- e.g. a fresh
+    // `start()` must be able to re-acquire the reservation immediately, even
+    // while THIS flush is still settling), but `persisting` says the
+    // checkpoint itself is not done yet -- the ticket's own "(or emit a
+    // saving state first)" alternative to delaying the phase.
+    expect(controller.getSnapshot().phase).toBe('sweepComplete');
+    expect(controller.getSnapshot().persisting).toBe(true);
+    expect(controller.getSnapshot().persistError).toBeNull();
+    expect(releaseGate).not.toBeNull();
+
+    releaseGate!();
+    await flush();
+
+    expect(controller.getSnapshot().persisting).toBe(false); // settled now.
+    expect(controller.getSnapshot().persistError).toMatch(/disk full/i);
+  });
+});
+
+/**
+ * X2 (P4i-FIX3, binding, after Codex P4irev3 R3 PARTIAL): "track claimed
+ * slices per flush; on failure, mark THAT slice as unpersisted and re-queue
+ * it (retry once) instead of Math.min on the shared marker; never
+ * double-write slices claimed by later flushes. Test: A claims 0-1, B claims
+ * 1-2, A fails, B succeeds -> next flush re-sends only slice A, sampleCount
+ * of B's responder stays 1" (the ticket's own literal scenario).
+ */
+describe('didSweepController: X2 -- slice-aware retry never re-derives/double-writes a LATER flush\'s own claim (P4i-FIX3)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('A claims [0x0001] and fails; B claims [0x0014] (queued behind A) and succeeds; the NEXT flush retries ONLY 0x0001 -- 0x0014 is never resent (sampleCount stays 1 for both)', async () => {
+    const gated = createHoldThenFailStore(createInMemoryDidSweepStore());
+    // 0x0014 (20) is deliberately FAR from 0x0001 -- pause() (called right
+    // after 0x0001 answers, well before the sweep ever reaches 0x0014) is
+    // what actually splits the two into separate flushes, not any timing
+    // race with a second scripted responder landing in the SAME window. The
+    // WHOLE test stays comfortably under `FLUSH_INTERVAL_MS` (1s) elapsed so
+    // no incidental PERIODIC flush can slip in between A/B/C -- every call
+    // below is filtered by its own `dids` content regardless, as a second
+    // layer of robustness against exact call-count/position assumptions.
+    const script = new Map<number, ScriptEntry>([
+      [0x0001, { responses: [positivePdu(0x0001, [0x50])], delayMs: 5 }],
+      [0x0014, { responses: [positivePdu(0x0014, [0x60])], delayMs: 5 }],
+    ]);
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store: gated.store,
+      requestTimeoutMs: 20,
+    });
+
+    gated.holdNextFlush(); // the NEXT flush (pause()'s own forced one, below) hangs, then FAILS once released.
+    controller.start({ from: 0x0000, to: 0xffff });
+    await vi.advanceTimersByTimeAsync(30); // 0x0000 times out, 0x0001 answers.
+    await flush();
+    expect(controller.getSnapshot().responders).toHaveLength(1);
+
+    // Flush A: forced (pause), claims JUST 0x0001 -- now held (about to fail).
+    void controller.pause().catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(30); // lets the (unscripted, timing-out) in-flight DID notice `paused` -- 0x0014 is still far away, nowhere near reached.
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('paused');
+    expect(gated.calls).toHaveLength(1);
+    expect(gated.calls[0]!.dids).toEqual([0x0001]);
+
+    // Resume on the SAME transport/accumulator (M2) and let 0x0014 answer.
+    controller.resume();
+    await vi.advanceTimersByTimeAsync(700); // (0x14 - a few already-visited DIDs) worth of unscripted timeouts, plus generous margin -- stays well under the 1s periodic-flush threshold.
+    await flush();
+    expect(controller.getSnapshot().responders).toHaveLength(2);
+
+    // Flush B: forced (pause again), claims JUST 0x0014 -- QUEUED behind the
+    // still-held flush A (persistenceTail serializes them), so B's OWN claim
+    // is captured now, at CALL time, before A's failure is even known.
+    void controller.pause().catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(30);
+    await flush();
+    expect(gated.calls).toHaveLength(1); // B has not executed its own write yet -- still queued behind the held A.
+
+    gated.release(); // A's write now proceeds and FAILS; B's (already-queued, already-sliced) write runs right after and succeeds.
+    await flush();
+
+    const callWith0x0014 = gated.calls.find((c) => c.dids.includes(0x0014));
+    expect(callWith0x0014?.dids).toEqual([0x0014]); // B's claim, UNCHANGED by A's failure -- never folded/rolled back, never bundled with anything else.
+
+    // Flush C: the retry -- resume then pause again (nothing NEW arrives),
+    // forced anyway because a slice is awaiting its one retry.
+    controller.resume();
+    await vi.advanceTimersByTimeAsync(10);
+    await flush();
+    void controller.pause().catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(30);
+    await flush();
+
+    // ONLY the failed slice is ever retried -- 0x0014 is NEVER resent (never
+    // appears in more than the ONE call found above).
+    const callsWith0x0001 = gated.calls.filter((c) => c.dids.includes(0x0001));
+    expect(callsWith0x0001).toHaveLength(2); // A's own (failed) attempt, then the retry.
+    const callsWith0x0014 = gated.calls.filter((c) => c.dids.includes(0x0014));
+    expect(callsWith0x0014).toHaveLength(1); // never resent.
+
+    const runId = controller.getCurrentRunId()!;
+    const responders = await gated.store.getResponders(runId);
+    const r1 = responders.find((r) => r.did === 0x0001);
+    const r2 = responders.find((r) => r.did === 0x0014);
+    expect(r1?.sampleCount).toBe(1); // persisted exactly once (via the retry) -- A's own failed attempt never reached the real store.
+    expect(r2?.sampleCount).toBe(1); // persisted exactly once (via B) -- never double-counted by the retry.
+
+    controller.stop();
+    await vi.runAllTimersAsync();
+    await flush();
+  });
+});
+
+/**
+ * X3 (P4i-FIX3, binding, after Codex P4irev3 R6 PARTIAL): "Pre-pass/phase
+ * elapsed advances on a wall-clock ticker (250 ms) independent of onSample;
+ * countdown reaches the advertised duration even with zero samples. Test
+ * with fake timers and a transport that never answers."
+ */
+describe('didSweepController: X3 -- pre-pass/phase elapsed advances on a wall-clock ticker, even with zero samples (P4i-FIX3)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * Answers the target DID EXACTLY `answerCount` times (alternating bytes, so
+   * `selectChangingCandidates`' own "changed" filter keeps it past the
+   * pre-pass), then times out on every request after that -- lets a test
+   * seed a candidate that survives the pre-pass (needs at least one answered
+   * pair to be selected at all) while proving the FIXED phases afterward
+   * (baseline/brake/steering/throttle) tick their own countdown purely from
+   * the wall-clock ticker, with `onSample` never firing again.
+   */
+  function createLimitedAnswerTransport(targetDid: number, cutoffMs: number): ObdTransport {
+    const dataListeners = new Set<(chunk: string) => void>();
+    const parser = new HsfzFrameParser();
+    const startedAtMs = Date.now(); // real (fake-timer-controlled) clock -- matches `deps.clock`'s own `Date.now()`.
+    return {
+      async connect(): Promise<void> {},
+      send(line: string): void {
+        let frames: ReturnType<HsfzFrameParser['push']>;
+        try {
+          frames = parser.push(binaryStringToBytes(line));
+        } catch {
+          return;
+        }
+        for (const frame of frames) {
+          if (frame.control !== HSFZ_CONTROL.DIAGNOSTIC_REQ_RES) continue;
+          const pdu = frame.payload;
+          if ((pdu[0] ?? 0) === 0x3e) continue; // TesterPresent -- no reply needed.
+          if ((pdu[0] ?? 0) !== 0x22) continue;
+          const did = ((pdu[1] ?? 0) << 8) | (pdu[2] ?? 0);
+          if (did !== targetDid) continue; // any other DID -- never scripted, times out.
+          const elapsedMs = Date.now() - startedAtMs;
+          if (elapsedMs >= cutoffMs) continue; // past the pre-pass window entirely -- times out from here on (the fixed phases below).
+          // Different bytes either side of the pre-pass' own midpoint (round 1
+          // vs round 2, across the dead gap) -- however many times THIS round
+          // re-polls, so `selectChangingCandidates` sees a genuine change.
+          const value = elapsedMs < cutoffMs / 2 ? 0x10 : 0x20;
+          const responsePdu = Uint8Array.from([0x62, (did >> 8) & 0xff, did & 0xff, value]);
+          const respFrame = encodeFrame({ control: HSFZ_CONTROL.DIAGNOSTIC_REQ_RES, source: TARGET_ADDRESS, target: TESTER_ADDRESS, payload: responsePdu });
+          const chunk = bytesToBinaryString(respFrame);
+          setTimeout(() => {
+            for (const listener of [...dataListeners]) listener(chunk);
+          }, 5);
+        }
+      },
+      onData(cb: (chunk: string) => void): () => void {
+        dataListeners.add(cb);
+        return () => dataListeners.delete(cb);
+      },
+      onClose(): () => void {
+        return () => undefined;
+      },
+      async close(): Promise<void> {},
+    };
+  }
+
+  it('guidedPhaseElapsedMs reaches guidedPhaseDurationMs during the pre-pass -- and again during the fixed "baseline" phase -- once nothing answers (onSample never fires again)', async () => {
+    const store = createInMemoryDidSweepStore();
+    await store.createRun({
+      runId: 'run-x3',
+      adapterType: 'enet',
+      targetAddress: TARGET_ADDRESS,
+      rangeFrom: 0x0001,
+      rangeTo: 0x0001,
+      lastDid: 0x0001,
+      startedAtUtc: '2026-08-28T00:00:00.000Z',
+      updatedAtUtc: '2026-08-28T00:00:00.000Z',
+      status: 'stopped',
+      visitedCount: 1,
+      timeoutCount: 0,
+      unmatchedCount: 0,
+      errorCount: 0,
+      nrcCounts: {},
+    });
+    await store.upsertResponders('run-x3', [{ did: 0x0001, raw: Uint8Array.from([0x10]), rttMs: 10 }], '2026-08-28T00:00:05.000Z');
+
+    const controller = createDidSweepController({
+      // Answers throughout the pre-pass window (6s -- both its rounds, so
+      // 0x0001 survives the "changing value" filter and actually enters the
+      // fixed phases below), then NEVER answers again -- proving those
+      // phases' own countdown advances purely from the wall-clock ticker,
+      // not `onSample`.
+      transportFactory: () => createLimitedAnswerTransport(0x0001, 6_000),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store,
+    });
+
+    await controller.resumePersistedRun('run-x3');
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().responders).toHaveLength(1);
+
+    controller.startGuidedObservation();
+    await flush();
+    expect(controller.getSnapshot().guidedPhase).toBe('prePass');
+    const prePassDurationMs = controller.getSnapshot().guidedPhaseDurationMs;
+    expect(prePassDurationMs).toBeGreaterThan(0);
+
+    // Step through the ENTIRE pre-pass in small (ticker-aligned) increments --
+    // the pre-fix bug: with nothing ever answering, `onSample` never fires,
+    // so `guidedPhaseElapsedMs` stayed frozen at 0 for the two ROUNDS (only
+    // the dead gap BETWEEN them ever ticked), never reaching the full total.
+    let maxElapsedInPrePass = 0;
+    for (let i = 0; i < Math.ceil(prePassDurationMs / 250) + 8 && controller.getSnapshot().guidedPhase === 'prePass'; i += 1) {
+      await vi.advanceTimersByTimeAsync(250);
+      await flush();
+      if (controller.getSnapshot().guidedPhase === 'prePass') {
+        maxElapsedInPrePass = Math.max(maxElapsedInPrePass, controller.getSnapshot().guidedPhaseElapsedMs);
+      }
+    }
+    expect(controller.getSnapshot().guidedPhase).not.toBe('prePass'); // the pre-pass genuinely finished on schedule.
+    expect(maxElapsedInPrePass).toBeGreaterThanOrEqual(prePassDurationMs - 300); // reached (within one tick of) the FULL advertised duration.
+
+    // Same property for a FIXED phase (`DID_OBSERVATION_PHASES`, e.g.
+    // "baseline") -- `runGuidedPhase`'s own ticker, not `onSample`.
+    expect(controller.getSnapshot().guidedPhase).toBe('baseline');
+    const baselineDurationMs = controller.getSnapshot().guidedPhaseDurationMs;
+    let maxElapsedInBaseline = 0;
+    for (let i = 0; i < Math.ceil(baselineDurationMs / 250) + 8 && controller.getSnapshot().guidedPhase === 'baseline'; i += 1) {
+      await vi.advanceTimersByTimeAsync(250);
+      await flush();
+      if (controller.getSnapshot().guidedPhase === 'baseline') {
+        maxElapsedInBaseline = Math.max(maxElapsedInBaseline, controller.getSnapshot().guidedPhaseElapsedMs);
+      }
+    }
+    expect(controller.getSnapshot().guidedPhase).not.toBe('baseline');
+    expect(maxElapsedInBaseline).toBeGreaterThanOrEqual(baselineDurationMs - 300);
+
+    // Let the rest of the guided sequence (brake/steering/throttle) finish.
+    for (let i = 0; i < 60 && controller.getSnapshot().phase === 'observing'; i += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flush();
+    }
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+  });
+});

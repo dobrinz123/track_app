@@ -84,6 +84,13 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   // (unchanged) -- this is purely a local UI cue for the awaited persistence
   // write, cleared once the returned promise settles.
   const [saving, setSaving] = React.useState(false);
+  // X1 fix (P4i-FIX3, binding, after Codex P4irev3 R1 PARTIAL): "screen shows
+  // 'Save failed -- results kept in memory, share now'" -- set from EITHER
+  // this explicit Stop/Pause's own rejected promise, OR (natural completion,
+  // no direct caller to catch) `snapshot.persistError` -- both surface the
+  // SAME message; Share is never blocked by this (it reads straight from the
+  // live controller/store).
+  const [saveFailedBanner, setSaveFailedBanner] = React.useState<string | null>(null);
   const didSweepStoreRef = React.useRef(createDidSweepStore(getTelemetryReadDb()));
 
   const settingsRef = React.useRef(settings);
@@ -187,7 +194,10 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
       // -- a cleanup function cannot be async/await anything -- the write is
       // still queued and will land (this is a dev-only screen; the unmount
       // path is not the one this ticket's "Saving…" UI cue targets).
-      void controllerRef.current?.stop();
+      // X1 fix (P4i-FIX3, binding): `stop()` can now REJECT on a failed
+      // terminal flush -- caught here (never an unhandled rejection); there
+      // is no screen left to show a banner on after unmount anyway.
+      void controllerRef.current?.stop().catch(() => undefined);
     },
     [],
   );
@@ -228,12 +238,14 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   function handleResume(runId: string): void {
     setRangeError(null);
     setTagBanner(null);
+    setSaveFailedBanner(null);
     void ensureController().resumePersistedRun(runId);
   }
 
   function handleStart(): void {
     setRangeError(null);
     setTagBanner(null);
+    setSaveFailedBanner(null);
     const from = parseHexRange(fromDraft);
     const to = parseHexRange(toDraft);
     if (from === null || to === null) {
@@ -249,8 +261,14 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   // not just the (already-immediate) phase transition.
   async function handleStop(): Promise<void> {
     setSaving(true);
+    setSaveFailedBanner(null);
     try {
       await controllerRef.current?.stop();
+    } catch {
+      // X1 fix (P4i-FIX3, binding): the checkpoint failed to commit -- the
+      // sweep's results are still fully intact in memory (Share still works
+      // from them), only the on-disk copy is behind.
+      setSaveFailedBanner('Save failed — results kept in memory, share now');
     } finally {
       setSaving(false);
     }
@@ -258,8 +276,11 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
 
   async function handlePause(): Promise<void> {
     setSaving(true);
+    setSaveFailedBanner(null);
     try {
       await controllerRef.current?.pause();
+    } catch {
+      setSaveFailedBanner('Save failed — results kept in memory, share now');
     } finally {
       setSaving(false);
     }
@@ -336,6 +357,12 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   }
 
   const phase = snapshot?.phase ?? 'idle';
+  // X1 fix (P4i-FIX3, binding): the SAME "Save failed" message whether it
+  // came from THIS explicit Stop/Pause (caught above) or from a natural
+  // completion's own terminal flush failing (no direct caller to catch --
+  // surfaced only through the snapshot). Results stay fully in memory either
+  // way; Share is never blocked by this.
+  const saveFailedMessage = saveFailedBanner ?? (snapshot?.persistError == null ? null : 'Save failed — results kept in memory, share now');
   const running = phase === 'sweeping' || phase === 'paused';
   const observing = phase === 'observing';
   const canStart = phase === 'idle' || phase === 'stopped' || phase === 'sweepComplete' || phase === 'observationComplete';
@@ -487,6 +514,14 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
           {saving ? (
             <Text style={styles.helperText} maxFontSizeMultiplier={1.3} accessibilityLiveRegion="polite">
               Saving…
+            </Text>
+          ) : null}
+          {/* X1 fix (P4i-FIX3, binding): a terminal checkpoint failure is
+              VISIBLE, never silently swallowed -- results stay in memory
+              (Share still works) regardless. */}
+          {!saving && saveFailedMessage !== null ? (
+            <Text style={styles.errorBanner} maxFontSizeMultiplier={1.3} accessibilityLiveRegion="polite">
+              {saveFailedMessage}
             </Text>
           ) : null}
         </View>
@@ -736,9 +771,20 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
                 {shareBanner}
               </Text>
             )}
-            <Pressable style={styles.button} onPress={() => void handleShareResults()} disabled={sharing} accessibilityRole="button" accessibilityLabel="Share results">
+            {/* X1 fix (P4i-FIX3, binding): "Share is enabled only once
+                persisted or explicitly failed" -- disabled while the
+                terminal checkpoint is still in flight (`persisting`); a
+                failure still re-enables it immediately (results are already
+                fully in memory either way). */}
+            <Pressable
+              style={styles.button}
+              onPress={() => void handleShareResults()}
+              disabled={sharing || snapshot.persisting}
+              accessibilityRole="button"
+              accessibilityLabel="Share results"
+            >
               <Text style={styles.buttonText} maxFontSizeMultiplier={1.3}>
-                {sharing ? 'Preparing…' : 'Share results'}
+                {sharing ? 'Preparing…' : snapshot.persisting ? 'Saving…' : 'Share results'}
               </Text>
             </Pressable>
           </View>

@@ -1,0 +1,2 @@
+# Review ticket P4i-REV3 — Codex read-only bounded re-verify
+Commit 9b4d643 (diff vs 072430e). Read-only; do not run tests. Re-verify ONLY the 6 items of `.foreman/scratch/ticket-p4i-fix2.md` (R1–R6, derived from the final section of `.foreman/scratch/p4hrev3-codex-output.log`): for each, FIXED / PARTIAL / NOT FIXED with file:line evidence and a concrete failure scenario for anything not FIXED. Then list any NEW HIGH/MEDIUM defect introduced by this fix diff only. Output: Table, NEW, Clean.

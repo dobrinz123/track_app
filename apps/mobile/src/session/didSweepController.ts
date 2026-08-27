@@ -251,6 +251,30 @@ export interface DidSweepSnapshot {
   guidedPhaseDurationMs: number;
   /** Live-updated (per sample, and finalized once the guided run ends) ranked candidate summaries -- see `didObservationPhases.ts`'s `computeDidCandidateSummaries`. `[]` before a guided observation has ever run. */
   candidateSummaries: readonly DidCandidateSummary[];
+  /**
+   * X1 fix (P4i-FIX3, binding, after Codex P4irev3 R1 PARTIAL): non-null
+   * exactly when the MOST RECENT terminal persistence checkpoint (the forced
+   * flush at pause/stop/natural-completion) failed to commit -- the sweep's
+   * results are still fully intact IN MEMORY (nothing here ever drops a
+   * responder/sample), only the on-disk checkpoint is stale/behind. The
+   * screen surfaces this as "Save failed -- results kept in memory, share
+   * now" (export reads straight from the live controller/memory, never
+   * blocked by this). Cleared to `null` by a fresh `start()`/`resumePersistedRun()`,
+   * and by any LATER terminal flush that succeeds.
+   */
+  persistError: string | null;
+  /**
+   * X1 fix (P4i-FIX3, binding): true from the instant a TERMINAL (forced)
+   * flush is issued -- pause/stop/natural-completion -- until it settles
+   * (success or failure). The phase itself still flips to its terminal value
+   * (`sweepComplete`/`paused`/`stopped`) SYNCHRONOUSLY, at the same instant it
+   * always did (existing callers -- including a fresh `start()`/`resumePersistedRun()`
+   * mid-flush, `canStart()`'s own set -- are unaffected); this is the
+   * ticket's own "(or emit a saving state first)" alternative: "Share is
+   * enabled only once persisted or explicitly failed" reads THIS flag (never
+   * gates Start/Resume/observation, which must remain immediately available).
+   */
+  persisting: boolean;
 }
 
 const INITIAL_SNAPSHOT: DidSweepSnapshot = {
@@ -269,6 +293,8 @@ const INITIAL_SNAPSHOT: DidSweepSnapshot = {
   guidedPhaseElapsedMs: 0,
   guidedPhaseDurationMs: 0,
   candidateSummaries: [],
+  persistError: null,
+  persisting: false,
 };
 
 const RESERVATION_BUSY_MESSAGE = 'The adapter is in use (telemetry or the DID probe) -- stop it first.';
@@ -351,6 +377,13 @@ export interface DidSweepController {
    * screen shows "Saving…" meanwhile) can `await` it; the phase itself still
    * flips to `'paused'` at the same moment it always did (unchanged for
    * every existing caller that never awaits this).
+   *
+   * X1 fix (P4i-FIX3, binding, after Codex P4irev3 R1 PARTIAL): the returned
+   * promise now REJECTS if that terminal flush fails (never silently
+   * swallowed) -- `snapshot.persistError` is also set at the same time so a
+   * caller that isn't awaiting this can still show the failure. The 'paused'
+   * phase itself still flips synchronously either way -- results stay fully
+   * intact in memory (export still works) even when the checkpoint failed.
    */
   pause(): Promise<void>;
   /** Resumes a paused sweep on the SAME transport/reservation/accumulator (no reconnect, no re-acquire, no lost results). */
@@ -366,6 +399,13 @@ export interface DidSweepController {
    * The phase flips to `'stopped'` synchronously, exactly as before --
    * awaiting this is for callers that need the write itself to be durable
    * (e.g. before navigating away) and want to show "Saving…" until then.
+   *
+   * X1 fix (P4i-FIX3, binding, after Codex P4irev3 R1 PARTIAL): the returned
+   * promise now REJECTS if that terminal flush fails (never silently
+   * swallowed) -- `snapshot.persistError` is also set at the same time so a
+   * caller that isn't awaiting this can still show the failure. Results stay
+   * fully intact in memory (export still works from it) even when the
+   * checkpoint failed -- only the on-disk copy is behind.
    */
   stop(): Promise<void>;
   /** Starts the observation phase over the responders found so far. From `'paused'`, reuses the held claim/open transport (M2, binding) -- no second acquire, no reconnect. From a terminal state (sweepComplete/stopped/observationComplete), acquires and connects fresh, exactly like `start()`. No-op if there are no responders. */
@@ -494,9 +534,29 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
   const FLUSH_INTERVAL_MS = 1_000;
   const FLUSH_RESPONDER_COUNT = 50;
   let currentRunId: string | null = null;
-  /** Index into `accumulator.responders` up to which persistence has already flushed -- only the SLICE past this is upserted on the next flush. */
+  /** Index into `accumulator.responders` up to which persistence has already flushed (or is currently claimed by an in-flight flush) -- only the SLICE past this is claimed by the NEXT flush. Never rolled back on failure (X2/R3 fix, below) -- a later flush's own claim is never re-derived from this. */
   let lastPersistedResponderIndex = 0;
   let lastFlushAtMs = 0;
+  /**
+   * X2 fix (P4i-FIX3, binding, after Codex P4irev3 R3 PARTIAL): the exact
+   * `[fromIndex, toIndex)` slice of `accumulator.responders` a FAILED flush
+   * claimed, eligible for exactly ONE retry on the next flush (folded into
+   * that flush's own write, then cleared unconditionally -- win or lose,
+   * never retried a second time). This is what replaces the pre-fix
+   * `Math.min` rollback on `lastPersistedResponderIndex`: that rollback could
+   * reset the SHARED marker backwards even after a LATER flush had already
+   * validly claimed (and possibly committed) the next slice, causing that
+   * later slice to be double-sent (`sample_count` incremented twice) on the
+   * following retry. Tracking the failed slice BY ITS OWN INDEX RANGE instead
+   * means a later flush's already-claimed (and/or already-committed) range is
+   * never touched, never re-derived, and never resent.
+   */
+  let pendingRetrySlice: { fromIndex: number; toIndex: number } | null = null;
+  /** Result of one `maybeFlushPersistence` attempt -- NEVER thrown across this module's own API (mirrors every other "never throws" discipline here); `error` is set only when `persisted` is `false`. */
+  interface PersistFlushResult {
+    persisted: boolean;
+    error?: string;
+  }
   /**
    * F1 fix (P4i-FIX1, binding, after Codex P4hrev2c): ONE serialized tail --
    * EVERY flush (forced or not) is chained onto this, in order, never
@@ -505,23 +565,34 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
    * defect: a boolean "one in flight, skip" latch silently discarded a forced
    * flush that happened to race a periodic one).
    */
-  let persistenceTail: Promise<void> = Promise.resolve();
+  let persistenceTail: Promise<PersistFlushResult> = Promise.resolve({ persisted: true });
   /** True while a NON-forced flush is queued/running -- coalesces rapid `onProgress` ticks into whatever is already pending instead of piling up redundant work. A forced flush is NEVER gated by this (always chained). */
   let periodicFlushQueued = false;
   /**
    * R1 fix (P4i-FIX2, binding): resolvers for every outstanding public
    * `pause()` call, waiting on the sweep loop noticing `control.paused` and
    * `finishSweepRun`'s own 'paused' branch committing its terminal flush.
-   * Resolved (never rejected) either there, or immediately by `stop()` if it
-   * supersedes the pause before the loop ever reaches it -- a `pause()` call
-   * must never hang forever just because the sweep was stopped instead.
+   *
+   * X1 fix (P4i-FIX3, binding, after Codex P4irev3 R1 PARTIAL): each entry now
+   * carries a `reject` too -- `settlePendingPauses(result)` rejects every
+   * outstanding `pause()` when `result.persisted` is `false` (a genuine
+   * checkpoint failure), and resolves them (never rejects) when `result` is
+   * omitted entirely -- the case where `stop()` supersedes a pause BEFORE the
+   * sweep ever reaches 'paused' at all (nothing to report as failed; the
+   * pause simply never happened).
    */
-  let pendingPauseResolvers: Array<() => void> = [];
+  let pendingPauseResolvers: Array<{ resolve: () => void; reject: (error: Error) => void }> = [];
 
-  function settlePendingPauses(): void {
+  function settlePendingPauses(result?: PersistFlushResult): void {
     const resolvers = pendingPauseResolvers;
     pendingPauseResolvers = [];
-    for (const resolve of resolvers) resolve();
+    for (const r of resolvers) {
+      if (result !== undefined && !result.persisted) {
+        r.reject(new Error(result.error !== undefined ? `Save failed -- results kept in memory: ${result.error}` : 'Save failed -- results kept in memory'));
+      } else {
+        r.resolve();
+      }
+    }
   }
 
   function nowIso(): string {
@@ -566,18 +637,28 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
    * second time (`sample_count` incremented again). Advancing the marker
    * immediately means ANY later flush call -- forced or not, however many are
    * still in-flight -- always slices from AFTER what this one already
-   * claimed. If the write later fails, the marker is rolled back (never
-   * advanced past where it would have been had this flush never been
-   * attempted), so a genuinely failed write does not silently drop responders
-   * from the next retry.
+   * claimed.
+   *
+   * X2 fix (P4i-FIX3, binding, after Codex P4irev3 R3 PARTIAL): a FAILED
+   * write no longer rolls `lastPersistedResponderIndex` back at all (the
+   * pre-fix `Math.min` bug: rolling the SHARED marker backwards could undo a
+   * LATER flush's already-valid claim on the next slice, causing that later
+   * slice to be resent -- and double-counted -- on the following retry
+   * instead). Failure instead records the exact `[fromIndex, toIndex)` this
+   * call itself claimed as `pendingRetrySlice`, folded into the NEXT flush's
+   * own write (whichever runs next, forced or periodic) and cleared right
+   * then -- retried exactly once, win or lose; a later flush's own
+   * (disjoint, already-claimed) slice is never touched or re-derived.
    */
-  function maybeFlushPersistence(force: boolean, status: DidSweepRunStatus): Promise<void> {
-    if (deps.store === undefined || currentRunId === null || accumulator === null) return Promise.resolve();
+  function maybeFlushPersistence(force: boolean, status: DidSweepRunStatus): Promise<PersistFlushResult> {
+    if (deps.store === undefined || currentRunId === null || accumulator === null) return Promise.resolve({ persisted: true });
     const now = deps.clock.now();
-    const newResponders = accumulator.responders.slice(lastPersistedResponderIndex);
+    const ownFromIndex = lastPersistedResponderIndex;
+    const newResponders = accumulator.responders.slice(ownFromIndex);
     const dueByTime = now - lastFlushAtMs >= FLUSH_INTERVAL_MS;
     const dueByCount = newResponders.length >= FLUSH_RESPONDER_COUNT;
-    if (!force && !dueByTime && !dueByCount) return Promise.resolve();
+    const dueByRetry = pendingRetrySlice !== null; // X2 fix: a slice awaiting its one retry is never left stuck behind an otherwise-quiet periodic check.
+    if (!force && !dueByTime && !dueByCount && !dueByRetry) return Promise.resolve({ persisted: true });
     if (!force) {
       if (periodicFlushQueued) return persistenceTail; // already one queued/running -- it (or the next due tick after it) will catch up.
       periodicFlushQueued = true;
@@ -589,12 +670,20 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
     // every one of those).
     const store = deps.store;
     const runId = currentRunId;
-    const previousPersistedResponderIndex = lastPersistedResponderIndex;
     const flushedThroughIndex = accumulator.responders.length;
-    const respondersToWrite = newResponders.map((r) => ({ did: r.did, raw: r.raw, rttMs: r.rttMs }));
-    // R3 fix (binding): advance NOW, before the write even starts -- see this
-    // function's own doc comment.
-    if (respondersToWrite.length > 0) lastPersistedResponderIndex = flushedThroughIndex;
+    // X2 fix (binding): fold in a PRIOR failed slice's own responders (its
+    // one retry attempt) BEFORE this call's own new range -- a gap of
+    // ALREADY-COMMITTED responders between the retry slice and `ownFromIndex`
+    // (claimed and persisted by an intervening flush) is correctly excluded,
+    // never resent.
+    const retrySlice = pendingRetrySlice;
+    pendingRetrySlice = null; // consumed by THIS attempt regardless of outcome -- retried at most once.
+    const retryResponders = retrySlice === null ? [] : accumulator.responders.slice(retrySlice.fromIndex, retrySlice.toIndex);
+    const respondersToWrite = [...retryResponders, ...newResponders].map((r) => ({ did: r.did, raw: r.raw, rttMs: r.rttMs }));
+    // R3 fix (binding): advance NOW, before the write even starts -- unchanged
+    // for the NEW range (see this function's own doc comment); never rolled
+    // back on failure (X2 fix, above).
+    if (newResponders.length > 0) lastPersistedResponderIndex = flushedThroughIndex;
     const patch: DidSweepRunProgressPatch = {
       status,
       lastDid: accumulator.lastDid,
@@ -606,7 +695,7 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
     };
     const flushNowIso = nowIso();
 
-    const runOneFlush = async (): Promise<void> => {
+    const runOneFlush = async (): Promise<PersistFlushResult> => {
       try {
         await store.flushRunProgress(runId, respondersToWrite, patch, flushNowIso);
         // Only advance the SHARED bookkeeping if `currentRunId` is STILL this
@@ -615,15 +704,16 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
         // overwrite (the exact REV finding: "a quick new Start ... lets that
         // old flush ... overwrite lastPersistedResponderIndex").
         if (currentRunId === runId) lastFlushAtMs = deps.clock.now();
-      } catch {
-        // Best-effort (mirrors `SqlSettingsStore.persist()`'s own discipline)
-        // -- a failed write never affects the LIVE sweep. R3 fix (binding):
-        // roll the marker back to what it was before THIS flush's snapshot,
-        // so the failed slice is retried by the next due flush rather than
-        // silently skipped -- but only if nothing else has moved it further
-        // still (still the SAME run, and no later flush already advanced
-        // past this rollback target).
-        if (currentRunId === runId) lastPersistedResponderIndex = Math.min(lastPersistedResponderIndex, previousPersistedResponderIndex);
+        return { persisted: true };
+      } catch (error) {
+        // X1/X2 fix (binding): the failure is NEVER swallowed silently --
+        // `persisted: false` propagates to every awaiter (`stop()`/`pause()`/
+        // `finishSweepRun`), and (X2) exactly THIS call's own new range (if
+        // any) is queued for one retry -- never the shared marker.
+        if (currentRunId === runId && newResponders.length > 0) {
+          pendingRetrySlice = { fromIndex: ownFromIndex, toIndex: flushedThroughIndex };
+        }
+        return { persisted: false, error: error instanceof Error ? error.message : String(error) };
       } finally {
         if (!force) periodicFlushQueued = false;
       }
@@ -797,22 +887,46 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
    * once it has. "Complete must await the terminal flush" (binding): a
    * natural completion's own async chain is not considered done until the
    * checkpoint commits, even though the visible phase already flipped.
+   *
+   * X1 fix (P4i-FIX3, binding, after Codex P4irev3 R1 PARTIAL): the NATURAL
+   * completion/stop branch below now emits its own terminal phase (`'sweepComplete'`/
+   * `'stopped'`) only AFTER that flush settles -- never before -- so nothing
+   * (Share, a fresh `start()`) can observe "done" while the checkpoint backing
+   * it is still in flight. `persistError` is set on the SAME emit, from the
+   * settled result, so a failure is visible the instant the phase appears
+   * (never a silent, unreported gap). The `'paused'` branch's phase flip stays
+   * SYNCHRONOUS (existing callers rely on it) -- `persistError` there is
+   * updated in a second, immediate follow-up emit once the flush settles.
    */
   async function finishSweepRun(myGeneration: number, outcome: SweepOutcome): Promise<void> {
     if (myGeneration !== generation) return; // stop() already handled teardown/release.
     if (outcome === 'paused') {
       const flushPromise = maybeFlushPersistence(true, 'paused');
-      emit({ phase: 'paused' });
-      await flushPromise;
-      settlePendingPauses();
+      emit({ phase: 'paused', persisting: true });
+      const result = await flushPromise;
+      if (myGeneration === generation) {
+        emit({ persisting: false, persistError: result.persisted ? null : (result.error ?? 'Save failed -- results kept in memory') });
+      }
+      settlePendingPauses(result);
       return; // transport/reservation stay held -- resume() continues on the SAME channel.
     }
     await teardownActiveTransport();
     if (myGeneration !== generation) return; // stop() raced in while close was settling -- it owns the final phase.
+    // X1 fix (P4i-FIX3, binding): the phase flip + release stay SYNCHRONOUS
+    // here (unchanged for every existing caller, INCLUDING a fresh `start()`
+    // that re-acquires the reservation while this SAME flush is still in
+    // flight -- `canStart()`'s own terminal set must open back up immediately,
+    // never gated on persistence) -- `persisting`/`persistError` instead
+    // surface the checkpoint's own outcome once it settles, satisfying "emit a
+    // saving state first" (the ticket's own alternative to delaying the
+    // phase itself).
     const flushPromise = maybeFlushPersistence(true, outcome === 'complete' ? 'complete' : 'stopped');
-    emit({ phase: outcome === 'complete' ? 'sweepComplete' : 'stopped' });
+    emit({ phase: outcome === 'complete' ? 'sweepComplete' : 'stopped', persisting: true });
     releaseReservation();
-    await flushPromise;
+    const result = await flushPromise;
+    if (myGeneration === generation) {
+      emit({ persisting: false, persistError: result.persisted ? null : (result.error ?? 'Save failed -- results kept in memory') });
+    }
   }
 
   /**
@@ -1028,6 +1142,15 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
    * round's own duration + the gap for the second -- so the snapshot's
    * `guidedPhaseElapsedMs` genuinely advances across the WHOLE pre-pass
    * (round -> gap -> round), never staying frozen.
+   *
+   * X3 fix (P4i-FIX3, binding, after Codex P4irev3 R6 PARTIAL): a WALL-CLOCK
+   * ticker (`ELAPSED_TICKER_INTERVAL_MS`) now runs alongside this round's own
+   * `runDidObservation` call, independent of `onSample` -- so the countdown
+   * still reaches this round's own duration even when NOTHING answers (every
+   * candidate times out). `onSample` can still report finer-grained progress
+   * in between ticks; the two are combined via a monotonic "never regress"
+   * guard (`bumpElapsed`) so neither can un-advance what the other already
+   * showed.
    */
   async function sampleOnceRoundRobin(
     myGeneration: number,
@@ -1038,29 +1161,49 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
     const samples = new Map<number, Uint8Array>();
     if (dids.length === 0) return samples;
     const durationMs = computeGuidedPhaseDurationMs(dids.length, PRE_PASS_ROUND_BASE_MS, undefined, 1);
-    await runDidObservation({
-      responders: dids,
-      transport: channel,
-      clock: deps.clock,
-      durationMs,
-      pacing: deps.pacing,
-      control: observationControl,
-      requestTimeoutMs: deps.requestTimeoutMs,
-      maxResponsePendingExtensions: deps.maxResponsePendingExtensions,
-      onSample: (did, raw, tMs) => {
-        if (myGeneration !== generation) return;
-        samples.set(did, raw);
-        emit({ guidedPhaseElapsedMs: baseElapsedMs + tMs });
-      },
-    });
+    let highestElapsedMs = 0;
+    const bumpElapsed = (ms: number): void => {
+      if (myGeneration !== generation || ms <= highestElapsedMs) return;
+      highestElapsedMs = ms;
+      emit({ guidedPhaseElapsedMs: baseElapsedMs + ms });
+    };
+    const tickerStartedAtMs = deps.clock.now();
+    const ticker = setInterval(() => {
+      bumpElapsed(Math.min(durationMs, deps.clock.now() - tickerStartedAtMs));
+    }, ELAPSED_TICKER_INTERVAL_MS);
+    try {
+      await runDidObservation({
+        responders: dids,
+        transport: channel,
+        clock: deps.clock,
+        durationMs,
+        pacing: deps.pacing,
+        control: observationControl,
+        requestTimeoutMs: deps.requestTimeoutMs,
+        maxResponsePendingExtensions: deps.maxResponsePendingExtensions,
+        onSample: (did, raw, tMs) => {
+          if (myGeneration !== generation) return;
+          samples.set(did, raw);
+          bumpElapsed(tMs);
+        },
+      });
+    } finally {
+      clearInterval(ticker);
+    }
     return samples;
   }
 
   const PRE_PASS_ROUND_BASE_MS = 2_000;
   /** "each candidate read twice ~2s apart" (addendum). */
   const PRE_PASS_GAP_MS = 2_000;
-  /** R6 fix (binding): how often the gap-wait ticks `guidedPhaseElapsedMs` forward -- fine enough that a 1s-stepped fake-timer test still observes intermediate progress. */
-  const PRE_PASS_GAP_TICK_MS = 250;
+  /**
+   * R6 fix (binding): how often the gap-wait ticks `guidedPhaseElapsedMs`
+   * forward -- fine enough that a 1s-stepped fake-timer test still observes
+   * intermediate progress. X3 fix (P4i-FIX3, binding): also the shared
+   * wall-clock tick rate for `sampleOnceRoundRobin`'s and `runGuidedPhase`'s
+   * own tickers (the ticket's own "wall-clock ticker (250 ms)").
+   */
+  const ELAPSED_TICKER_INTERVAL_MS = 250;
 
   /**
    * R6 fix (P4i-FIX2, binding): advances `guidedPhaseElapsedMs` (relative to
@@ -1082,7 +1225,7 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
           clearInterval(timer);
           resolve();
         }
-      }, PRE_PASS_GAP_TICK_MS);
+      }, ELAPSED_TICKER_INTERVAL_MS);
     });
   }
 
@@ -1139,24 +1282,46 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
     const durationMs = computeGuidedPhaseDurationMs(responders.length, phase.durationMs);
     emit({ guidedPhase: phase.id, guidedPhaseElapsedMs: 0, guidedPhaseDurationMs: durationMs });
     if (responders.length === 0) return { nextResponderIndex: 0 };
-    const result = await runDidObservation({
-      responders,
-      transport: channel,
-      clock: deps.clock,
-      durationMs,
-      pacing: deps.pacing,
-      control: observationControl,
-      requestTimeoutMs: deps.requestTimeoutMs,
-      maxResponsePendingExtensions: deps.maxResponsePendingExtensions,
-      onStarted: (startedAtMs) => {
-        if (myGeneration === generation) deps.onObservationStarted?.({ wallClockMs: startedAtMs });
-      },
-      onSample: (did, raw, tMs) => {
-        if (myGeneration !== generation) return;
-        guidedSamples.push({ did, phase: phase.id, tMs, raw });
-        emit({ guidedPhaseElapsedMs: tMs, candidateSummaries: computeDidCandidateSummaries(guidedSamples) });
-      },
-    });
+    // X3 fix (P4i-FIX3, binding, after Codex P4irev3 R6 PARTIAL): same
+    // wall-clock floor as `sampleOnceRoundRobin` -- this fixed phase's own
+    // countdown must still reach `durationMs` even when nothing answers.
+    let highestElapsedMs = 0;
+    const tickerStartedAtMs = deps.clock.now();
+    const ticker = setInterval(() => {
+      if (myGeneration !== generation) return;
+      const elapsed = Math.min(durationMs, deps.clock.now() - tickerStartedAtMs);
+      if (elapsed <= highestElapsedMs) return;
+      highestElapsedMs = elapsed;
+      emit({ guidedPhaseElapsedMs: elapsed });
+    }, ELAPSED_TICKER_INTERVAL_MS);
+    let result: { nextResponderIndex: number };
+    try {
+      result = await runDidObservation({
+        responders,
+        transport: channel,
+        clock: deps.clock,
+        durationMs,
+        pacing: deps.pacing,
+        control: observationControl,
+        requestTimeoutMs: deps.requestTimeoutMs,
+        maxResponsePendingExtensions: deps.maxResponsePendingExtensions,
+        onStarted: (startedAtMs) => {
+          if (myGeneration === generation) deps.onObservationStarted?.({ wallClockMs: startedAtMs });
+        },
+        onSample: (did, raw, tMs) => {
+          if (myGeneration !== generation) return;
+          guidedSamples.push({ did, phase: phase.id, tMs, raw });
+          const advanced = tMs > highestElapsedMs;
+          if (advanced) highestElapsedMs = tMs;
+          emit({
+            ...(advanced ? { guidedPhaseElapsedMs: tMs } : {}),
+            candidateSummaries: computeDidCandidateSummaries(guidedSamples),
+          });
+        },
+      });
+    } finally {
+      clearInterval(ticker);
+    }
     return { nextResponderIndex: result.nextResponderIndex };
   }
 
@@ -1262,6 +1427,11 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       // persisted incrementally" (ONE run per Start tap, resumed rather than
       // re-created by `resumePersistedRun`).
       lastPersistedResponderIndex = 0;
+      // X2 fix (P4i-FIX3, binding): a PRIOR run's still-pending retry slice
+      // (index range into ITS OWN, now-replaced `accumulator.responders`)
+      // must never survive into a fresh run -- those indices are meaningless
+      // against a brand-new accumulator.
+      pendingRetrySlice = null;
       lastFlushAtMs = deps.clock.now();
       if (deps.store !== undefined) {
         currentRunId = generateRunId();
@@ -1303,10 +1473,14 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       // exactly as before) -- the returned promise resolves once
       // `finishSweepRun`'s 'paused' branch actually reaches (and commits) its
       // own terminal flush, or immediately if pausing never applies here.
+      //
+      // X1 fix (P4i-FIX3, binding): REJECTS instead if that terminal flush
+      // fails (see `settlePendingPauses`) -- never silently resolved over a
+      // checkpoint that didn't actually commit.
       if (snapshot.phase !== 'sweeping') return Promise.resolve();
       control.paused = true;
-      return new Promise<void>((resolve) => {
-        pendingPauseResolvers.push(resolve);
+      return new Promise<void>((resolve, reject) => {
+        pendingPauseResolvers.push({ resolve, reject });
       });
     },
 
@@ -1337,6 +1511,7 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       control.stopped = true;
       observationControl.stopped = true;
       generation += 1; // supersede any in-flight sweep/observation continuation -- ITS OWN teardown/release is now skipped (see the `myGeneration !== generation` guards above), this call owns close-then-release instead.
+      const myGeneration = generation;
       // R1 fix (P4i-FIX2, binding): a pause() that never got a chance to reach
       // its own 'paused' branch (this stop() superseded it first) must not
       // hang forever -- resolve it now, since the sweep will never pause.
@@ -1345,8 +1520,14 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       // -- the phase still flips to 'stopped' synchronously below (unchanged
       // for every existing caller), but a caller that awaits `stop()` only
       // sees it resolve once the terminal checkpoint has actually committed.
+      //
+      // X1 fix (P4i-FIX3, binding): the returned promise now REJECTS if that
+      // flush fails -- `persistError` is set on the snapshot from the settled
+      // result regardless (guarded by `myGeneration`, so a stale attempt can
+      // never clobber a LATER run's own state) so a caller that isn't
+      // awaiting this can still see the failure.
       const flushPromise = maybeFlushPersistence(true, 'stopped');
-      emit({ phase: 'stopped' });
+      emit({ phase: 'stopped', persisting: true });
       void (async () => {
         // P4f-FIX4 (binding, HIGH, after Codex REV4): release is UNCONDITIONAL
         // -- a `finally`, not a second sequential statement -- so it always
@@ -1359,7 +1540,14 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
           releaseReservation();
         }
       })();
-      return flushPromise;
+      return flushPromise.then((result) => {
+        if (myGeneration === generation) {
+          emit({ persisting: false, persistError: result.persisted ? null : (result.error ?? 'Save failed -- results kept in memory') });
+        }
+        if (!result.persisted) {
+          throw new Error(result.error !== undefined ? `Save failed -- results kept in memory: ${result.error}` : 'Save failed -- results kept in memory, share now');
+        }
+      });
     },
 
     startObservation(windowMs = DEFAULT_OBSERVATION_WINDOW_MS): void {
@@ -1498,6 +1686,9 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       observationResponderDids = [];
       currentRunId = runId;
       lastPersistedResponderIndex = restoredResponders.length;
+      // X2 fix (P4i-FIX3, binding): see `start()`'s own comment -- a resumed
+      // run gets its own fresh accumulator too.
+      pendingRetrySlice = null;
       lastFlushAtMs = deps.clock.now();
       // R2 fix (P4i-FIX2, binding): "cleared on every fresh sweep start /
       // resume" -- a resumed run never inherits a PRIOR run's guided
