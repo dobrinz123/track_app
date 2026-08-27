@@ -307,3 +307,140 @@ function splitIntoFragments(bytes: Uint8Array, prng: SeededPrng): Uint8Array[] {
   }
   return chunks;
 }
+
+// ---------------------------------------------------------------------------
+// DID sweep addendum extension (additive): a small scripted DID table shaped
+// like the three heuristic signal shapes `didHeuristics.ts` looks for, and a
+// scripted discovery probe factory for `enetDiscovery.ts`'s `runDiscovery`.
+// Nothing above this comment changed.
+// ---------------------------------------------------------------------------
+
+/** DID 0x1E1C: temperature-like -- slow monotonic warm-up, u8-40 decode (same warm-up model as `defaultEngineOilC` above). */
+export const ENET_DID_TEMPERATURE_DID = '1E1C';
+/** DID 0x1E20: pedal-like -- fast bimodal steps (u8 raw decode), toggling every 1.5s. */
+export const ENET_DID_PEDAL_DID = '1E20';
+/** DID 0x1E24: steering-like -- zero-centred oscillation (i16 raw decode). */
+export const ENET_DID_STEERING_DID = '1E24';
+
+function signedTwoBytesBE(value: number): Uint8Array {
+  const clamped = Math.max(-32_768, Math.min(32_767, Math.round(value)));
+  const raw = clamped < 0 ? clamped + 0x1_0000 : clamped;
+  return Uint8Array.from([(raw >> 8) & 0xff, raw & 0xff]);
+}
+
+/** Three scripted DID responders for the DID sweep addendum's dev screen/tests -- one shaped like each non-`unknown` heuristic `didHeuristics.ts` classifies for a temperature/pedal/steering DID (speed-like is already covered by `DEFAULT_ENET_SCENARIO`'s obd01 `speedKph`, which correlates with GNSS by construction in a real drive). Feed into `SimulatedEnetTransportConfig.scenario` alongside (or instead of) `DEFAULT_ENET_SCENARIO`. */
+export const DEFAULT_ENET_DID_SCENARIO: readonly EnetSimulatedChannelScript[] = [
+  {
+    mode: 'did',
+    requestHex: ENET_DID_TEMPERATURE_DID,
+    encodeDataBytes: (t) => oneByte(defaultEngineOilC(t) + 40),
+  },
+  {
+    mode: 'did',
+    requestHex: ENET_DID_PEDAL_DID,
+    encodeDataBytes: (t) => oneByte(Math.floor(t / 1_500) % 2 === 0 ? 20 : 220),
+  },
+  {
+    mode: 'did',
+    requestHex: ENET_DID_STEERING_DID,
+    encodeDataBytes: (t) => signedTwoBytesBE(300 * Math.sin(t / 2_000)),
+  },
+];
+
+export type SimulatedDiscoveryBehavior = 'level2' | 'level1' | 'refuse';
+
+export interface SimulatedDiscoveryHostScript {
+  host: string;
+  /** When omitted, this entry matches `host` on any port. */
+  port?: number;
+  behavior: SimulatedDiscoveryBehavior;
+}
+
+export interface SimulatedDiscoveryProbeFactoryConfig {
+  /**
+   * Per-host (optionally per-port) scripted behavior. The addendum's own
+   * example shape: answer level-2 on exactly one host, level-1 on another,
+   * refuse the rest (`defaultBehavior`, default `'refuse'`).
+   */
+  script: readonly SimulatedDiscoveryHostScript[];
+  defaultBehavior?: SimulatedDiscoveryBehavior;
+  /** default 5. Real (not `monotonicNow`-driven) delay -- discovery's own timeouts are wall-clock via `setTimeout`, matching `enetSession`'s pattern; tests drive this with `vi.useFakeTimers()`. */
+  connectDelayMs?: number;
+  /** default 5. */
+  replyDelayMs?: number;
+}
+
+/**
+ * Builds a `runDiscovery`-compatible `probe` factory: a fresh scripted
+ * `ObdTransport` per `(host, port)` call, resolving/rejecting `connect()` and
+ * replying (or not) to the probe's TesterPresent per `config.script`.
+ */
+export function createSimulatedDiscoveryProbeFactory(
+  config: SimulatedDiscoveryProbeFactoryConfig,
+): (host: string, port: number) => ObdTransport {
+  const defaultBehavior = config.defaultBehavior ?? 'refuse';
+  const connectDelayMs = config.connectDelayMs ?? 5;
+  const replyDelayMs = config.replyDelayMs ?? 5;
+  return (host, port) => {
+    const matched = config.script.find(
+      (entry) => entry.host === host && (entry.port === undefined || entry.port === port),
+    );
+    const behavior = matched?.behavior ?? defaultBehavior;
+    return new SimulatedDiscoveryProbeTransport(behavior, connectDelayMs, replyDelayMs);
+  };
+}
+
+class SimulatedDiscoveryProbeTransport implements ObdTransport {
+  private readonly dataListeners = new Set<(chunk: string) => void>();
+  private readonly closeListeners = new Set<(error?: Error) => void>();
+  private closed = false;
+
+  constructor(
+    private readonly behavior: SimulatedDiscoveryBehavior,
+    private readonly connectDelayMs: number,
+    private readonly replyDelayMs: number,
+  ) {}
+
+  connect(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      setTimeout(() => {
+        if (this.closed) return;
+        if (this.behavior === 'refuse') {
+          reject(new Error('Simulated discovery probe refused the connection'));
+          return;
+        }
+        resolve();
+      }, this.connectDelayMs);
+    });
+  }
+
+  /** `level1` never replies (connects only, per the addendum's example script); `level2` replies with one minimal valid HSFZ frame (an acknowledge -- level-2 only requires ANY valid frame, per the addendum). */
+  send(_line: string): void {
+    if (this.closed || this.behavior !== 'level2') return;
+    const reply = encodeFrame({
+      control: HSFZ_CONTROL.ACKNOWLEDGE,
+      source: 0,
+      target: 0,
+      payload: new Uint8Array(0),
+    });
+    setTimeout(() => {
+      if (this.closed) return;
+      const chunk = bytesToBinaryString(reply);
+      for (const listener of [...this.dataListeners]) listener(chunk);
+    }, this.replyDelayMs);
+  }
+
+  onData(cb: (chunk: string) => void): () => void {
+    this.dataListeners.add(cb);
+    return () => this.dataListeners.delete(cb);
+  }
+
+  onClose(cb: (error?: Error) => void): () => void {
+    this.closeListeners.add(cb);
+    return () => this.closeListeners.delete(cb);
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+  }
+}

@@ -3,3 +3,6 @@ export * from './udsCodec';
 export * from './enetChannelSpecs';
 export * from './enetSession';
 export * from './simulatedEnetTransport';
+export * from './enetDiscovery';
+export * from './didSweep';
+export * from './didHeuristics';
