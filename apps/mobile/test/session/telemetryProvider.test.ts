@@ -159,12 +159,23 @@ const tracker = vi.hoisted(() => ({
   pendingConnects: [] as Array<{ resolve: () => void; reject: (error: Error) => void }>,
   /** Field revision (2026-08-27, binding): counts `close()` calls on this mocked transport -- the "adapter-type switch" tests assert the OLD ELM327 socket is actually closed, not merely abandoned. */
   closeCalls: 0,
+  /**
+   * P4g-FIX1 test seam (binding, M2): when true, `connect()` resolves
+   * genuinely (the real field scenario -- "connect resolves, AT init
+   * rejects/times out, with the socket open") instead of rejecting or
+   * hanging -- `send()` remains a no-op (below), so no init command ever
+   * gets a reply and the session's OWN init-timeout fires later, driving a
+   * REAL async post-connect failure, unlike `holdConnect` (connect() itself
+   * never settles at all).
+   */
+  resolveConnect: false,
 }));
 
 vi.mock('../../src/session/tcpObdTransport', () => ({
   TcpObdTransport: class {
     async connect(): Promise<void> {
       tracker.connectCalls += 1;
+      if (tracker.resolveConnect) return undefined;
       if (tracker.holdConnect) {
         return new Promise<void>((resolve, reject) => {
           tracker.pendingConnects.push({ resolve, reject });
@@ -327,7 +338,7 @@ describe('telemetryProvider: stop()/start() race is generation-scoped (F3 fix)',
     vi.useRealTimers();
   });
 
-  it('a start() during a still-pending stop() gets a fresh generation the old stop() cannot detach -- the OLD session\'s late "stopped" is dropped, and the NEW session keeps forwarding state after', async () => {
+  it('a start() during a still-pending stop() WAITS for it (P4g-FIX1, H1 unification) -- gen2 only connects AFTER gen1\'s teardown settles, and gen1\'s late "stopped" is dropped once gen2 exists', async () => {
     const store = new InMemorySettingsStore();
     store.update({ telemetryEnabled: true, telemetrySimulate: false });
     const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter() });
@@ -347,28 +358,38 @@ describe('telemetryProvider: stop()/start() race is generation-scoped (F3 fix)',
     const stopPromise = provider.stop();
     await flushMicrotasks();
 
-    // A start() while that stop() is still in flight gets generation 2.
+    // A start() while that stop() is still in flight now QUEUES behind it
+    // (P4g-FIX1 H1: EVERY generation, ELM327 included, sets `stopping` --
+    // previously ELM327 never did, so this start() launched a SECOND socket
+    // immediately, before the first was guaranteed closed).
     provider.start();
     await flushMicrotasks();
-    expect(tracker.pendingConnects).toHaveLength(2);
-    const gen2Connect = tracker.pendingConnects[1]!;
+    expect(tracker.pendingConnects).toHaveLength(1); // gen2 has NOT connected yet -- still queued behind gen1's teardown.
     // F10 fix: the leading 'idle' is `onStateChange`'s own immediate replay
     // of the current state at subscribe time (subscribed above before
     // either generation started).
-    expect(states).toEqual(['idle', 'connecting', 'connecting']); // both genuinely-live starts are forwarded.
+    expect(states).toEqual(['idle', 'connecting']); // gen2 has not launched yet.
 
     // Let generation 1 fail its connect() -- its `run()` sees `stopRequested`
     // and settles down to 'stopped' WITHOUT throwing, resolving the pending
-    // stop() from above.
+    // stop() from above, which resolves `stopping`, which unblocks gen2's
+    // queued launch.
     gen1Connect.reject(new Error('gen1 connect aborted'));
     await stopPromise;
     await flushMicrotasks();
 
-    // Generation 1's late 'stopped' must be DROPPED (it is a stale
-    // generation once generation 2 exists) -- states must NOT have gained a
-    // 'stopped' entry that has nothing to do with generation 2, which is
-    // still the genuinely-live session.
-    expect(states).toEqual(['idle', 'connecting', 'connecting']);
+    // gen2 has now launched -- a SECOND connect() call, after gen1's teardown settled.
+    expect(tracker.pendingConnects).toHaveLength(2);
+    const gen2Connect = tracker.pendingConnects[1]!;
+
+    // P4g-FIX1 (binding, H1): unlike the pre-fix race (gen2 used to launch
+    // BEFORE gen1's own stop() ever settled, so gen1's later 'stopped'
+    // transition arrived once `current` already pointed at gen2 and was
+    // dropped as stale), gen1's teardown now genuinely COMPLETES before gen2
+    // launches -- gen1's own 'stopped' transition fires while `current` is
+    // STILL gen1, so it IS forwarded (a real, non-stale transition), THEN
+    // gen2's 'connecting' follows once its queued launch runs.
+    expect(states).toEqual(['idle', 'connecting', 'stopped', 'connecting']);
 
     // Generation 2 is still alive and must keep forwarding its OWN events --
     // the pre-fix bug used generation 1's stop() to (wrongly) detach
@@ -377,10 +398,141 @@ describe('telemetryProvider: stop()/start() race is generation-scoped (F3 fix)',
     gen2Connect.reject(new Error('gen2 connect also fails'));
     await flushMicrotasks();
 
-    expect(states).toEqual(['idle', 'connecting', 'connecting', 'failed']);
+    expect(states).toEqual(['idle', 'connecting', 'stopped', 'connecting', 'failed']);
     expect(provider.getDiagnostics().state).toBe('failed');
 
     await provider.stop(); // cleanup: cancels generation 2's own reconnect-retry timer.
+  });
+});
+
+/**
+ * P4g-FIX1 (binding, H1 -- Codex P4g-REV1 HIGH "ELM teardown is not
+ * serialized with the next ENET Start"): EVERY generation now gets the SAME
+ * `stopping` promise and unconditional cleanup, `start()` always awaits any
+ * in-flight `stopping` regardless of destination adapter type, and
+ * concurrent `start()` calls coalesce behind one `starting` promise rather
+ * than each queuing (or launching) their own attempt.
+ */
+describe('telemetryProvider: P4g-FIX1 H1 -- unified teardown ordering and Start coalescing', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    tracker.connectCalls = 0;
+    tracker.closeCalls = 0;
+    tracker.holdConnect = false;
+    tracker.resolveConnect = false;
+    tracker.pendingConnects = [];
+  });
+  afterEach(() => {
+    tracker.holdConnect = false;
+    vi.useRealTimers();
+  });
+
+  it('EVENT-LOG ordering: ELM stuck in connect() -> switch to ENET -> Start -> the ENET generation only reaches polling AFTER the old ELM transport is force-closed', async () => {
+    tracker.holdConnect = true; // the ELM socket never settles on its own.
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'elm327' });
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
+    const states: Elm327State[] = [];
+    provider.onStateChange((s) => states.push(s));
+
+    provider.start();
+    await flushMicrotasks();
+    expect(states).toEqual(['idle', 'connecting']); // ELM stuck 'connecting'.
+    expect(tracker.closeCalls).toBe(0);
+
+    // The user switches to ENET (simulated -- no real socket needed on that
+    // side) WHILE the ELM socket is still genuinely stuck open.
+    store.update({ adapterType: 'enet', telemetrySimulate: true });
+    await flushMicrotasks();
+    expect(tracker.closeCalls).toBe(0); // not yet -- the watcher's doStop() is still racing the 200ms force-close.
+
+    // The monitor's own Start button, pressed WHILE that teardown is still
+    // in flight -- PRIOR bug (H1): `stopping` was never set for an ELM327
+    // teardown, so this would launch ENET immediately (a NEW state entry
+    // right here), before the old socket was closed.
+    provider.start();
+    await flushMicrotasks();
+    expect(tracker.closeCalls).toBe(0); // still not closed -- proves the queued Start has NOT raced ahead.
+    expect(states).toEqual(['idle', 'connecting']); // UNCHANGED -- ENET has not launched at all yet (no new state entry of any kind).
+
+    // The 200ms force-close settles HERE -- gen1's (stuck) transport is closed.
+    await vi.advanceTimersByTimeAsync(200);
+    await flushMicrotasks();
+    expect(tracker.closeCalls).toBeGreaterThanOrEqual(1);
+    const stateCountRightAfterClose = states.length;
+    expect(stateCountRightAfterClose).toBeGreaterThan(2); // ENET's queued launch has now started (a fresh state entry) -- STRICTLY after the close above, never before it.
+
+    // ENET's queued launch runs to completion -- connects (simulated) and reaches polling.
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flushMicrotasks();
+
+    expect(states.at(-1)).toBe('polling');
+    expect(provider.getDiagnostics().adapterType).toBe('enet');
+
+    await provider.stop();
+  });
+
+  it('double/rapid Start while a teardown is queued behind `stopping` coalesces into exactly ONE fresh launch, not two', async () => {
+    tracker.holdConnect = true;
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'elm327' });
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
+
+    provider.start();
+    await flushMicrotasks();
+    expect(tracker.pendingConnects).toHaveLength(1);
+    const gen1Connect = tracker.pendingConnects[0]!;
+
+    const stopPromise = provider.stop(); // gen1 stuck -- doStop() sets `stopping`, races the 200ms force-close.
+    await flushMicrotasks();
+
+    // TWO rapid Start calls while `stopping` is in flight -- must coalesce
+    // into exactly ONE queued launch (the `starting` promise), not two.
+    provider.start();
+    provider.start();
+    await flushMicrotasks();
+    expect(tracker.pendingConnects).toHaveLength(1); // neither has connected yet -- still queued behind `stopping`.
+
+    await vi.advanceTimersByTimeAsync(200); // the force-close settles `stopping`, unblocking the ONE queued launch.
+    await flushMicrotasks();
+
+    expect(tracker.pendingConnects).toHaveLength(2); // exactly ONE fresh generation launched -- not two.
+
+    gen1Connect.reject(new Error('gen1 late settle (test double)'));
+    tracker.pendingConnects[1]!.reject(new Error('gen2 fails (test double)'));
+    await flushMicrotasks();
+    await stopPromise.catch(() => undefined);
+    await provider.stop();
+  });
+
+  it('a start() called WHILE another start() is still queued behind `stopping` is a no-op (starting !== null), even before either has launched', async () => {
+    tracker.holdConnect = true;
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'elm327' });
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
+
+    provider.start();
+    await flushMicrotasks();
+    const gen1Connect = tracker.pendingConnects[0]!;
+    const stopPromise = provider.stop();
+    await flushMicrotasks();
+
+    provider.start(); // queues behind `stopping`.
+    provider.start(); // coalesces -- must not queue a second attempt.
+    provider.start(); // same.
+    await flushMicrotasks();
+    expect(tracker.pendingConnects).toHaveLength(1); // NONE of the three has launched yet -- still queued behind `stopping`.
+
+    await vi.advanceTimersByTimeAsync(200);
+    await flushMicrotasks();
+
+    expect(tracker.pendingConnects).toHaveLength(2); // gen1 (stuck) + exactly ONE fresh generation -- not three.
+
+    gen1Connect.reject(new Error('gen1 late settle (test double)'));
+    tracker.pendingConnects[1]!.reject(new Error('gen2 fails (test double)'));
+    await flushMicrotasks();
+    await stopPromise.catch(() => undefined);
+    await provider.stop();
   });
 });
 
@@ -510,11 +662,23 @@ describe('telemetryProvider: start() isolates a synchronous session-construction
  * cleanup that also applied to ELM327 -- a rejecting ELM `session.stop()`
  * used to leave listener/diagnostics state INTACT (no unsubscribe, no
  * `current` clearing -- the behavior at HEAD 3027d94, before that wave),
- * but started being cleared regardless of the rejection. This pins the
- * restored, byte-identical ELM327 behavior directly against a
- * hand-built `Elm327Session` double whose `stop()` rejects.
+ * but started being cleared regardless of the rejection. P4e-FIX5 restored
+ * that byte-identical (cleanup-skipped-on-rejection) ELM327 behavior.
+ *
+ * SUPERSEDED (binding, P4g-FIX1 H1 -- Codex P4g-REV1 HIGH "ELM teardown is
+ * not serialized with the next ENET Start"): that asymmetry -- ELM327
+ * skipping cleanup on a rejecting stop(), and never setting the shared
+ * `stopping` promise at all -- was the root cause: an ELM327 generation
+ * stuck in `connect()` never signalled a subsequent `start()` (of EITHER
+ * adapter type) that a teardown was still in flight, so a Start immediately
+ * after switching adapters could launch a new transport before the old
+ * one's close was even attempted. `doStop()` now runs the SAME
+ * unconditional cleanup for BOTH kinds -- a rejecting ELM327 `stop()` still
+ * propagates its rejection to the caller (unchanged), but cleanup
+ * (unsubscribe, clearing `current`) now ALSO runs, exactly like ENET
+ * already did.
  */
-describe('telemetryProvider: ELM327 stop() semantics are byte-identical to pre-P4e-FIX4 (P4e-FIX5, binding)', () => {
+describe('telemetryProvider: ELM327 stop() semantics after unification (P4g-FIX1 H1, binding, supersedes the P4e-FIX5 byte-identical pin)', () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -522,7 +686,7 @@ describe('telemetryProvider: ELM327 stop() semantics are byte-identical to pre-P
     vi.useRealTimers();
   });
 
-  it('a rejecting ELM stop() leaves listener/diagnostics state intact -- unsubscribe and current-clearing are SKIPPED, matching pre-wave behavior', async () => {
+  it('a rejecting ELM stop() still propagates its rejection, but cleanup now runs unconditionally (unsubscribe, current cleared, diagnostics fall back)', async () => {
     const store = new InMemorySettingsStore();
     store.update({ telemetryEnabled: true, telemetrySimulate: true }); // adapterType defaults to 'elm327'.
 
@@ -569,34 +733,78 @@ describe('telemetryProvider: ELM327 stop() semantics are byte-identical to pre-P
 
     await expect(provider.stop()).rejects.toBe(stopError);
 
-    // Byte-identical to pre-P4e-FIX4 (HEAD 3027d94) behavior: a rejecting
-    // stop() propagates immediately, BEFORE any cleanup runs -- the
-    // generation's own listeners are still subscribed, `current` still
-    // points at it, and `getDiagnostics()` still reads its (unchanged) live
-    // values straight through.
-    expect(stateUnsubscribed).toBe(false);
-    expect(sampleUnsubscribed).toBe(false);
+    // P4g-FIX1 (binding, H1): the rejection still propagates to the
+    // caller (unchanged) -- but cleanup NOW runs unconditionally (the
+    // `finally` unification), matching ENET's own long-standing behavior.
+    // `current` is cleared, so `getDiagnostics()` no longer reads the
+    // (now-detached) fake session's own diagnostics -- it falls back to the
+    // "no active generation" shape. `currentState` itself is untouched by
+    // this rejecting stop() (this fake session's stop() never calls its own
+    // onStateChange with 'stopped' before rejecting), so `state` stays
+    // whatever it last was ('polling').
+    expect(stateUnsubscribed).toBe(true);
+    expect(sampleUnsubscribed).toBe(true);
     expect(provider.getDiagnostics().state).toBe('polling');
-    expect(provider.getDiagnostics().errorCount).toBe(3);
-    expect(provider.getDiagnostics().lastError).toBe('diagnostic sentinel');
+    expect(provider.getDiagnostics().errorCount).toBe(0);
+    expect(provider.getDiagnostics().lastError).toBeUndefined();
   });
 });
 
-describe('currentConfigFingerprint / fingerprintsEqual (field revision, 2026-08-27, binding)', () => {
-  it('the fingerprint is {adapterType, host, port} -- host/port sourced from the RIGHT settings field per adapterType', () => {
-    const elmSettings = { adapterType: 'elm327' as const, adapterHost: '192.168.0.10', adapterPort: 35_000, enetHost: '192.168.4.10', enetPort: 6_801 };
-    expect(currentConfigFingerprint(elmSettings)).toEqual({ adapterType: 'elm327', host: '192.168.0.10', port: 35_000 });
+describe('currentConfigFingerprint / fingerprintsEqual (field revision, 2026-08-27, binding; extended P4g-FIX1 M1)', () => {
+  it('the fingerprint is {adapterType, host, port, telemetrySimulate} -- host/port sourced from the RIGHT settings field per adapterType', () => {
+    const elmSettings = {
+      adapterType: 'elm327' as const,
+      adapterHost: '192.168.0.10',
+      adapterPort: 35_000,
+      enetHost: '192.168.4.10',
+      enetPort: 6_801,
+      telemetrySimulate: false,
+    };
+    expect(currentConfigFingerprint(elmSettings)).toEqual({
+      adapterType: 'elm327',
+      host: '192.168.0.10',
+      port: 35_000,
+      telemetrySimulate: false,
+    });
 
-    const enetSettings = { adapterType: 'enet' as const, adapterHost: '192.168.0.10', adapterPort: 35_000, enetHost: '192.168.4.10', enetPort: 6_801 };
-    expect(currentConfigFingerprint(enetSettings)).toEqual({ adapterType: 'enet', host: '192.168.4.10', port: 6_801 });
+    const enetSettings = { ...elmSettings, adapterType: 'enet' as const };
+    expect(currentConfigFingerprint(enetSettings)).toEqual({
+      adapterType: 'enet',
+      host: '192.168.4.10',
+      port: 6_801,
+      telemetrySimulate: false,
+    });
   });
 
-  it('fingerprintsEqual compares every field -- adapterType, host, AND port', () => {
-    const a = { adapterType: 'elm327' as const, host: '192.168.0.10', port: 35_000 };
+  it('fingerprintsEqual compares every field -- adapterType, host, port, AND telemetrySimulate', () => {
+    const a = { adapterType: 'elm327' as const, host: '192.168.0.10', port: 35_000, telemetrySimulate: false };
     expect(fingerprintsEqual(a, { ...a })).toBe(true);
     expect(fingerprintsEqual(a, { ...a, adapterType: 'enet' })).toBe(false);
     expect(fingerprintsEqual(a, { ...a, host: '192.168.0.11' })).toBe(false);
     expect(fingerprintsEqual(a, { ...a, port: 35_001 })).toBe(false);
+    expect(fingerprintsEqual(a, { ...a, telemetrySimulate: true })).toBe(false);
+  });
+
+  /**
+   * P4g-FIX1 (binding, M1 -- Codex P4g-REV1 MEDIUM): `telemetrySimulate`
+   * selects the TRANSPORT (real vs. simulated) for the SAME host/port, so
+   * it must be part of the fingerprint -- this SUPERSEDES an earlier test
+   * in this file that documented the omission (asserted toggling simulate
+   * alone never changed the fingerprint / never triggered the settings
+   * watcher).
+   */
+  it('toggling telemetrySimulate alone (same adapterType/host/port) changes the fingerprint', () => {
+    const settings = {
+      adapterType: 'elm327' as const,
+      adapterHost: '192.168.0.10',
+      adapterPort: 35_000,
+      enetHost: '192.168.4.10',
+      enetPort: 6_801,
+      telemetrySimulate: false,
+    };
+    const a = currentConfigFingerprint(settings);
+    const b = currentConfigFingerprint({ ...settings, telemetrySimulate: true });
+    expect(fingerprintsEqual(a, b)).toBe(false);
   });
 });
 
@@ -617,10 +825,12 @@ describe('telemetryProvider: field revision -- adapter-type switch takes effect 
     tracker.connectCalls = 0;
     tracker.closeCalls = 0;
     tracker.holdConnect = false;
+    tracker.resolveConnect = false;
     tracker.pendingConnects = [];
   });
   afterEach(() => {
     tracker.holdConnect = false;
+    tracker.resolveConnect = false;
     vi.useRealTimers();
   });
 
@@ -639,9 +849,9 @@ describe('telemetryProvider: field revision -- adapter-type switch takes effect 
     expect(tracker.closeCalls).toBe(0); // not yet -- still genuinely stuck.
 
     // The user switches to ENET (telemetrySimulate too, so the ENET side
-    // needs no real socket -- telemetrySimulate is NOT part of the
-    // fingerprint, so flipping it alone never triggers the settings-change
-    // watcher; adapterType IS part of it, and DOES).
+    // needs no real socket -- adapterType changing alone already triggers
+    // the settings-change watcher; telemetrySimulate is ALSO part of the
+    // fingerprint since P4g-FIX1 M1, so this update changes it twice over).
     store.update({ adapterType: 'enet', telemetrySimulate: true });
     await flushMicrotasks();
 
@@ -671,6 +881,57 @@ describe('telemetryProvider: field revision -- adapter-type switch takes effect 
     expect(states.at(-1)).toBe('polling');
 
     await provider.stop(); // cleanup -- releases the (shared, singleton) ENET reservation this test acquired.
+  });
+
+  /**
+   * P4g-FIX1 (binding, M2 -- Codex P4g-REV1 MEDIUM "the purported field
+   * reproduction never produces the specified async failure"): the test
+   * ABOVE uses `holdConnect` -- `connect()` itself never settles, which is
+   * NOT the field description ("connect resolves, AT init rejects/times
+   * out, with the socket open"). This test reproduces the ACTUAL scenario:
+   * `connect()` genuinely resolves, no init command ever gets a reply (the
+   * mocked transport's `send()` is a no-op), so the session's own
+   * init-timeout fires later -- a REAL async post-connect failure -- and
+   * asserts the 'failed' handler's explicit transport close
+   * (`closeGenTransportQuietly`) actually ran (via `tracker.closeCalls`)
+   * BEFORE a subsequent adapter switch + Start builds the new ENET session.
+   */
+  it('ELM connect() genuinely resolves, then AT init times out ASYNC (real post-connect failure) -- the failed handler closes the transport before a switch-and-Start builds ENET', async () => {
+    tracker.resolveConnect = true;
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'elm327' });
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
+    const states: Elm327State[] = [];
+    provider.onStateChange((s) => states.push(s));
+
+    provider.start();
+    await flushMicrotasks();
+    expect(tracker.connectCalls).toBe(1);
+    expect(states.at(-1)).not.toBe('failed'); // connect() itself resolved -- not an immediate/sync failure.
+    expect(tracker.closeCalls).toBe(0); // not yet -- the socket is genuinely open, init still pending.
+
+    // No init command ever gets a reply (send() is a no-op) -- the
+    // session's own init-timeout fires, transitioning to 'failed'
+    // asynchronously, well after connect() itself already resolved.
+    await vi.advanceTimersByTimeAsync(6_000);
+    await flushMicrotasks();
+
+    expect(states.at(-1)).toBe('failed');
+    expect(tracker.closeCalls).toBeGreaterThanOrEqual(1); // the failed handler explicitly closed the (still-open) socket.
+
+    // Switch to ENET and Start -- must build a fresh ENET session, not be
+    // blocked/confused by the just-failed ELM327 generation.
+    tracker.resolveConnect = false;
+    store.update({ adapterType: 'enet', telemetrySimulate: true });
+    provider.start();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flushMicrotasks();
+
+    expect(states.at(-1)).toBe('polling');
+    expect(provider.getDiagnostics().adapterType).toBe('enet');
+
+    await provider.stop();
   });
 
   it('a retry timer scheduled under ELM327 never reopens an ELM socket if adapterType changes before it fires', async () => {

@@ -110,6 +110,14 @@ export interface ConfigFingerprint {
   adapterType: AdapterType;
   host: string;
   port: number;
+  /**
+   * P4g-FIX1 (binding, M1): included because it selects the TRANSPORT, not
+   * just the endpoint -- a real vs. simulated transport for the SAME
+   * host/port previously compared equal, so toggling simulation while a
+   * generation was connecting/polling and calling `start()` was a silent
+   * no-op instead of relaunching from the current effective settings.
+   */
+  telemetrySimulate: boolean;
 }
 
 export function currentConfigFingerprint(settings: {
@@ -118,14 +126,20 @@ export function currentConfigFingerprint(settings: {
   adapterPort: number;
   enetHost: string;
   enetPort: number;
+  telemetrySimulate: boolean;
 }): ConfigFingerprint {
   return settings.adapterType === 'enet'
-    ? { adapterType: 'enet', host: settings.enetHost, port: settings.enetPort }
-    : { adapterType: 'elm327', host: settings.adapterHost, port: settings.adapterPort };
+    ? { adapterType: 'enet', host: settings.enetHost, port: settings.enetPort, telemetrySimulate: settings.telemetrySimulate }
+    : { adapterType: 'elm327', host: settings.adapterHost, port: settings.adapterPort, telemetrySimulate: settings.telemetrySimulate };
 }
 
 export function fingerprintsEqual(a: ConfigFingerprint, b: ConfigFingerprint): boolean {
-  return a.adapterType === b.adapterType && a.host === b.host && a.port === b.port;
+  return (
+    a.adapterType === b.adapterType &&
+    a.host === b.host &&
+    a.port === b.port &&
+    a.telemetrySimulate === b.telemetrySimulate
+  );
 }
 
 /**
@@ -459,6 +473,16 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
    * previous one is still closing -- the review's exact overlap scenario.
    */
   let stopping: Promise<void> | null = null;
+  /**
+   * P4g-FIX1 (binding, H1): while a `start()` call is queued behind an
+   * in-flight `stopping` (or otherwise not-yet-launched), this is the
+   * promise other CONCURRENT `start()` calls coalesce behind instead of
+   * queuing a SECOND, redundant launch attempt -- e.g. a rapid double-tap
+   * on Start, or a Start issued while a settings-change-triggered teardown
+   * is still resolving. `null` once the queued attempt has actually run
+   * (whether it launched successfully or failed).
+   */
+  let starting: Promise<void> | null = null;
   /**
    * Field revision (2026-08-27, binding): the RAW transport the current
    * generation is built on -- tracked here (not just inside the session)
@@ -847,8 +871,23 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       emitState('idle', ENET_ADAPTER_RESERVED_BY_PROBE_DETAIL);
       return;
     }
+    // P4g-FIX1 (binding, H2): captured BEFORE the scan so a settings change
+    // mid-discovery (adapterType switch, or a host/port/simulate edit) can be
+    // detected once the scan resolves -- `current` stays `null` for this
+    // whole window (by design, above), so the settings watcher cannot rely
+    // on generation state alone to know a discovery is in flight for THIS
+    // fingerprint; this capture/compare is the belt to the watcher's own
+    // abort-on-change braces.
+    const fingerprintAtDiscoveryStart = currentConfigFingerprint(settingsStore.getSettings());
     const result = await runTrackedAutoDiscovery();
     if (!running || current !== null) {
+      enetAdapterReservation.release(token);
+      return;
+    }
+    if (!fingerprintsEqual(fingerprintAtDiscoveryStart, currentConfigFingerprint(settingsStore.getSettings()))) {
+      // The user changed adapterType/host/port/simulate WHILE this scan was
+      // running -- discard: no persist, no session built from a stale hit,
+      // release the reservation this (now-superseded) scan was holding.
       enetAdapterReservation.release(token);
       return;
     }
@@ -883,8 +922,19 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
    * before it resolves.
    */
   async function runAutoDiscoveryThenConnect(id: number, token: EnetAdapterToken): Promise<void> {
+    // P4g-FIX1 (binding, H2): see the matching comment in
+    // `runAutoDiscoveryOnFailure` -- same capture/compare discipline; this
+    // path's `!running || generationCounter !== id` check alone does NOT
+    // catch a bare settings edit that never called stop()/start() (that
+    // never advances `generationCounter`), so a stale hit could otherwise
+    // still be persisted/used.
+    const fingerprintAtDiscoveryStart = currentConfigFingerprint(settingsStore.getSettings());
     const result = await runTrackedAutoDiscovery();
     if (!running || generationCounter !== id) {
+      enetAdapterReservation.release(token);
+      return;
+    }
+    if (!fingerprintsEqual(fingerprintAtDiscoveryStart, currentConfigFingerprint(settingsStore.getSettings()))) {
       enetAdapterReservation.release(token);
       return;
     }
@@ -1092,33 +1142,21 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       const gen = current;
       if (gen === null) return;
 
-      // P4e-FIX5 fix (binding, Codex P4e-REV5 MED): the finally-based
-      // cleanup below applies ONLY to ENET generations. ELM327 keeps its
-      // ORIGINAL, pre-P4e-FIX4 semantics exactly (byte-identical, binding):
-      // cleanup happens ONLY after the awaited `session.stop()` RESOLVES --
-      // a rejection propagates immediately, leaving listener/diagnostics
-      // state (and `current`) intact, precisely as this app has always
-      // behaved for ELM327. `stopping`/the adapter reservation are ENET-only
-      // concepts; nothing below applies (or is even touched) for ELM327.
-      if (gen.kind !== 'enet') {
-        // Field revision (2026-08-27, binding): races the graceful stop
-        // against a 200ms transport-close timeout -- see
-        // `stopGenSessionWithTransportRace`'s own doc comment. A normal, fast
-        // resolve/reject is unaffected; a HUNG stop (stuck `connect()`, the
-        // driveway-test scenario) still gets `gen`'s OWN transport force-
-        // closed, generation-scoped -- never a shared field that could
-        // otherwise close a NEWER generation's transport instead.
-        await stopGenSessionWithTransportRace(gen);
-        gen.unsubscribeSample();
-        gen.unsubscribeState();
-        if (current === gen) current = null;
-        return;
-      }
-
-      // P4e-FIX4 fix (binding): tracked so a `start()` racing in WHILE this
-      // stop() is still tearing down queues behind it instead of opening a
-      // second ENET socket while the first is still closing (the review's
-      // overlap scenario) -- see `stopping`'s own doc comment above.
+      // P4g-FIX1 (binding, H1 -- Codex P4g-REV1 HIGH "ELM teardown is not
+      // serialized with the next ENET Start"): EVERY generation, ELM327 AND
+      // ENET alike, now gets the SAME `stopping` promise and the SAME
+      // unconditional (`finally`-based) cleanup. The PRIOR asymmetry -- only
+      // ENET ever set `stopping`, and ELM327's cleanup ran only when
+      // `session.stop()` RESOLVED (skipped entirely on rejection, "byte-
+      // identical to pre-P4e-FIX4") -- meant an ELM327 generation stuck in
+      // `connect()` never signalled ANYTHING to a subsequent `start()`: the
+      // old socket was not guaranteed closed before a new (e.g. ENET)
+      // transport connected. Unifying means `start()` can always await
+      // `stopping` regardless of which kind is tearing down, and a rejecting
+      // `session.stop()` (either kind) still runs cleanup -- it no longer
+      // leaves stale listeners/`current` behind, though the rejection itself
+      // still propagates to this call's own caller (see the outer `finally`
+      // below).
       let resolveStopping: () => void = () => undefined;
       const stoppingPromise = new Promise<void>((resolve) => {
         resolveStopping = resolve;
@@ -1127,21 +1165,22 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
 
       try {
         try {
-          // Field revision (2026-08-27, binding): same 200ms transport-close
-          // race as the ELM327 branch above -- see
-          // `stopGenSessionWithTransportRace`'s own doc comment.
+          // Field revision (2026-08-27, binding): races the graceful stop
+          // against a 200ms transport-close timeout -- see
+          // `stopGenSessionWithTransportRace`'s own doc comment. A normal,
+          // fast resolve/reject is unaffected; a HUNG stop (stuck
+          // `connect()`, the driveway-test scenario) still gets `gen`'s OWN
+          // transport force-closed, generation-scoped -- never a shared
+          // field that could otherwise close a NEWER generation's transport
+          // instead.
           await stopGenSessionWithTransportRace(gen);
         } finally {
           // P4e-FIX4 fix (binding): "stop() releases the claim in a finally
           // AFTER the old session's stop settles (rejection included)" --
           // released via THIS generation's OWN token, so a NEWER
           // generation's (different) token/claim is never touched even if
-          // this stop() is slow. Cleanup below also lives in this
-          // `finally` (previously only ran when `gen.session.stop()`
-          // resolved, for ENET too) -- a rejection must not leave stale
-          // listeners subscribed to a generation nothing else believes is
-          // live any more.
-          enetAdapterReservation.release(gen.enetToken);
+          // this stop() is slow. ELM327 holds no reservation at all.
+          if (gen.kind === 'enet') enetAdapterReservation.release(gen.enetToken);
           gen.unsubscribeSample();
           gen.unsubscribeState();
           // Only clear the shared `current` pointer if it's STILL this
@@ -1155,8 +1194,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
         // inner `release`/unsubscribe block itself threw -- the
         // reservation module's own `notify()` can no longer throw (its own
         // FIX5 fix), but this nesting means a FUTURE change on either side
-        // still can never deadlock an ENET `start()` queued behind
-        // `stopping`.
+        // still can never deadlock a `start()` queued behind `stopping`.
         if (stopping === stoppingPromise) stopping = null;
         resolveStopping();
       }
@@ -1186,61 +1224,82 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     // its own just-found host/port is this SAME generation completing its
     // own connect, never a user-initiated adapter switch.
     if (applyingDiscoveryResultUpdate) return;
-    if (current === null) return; // nothing live to stop -- the next start() will simply use the new settings.
-    settingsChangedDetail = 'settings changed';
-    void doStop().then(() => emitState('stopped', 'settings changed'));
+
+    // P4g-FIX1 (binding, H2 -- Codex P4g-REV1 HIGH "settings changes during
+    // auto-discovery are ignored"): PRIOR code early-returned right here on
+    // `current === null`, which is true for the ENTIRE duration of EITHER
+    // auto-discovery phase (no-host preamble, on-failure continuation --
+    // both deliberately null `current` before scanning) -- so a user
+    // switching adapterType, or editing the host, while a scan was in
+    // flight was silently ignored: the scan could still persist its hit
+    // over the user's edit and build a session from stale settings. Now:
+    // abort any in-flight discovery FIRST, regardless of `current` --
+    // `runAutoDiscoveryOnFailure`/`runAutoDiscoveryThenConnect` each also
+    // compare the fingerprint captured at scan START against the one at
+    // scan COMPLETION and discard (no persist, no session, reservation
+    // released) on a mismatch, so this abort is a fast-path, not the only
+    // guard.
+    if (discoveryAbortSignal !== null) discoveryAbortSignal.aborted = true;
+    if (networkInfoAbortNotify !== null) networkInfoAbortNotify();
+    const discoveryToAwait = discoveryInFlight;
+
+    const stopLiveGeneration = async (): Promise<void> => {
+      // Ensures the aborted scan (and the reservation/probe socket it was
+      // holding) has genuinely unwound before this handler considers itself
+      // done -- mirrors `doStop()`'s own discovery-abort-then-await
+      // discipline.
+      if (discoveryToAwait !== null) await discoveryToAwait;
+      if (current === null) return; // nothing live to stop -- the next start() will simply use the new settings.
+      settingsChangedDetail = 'settings changed';
+      await doStop();
+      // P4g-FIX1 (binding, H1): guard this stale continuation by generation
+      // -- if a NEWER generation was installed while `doStop()` was
+      // tearing down (e.g. a queued `start()` that was waiting on
+      // `stopping`, which resolves and relaunches BEFORE this `await
+      // doStop()` itself settles -- see `stopping`'s resolution ordering),
+      // `current` is no longer `null` here, and emitting 'stopped' would
+      // incorrectly overwrite that newer generation's own live state.
+      if (current === null) emitState('stopped', 'settings changed');
+    };
+    void stopLiveGeneration();
   });
+
+  // F2 fix (MED, binding): a synchronous throw while BUILDING the session
+  // (transport construction, `createElm327Session`'s config validation) must
+  // never leave this provider wedged `running=true` with no active
+  // generation -- L3 (`elm327Session.ts`) now handles customPids config
+  // problems as warnings, never throws, but this catch stays as the
+  // provider's own defense-in-depth backstop regardless of what a future
+  // config-validation change does. P4e-FIX4 (binding): factored into the
+  // shared `handleLaunchFailure` -- the retry timer callback needs the SAME
+  // reset now too.
+  function launchFresh(): void {
+    running = true;
+    retriesUsed = 0;
+    // ENET auto-discovery addendum (binding): "runs discovery ONCE per
+    // start" -- reset here (a fresh start()..stop() lifecycle), mirroring
+    // `retriesUsed`'s own reset discipline (NOT reset in `stop()`).
+    autoDiscoveryAttempted = false;
+    try {
+      launchSession();
+    } catch (error) {
+      handleLaunchFailure(error);
+    }
+  }
 
   return {
     start(): void {
       if (!settingsStore.getSettings().telemetryEnabled) return;
-      const fingerprint = currentConfigFingerprint(settingsStore.getSettings());
 
-      // F2 fix (MED, binding): a synchronous throw while BUILDING the
-      // session (transport construction, `createElm327Session`'s config
-      // validation) must never leave this provider wedged `running=true`
-      // with no active generation -- L3 (`elm327Session.ts`) now handles
-      // customPids config problems as warnings, never throws, but this
-      // catch stays as the provider's own defense-in-depth backstop
-      // regardless of what a future config-validation change does.
-      // P4e-FIX4 (binding): factored into the shared `handleLaunchFailure`
-      // -- the retry timer callback needs the SAME reset now too.
-      const launchFresh = (): void => {
-        running = true;
-        retriesUsed = 0;
-        // ENET auto-discovery addendum (binding): "runs discovery ONCE per
-        // start" -- reset here (a fresh start()..stop() lifecycle), mirroring
-        // `retriesUsed`'s own reset discipline (NOT reset in `stop()`).
-        autoDiscoveryAttempted = false;
-        const attempt = (): void => {
-          if (!running) return; // a stop() raced in while this attempt was queued behind `stopping` below.
-          try {
-            launchSession();
-          } catch (error) {
-            handleLaunchFailure(error);
-          }
-        };
-        // P4e-FIX4 fix (binding, Codex P4e-REV4 HIGH finding -- "overlapping
-        // provider generations bypass exclusivity"): if a `stop()` is still
-        // tearing down the PREVIOUS generation (its own session.stop() +
-        // reservation release + unsubscribe not yet settled), this start()
-        // queues behind that -- `running=true` already guards a second
-        // concurrent `start()` from queuing twice, and `attempt`'s own
-        // `running` re-check handles a `stop()` that raced in during the
-        // wait. ONLY the ENET path serializes this way: the reservation's
-        // exclusivity is the ENTIRE reason this queuing exists, and only
-        // `adapterType: 'enet'` ever touches it -- the ELM327 path's own
-        // overlap behavior stays EXACTLY as it was before this ticket
-        // (byte-identical, binding), a fresh generation immediately, even
-        // while an earlier stop() is still tearing down. Nothing is awaited
-        // when no stop() is in flight either way -- start() stays
-        // synchronous-looking for every existing caller.
-        if (stopping !== null && settingsStore.getSettings().adapterType === 'enet') {
-          void stopping.then(attempt, attempt);
-        } else {
-          attempt();
-        }
-      };
+      // P4g-FIX1 (binding, H1 -- Codex P4g-REV1 HIGH "rapid/double Start can
+      // queue or create multiple launches"): coalesce ANY concurrent
+      // `start()` call into the ONE already in flight -- whether it's
+      // queued behind a teardown's `stopping`, or behind another queued
+      // start. Placed FIRST so it catches every re-entrant shape below,
+      // not just the "already running" one.
+      if (starting !== null) return;
+
+      const fingerprint = currentConfigFingerprint(settingsStore.getSettings());
 
       if (running) {
         // Field revision (2026-08-27, binding, "adapter-type switch" fix):
@@ -1257,7 +1316,30 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
         const generationIsTerminal = current === null || currentState === 'failed' || currentState === 'stopped';
         const fingerprintChanged = activeFingerprint !== null && !fingerprintsEqual(activeFingerprint, fingerprint);
         if (!generationIsTerminal && !fingerprintChanged) return;
-        void doStop().then(launchFresh, launchFresh);
+        const p = doStop().then(launchFresh, launchFresh);
+        starting = p.finally(() => {
+          if (starting === p) starting = null;
+        });
+        return;
+      }
+
+      // P4g-FIX1 (binding, H1 -- Codex P4g-REV1 HIGH "ELM teardown is not
+      // serialized with the next ENET Start"): even when NOT currently
+      // `running` (e.g. a settings-change watcher just began tearing down
+      // the previous generation, clearing `running` before this `start()`
+      // is called), a teardown from EITHER adapter kind may still be
+      // in-flight (`stopping`, now set unconditionally by `doStop()` -- see
+      // its own comment) -- wait for it so the OLD transport is guaranteed
+      // closed before a NEW one connects, regardless of destination adapter
+      // type (previously this queuing only ever applied when switching TO
+      // enet, which combined with `stopping` only ever being set by ENET's
+      // own teardown, meant an ELM-stuck-in-connect generation followed by
+      // switching to ENET and pressing Start did not wait for anything).
+      if (stopping !== null) {
+        const p = stopping.then(launchFresh, launchFresh);
+        starting = p.finally(() => {
+          if (starting === p) starting = null;
+        });
         return;
       }
       launchFresh();

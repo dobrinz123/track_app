@@ -162,20 +162,27 @@ export interface AppSettings {
 }
 
 /**
- * Field revision (2026-08-27, binding): pure tap-counter for the "7 taps on
- * the About version text toggles developer mode" gesture -- `state` is
- * `null` before the first tap (or after a toggle just fired, resetting the
- * count); a tap outside `windowMs` of the previous one restarts the count at
- * 1 rather than accumulating indefinitely (so idle taps spread across a
- * session, e.g. 3 taps now and 4 taps an hour later, never silently
- * accumulate into an accidental toggle). `toggled` is `true` exactly on the
- * tap that reaches `threshold` -- the caller (`SettingsScreen`) flips
- * `developerModeEnabled` and shows the toast on THAT tap only, never on
- * every tap past the threshold while the user keeps tapping.
+ * Field revision (2026-08-27, binding; window semantics corrected P4g-FIX1):
+ * pure tap-counter for the "7 taps on the About version text toggles
+ * developer mode" gesture -- `state` is `null` before the first tap (or
+ * after a toggle just fired, resetting the count). `firstTapAtMs` anchors
+ * the window to the FIRST tap of the current run: the whole sequence (tap 1
+ * through the tap that reaches `threshold`) must land within `windowMs` of
+ * THAT first tap, not merely within `windowMs` of the immediately preceding
+ * tap -- otherwise taps spaced just under the window apart (e.g. 1.9s, each
+ * individually "recent") would accumulate indefinitely and the gesture would
+ * effectively have no time limit. A tap that arrives after the current run's
+ * window has elapsed restarts the count at 1 and becomes the new anchor (so
+ * idle taps spread across a session, e.g. 3 taps now and 4 taps an hour
+ * later, never silently accumulate into an accidental toggle). `toggled` is
+ * `true` exactly on the tap that reaches `threshold` -- the caller
+ * (`SettingsScreen`) flips `developerModeEnabled` and shows the toast on
+ * THAT tap only, never on every tap past the threshold while the user keeps
+ * tapping.
  */
 export interface DevTapState {
   count: number;
-  lastTapAtMs: number;
+  firstTapAtMs: number;
 }
 
 export const DEV_TAP_THRESHOLD = 7;
@@ -187,10 +194,15 @@ export function registerDevTap(
   threshold: number = DEV_TAP_THRESHOLD,
   windowMs: number = DEV_TAP_WINDOW_MS,
 ): { state: DevTapState; toggled: boolean } {
-  const withinWindow = state !== null && nowMs - state.lastTapAtMs <= windowMs;
-  const count = withinWindow ? state.count + 1 : 1;
+  const withinWindow = state !== null && nowMs - state.firstTapAtMs <= windowMs;
+  if (!withinWindow) {
+    const toggled = threshold <= 1;
+    return { state: { count: toggled ? 0 : 1, firstTapAtMs: nowMs }, toggled };
+  }
+  const state2 = state as DevTapState;
+  const count = state2.count + 1;
   const toggled = count >= threshold;
-  return { state: { count: toggled ? 0 : count, lastTapAtMs: nowMs }, toggled };
+  return { state: { count: toggled ? 0 : count, firstTapAtMs: toggled ? nowMs : state2.firstTapAtMs }, toggled };
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {

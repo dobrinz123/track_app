@@ -566,6 +566,107 @@ describe('telemetryProvider: M1 -- stop() aborts an in-flight auto-discovery sca
   });
 });
 
+/**
+ * P4g-FIX1 (binding, H2 -- Codex P4g-REV1 HIGH "settings changes during
+ * auto-discovery are ignored"): the settings-change watcher used to
+ * early-return whenever `current === null`, which is true for the WHOLE
+ * duration of EITHER auto-discovery phase (both deliberately null `current`
+ * before scanning) -- so a user switching adapterType, or editing the host,
+ * while a scan was in flight was silently ignored: the scan could still
+ * persist its (now-stale) hit and build a session from it. Fixed two ways:
+ * the watcher now aborts an in-flight scan regardless of `current`, AND
+ * `runAutoDiscoveryThenConnect`/`runAutoDiscoveryOnFailure` each compare the
+ * fingerprint captured at scan START against the one at scan COMPLETION,
+ * discarding (no persist, no session, reservation released) on a mismatch --
+ * belt and braces, since neither `running` nor `generationCounter` alone
+ * change from a bare settings edit that never called stop()/start().
+ */
+describe('telemetryProvider: P4g-FIX1 H2 -- a settings change during an in-flight ENET discovery scan is honored, not ignored (Codex P4g-REV1 HIGH)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    tracker.script = new Map();
+    tracker.connectedHostPorts = [];
+    tracker.connectDelayByHostPort = new Map();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('adapterType switched to elm327 WHILE the no-host discovery preamble is scanning -- the eventual level-2 hit is discarded: nothing persisted, no ENET session builds, the reservation is released', async () => {
+    tracker.connectDelayByHostPort.set('192.168.4.1:6801', 10_000); // stuck "in flight" for the duration of this test.
+    tracker.script.set('192.168.4.1:6801', 'level2'); // WOULD be a hit, if ever allowed to complete.
+    const reservation = createEnetAdapterReservation();
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet' }); // no host -> immediate discovery.
+
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: monotonicCounter(),
+      isDev: true,
+      getNetworkInfo: NO_PHONE_INFO,
+      enetAdapterReservation: reservation,
+    });
+
+    provider.start();
+    await flushMicrotasks();
+    expect(provider.getDiagnostics().state).toBe('connecting'); // scanning -- the candidate is deliberately stuck.
+    expect(reservation.holder()).toBe('provider');
+
+    // PRIOR bug (H2): the settings watcher early-returned here on `current
+    // === null` (true for the WHOLE discovery window) -- this switch was
+    // silently ignored, and the scan's eventual hit would be persisted OVER
+    // it and used to build an ENET session anyway.
+    store.update({ adapterType: 'elm327' });
+    // The abort signal is polled every ~10ms internally by `runDiscovery` --
+    // a modest advance is enough for it to notice and unwind, without
+    // waiting out the full (stuck) connect() delay.
+    await vi.advanceTimersByTimeAsync(50);
+    await flushMicrotasks();
+
+    expect(reservation.holder()).toBeNull(); // released -- the aborted scan's claim does not outlive the switch.
+    expect(store.getSettings().enetHost).toBe(''); // nothing persisted -- the level-2 hit was discarded.
+    expect(store.getSettings().enetHostProvenance).toBe('');
+    expect(provider.getDiagnostics().adapterType).toBe('elm327'); // reflects the user's own switch, not a stale ENET session.
+
+    // Let the stuck candidate's connect() finally settle (late) -- proves
+    // it is fully abandoned: no further discovery activity, nothing
+    // re-applies the hit after the fact.
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flushMicrotasks();
+    expect(store.getSettings().enetHost).toBe('');
+  });
+
+  it("the SAME check applies to a plain host edit (adapterType stays 'enet') mid-scan -- the stale scan's hit is discarded, the user's edited host is left untouched", async () => {
+    tracker.connectDelayByHostPort.set('192.168.4.1:6801', 10_000);
+    tracker.script.set('192.168.4.1:6801', 'level2');
+    const reservation = createEnetAdapterReservation();
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet' }); // no host -> immediate discovery.
+
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: monotonicCounter(),
+      isDev: true,
+      getNetworkInfo: NO_PHONE_INFO,
+      enetAdapterReservation: reservation,
+    });
+
+    provider.start();
+    await flushMicrotasks();
+    expect(reservation.holder()).toBe('provider');
+
+    // The user manually enters a host WHILE the scan (for the empty host)
+    // is still running -- same adapterType, different fingerprint (host).
+    store.update({ enetHost: '10.0.0.55' });
+    await vi.advanceTimersByTimeAsync(50);
+    await flushMicrotasks();
+
+    expect(reservation.holder()).toBeNull();
+    expect(store.getSettings().enetHost).toBe('10.0.0.55'); // the user's OWN edit -- untouched by the aborted scan.
+    expect(store.getSettings().enetHostProvenance).toBe(''); // never overwritten with a "discovered" provenance from the stale scan.
+  });
+});
+
 describe('telemetryProvider: adapterType "elm327" never runs ENET discovery (offline mandate, binding)', () => {
   beforeEach(() => {
     vi.useFakeTimers();
