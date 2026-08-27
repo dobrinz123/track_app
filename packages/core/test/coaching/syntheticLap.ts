@@ -40,7 +40,16 @@ export const SYNTHETIC_CORNER: Corner = Object.freeze({
 
 const GRAVITY_MPS2 = 9.80665;
 
-export type SyntheticChannels = 'none' | 'pedal' | 'throttlePlate' | 'imu' | 'all';
+export type SyntheticChannels =
+  | 'none'
+  | 'pedal'
+  | 'throttlePlate'
+  | 'imu'
+  | 'all'
+  | 'brake'
+  | 'steering'
+  | 'yaw'
+  | 'tier2';
 
 export interface SyntheticLapOptions {
   channels?: SyntheticChannels;
@@ -59,9 +68,20 @@ export interface SyntheticLapOptions {
    * point the way real laps do. Positive = braked later.
    */
   profileShiftM?: number;
+  /** Replaces the analytic longitudinal profile (m/s^2 at a lap distance). */
+  accelAt?: (distanceM: number) => number;
+  /** Replaces the analytic accelerator-pedal profile (%, at a lap distance). */
+  pedalAt?: (distanceM: number) => number;
+  /** Drops `speedKph` from every sample (a GNSS fix with no Doppler speed). */
+  withoutDopplerSpeed?: boolean;
+  /**
+   * Centreline heading at a lap distance, degrees. Emitted as
+   * `centrelineHeadingDeg` so the yaw check has an implied-yaw reference.
+   */
+  centrelineHeadingDeg?: (distanceM: number) => number;
 }
 
-function accelAt(distanceM: number): number {
+function defaultAccelAt(distanceM: number): number {
   if (distanceM < 360) return 0;
   if (distanceM < 400) return -0.8;
   if (distanceM < 600) return -3;
@@ -70,10 +90,26 @@ function accelAt(distanceM: number): number {
   return 0;
 }
 
-function pedalAt(distanceM: number): number {
+function defaultPedalAt(distanceM: number): number {
   if (distanceM < 360) return 90;
   if (distanceM < 660) return 0;
   return Math.min(90, (distanceM - 660) * 0.9);
+}
+
+/** Tier-2 brake channel: pressure only while the analytic profile really brakes. */
+function brakeAt(distanceM: number): number {
+  return distanceM >= 400 && distanceM < 600 ? 45 : 0;
+}
+
+/** Tier-2 steering angle: 0 -> 30 deg -> 0 across the corner (turn-in near 610 m). */
+function steeringAt(distanceM: number): number {
+  if (distanceM < 600 || distanceM > 700) return 0;
+  return distanceM <= 650 ? (distanceM - 600) * 0.6 : (700 - distanceM) * 0.6;
+}
+
+/** Gyro yaw rate consistent with the steering profile, deg/s. */
+function yawAt(distanceM: number): number {
+  return steeringAt(distanceM) * 0.5;
 }
 
 export function syntheticLap(options: SyntheticLapOptions = {}): CornerLapSample[] {
@@ -88,6 +124,8 @@ export function syntheticLap(options: SyntheticLapOptions = {}): CornerLapSample
   let index = 0;
 
   const shiftM = options.profileShiftM ?? 0;
+  const accelAt = options.accelAt ?? defaultAccelAt;
+  const pedalAt = options.pedalAt ?? defaultPedalAt;
   while (distanceM < SYNTHETIC_TOTAL_LENGTH_M) {
     const accel = accelAt(distanceM - shiftM) * speedScale;
     const inCorner = distanceM >= 620 && distanceM <= 680;
@@ -99,20 +137,26 @@ export function syntheticLap(options: SyntheticLapOptions = {}): CornerLapSample
     const mode = options.channels ?? 'none';
     if (mode === 'pedal' || mode === 'all') channels.accelPedalPct = pedalAt(distanceM - shiftM);
     if (mode === 'throttlePlate') channels.throttlePct = Math.max(14, pedalAt(distanceM - shiftM));
-    if (mode === 'imu' || mode === 'all') {
+    if (mode === 'imu' || mode === 'all' || mode === 'tier2') {
       channels.longG = accel / GRAVITY_MPS2;
       channels.latG = latG;
     }
+    if (mode === 'brake' || mode === 'tier2') channels.brakePct = brakeAt(distanceM - shiftM);
+    if (mode === 'steering' || mode === 'tier2') channels.steeringDeg = steeringAt(distanceM);
+    if (mode === 'yaw') channels.yawRateDps = yawAt(distanceM);
 
     samples.push({
       tMonoMs: tMs,
       distanceM: reportedDistanceM,
-      speedKph: speedMps * 3.6,
+      ...(options.withoutDopplerSpeed === true ? {} : { speedKph: speedMps * 3.6 }),
       accuracyM,
       lateralM: options.lateralM?.(reportedDistanceM, index) ?? 0,
       headingDeg:
         options.headingDeg?.(reportedDistanceM, index) ??
         ((reportedDistanceM / SYNTHETIC_TOTAL_LENGTH_M) * 360) % 360,
+      ...(options.centrelineHeadingDeg === undefined
+        ? {}
+        : { centrelineHeadingDeg: options.centrelineHeadingDeg(reportedDistanceM) }),
       ...(Object.keys(channels).length > 0 ? { channels } : {}),
     });
 

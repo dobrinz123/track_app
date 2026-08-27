@@ -107,7 +107,8 @@ describe('analyzeSession: shape and honesty', () => {
     const finding = insights.timeLossRanking[0];
     expect(finding?.cornerId).toBe(1);
     expect(finding?.referenceLapNumber).toBe(insights.referenceLapNumber);
-    expect(finding?.medianLapNumber).toBe(insights.medianCleanLapNumber);
+    expect(finding?.comparisonLapNumber).toBe(insights.comparisonLapNumber);
+    expect(insights.comparisonLapNumber).toBe(insights.medianCleanLapNumber);
     expect(finding?.deltaMs).not.toBeNull();
     expect(finding?.bestSectorMs).not.toBeNull();
     expect(finding?.bestSectorLapNumber).not.toBeNull();
@@ -121,12 +122,15 @@ describe('analyzeSession: shape and honesty', () => {
     expect(corner?.envelope?.evidenceLapIds).toEqual([1, 2, 3]);
   });
 
-  it('ranks the track sectors against the reference lap when sector times are given', () => {
+  it('ranks the track sectors with the SAME comparison the corner ranking uses (M4)', () => {
     const insights = analyzeSession(threeLapSession(), CORNERS, CONTEXT);
     expect(insights.sectorTimeLoss.map((entry) => entry.sectorIndex).sort()).toEqual([0, 1]);
     for (const sector of insights.sectorTimeLoss) {
       expect(sector.referenceLapNumber).toBe(insights.referenceLapNumber);
-      expect(sector.lostMs).toBeGreaterThanOrEqual(0);
+      expect(sector.comparisonLapNumber).toBe(insights.comparisonLapNumber);
+      // Representative lap vs the best-clean reference -- not "the reference
+      // lost time to some other lap's best sector".
+      expect(sector.lostMs).toBeCloseTo(sector.comparisonMs - sector.referenceMs, 6);
     }
   });
 
@@ -220,5 +224,127 @@ describe('analyzeSession: honesty gates', () => {
     expect(insights.corners).toHaveLength(1);
     expect(insights.corners[0]?.perLap).toEqual([]);
     expect(insights.limitations.map((entry) => entry.code)).toContain('NO_CLEAN_LAPS');
+  });
+});
+
+describe('analyzeSession: exactly two clean laps (H7)', () => {
+  function twoLapSession(): SessionLapInput[] {
+    clock = 0;
+    return [lapInput(1, { profileShiftM: 0 }), lapInput(2, { profileShiftM: 14, speedScale: 1.02 })];
+  }
+
+  it('produces a time-loss analysis at exactly the honesty-gate minimum', () => {
+    const insights = analyzeSession(twoLapSession(), CORNERS, CONTEXT);
+    expect(insights.cleanLapCount).toBe(2);
+    expect(insights.timeLossRanking.length).toBeGreaterThan(0);
+    const finding = insights.timeLossRanking[0];
+    expect(finding?.deltaMs).not.toBeNull();
+    // The comparison lap is the OTHER clean lap, never the reference itself.
+    expect(finding?.comparisonLapNumber).not.toBe(insights.referenceLapNumber);
+    expect(insights.comparisonLapNumber).toBe(finding?.comparisonLapNumber);
+    expect(insights.limitations.map((entry) => entry.code)).not.toContain('FEW_CLEAN_LAPS');
+  });
+
+  it('keeps using the median once there are three or more clean laps', () => {
+    const insights = analyzeSession(threeLapSession(), CORNERS, CONTEXT);
+    expect(insights.comparisonLapNumber).toBe(insights.medianCleanLapNumber);
+  });
+});
+
+describe('analyzeSession: unverified laps (H5)', () => {
+  function strippedSession(): SessionLapInput[] {
+    clock = 0;
+    return [lapInput(1), lapInput(2, { profileShiftM: 12 })].map((entry) => ({
+      ...entry,
+      samples: entry.samples.map(({ tMonoMs, distanceM, speedKph }) => ({
+        tMonoMs,
+        distanceM,
+        speedKph,
+      })),
+    }));
+  }
+
+  it('never counts a lap whose safety checks could not run as clean', () => {
+    const insights = analyzeSession(strippedSession(), CORNERS, CONTEXT);
+    expect(insights.cleanLapCount).toBe(0);
+    expect(insights.laps.every((lap) => lap.status === 'unverified')).toBe(true);
+    expect(insights.referenceLapNumber).toBeNull();
+    expect(insights.envelope.cleanLapIds).toEqual([]);
+  });
+
+  it('states the unavailable checks as a limitation instead of staying silent', () => {
+    const insights = analyzeSession(strippedSession(), CORNERS, CONTEXT);
+    const limitation = insights.limitations.find((entry) => entry.code === 'UNVERIFIED_LAPS');
+    expect(limitation).toBeDefined();
+    expect(limitation?.lapNumbers).toEqual([1, 2]);
+    expect(limitation?.checks).toContain('offTrack');
+    expect(limitation?.checks).toContain('yawSpike');
+  });
+});
+
+describe('analyzeSession: non-finite and duplicated lap metadata (M6)', () => {
+  it('refuses to make a lap with a NaN duration the reference', () => {
+    clock = 0;
+    const broken = lapInput(1);
+    const session: SessionLapInput[] = [
+      { ...broken, lap: { ...broken.lap, durationMs: Number.NaN } },
+      lapInput(2, { profileShiftM: 8 }),
+      lapInput(3, { profileShiftM: -6 }),
+    ];
+    const insights = analyzeSession(session, CORNERS, CONTEXT);
+    expect(insights.referenceLapNumber).not.toBe(1);
+    expect(insights.laps[0]?.clean).toBe(false);
+    expect(insights.laps[0]?.reasons).toContain('incomplete');
+    expect(Number.isFinite(insights.referenceDurationMs ?? Number.NaN)).toBe(true);
+    expect(JSON.stringify(insights)).not.toMatch(/NaN|Infinity/);
+  });
+
+  it('refuses an Infinity duration the same way', () => {
+    clock = 0;
+    const broken = lapInput(1);
+    const insights = analyzeSession(
+      [{ ...broken, lap: { ...broken.lap, durationMs: Number.POSITIVE_INFINITY } }],
+      CORNERS,
+      CONTEXT,
+    );
+    expect(insights.cleanLapCount).toBe(0);
+    expect(insights.laps[0]?.reasons).toContain('incomplete');
+  });
+
+  it('rejects a session that carries the same lap number twice', () => {
+    clock = 0;
+    const session = [lapInput(1), lapInput(1, { profileShiftM: 5 })];
+    expect(() => analyzeSession(session, CORNERS, CONTEXT)).toThrow(RangeError);
+  });
+});
+
+describe('analyzeSession: consistency evidence basis (M7)', () => {
+  /** A second corner on the flat-out straight: no braking evidence at all. */
+  const STRAIGHT_CORNER = {
+    ...SYNTHETIC_CORNER,
+    id: 2,
+    entryDistanceM: 100,
+    apexDistanceM: 130,
+    exitDistanceM: 160,
+  };
+
+  it('declares which components a consistency score was built from', () => {
+    const insights = analyzeSession(threeLapSession(), [SYNTHETIC_CORNER, STRAIGHT_CORNER], CONTEXT);
+    const corner1 = insights.corners.find((corner) => corner.cornerId === 1)?.consistency;
+    const corner2 = insights.corners.find((corner) => corner.cornerId === 2)?.consistency;
+    expect(corner1?.basis).toContain('brake');
+    expect(corner1?.basis).toContain('sector');
+    expect(corner2?.basis).not.toContain('brake');
+  });
+
+  it('only ranks corners whose scores share the same evidence basis', () => {
+    const insights = analyzeSession(threeLapSession(), [SYNTHETIC_CORNER, STRAIGHT_CORNER], CONTEXT);
+    const bases = new Set(insights.consistencyRanking.map((entry) => entry.basis.join('+')));
+    expect(bases.size).toBe(1);
+    expect(insights.consistencyRanking.every((entry) => entry.comparable)).toBe(true);
+    const excluded = insights.corners
+      .map((corner) => corner.consistency)
+      .filter((entry) => entry !== null && !entry.comparable);
+    expect(excluded.length).toBeGreaterThan(0);
   });
 });

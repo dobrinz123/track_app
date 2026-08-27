@@ -1,4 +1,5 @@
 import type { LocationSample } from '../contracts';
+import { polylineLength } from '../geometry';
 import { TrackMatcher, type TrackMatcherConfig } from '../matching';
 import type { RuntimeProfile } from '../profile';
 import type { TelemetrySample } from '../telemetry/contracts';
@@ -93,11 +94,54 @@ export interface ProjectedLap {
   rejected: number;
   /** Samples dropped because they moved backwards beyond the hysteresis. */
   backSteps: number;
+  /**
+   * Samples kept but whose distance was CLAMPED to the furthest progress seen
+   * so far (a back-step inside the hysteresis). The sample's channels and time
+   * are real; only its distance is held, so the emitted series is monotone.
+   */
+  clamped: number;
+}
+
+/**
+ * Direction of the centreline at a lap distance (metres from start/finish),
+ * degrees, 0 = north -- the same convention as `LocationSample.headingDeg`.
+ * The rate of change of this heading along the driven path IS the yaw rate the
+ * track geometry implies (curvature x speed).
+ */
+function centrelineHeadingAt(
+  runtime: RuntimeProfile,
+  lapDistanceM: number,
+  totalLengthM: number,
+): number | undefined {
+  const centreline = runtime.centerline;
+  const cumulative = runtime.cumulativeDistancesM;
+  if (centreline.length < 2 || cumulative.length < 2) return undefined;
+  const raw = normalizeDistance(lapDistanceM + runtime.startFinishGate.distanceM, totalLengthM);
+  let low = 0;
+  let high = cumulative.length - 1;
+  while (high - low > 1) {
+    const mid = (low + high) >> 1;
+    if ((cumulative[mid] ?? 0) <= raw) low = mid;
+    else high = mid;
+  }
+  const a = centreline[low];
+  const b = centreline[(low + 1) % centreline.length];
+  if (a === undefined || b === undefined) return undefined;
+  const de = b.e - a.e;
+  const dn = b.n - a.n;
+  if (de === 0 && dn === 0) return undefined;
+  return normalizeDistance((Math.atan2(de, dn) * 180) / Math.PI, 360);
 }
 
 /**
  * Projects raw GNSS samples of ONE lap onto the circuit centreline through the
  * production matcher and returns analysis-ready, monotone samples.
+ *
+ * Monotone is a guarantee, not a hope: a projection that steps backwards by
+ * more than `hysteresisM` is dropped, and one that steps backwards by less is
+ * kept with its distance CLAMPED to the furthest progress already reached. No
+ * consecutive pair of emitted samples ever moves backwards (the single
+ * start/finish wrap aside), so downstream unwrapping cannot reorder events.
  */
 export function projectLapSamples(
   runtime: RuntimeProfile,
@@ -108,10 +152,13 @@ export function projectLapSamples(
   if (!Number.isFinite(hysteresisM) || hysteresisM < 0) {
     throw new RangeError('hysteresisM must be a non-negative, finite number of metres');
   }
+  const totalLengthM = polylineLength(runtime.centerline);
+  assertPositiveLength(totalLengthM, 'centreline length');
   const matcher = new TrackMatcher(runtime, options.matcher ?? {});
   const samples: CornerLapSample[] = [];
   let rejected = 0;
   let backSteps = 0;
+  let clamped = 0;
   let previousProgressM: number | undefined;
 
   for (const sample of locationSamples) {
@@ -124,18 +171,28 @@ export function projectLapSamples(
       backSteps += 1;
       continue;
     }
-    previousProgressM = Math.max(previousProgressM ?? match.unwrappedProgressM, match.unwrappedProgressM);
+    const heldBack = previousProgressM !== undefined && match.unwrappedProgressM < previousProgressM;
+    if (heldBack) clamped += 1;
+    const progressM = heldBack
+      ? (previousProgressM as number)
+      : match.unwrappedProgressM;
+    const distanceM = heldBack
+      ? normalizeDistance(progressM, totalLengthM)
+      : match.distanceM;
+    previousProgressM = progressM;
+    const centrelineHeadingDeg = centrelineHeadingAt(runtime, distanceM, totalLengthM);
     samples.push({
       tMonoMs: match.tMono,
-      distanceM: match.distanceM,
+      distanceM,
       ...(sample.speedMps === undefined ? {} : { speedKph: sample.speedMps * 3.6 }),
       ...(sample.accuracyM === undefined ? {} : { accuracyM: sample.accuracyM }),
       lateralM: match.lateralM,
       ...(sample.headingDeg === undefined ? {} : { headingDeg: sample.headingDeg }),
+      ...(centrelineHeadingDeg === undefined ? {} : { centrelineHeadingDeg }),
     });
   }
 
-  return { samples, rejected, backSteps };
+  return { samples, rejected, backSteps, clamped };
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +348,124 @@ function interpolateAt(
   return a.value + (b.value - a.value) * ratio;
 }
 
+/** Half-width of the moving average applied to a ds/dt speed profile, metres. */
+const SPEED_SMOOTHING_HALF_WIDTH_M = 7;
+/** Below this the car is standing still and `ds/v` cannot carry the clock. */
+const MIN_INTEGRATION_SPEED_MPS = 0.05;
+
+/**
+ * Fills the grid speed where GNSS Doppler was absent, from `ds/dt` of the
+ * timestamp curve, and smooths ONLY those derived values (the Doppler speed is
+ * a measurement and is never altered) -- `analysis-engine.md` §2.2.
+ */
+function fillDerivedSpeed(
+  order: readonly number[],
+  targets: readonly (number | null)[],
+  elapsedMs: readonly (number | null)[],
+  speedKph: (number | null)[],
+  stepM: number,
+): void {
+  const derived: (number | null)[] = new Array<number | null>(order.length).fill(null);
+  for (let position = 0; position < order.length; position += 1) {
+    const index = order[position];
+    if (index === undefined || speedKph[index] !== null) continue;
+    const before = order[Math.max(0, position - 1)];
+    const after = order[Math.min(order.length - 1, position + 1)];
+    if (before === undefined || after === undefined || before === after) continue;
+    const ds = (targets[after] ?? 0) - (targets[before] ?? 0);
+    const dtMs = (elapsedMs[after] ?? 0) - (elapsedMs[before] ?? 0);
+    if (!(ds > 0) || !(dtMs > 0)) continue;
+    derived[position] = (ds / (dtMs / 1_000)) * 3.6;
+  }
+  const window = Math.max(1, Math.round(SPEED_SMOOTHING_HALF_WIDTH_M / stepM));
+  for (let position = 0; position < order.length; position += 1) {
+    const index = order[position];
+    if (index === undefined || derived[position] === null) continue;
+    let sum = 0;
+    let count = 0;
+    for (let probe = position - window; probe <= position + window; probe += 1) {
+      const value = probe < 0 || probe >= order.length ? null : derived[probe];
+      if (value === null || value === undefined) continue;
+      sum += value;
+      count += 1;
+    }
+    speedKph[index] = count === 0 ? (derived[position] ?? null) : sum / count;
+  }
+}
+
+/**
+ * Turns `t(s)` into the integral the design asks for: `t(s) = sum ds / v(s)`.
+ *
+ * The speed profile decides HOW the time is distributed inside each pair of
+ * real samples (so sub-sample resolution follows the physics, not timestamp
+ * jitter), while the measured timestamps still anchor both ends of every
+ * interval -- a standstill, where `ds/v` carries no clock at all, therefore
+ * keeps its real duration. Where no speed profile exists the linear-in-distance
+ * interpolation stands.
+ */
+function integrateElapsedFromSpeed(
+  order: readonly number[],
+  targets: readonly (number | null)[],
+  elapsedMs: (number | null)[],
+  speedKph: readonly (number | null)[],
+  unwrapped: readonly UnwrappedSample[],
+  originTMonoMs: number,
+): void {
+  if (order.length < 2) return;
+  // Cumulative "model time" (seconds) along the grid: sum of ds / v.
+  const model: number[] = new Array<number>(order.length).fill(0);
+  for (let position = 1; position < order.length; position += 1) {
+    const previous = order[position - 1];
+    const current = order[position];
+    if (previous === undefined || current === undefined) return;
+    const ds = (targets[current] ?? 0) - (targets[previous] ?? 0);
+    const a = speedKph[previous];
+    const b = speedKph[current];
+    if (a === null || a === undefined || b === null || b === undefined || !(ds > 0)) return;
+    const mean = Math.max(MIN_INTEGRATION_SPEED_MPS, (a + b) / 2 / 3.6);
+    model[position] = (model[position - 1] ?? 0) + ds / mean;
+  }
+  const modelAt = (du: number): number | null => {
+    let low = 0;
+    let high = order.length - 1;
+    const firstTarget = targets[order[0] as number] ?? 0;
+    const lastTarget = targets[order[order.length - 1] as number] ?? 0;
+    if (du <= firstTarget) return model[0] ?? 0;
+    if (du >= lastTarget) return model[order.length - 1] ?? 0;
+    while (high - low > 1) {
+      const mid = (low + high) >> 1;
+      if ((targets[order[mid] as number] ?? 0) <= du) low = mid;
+      else high = mid;
+    }
+    const lowTarget = targets[order[low] as number] ?? 0;
+    const highTarget = targets[order[high] as number] ?? 0;
+    const lowModel = model[low] ?? 0;
+    const highModel = model[high] ?? 0;
+    if (highTarget === lowTarget) return lowModel;
+    return lowModel + ((highModel - lowModel) * (du - lowTarget)) / (highTarget - lowTarget);
+  };
+
+  let cursor = 0;
+  for (const index of order) {
+    const target = targets[index];
+    if (target === null || target === undefined) continue;
+    while (cursor + 1 < unwrapped.length && (unwrapped[cursor + 1]?.du ?? 0) < target) cursor += 1;
+    const a = unwrapped[cursor];
+    const b = unwrapped[cursor + 1];
+    if (a === undefined || b === undefined) continue;
+    if (target < a.du || target > b.du) continue;
+    const spanMs = b.tMonoMs - a.tMonoMs;
+    const modelA = modelAt(a.du);
+    const modelB = modelAt(b.du);
+    if (modelA === null || modelB === null) continue;
+    const modelSpan = modelB - modelA;
+    if (!(modelSpan > 0) || !Number.isFinite(spanMs)) continue;
+    const fraction = ((modelAt(target) ?? modelA) - modelA) / modelSpan;
+    if (!Number.isFinite(fraction)) continue;
+    elapsedMs[index] = a.tMonoMs + fraction * spanMs - originTMonoMs;
+  }
+}
+
 /**
  * Resamples one lap onto a fixed distance grid. Grid points outside the
  * sampled distance range, or inside a gap wider than `maxBridgeM`, are `null`
@@ -359,6 +534,8 @@ export function resampleLapToDistanceGrid(
     .filter((sample) => sample.speedKph !== null)
     .map((sample) => ({ du: sample.du, value: sample.speedKph as number }));
 
+  // --- pass 1: coverage, the timestamp-interpolated time, Doppler speed ------
+  const targets: (number | null)[] = new Array<number | null>(gridSize).fill(null);
   let coveredCount = 0;
   for (let index = 0; index < gridSize; index += 1) {
     const base = index * stepM;
@@ -376,6 +553,7 @@ export function resampleLapToDistanceGrid(
     if (target === null) continue;
     const t = interpolateAt(timePoints, target, maxBridgeM);
     if (t === null) continue;
+    targets[index] = target;
     elapsedMs[index] = t - first.tMonoMs;
     covered[index] = true;
     coveredCount += 1;
@@ -387,6 +565,15 @@ export function resampleLapToDistanceGrid(
       series[index] = interpolateAt(points, target, maxBridgeM);
     }
   }
+
+  // Grid points in TRAVEL order (a lap may start anywhere on the grid).
+  const order = distanceM
+    .map((_value, index) => index)
+    .filter((index) => covered[index] === true)
+    .sort((a, b) => (targets[a] ?? 0) - (targets[b] ?? 0));
+
+  fillDerivedSpeed(order, targets, elapsedMs, speedKph, stepM);
+  integrateElapsedFromSpeed(order, targets, elapsedMs, speedKph, unwrapped, first.tMonoMs);
 
   return {
     stepM,
@@ -424,7 +611,13 @@ export function deltaCurveMs(lap: DistanceGrid, reference: DistanceGrid): (numbe
 /**
  * Time gained (negative) or lost (positive) between two lap distances: the
  * change of the delta curve across the segment, which is independent of where
- * each lap's `elapsedMs` origin sits. `null` when either end is uncovered.
+ * each lap's `elapsedMs` origin sits. `null` when an end is uncovered.
+ *
+ * A segment that crosses the start/finish line is TWO stretches of the curve --
+ * `startM -> end of lap` and `start of lap -> endM` -- and its contribution is
+ * their sum. Subtracting `delta[endM] - delta[startM]` across the line instead
+ * would report a slower-everywhere lap as having GAINED almost a full lap's
+ * delta on that sector.
  */
 export function deltaOverSegmentMs(
   delta: readonly (number | null)[],
@@ -438,9 +631,33 @@ export function deltaOverSegmentMs(
     const wrapped = normalizeDistance(distance, grid.totalLengthM);
     return Math.min(delta.length - 1, Math.max(0, Math.round(wrapped / grid.stepM) % delta.length));
   };
-  const startValue = delta[indexOf(startM)];
-  const endValue = delta[indexOf(endM)];
-  if (startValue === null || startValue === undefined) return null;
-  if (endValue === null || endValue === undefined) return null;
-  return endValue - startValue;
+  const at = (index: number): number | null => {
+    const value = delta[index];
+    return value === null || value === undefined || !Number.isFinite(value) ? null : value;
+  };
+  const startValue = at(indexOf(startM));
+  const endValue = at(indexOf(endM));
+  if (startValue === null || endValue === null) return null;
+  if (!windowWraps(startM, endM, grid.totalLengthM)) return endValue - startValue;
+  // The lap's own last and first covered grid points stand for "end of lap" and
+  // "start of lap": the delta accumulated between them is a full lap's worth.
+  let lapEndIndex = -1;
+  for (let index = delta.length - 1; index >= 0; index -= 1) {
+    if (at(index) !== null) {
+      lapEndIndex = index;
+      break;
+    }
+  }
+  let lapStartIndex = -1;
+  for (let index = 0; index < delta.length; index += 1) {
+    if (at(index) !== null) {
+      lapStartIndex = index;
+      break;
+    }
+  }
+  if (lapEndIndex < indexOf(startM) || lapStartIndex > indexOf(endM)) return null;
+  const lapEndValue = at(lapEndIndex);
+  const lapStartValue = at(lapStartIndex);
+  if (lapEndValue === null || lapStartValue === null) return null;
+  return lapEndValue - startValue + (endValue - lapStartValue);
 }

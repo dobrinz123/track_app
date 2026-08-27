@@ -6,7 +6,7 @@ import type {
   TimeLossCause,
   TimeLossFinding,
 } from './sessionInsights';
-import type { CoachingChannelId, CornerMetrics, LapAnomalyReason } from './types';
+import type { CoachingChannelId, CornerMetrics, LapAnomalyReason, LapCheckId } from './types';
 
 /**
  * Template-generated session report in Romanian and English -- Phase 5 REVISION
@@ -67,9 +67,17 @@ function seconds(value: number, language: ReportLanguage): string {
   return `${formatNumber(value / 1_000, 2, language)} s`;
 }
 
-function signedSeconds(value: number, language: ReportLanguage): string {
-  const sign = value > 0 ? '+' : value < 0 ? '-' : '';
-  return `${sign}${formatNumber(Math.abs(value) / 1_000, 2, language)} s`;
+/**
+ * A time difference always reaches the reader as a VERB plus a magnitude
+ * ("you lost 0.20 s" / "you gained 0.20 s"), never as a signed number after
+ * "lost", which would read as "you lost -0.20 s".
+ */
+function gainOrLoss(value: number, language: ReportLanguage): string {
+  const magnitude = seconds(Math.abs(value), language);
+  if (language === 'ro') {
+    return value < 0 ? `ai câștigat ${magnitude}` : `ai pierdut ${magnitude}`;
+  }
+  return value < 0 ? `you gained ${magnitude}` : `you lost ${magnitude}`;
 }
 
 function lapTime(value: number, language: ReportLanguage): string {
@@ -172,6 +180,24 @@ const REASON_LABELS: Record<ReportLanguage, Record<LapAnomalyReason, string>> = 
   },
 };
 
+/** What each safety check actually looks at, for the "unverified" sentence. */
+const CHECK_LABELS: Record<ReportLanguage, Record<LapCheckId, string>> = {
+  ro: {
+    offTrack: 'poziția față de traseu',
+    yawSpike: 'derapaj / rotire',
+    decelSpike: 'decelerare',
+    gnssPoor: 'calitatea semnalului GPS',
+    coverage: 'acoperirea turului',
+  },
+  en: {
+    offTrack: 'position relative to the track',
+    yawSpike: 'slide or spin',
+    decelSpike: 'deceleration',
+    gnssPoor: 'GPS signal quality',
+    coverage: 'lap coverage',
+  },
+};
+
 const CAUSE_LABELS: Record<ReportLanguage, Record<TimeLossCause, string>> = {
   ro: {
     EARLIER_BRAKE: 'ai frânat mai devreme',
@@ -249,6 +275,11 @@ function channelNames(
   return channels.map((channel) => CHANNEL_LABELS[language][channel] ?? channel).join(', ');
 }
 
+function checkNames(checks: readonly LapCheckId[], language: ReportLanguage): string {
+  const names = checks.map((check) => CHECK_LABELS[language][check] ?? check);
+  return names.length === 0 ? (language === 'ro' ? 'verificările de siguranță' : 'the safety checks') : names.join(', ');
+}
+
 function overviewLines(insights: SessionInsights, language: ReportLanguage): string[] {
   const lines: string[] = [];
   const ro = language === 'ro';
@@ -273,7 +304,7 @@ function overviewLines(insights: SessionInsights, language: ReportLanguage): str
         : `Your clean lap times span ${seconds(consistency.spreadMs, language)} (best ${lapTime(consistency.bestMs, language)} on lap ${consistency.bestLapNumber}, slowest ${lapTime(consistency.worstMs, language)} on lap ${consistency.worstLapNumber}) — consistency score ${consistency.score}/100 over ${consistency.lapCount} laps.`,
     );
   }
-  const anomalous = insights.laps.filter((lap) => !lap.clean);
+  const anomalous = insights.laps.filter((lap) => lap.status === 'anomalous');
   if (anomalous.length > 0) {
     const why = anomalous.map((lap) => {
       const reasons = lap.reasons.map((reason) => REASON_LABELS[language][reason]).join(', ');
@@ -284,6 +315,18 @@ function overviewLines(insights: SessionInsights, language: ReportLanguage): str
       ro
         ? `Tururi excluse din comparații: ${lapList(anomalous.map((lap) => lap.lapNumber), language)} (${why.join('; ')}).`
         : `Laps excluded from the comparisons: ${lapList(anomalous.map((lap) => lap.lapNumber), language)} (${why.join('; ')}).`,
+    );
+  }
+  // An unverified lap is not an anomalous lap: nothing went wrong on it, the
+  // data simply cannot prove it was clean. Saying "unspecified reason" would be
+  // an invented fault.
+  const unverified = insights.laps.filter((lap) => lap.status === 'unverified');
+  if (unverified.length > 0) {
+    const checks = [...new Set(unverified.flatMap((lap) => lap.unavailableChecks))];
+    lines.push(
+      ro
+        ? `Tururile ${lapList(unverified.map((lap) => lap.lapNumber), language)} nu au putut fi verificate (lipsesc datele pentru: ${checkNames(checks, language)}), așa că nu intră în comparații.`
+        : `Laps ${lapList(unverified.map((lap) => lap.lapNumber), language)} could not be verified (no data for: ${checkNames(checks, language)}), so they stay out of the comparisons.`,
     );
   }
   if (insights.availability.available.length > 0) {
@@ -307,6 +350,13 @@ function limitationLine(limitation: Limitation, language: ReportLanguage): strin
       return ro
         ? `Doar ${limitation.count ?? 0} tur curat: comparațiile și scorurile de constanță au nevoie de cel puțin 2, așa că raportul rămâne la fapte.`
         : `Only ${limitation.count ?? 0} clean lap: comparisons and consistency scores need at least 2, so the report stays at facts.`;
+    case 'UNVERIFIED_LAPS': {
+      const laps = limitation.lapNumbers ?? [];
+      const one = laps.length === 1;
+      return ro
+        ? `${one ? 'Turul' : 'Tururile'} ${lapList(laps, language)} nu ${one ? 'a putut fi verificat' : 'au putut fi verificate'}: lipsesc datele pentru ${checkNames(limitation.checks ?? [], language)}, așa că ${one ? 'nu poate fi declarat curat' : 'nu pot fi declarate curate'} și ${one ? 'nu intră' : 'nu intră'} în comparații.`
+        : `${one ? 'Lap' : 'Laps'} ${lapList(laps, language)} could not be verified: there is no data for ${checkNames(limitation.checks ?? [], language)}, so ${one ? 'it cannot be called clean' : 'they cannot be called clean'} and ${one ? 'it stays' : 'they stay'} out of the comparisons.`;
+    }
     case 'UNSUPPORTED_CHANNELS':
       return ro
         ? `Mașina/adaptorul nu oferă: ${channelNames(limitation.channels ?? [], language)} — metricile care depind de ele lipsesc.`
@@ -344,24 +394,24 @@ function timeLossLine(finding: TimeLossFinding, language: ReportLanguage): strin
   if (finding.deltaMs !== null) {
     parts.push(
       ro
-        ? `pe turul ${finding.medianLapNumber} ai pierdut ${signedSeconds(finding.deltaMs, language)} față de turul ${finding.referenceLapNumber}`
-        : `on lap ${finding.medianLapNumber} you lost ${signedSeconds(finding.deltaMs, language)} against lap ${finding.referenceLapNumber}`,
+        ? `pe turul ${finding.comparisonLapNumber} ${gainOrLoss(finding.deltaMs, language)} față de turul ${finding.referenceLapNumber}`
+        : `on lap ${finding.comparisonLapNumber} ${gainOrLoss(finding.deltaMs, language)} against lap ${finding.referenceLapNumber}`,
     );
   }
   if (
     finding.sectorLossMs !== null &&
     finding.bestSectorMs !== null &&
     finding.bestSectorLapNumber !== null &&
-    finding.medianSectorMs !== null
+    finding.comparisonSectorMs !== null
   ) {
     parts.push(
       finding.sectorLossMs > 0
         ? ro
-          ? `ai trecut virajul în ${seconds(finding.medianSectorMs, language)}, cu ${seconds(finding.sectorLossMs, language)} mai mult decât cel mai bun al tău (${seconds(finding.bestSectorMs, language)}, turul ${finding.bestSectorLapNumber})`
-          : `you took ${seconds(finding.medianSectorMs, language)} through it, ${seconds(finding.sectorLossMs, language)} more than your own best (${seconds(finding.bestSectorMs, language)} on lap ${finding.bestSectorLapNumber})`
+          ? `ai trecut virajul în ${seconds(finding.comparisonSectorMs, language)}, cu ${seconds(finding.sectorLossMs, language)} mai mult decât cel mai bun al tău (${seconds(finding.bestSectorMs, language)}, turul ${finding.bestSectorLapNumber})`
+          : `you took ${seconds(finding.comparisonSectorMs, language)} through it, ${seconds(finding.sectorLossMs, language)} more than your own best (${seconds(finding.bestSectorMs, language)} on lap ${finding.bestSectorLapNumber})`
         : ro
-          ? `ai trecut virajul în ${seconds(finding.medianSectorMs, language)}, cel mai bun timp al tău prin el`
-          : `you took ${seconds(finding.medianSectorMs, language)} through it, your own best time there`,
+          ? `ai trecut virajul în ${seconds(finding.comparisonSectorMs, language)}, cel mai bun timp al tău prin el`
+          : `you took ${seconds(finding.comparisonSectorMs, language)} through it, your own best time there`,
     );
   }
   if (parts.length === 0) return null;
@@ -604,8 +654,8 @@ export function buildReport(insights: SessionInsights, language: ReportLanguage)
       heading: vocabulary.headings.sectors ?? 'Sectors',
       lines: insights.sectorTimeLoss.map((sector) =>
         ro
-          ? `Sectorul ${sector.sectorIndex + 1}: pe turul de referință ${sector.referenceLapNumber} ai făcut ${seconds(sector.referenceMs, language)}, iar cel mai bun al tău este ${seconds(sector.bestMs, language)} în turul ${sector.bestLapNumber} (diferență ${signedSeconds(sector.lostMs, language)}).`
-          : `Sector ${sector.sectorIndex + 1}: on reference lap ${sector.referenceLapNumber} you did ${seconds(sector.referenceMs, language)}, while your best is ${seconds(sector.bestMs, language)} on lap ${sector.bestLapNumber} (difference ${signedSeconds(sector.lostMs, language)}).`,
+          ? `Sectorul ${sector.sectorIndex + 1}: pe turul ${sector.comparisonLapNumber} ai făcut ${seconds(sector.comparisonMs, language)}, față de ${seconds(sector.referenceMs, language)} pe turul de referință ${sector.referenceLapNumber} — ${gainOrLoss(sector.lostMs, language)}.`
+          : `Sector ${sector.sectorIndex + 1}: on lap ${sector.comparisonLapNumber} you did ${seconds(sector.comparisonMs, language)} against ${seconds(sector.referenceMs, language)} on reference lap ${sector.referenceLapNumber} — ${gainOrLoss(sector.lostMs, language)}.`,
       ),
     });
   }

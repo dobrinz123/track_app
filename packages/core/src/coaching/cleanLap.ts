@@ -6,6 +6,7 @@ import {
   type LapAnomalyReason,
   type LapCheckId,
   type LapClassification,
+  type LapStatus,
 } from './types';
 
 /**
@@ -33,14 +34,23 @@ export interface ClassifyLapOptions {
   maxSampleGapMs?: number;
   /** |longitudinal g| above this is an implausible spike. Default 1.2. */
   decelSpikeG?: number;
-  /** Heading rate above this is a yaw spike, degrees/second. Default 150. */
+  /**
+   * How far the measured yaw rate may exceed the yaw the track's own curvature
+   * implies before it counts as a spike, degrees/second. Default 150.
+   */
   yawSpikeDps?: number;
   /**
-   * A yaw rate only counts as a spike when the lateral acceleration it implies
-   * (`yawRate * speed`) is beyond what any car can hold, in g. Default 2.
-   * Course-over-ground noise and centreline-vertex jitter fail this test.
+   * A yaw excess only counts as a spike when the lateral acceleration it
+   * implies (`excess * speed`) is beyond what any car can hold, in g.
+   * Default 2. Course-over-ground noise at crawling speed fails this test.
    */
   yawSpikeLatG?: number;
+  /**
+   * How long the yaw excess must hold to count as a spike, milliseconds.
+   * Default 200. Measured as a DURATION, so the rule does not change with the
+   * sample rate.
+   */
+  yawSpikeMs?: number;
   /** Fraction of the lap distance that must be covered by samples. Default 0.9. */
   minCoverageFraction?: number;
 }
@@ -58,11 +68,18 @@ const REASON_PRIORITY: readonly LapAnomalyReason[] = Object.freeze([
 const COVERAGE_BUCKETS = 100;
 
 /**
- * How many consecutive sample intervals must exceed the yaw threshold before it
- * counts as a spike. A single interval is jitter -- a sharp centreline vertex,
- * or one noisy course-over-ground fix -- while a slide or spin lasts.
+ * Checks the Phase 5 safety contract (rule 2) requires before a lap may be
+ * called CLEAN: "on-track, no yaw/decel anomaly, valid GNSS quality", plus the
+ * coverage that proves the lap was actually driven. A lap that passes every
+ * check it COULD run but could not run one of these is `unverified`.
  */
-const YAW_SPIKE_MIN_INTERVALS = 2;
+const REQUIRED_CHECKS: readonly LapCheckId[] = Object.freeze([
+  'offTrack',
+  'yawSpike',
+  'decelSpike',
+  'gnssPoor',
+  'coverage',
+] as const);
 
 function wrappedHeadingDelta(from: number, to: number): number {
   let delta = (to - from) % 360;
@@ -73,6 +90,143 @@ function wrappedHeadingDelta(from: number, to: number): number {
 
 function formatMetres(value: number): string {
   return `${Math.round(value)} m`;
+}
+
+function finite(value: number | undefined): value is number {
+  return value !== undefined && Number.isFinite(value);
+}
+
+/**
+ * How far the implied-yaw window may be widened, in samples, to absorb the
+ * projection lag between the car's own heading and the centreline vertex it is
+ * crossing.
+ */
+const YAW_IMPLIED_TOLERANCE_SAMPLES = 2;
+
+/**
+ * Degrees of the measured turn that the centreline cannot explain, minimised
+ * over the tolerated window widenings. Returns the measured turn itself when no
+ * centreline heading is available (implied yaw 0).
+ */
+function smallestUnexplainedTurn(
+  samples: readonly CornerLapSample[],
+  from: number,
+  to: number,
+  measuredTurn: number,
+): number {
+  let best = Math.abs(measuredTurn);
+  for (let a = Math.max(0, from - YAW_IMPLIED_TOLERANCE_SAMPLES); a <= from; a += 1) {
+    const start = samples[a];
+    if (start === undefined || !finite(start.centrelineHeadingDeg)) continue;
+    for (
+      let b = to;
+      b <= Math.min(samples.length - 1, to + YAW_IMPLIED_TOLERANCE_SAMPLES);
+      b += 1
+    ) {
+      const finish = samples[b];
+      if (finish === undefined || !finite(finish.centrelineHeadingDeg)) continue;
+      const implied = wrappedHeadingDelta(start.centrelineHeadingDeg, finish.centrelineHeadingDeg);
+      const unexplained = Math.abs(measuredTurn - implied);
+      if (unexplained < best) best = unexplained;
+    }
+  }
+  return best;
+}
+
+interface YawEvaluation {
+  /** False when the samples carry neither a gyro channel nor two headings. */
+  available: boolean;
+  /** Worst excess over the implied yaw that satisfied every guard, deg/s. */
+  worstDps: number | null;
+}
+
+/** Degrees the gyro says the car turned between two indices. */
+function integratedGyroTurn(
+  samples: readonly CornerLapSample[],
+  from: number,
+  to: number,
+): number | null {
+  let total = 0;
+  for (let index = from; index < to; index += 1) {
+    const sample = samples[index];
+    const next = samples[index + 1];
+    if (sample === undefined || next === undefined) return null;
+    const rate = sample.channels?.yawRateDps;
+    if (!finite(rate)) return null;
+    const dtSeconds = (next.tMonoMs - sample.tMonoMs) / 1_000;
+    if (!(dtSeconds > 0)) return null;
+    total += rate * dtSeconds;
+  }
+  return total;
+}
+
+/**
+ * Yaw anomaly per `analysis-engine.md` §3: the yaw the car ACTUALLY turned
+ * through -- the recorded gyro when the session has one, else the GNSS course
+ * over ground -- against the yaw the CENTRELINE's own curvature implies over
+ * the same stretch. A car following a hairpin turns fast and is not sliding; a
+ * car turning fast where the track does not is.
+ *
+ * Both signals are compared over a fixed DURATION window rather than per sample
+ * interval: the rule is then identical at 5 Hz and at 20 Hz, and the shared
+ * turn across a centreline vertex cancels instead of appearing as a spike in
+ * one signal only. With no centreline heading the implied yaw is 0, so the
+ * check degrades to an absolute-rate rule -- never to attributing yaw to a
+ * track it cannot see -- and the implausible-lateral-g guard still applies.
+ */
+function evaluateYaw(
+  samples: readonly CornerLapSample[],
+  yawSpikeMs: number,
+  yawSpikeDps: number,
+  yawSpikeLatG: number,
+): YawEvaluation {
+  let gyroCount = 0;
+  let headingCount = 0;
+  for (const sample of samples) {
+    if (finite(sample.channels?.yawRateDps)) gyroCount += 1;
+    if (finite(sample.headingDeg)) headingCount += 1;
+  }
+  const useGyro = gyroCount >= 2;
+  if (!useGyro && headingCount < 2) return { available: false, worstDps: null };
+
+  let worstDps: number | null = null;
+  for (let index = 0; index < samples.length; index += 1) {
+    const start = samples[index];
+    if (start === undefined) continue;
+    let end = index + 1;
+    while (end < samples.length && (samples[end]?.tMonoMs ?? 0) - start.tMonoMs < yawSpikeMs) {
+      end += 1;
+    }
+    const finish = samples[end];
+    if (finish === undefined) continue;
+    const spanMs = finish.tMonoMs - start.tMonoMs;
+    // The window must be the duration the rule asks for, and must not straddle
+    // a data gap (which is already reported on its own).
+    if (spanMs < yawSpikeMs || spanMs > yawSpikeMs * 4) continue;
+    const measuredTurn = useGyro
+      ? integratedGyroTurn(samples, index, end)
+      : finite(start.headingDeg) && finite(finish.headingDeg)
+        ? wrappedHeadingDelta(start.headingDeg, finish.headingDeg)
+        : null;
+    if (measuredTurn === null) continue;
+    // The projected distance carries a few metres of GNSS/projection
+    // uncertainty, and a catalog centreline turns in discrete vertex steps (a
+    // single OSM vertex can be worth 35 degrees). Comparing two step functions
+    // whose phase differs by a metre or two would invent a spin at every such
+    // vertex, so the implied turn is taken over the window WIDENED by up to
+    // `YAW_IMPLIED_TOLERANCE_SAMPLES` on each side and the reading that best
+    // explains the measured turn wins. Nothing is widened for the measurement
+    // itself, so a real rotation the track does not ask for still stands out.
+    const excessDeg = smallestUnexplainedTurn(samples, index, end, measuredTurn);
+    const excessDps = excessDeg / (spanMs / 1_000);
+    const speedMps = finite(start.speedKph) ? start.speedKph / 3.6 : null;
+    const excessLatG =
+      speedMps === null ? null : (((excessDps * Math.PI) / 180) * speedMps) / GRAVITY_MPS2;
+    if (excessDps <= yawSpikeDps) continue;
+    if (excessLatG !== null && excessLatG <= yawSpikeLatG) continue;
+    if (worstDps === null || excessDps > worstDps) worstDps = excessDps;
+  }
+  return { available: true, worstDps };
 }
 
 /**
@@ -93,6 +247,7 @@ export function classifyLap(
   const decelSpikeG = options.decelSpikeG ?? 1.2;
   const yawSpikeDps = options.yawSpikeDps ?? 150;
   const yawSpikeLatG = options.yawSpikeLatG ?? 2;
+  const yawSpikeMs = options.yawSpikeMs ?? 200;
   const minCoverageFraction = options.minCoverageFraction ?? 0.9;
 
   const reasons = new Set<LapAnomalyReason>();
@@ -104,6 +259,12 @@ export function classifyLap(
     reasons.add('incomplete');
     const listed = lap.invalidReasons.length > 0 ? lap.invalidReasons.join(', ') : 'no reason given';
     details.push(`lap record is invalid (${listed})`);
+  }
+  // A lap time that is not a finite positive number of milliseconds is not a
+  // lap time: it must never reach the reference selection or the report text.
+  if (!Number.isFinite(lap.durationMs) || lap.durationMs <= 0) {
+    reasons.add('incomplete');
+    details.push('lap duration is not a finite, positive number of milliseconds');
   }
 
   // --- coverage -------------------------------------------------------------
@@ -138,9 +299,7 @@ export function classifyLap(
   let accuracyCount = 0;
   let worstLateralM: number | null = null;
   let lateralCount = 0;
-  let headingCount = 0;
-  let worstYawDps: number | null = null;
-  let yawRun = 0;
+  const yaw = evaluateYaw(samples, yawSpikeMs, yawSpikeDps, yawSpikeLatG);
   let speedCount = 0;
   let worstDecelG: number | null = null;
   let observedMaxGapMs: number | null = null;
@@ -162,32 +321,11 @@ export function classifyLap(
       const magnitude = Math.abs(sample.lateralM);
       if (worstLateralM === null || magnitude > worstLateralM) worstLateralM = magnitude;
     }
-    if (sample.headingDeg !== undefined && Number.isFinite(sample.headingDeg)) headingCount += 1;
-
     if (next === undefined) continue;
     const dtSeconds = (next.tMonoMs - sample.tMonoMs) / 1_000;
     if (dtSeconds > 0) {
       const gapMs = dtSeconds * 1_000;
       if (observedMaxGapMs === null || gapMs > observedMaxGapMs) observedMaxGapMs = gapMs;
-      if (
-        sample.headingDeg !== undefined &&
-        next.headingDeg !== undefined &&
-        Number.isFinite(sample.headingDeg) &&
-        Number.isFinite(next.headingDeg)
-      ) {
-        const rate = Math.abs(wrappedHeadingDelta(sample.headingDeg, next.headingDeg)) / dtSeconds;
-        const speedMps =
-          sample.speedKph !== undefined && Number.isFinite(sample.speedKph)
-            ? sample.speedKph / 3.6
-            : null;
-        const impliedLatG =
-          speedMps === null ? null : ((rate * Math.PI) / 180) * speedMps / GRAVITY_MPS2;
-        const beyond = rate > yawSpikeDps && (impliedLatG === null || impliedLatG > yawSpikeLatG);
-        yawRun = beyond ? yawRun + 1 : 0;
-        if (yawRun >= YAW_SPIKE_MIN_INTERVALS && (worstYawDps === null || rate > worstYawDps)) {
-          worstYawDps = rate;
-        }
-      }
       const speed = sample.speedKph;
       const nextSpeed = next.speedKph;
       if (
@@ -211,10 +349,13 @@ export function classifyLap(
     );
   }
 
-  if (headingCount < 2) unavailable.add('yawSpike');
-  else if (worstYawDps !== null && worstYawDps > yawSpikeDps) {
+  if (!yaw.available) unavailable.add('yawSpike');
+  else if (yaw.worstDps !== null) {
     reasons.add('yawSpike');
-    details.push(`heading rate reached ${Math.round(worstYawDps)} deg/s (limit ${yawSpikeDps})`);
+    details.push(
+      `yaw rate exceeded the implied (centreline) yaw by ${Math.round(yaw.worstDps)} deg/s ` +
+        `over ${yawSpikeMs} ms (limit ${yawSpikeDps} deg/s)`,
+    );
   }
 
   if (speedCount === 0) unavailable.add('decelSpike');
@@ -238,14 +379,25 @@ export function classifyLap(
 
   const ordered = REASON_PRIORITY.filter((reason) => reasons.has(reason));
   const first = ordered[0] ?? null;
+  const unavailableChecks = REQUIRED_CHECKS.filter((check) => unavailable.has(check));
+  // An unavailable required check can never be reported as "clean": the lap did
+  // not fail, but the evidence to call it clean was not there either.
+  const status: LapStatus =
+    ordered.length > 0 ? 'anomalous' : unavailableChecks.length > 0 ? 'unverified' : 'clean';
+  const detail =
+    details.length > 0
+      ? details.join('; ')
+      : status === 'unverified'
+        ? `no anomaly detected, but these checks could not run: ${unavailableChecks.join(', ')}`
+        : 'no anomaly detected';
   return {
     lapNumber: lap.lapNumber,
-    clean: ordered.length === 0,
+    status,
+    clean: status === 'clean',
     reason: first,
     reasons: ordered,
-    detail: details.length === 0 ? 'no anomaly detected' : details.join('; '),
-    unavailableChecks: (['offTrack', 'yawSpike', 'decelSpike', 'gnssPoor', 'coverage'] as const)
-      .filter((check) => unavailable.has(check)),
+    detail,
+    unavailableChecks: [...unavailableChecks],
     coverageFraction,
     worstAccuracyM,
     maxSampleGapMs: observedMaxGapMs,

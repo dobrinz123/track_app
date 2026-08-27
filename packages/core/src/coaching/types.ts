@@ -52,6 +52,13 @@ export interface CornerLapSample {
   readonly lateralM?: number;
   /** Course over ground, degrees, 0 = north. */
   readonly headingDeg?: number;
+  /**
+   * Direction of the CENTRELINE at this sample's projected distance, degrees,
+   * 0 = north. `projectLapSamples` fills it from the catalog geometry; the yaw
+   * check turns its rate of change into the yaw rate the track itself implies
+   * (curvature x speed) so a measured yaw rate can be compared against it.
+   */
+  readonly centrelineHeadingDeg?: number;
   /** Decoded channel values at this sample's time, by channel id. */
   readonly channels?: Readonly<Partial<Record<CoachingChannelId, number>>>;
 }
@@ -157,8 +164,19 @@ export type LapAnomalyReason = 'incomplete' | 'offTrack' | 'yawSpike' | 'decelSp
 /** Checks that could not run because the samples lack the required field. */
 export type LapCheckId = 'offTrack' | 'yawSpike' | 'decelSpike' | 'gnssPoor' | 'coverage';
 
+/**
+ * Three-valued lap status. `unverified` is the honest middle: no anomaly was
+ * found, but at least one of the checks the safety contract requires
+ * ("on-track, no yaw/decel anomaly, valid GNSS quality") could not run, so the
+ * lap is NOT established as clean and never feeds the reference or the
+ * demonstrated envelope.
+ */
+export type LapStatus = 'clean' | 'unverified' | 'anomalous';
+
 export interface LapClassification {
   lapNumber: number;
+  status: LapStatus;
+  /** True only for `status === 'clean'`. */
   clean: boolean;
   /** Highest-priority reason, or `null` when the lap is clean. */
   reason: LapAnomalyReason | null;

@@ -22,6 +22,8 @@ import type {
   CornerLapSample,
   CornerMetrics,
   LapAnomalyReason,
+  LapCheckId,
+  LapStatus,
 } from './types';
 
 /**
@@ -86,10 +88,15 @@ export interface LapInsight {
   lapNumber: number;
   durationMs: number;
   valid: boolean;
+  /** `clean` / `unverified` / `anomalous` -- see `LapStatus`. */
+  status: LapStatus;
+  /** True only for `status === 'clean'`. */
   clean: boolean;
   reason: LapAnomalyReason | null;
   reasons: LapAnomalyReason[];
   detail: string;
+  /** Safety checks this lap's samples could not support. */
+  unavailableChecks: LapCheckId[];
   coverageFraction: number;
   corners: CornerMetrics[];
 }
@@ -124,17 +131,24 @@ export interface TimeLossFinding {
   cornerId: number;
   /** The reference (best clean) lap this corner is measured against. */
   referenceLapNumber: number;
-  /** The median clean lap, whose loss against the reference is ranked. */
-  medianLapNumber: number;
-  /** Δt contribution of the median lap over the corner window, ms (+ = lost). */
+  /**
+   * The REPRESENTATIVE clean lap whose loss against the reference is ranked:
+   * the median clean lap from three laps up, and the other clean lap when the
+   * session has exactly the two the honesty gate requires.
+   */
+  comparisonLapNumber: number;
+  /** Δt contribution of the comparison lap over the corner window, ms (+ = lost). */
   deltaMs: number | null;
-  /** Corner time of the median lap minus the best corner time, ms. */
+  /** Corner time of the comparison lap minus the best corner time, ms. */
   sectorLossMs: number | null;
   bestSectorMs: number | null;
   bestSectorLapNumber: number | null;
-  medianSectorMs: number | null;
+  comparisonSectorMs: number | null;
   causes: TimeLossCause[];
 }
+
+/** Which measurements a consistency score was actually built from. */
+export type ConsistencyComponent = 'brake' | 'minSpeed' | 'sector';
 
 export interface ConsistencyFinding {
   cornerId: number;
@@ -145,14 +159,27 @@ export interface ConsistencyFinding {
   sectorSpreadMs: number | null;
   /** 0-100, 100 = tight. `null` when there is not enough clean evidence. */
   score: number | null;
+  /**
+   * The components the score averaged, in a fixed order. A score built from
+   * corner time alone is NOT the same measurement as one built from brake
+   * point, minimum speed and corner time.
+   */
+  basis: ConsistencyComponent[];
+  /**
+   * True when this corner's basis matches the basis the ranking uses. Only
+   * corners that share a basis are ranked against each other.
+   */
+  comparable: boolean;
 }
 
 export interface SectorLossFinding {
   sectorIndex: number;
   referenceLapNumber: number;
   referenceMs: number;
-  bestMs: number;
-  bestLapNumber: number;
+  /** The same representative lap the corner ranking compares (see `TimeLossFinding`). */
+  comparisonLapNumber: number;
+  comparisonMs: number;
+  /** `comparisonMs - referenceMs`: positive = lost, negative = gained. */
   lostMs: number;
 }
 
@@ -180,6 +207,7 @@ export interface CornerInsight {
 export type LimitationCode =
   | 'NO_CLEAN_LAPS'
   | 'FEW_CLEAN_LAPS'
+  | 'UNVERIFIED_LAPS'
   | 'UNSUPPORTED_CHANNELS'
   | 'MISSING_CHANNELS'
   | 'GNSS_QUALITY'
@@ -193,6 +221,8 @@ export interface Limitation {
   channels?: CoachingChannelId[];
   lapNumbers?: number[];
   cornerIds?: number[];
+  /** Safety checks that could not run (`UNVERIFIED_LAPS`). */
+  checks?: LapCheckId[];
 }
 
 export interface LapTimeConsistency {
@@ -221,10 +251,12 @@ export interface SessionInsights {
   referenceLapNumber: number | null;
   referenceDurationMs: number | null;
   medianCleanLapNumber: number | null;
+  /** The representative clean lap every comparison in this report uses. */
+  comparisonLapNumber: number | null;
   corners: CornerInsight[];
-  /** Corners ranked by time lost on the median clean lap, worst first. */
+  /** Corners ranked by time lost on the representative clean lap, worst first. */
   timeLossRanking: TimeLossFinding[];
-  /** Corners ranked by consistency score, least consistent first. */
+  /** Corners ranked by consistency score, least consistent first (same basis only). */
   consistencyRanking: ConsistencyFinding[];
   sectorTimeLoss: SectorLossFinding[];
   lapTimeConsistency: LapTimeConsistency | null;
@@ -293,6 +325,15 @@ export function analyzeSession(
   };
   const orderedCorners = [...corners].sort((a, b) => a.id - b.id);
   const orderedLaps = [...laps].sort((a, b) => a.lap.lapNumber - b.lap.lapNumber);
+  // Lap numbers key every comparison, the envelope and the report sentences: a
+  // duplicate would silently make one lap stand for two different drives.
+  const seenLapNumbers = new Set<number>();
+  for (const entry of orderedLaps) {
+    if (seenLapNumbers.has(entry.lap.lapNumber)) {
+      throw new RangeError(`duplicate lap number ${entry.lap.lapNumber} in the session`);
+    }
+    seenLapNumbers.add(entry.lap.lapNumber);
+  }
 
   // --- per lap ---------------------------------------------------------------
   const lapInsights: LapInsight[] = orderedLaps.map((entry) => {
@@ -304,10 +345,12 @@ export function analyzeSession(
       lapNumber: entry.lap.lapNumber,
       durationMs: entry.lap.durationMs,
       valid: entry.lap.valid,
+      status: classification.status,
       clean: classification.clean,
       reason: classification.reason,
       reasons: classification.reasons,
       detail: classification.detail,
+      unavailableChecks: classification.unavailableChecks,
       coverageFraction: classification.coverageFraction,
       corners: computeCornerMetrics(entry.samples, orderedCorners, metricsOptions),
     };
@@ -335,6 +378,21 @@ export function analyzeSession(
             : best,
         );
   const medianLap = comparable ? lowerMedianOf(cleanLaps, (lap) => lap.durationMs) : null;
+  // The lap the report compares against the reference. With three or more clean
+  // laps that is the median; with exactly the two the honesty gate requires,
+  // the median IS the reference, so the other clean lap is the representative
+  // one -- otherwise the minimum session that passes the gate would produce an
+  // empty priority-1 report.
+  const comparisonLap: LapInsight | null =
+    !comparable || reference === null
+      ? null
+      : (() => {
+          if (medianLap !== null && medianLap.lapNumber !== reference.lapNumber) return medianLap;
+          const rest = [...cleanLaps]
+            .filter((lap) => lap.lapNumber !== reference.lapNumber)
+            .sort((a, b) => a.durationMs - b.durationMs || a.lapNumber - b.lapNumber);
+          return rest[Math.floor((rest.length - 1) / 2)] ?? null;
+        })();
 
   // --- distance-domain delta curves -----------------------------------------
   const gridStepM = context.gridStepM ?? 1;
@@ -407,11 +465,15 @@ export function analyzeSession(
           const brakeSpread = spread(definedNumbers(cleanRows.map((row) => row.brakeStartM)));
           const minSpeedSpread = spread(definedNumbers(cleanRows.map((row) => row.minSpeedKph)));
           const sectorSpread = spread(sectorValues.map((entry) => entry.value));
-          const parts = [
-            subScore(brakeSpread, CONSISTENCY_BRAKE_SPREAD_M),
-            subScore(minSpeedSpread, CONSISTENCY_MIN_SPEED_SPREAD_KPH),
-            subScore(sectorSpread, CONSISTENCY_SECTOR_SPREAD_MS),
-          ].filter((part): part is number => part !== null);
+          const components: { id: ConsistencyComponent; score: number | null }[] = [
+            { id: 'brake', score: subScore(brakeSpread, CONSISTENCY_BRAKE_SPREAD_M) },
+            { id: 'minSpeed', score: subScore(minSpeedSpread, CONSISTENCY_MIN_SPEED_SPREAD_KPH) },
+            { id: 'sector', score: subScore(sectorSpread, CONSISTENCY_SECTOR_SPREAD_MS) },
+          ];
+          const used = components.filter(
+            (component): component is { id: ConsistencyComponent; score: number } =>
+              component.score !== null,
+          );
           return {
             cornerId: corner.id,
             lapCount: cleanRows.length,
@@ -419,19 +481,24 @@ export function analyzeSession(
             minSpeedSpreadKph: minSpeedSpread,
             sectorSpreadMs: sectorSpread,
             score:
-              parts.length === 0
+              used.length === 0
                 ? null
-                : Math.round(parts.reduce((sum, part) => sum + part, 0) / parts.length),
+                : Math.round(
+                    used.reduce((sum, component) => sum + component.score, 0) / used.length,
+                  ),
+            basis: used.map((component) => component.id),
+            // Filled in below, once every corner's basis is known.
+            comparable: false,
           };
         })()
       : null;
 
     const timeLoss: TimeLossFinding | null =
-      comparable && reference !== null && medianLap !== null && medianLap.lapNumber !== reference.lapNumber
+      comparable && reference !== null && comparisonLap !== null
         ? (() => {
-            const medianRow = perLap.find((row) => row.lapNumber === medianLap.lapNumber);
+            const medianRow = perLap.find((row) => row.lapNumber === comparisonLap.lapNumber);
             const referenceMetrics = metricsOf(reference, corner.id);
-            const medianMetrics = metricsOf(medianLap, corner.id);
+            const medianMetrics = metricsOf(comparisonLap, corner.id);
             const causes: TimeLossCause[] = [];
             if (referenceMetrics !== undefined && medianMetrics !== undefined) {
               const later = (a: number | null, b: number | null, margin: number): boolean =>
@@ -469,7 +536,7 @@ export function analyzeSession(
             return {
               cornerId: corner.id,
               referenceLapNumber: reference.lapNumber,
-              medianLapNumber: medianLap.lapNumber,
+              comparisonLapNumber: comparisonLap.lapNumber,
               deltaMs: medianRow?.deltaMs ?? null,
               sectorLossMs:
                 medianSectorMs !== null && bestSector !== null
@@ -477,7 +544,7 @@ export function analyzeSession(
                   : null,
               bestSectorMs: bestSector?.value ?? null,
               bestSectorLapNumber: bestSector?.lapNumber ?? null,
-              medianSectorMs,
+              comparisonSectorMs: medianSectorMs,
               causes,
             };
           })()
@@ -514,15 +581,52 @@ export function analyzeSession(
       return right - left || a.cornerId - b.cornerId;
     });
 
-  const consistencyRanking = cornerInsights
+  // A consistency score built from corner time alone and one built from brake
+  // point + minimum speed + corner time are not the same measurement, so only
+  // corners that share an evidence basis are ranked against each other. The
+  // ranked basis is the most common one; ties go to the richer basis, then to
+  // the lexicographically smaller key, so the choice is deterministic.
+  const scored = cornerInsights
     .map((corner) => corner.consistency)
-    .filter((finding): finding is ConsistencyFinding => finding !== null && finding.score !== null)
+    .filter((finding): finding is ConsistencyFinding => finding !== null && finding.score !== null);
+  const basisKey = (finding: ConsistencyFinding): string => finding.basis.join('+');
+  const counts = new Map<string, { count: number; size: number }>();
+  for (const finding of scored) {
+    const key = basisKey(finding);
+    const seen = counts.get(key);
+    counts.set(key, { count: (seen?.count ?? 0) + 1, size: finding.basis.length });
+  }
+  let rankedBasis: string | null = null;
+  for (const [key, value] of [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const incumbent = rankedBasis === null ? null : counts.get(rankedBasis);
+    if (
+      incumbent === undefined ||
+      incumbent === null ||
+      value.count > incumbent.count ||
+      (value.count === incumbent.count && value.size > incumbent.size)
+    ) {
+      rankedBasis = key;
+    }
+  }
+  for (const corner of cornerInsights) {
+    if (corner.consistency === null) continue;
+    corner.consistency.comparable =
+      corner.consistency.score !== null && basisKey(corner.consistency) === rankedBasis;
+  }
+  const consistencyRanking = scored
+    .filter((finding) => finding.comparable)
     .sort((a, b) => (a.score ?? 0) - (b.score ?? 0) || a.cornerId - b.cornerId);
 
   // --- track sectors ----------------------------------------------------------
+  // The SAME comparison the corner ranking uses: the representative clean lap
+  // against the best-clean reference. Comparing the reference against the best
+  // sector on any lap would report the driver's own personal best as a loss.
   const sectorTimeLoss: SectorLossFinding[] = [];
-  if (comparable && reference !== null) {
+  if (comparable && reference !== null && comparisonLap !== null) {
     const referenceEntry = orderedLaps.find((entry) => entry.lap.lapNumber === reference.lapNumber);
+    const comparisonEntry = orderedLaps.find(
+      (entry) => entry.lap.lapNumber === comparisonLap.lapNumber,
+    );
     const sectorIndices = [
       ...new Set(
         orderedLaps.flatMap((entry) => (entry.sectorTimes ?? []).map((sector) => sector.sectorIndex)),
@@ -532,25 +636,18 @@ export function analyzeSession(
       const referenceMs = referenceEntry?.sectorTimes?.find(
         (sector) => sector.sectorIndex === sectorIndex,
       )?.durationMs;
+      const comparisonMs = comparisonEntry?.sectorTimes?.find(
+        (sector) => sector.sectorIndex === sectorIndex,
+      )?.durationMs;
       if (referenceMs === undefined || !Number.isFinite(referenceMs)) continue;
-      let best: { lapNumber: number; value: number } | null = null;
-      for (const entry of orderedLaps) {
-        const insight = lapInsights.find((lap) => lap.lapNumber === entry.lap.lapNumber);
-        if (insight === undefined || !insight.clean) continue;
-        const value = entry.sectorTimes?.find(
-          (sector) => sector.sectorIndex === sectorIndex,
-        )?.durationMs;
-        if (value === undefined || !Number.isFinite(value)) continue;
-        if (best === null || value < best.value) best = { lapNumber: entry.lap.lapNumber, value };
-      }
-      if (best === null) continue;
+      if (comparisonMs === undefined || !Number.isFinite(comparisonMs)) continue;
       sectorTimeLoss.push({
         sectorIndex,
         referenceLapNumber: reference.lapNumber,
         referenceMs,
-        bestMs: best.value,
-        bestLapNumber: best.lapNumber,
-        lostMs: referenceMs - best.value,
+        comparisonLapNumber: comparisonLap.lapNumber,
+        comparisonMs,
+        lostMs: comparisonMs - referenceMs,
       });
     }
     sectorTimeLoss.sort((a, b) => b.lostMs - a.lostMs || a.sectorIndex - b.sectorIndex);
@@ -589,6 +686,25 @@ export function analyzeSession(
   } else if (!comparable) {
     limitations.push({ code: 'FEW_CLEAN_LAPS', count: cleanLaps.length });
   }
+  // A lap whose safety checks could not run is neither clean nor anomalous, and
+  // the report has to say which evidence was missing rather than stay silent.
+  const unverifiedLaps = lapInsights.filter((lap) => lap.status === 'unverified');
+  if (unverifiedLaps.length > 0) {
+    const checkOrder: readonly LapCheckId[] = [
+      'offTrack',
+      'yawSpike',
+      'decelSpike',
+      'gnssPoor',
+      'coverage',
+    ];
+    const seen = new Set(unverifiedLaps.flatMap((lap) => lap.unavailableChecks));
+    limitations.push({
+      code: 'UNVERIFIED_LAPS',
+      count: unverifiedLaps.length,
+      lapNumbers: unverifiedLaps.map((lap) => lap.lapNumber),
+      checks: checkOrder.filter((check) => seen.has(check)),
+    });
+  }
   if (availability.unsupported.length > 0) {
     limitations.push({ code: 'UNSUPPORTED_CHANNELS', channels: availability.unsupported });
   }
@@ -625,6 +741,7 @@ export function analyzeSession(
     referenceLapNumber: reference?.lapNumber ?? null,
     referenceDurationMs: reference?.durationMs ?? null,
     medianCleanLapNumber: medianLap?.lapNumber ?? null,
+    comparisonLapNumber: comparisonLap?.lapNumber ?? null,
     corners: cornerInsights,
     timeLossRanking,
     consistencyRanking,

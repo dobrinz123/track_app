@@ -110,10 +110,23 @@ describe('deltaCurveMs / deltaOverSegmentMs', () => {
     expect(segment ?? 0).toBeGreaterThan(0);
   });
 
-  it('handles a segment that wraps the start/finish line', () => {
+  it('adds the lap-end term for a segment that wraps the start/finish line (H2)', () => {
     const delta = deltaCurveMs(slower, reference);
     const segment = deltaOverSegmentMs(delta, 950, 50, { stepM: 1, totalLengthM: L });
     expect(segment).not.toBeNull();
+    // A lap that is slower EVERYWHERE loses time across the 950 -> 50 m sector
+    // too: the contribution is (end-of-lap - 950 m) + (50 m - start-of-lap).
+    expect(segment ?? 0).toBeGreaterThan(0);
+    const lapEnd = [...delta].reverse().find((value) => value !== null) ?? 0;
+    const lapStart = delta.find((value) => value !== null) ?? 0;
+    const expected = (lapEnd - (delta[950] ?? 0)) + ((delta[50] ?? 0) - lapStart);
+    expect(segment ?? 0).toBeCloseTo(expected, 6);
+  });
+
+  it('still reports a plain forward segment as the plain delta change', () => {
+    const delta = deltaCurveMs(slower, reference);
+    const segment = deltaOverSegmentMs(delta, 100, 900, { stepM: 1, totalLengthM: L });
+    expect(segment ?? 0).toBeCloseTo((delta[900] ?? 0) - (delta[100] ?? 0), 9);
   });
 
   it('refuses grids that disagree on step or circuit length', () => {
@@ -154,6 +167,17 @@ describe('joinTelemetryChannels', () => {
   });
 });
 
+/** Counts strictly decreasing steps, ignoring the single start/finish wrap. */
+function backSteps(distances: readonly number[], totalLengthM: number): number {
+  let count = 0;
+  for (let index = 1; index < distances.length; index += 1) {
+    const previous = distances[index - 1] ?? 0;
+    const current = distances[index] ?? 0;
+    if (current < previous && previous - current < totalLengthM / 2) count += 1;
+  }
+  return count;
+}
+
 describe('projectLapSamples on real circuit geometry', () => {
   for (const circuit of [transilvania(), motorpark()]) {
     it(`projects a driven lap onto ${circuit.profile.circuitId} with monotone distances`, () => {
@@ -172,6 +196,14 @@ describe('projectLapSamples on real circuit geometry', () => {
         expect(sample.distanceM).toBeLessThan(circuit.totalLengthM);
         expect(Number.isFinite(sample.lateralM ?? 0)).toBe(true);
       }
+      // "Monotone" is an assertion, not a claim: no consecutive pair may go
+      // backwards (the one start/finish wrap aside).
+      expect(
+        backSteps(
+          projected.samples.map((sample) => sample.distanceM),
+          circuit.totalLengthM,
+        ),
+      ).toBe(0);
       // One lap of samples must sweep the whole centreline once.
       const grid = resampleLapToDistanceGrid(projected.samples, {
         totalLengthM: circuit.totalLengthM,
@@ -179,4 +211,99 @@ describe('projectLapSamples on real circuit geometry', () => {
       expect(grid.coverageFraction).toBeGreaterThan(0.95);
     });
   }
+
+  it('clamps an accepted within-hysteresis back-step so distances never go back (M1)', () => {
+    const circuit = transilvania();
+    const raw = driveLap(circuit.profile, {
+      seed: 5_107,
+      sampleRateHz: 20,
+      noiseSigmaM: 0,
+      startDistanceM: 0,
+      endPaddingM: 0,
+    });
+    // Re-play an earlier fix a few times: the projection steps ~2 m backwards,
+    // well inside the 5 m hysteresis, so the sample is ACCEPTED.
+    const withBackSteps = raw.flatMap((sample, index) => {
+      const previous = raw[index - 1];
+      if (index < 20 || index % 50 !== 0 || previous === undefined) return [sample];
+      return [sample, { ...previous, tMono: sample.tMono + 20 }];
+    });
+    const projected = projectLapSamples(circuit.runtime, withBackSteps);
+    expect(withBackSteps.length).toBeGreaterThan(raw.length);
+    expect(projected.backSteps).toBe(0);
+    expect(
+      backSteps(
+        projected.samples.map((sample) => sample.distanceM),
+        circuit.totalLengthM,
+      ),
+    ).toBe(0);
+  });
+
+  it('reports the centreline heading so the yaw check has an implied-yaw reference (H6)', () => {
+    const circuit = transilvania();
+    const raw = driveLap(circuit.profile, {
+      seed: 5_109,
+      sampleRateHz: 5,
+      noiseSigmaM: 0,
+      startDistanceM: 0,
+      endPaddingM: 0,
+    });
+    const projected = projectLapSamples(circuit.runtime, raw);
+    const headings = projected.samples.map((sample) => sample.centrelineHeadingDeg);
+    expect(headings.every((value) => value !== undefined && Number.isFinite(value))).toBe(true);
+    // A driven lap follows the centreline: course and centreline agree closely.
+    const offsets = projected.samples
+      .filter((sample) => sample.headingDeg !== undefined)
+      .map((sample) => {
+        const delta = ((sample.centrelineHeadingDeg ?? 0) - (sample.headingDeg ?? 0) + 540) % 360;
+        return Math.abs(delta - 180);
+      });
+    const median = [...offsets].sort((a, b) => a - b)[Math.floor(offsets.length / 2)] ?? 999;
+    expect(median).toBeLessThan(10);
+  });
+});
+
+describe('grid speed and t(s) (M2)', () => {
+  it('derives the grid speed from ds/dt when the fixes carry no Doppler speed', () => {
+    const grid = resampleLapToDistanceGrid(syntheticLap({ withoutDopplerSpeed: true }), OPTIONS);
+    const coveredSpeeds = grid.speedKph.filter((_, index) => grid.covered[index] === true);
+    expect(coveredSpeeds.length).toBeGreaterThan(900);
+    expect(coveredSpeeds.every((value) => value !== null && Number.isFinite(value))).toBe(true);
+    // The constant-speed section really is 144 km/h.
+    expect(grid.speedKph[200] ?? 0).toBeCloseTo(144, 0);
+    // ... and the braking section really is slower.
+    expect(grid.speedKph[560] ?? 999).toBeLessThan(120);
+  });
+
+  it('keeps t(s) monotone and finite across a zero-speed interval', () => {
+    const moving = syntheticLap();
+    const pivot = moving.findIndex((sample) => sample.distanceM > 300);
+    const source = moving[pivot];
+    const stopped: CornerLapSample[] = [];
+    if (source !== undefined) {
+      for (let index = 1; index <= 20; index += 1) {
+        stopped.push({ ...source, tMonoMs: source.tMonoMs + index * 100, speedKph: 0 });
+      }
+    }
+    const shifted = moving
+      .slice(pivot + 1)
+      .map((sample) => ({ ...sample, tMonoMs: sample.tMonoMs + 2_000 }));
+    const grid = resampleLapToDistanceGrid(
+      [...moving.slice(0, pivot + 1), ...stopped, ...shifted],
+      OPTIONS,
+    );
+    const covered = grid.elapsedMs.filter((value): value is number => value !== null);
+    expect(covered.length).toBeGreaterThan(900);
+    expect(covered.every((value) => Number.isFinite(value))).toBe(true);
+    for (let index = 1; index < covered.length; index += 1) {
+      expect(covered[index] ?? 0).toBeGreaterThanOrEqual(covered[index - 1] ?? 0);
+    }
+    // The 2 s standstill is still in the elapsed time.
+    expect(covered[covered.length - 1] ?? 0).toBeGreaterThan(26_000);
+  });
+
+  it('reproduces the analytic constant-speed time exactly through the integrated profile', () => {
+    const grid = resampleLapToDistanceGrid(syntheticLap(), OPTIONS);
+    expect((grid.elapsedMs[300] ?? 0) - (grid.elapsedMs[100] ?? 0)).toBeCloseTo(5_000, 3);
+  });
 });

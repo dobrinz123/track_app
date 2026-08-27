@@ -52,9 +52,10 @@ describe('classifyLap', () => {
     expect(result.reasons).toContain('offTrack');
   });
 
-  it('detects a yaw spike (heading rate far beyond a driven corner)', () => {
+  it('detects a yaw spike (a real rotation far beyond what the corner implies)', () => {
+    // The car keeps rotating at ~400 deg/s past the apex: a spin, not a corner.
     const samples = syntheticLap({
-      headingDeg: (distanceM, index) => (index % 2 === 0 && distanceM > 640 ? 200 : 10),
+      headingDeg: (distanceM, index) => (distanceM > 640 ? (index * 40) % 360 : 10),
     });
     const result = classifyLap(LAP, samples, OPTIONS);
     expect(result.clean).toBe(false);
@@ -91,7 +92,7 @@ describe('classifyLap', () => {
     expect(first.reason).toBe('offTrack');
   });
 
-  it('states which checks it could not run when the inputs lack those fields', () => {
+  it('is UNVERIFIED, never clean, when a required safety check could not run (H5)', () => {
     const samples = syntheticLap().map(({ tMonoMs, distanceM, speedKph }) => ({
       tMonoMs,
       distanceM,
@@ -100,10 +101,101 @@ describe('classifyLap', () => {
     const result = classifyLap(LAP, samples, OPTIONS);
     expect(result.unavailableChecks).toContain('offTrack');
     expect(result.unavailableChecks).toContain('yawSpike');
-    expect(result.clean).toBe(true);
+    // "On-track, no yaw anomaly, valid GNSS quality" was NOT established, so
+    // the lap is not clean -- but it is not anomalous either.
+    expect(result.status).toBe('unverified');
+    expect(result.clean).toBe(false);
+    expect(result.reason).toBeNull();
+    expect(result.reasons).toEqual([]);
+  });
+
+  it('stays anomalous (not merely unverified) when a check both ran and failed', () => {
+    const samples = syntheticLap({ lateralM: () => 40 }).map(
+      ({ tMonoMs, distanceM, speedKph, lateralM }) => ({ tMonoMs, distanceM, speedKph, lateralM }),
+    );
+    const result = classifyLap(LAP, samples, OPTIONS);
+    expect(result.status).toBe('anomalous');
+    expect(result.reasons).toContain('offTrack');
+  });
+
+  it('marks a full-fidelity lap clean and says so in the status', () => {
+    const result = classifyLap(LAP, syntheticLap(), OPTIONS);
+    expect(result.status).toBe('clean');
+    expect(result.unavailableChecks).toEqual([]);
+  });
+
+  it('rejects a lap whose duration is not a finite number (M6)', () => {
+    for (const durationMs of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+      const result = classifyLap({ ...LAP, durationMs }, syntheticLap(), OPTIONS);
+      expect(result.clean).toBe(false);
+      expect(result.reasons).toContain('incomplete');
+      expect(result.detail).not.toMatch(/NaN|undefined/);
+    }
   });
 
   it('rejects a non-positive totalLengthM', () => {
     expect(() => classifyLap(LAP, [], { totalLengthM: -1 })).toThrow(RangeError);
+  });
+});
+
+describe('classifyLap: yaw anomaly vs the implied yaw (H6)', () => {
+  it('uses the recorded gyro yaw rate even when the course heading is steady', () => {
+    const samples = syntheticLap({
+      headingDeg: () => 30,
+      centrelineHeadingDeg: () => 30,
+    }).map((sample, index) =>
+      index >= 40 && index <= 45
+        ? { ...sample, channels: { ...(sample.channels ?? {}), yawRateDps: 320 } }
+        : { ...sample, channels: { ...(sample.channels ?? {}), yawRateDps: 0 } },
+    );
+    const result = classifyLap(LAP, samples, OPTIONS);
+    expect(result.reasons).toContain('yawSpike');
+    expect(result.detail).toMatch(/yaw/i);
+  });
+
+  it('does NOT flag a fast but geometrically implied yaw (a tight corner)', () => {
+    // Course heading swings ~163 deg/s -- and so does the centreline: the car
+    // is simply following the track, which is what the spec compares against.
+    const swing = (distanceM: number): number =>
+      distanceM < 620 ? 0 : distanceM > 680 ? 480 : (distanceM - 620) * 8;
+    const samples = syntheticLap({
+      headingDeg: (distanceM) => swing(distanceM),
+      centrelineHeadingDeg: (distanceM) => swing(distanceM),
+    });
+    const result = classifyLap(LAP, samples, OPTIONS);
+    expect(result.reasons).not.toContain('yawSpike');
+  });
+
+  it('detects a 0.2 s spike at 5 Hz as well as at 20 Hz (sample-rate independent)', () => {
+    for (const sampleRateHz of [5, 20]) {
+      const spikeMs = 200;
+      const samples = syntheticLap({
+        sampleRateHz,
+        headingDeg: () => 30,
+        centrelineHeadingDeg: () => 30,
+      }).map((sample, index) => {
+        const spikeSamples = Math.max(2, Math.round((spikeMs / 1_000) * sampleRateHz) + 1);
+        const spiking = index >= 40 && index < 40 + spikeSamples;
+        return { ...sample, channels: { ...(sample.channels ?? {}), yawRateDps: spiking ? 320 : 0 } };
+      });
+      const result = classifyLap(LAP, samples, OPTIONS);
+      expect(result.reasons, `sampleRateHz=${sampleRateHz}`).toContain('yawSpike');
+    }
+  });
+
+  it('keeps the implausible-lateral-g guard: crawling-speed heading noise is not a spike', () => {
+    // 0.5 m/s in the pit lane: turning the car on the spot at 200 deg/s implies
+    // only ~0.2 g of lateral acceleration, which is not physically impossible.
+    const samples: CornerLapSample[] = Array.from({ length: 200 }, (_value, index) => ({
+      tMonoMs: index * 100,
+      distanceM: index * 0.05,
+      speedKph: 1.8,
+      accuracyM: 4,
+      lateralM: 0,
+      headingDeg: (index * 20) % 360,
+      centrelineHeadingDeg: 30,
+    }));
+    const result = classifyLap(LAP, samples, OPTIONS);
+    expect(result.reasons).not.toContain('yawSpike');
   });
 });

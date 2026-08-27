@@ -15,11 +15,12 @@ import { driveCircuitSession, motorpark, transilvania, type TestCircuit } from '
 
 const FORBIDDEN = /undefined|NaN/;
 
-function analyze(circuit: TestCircuit, laps = 4) {
+function analyze(circuit: TestCircuit, laps = 4, channels: 'none' | 'tier1' | 'tier2' = 'none') {
   const session = driveCircuitSession(circuit, {
     laps,
     cornerSpeedScales: [0.95, 1, 0.97, 0.93],
     brakeDecelMps2: [3.6, 4.2, 3.9, 3.4],
+    channels,
   });
   const insights = analyzeSession(session, circuit.corners, {
     totalLengthM: circuit.totalLengthM,
@@ -93,9 +94,50 @@ describe.each([
     expect([...deltas].sort((a, b) => b - a)).toEqual(deltas);
     for (const finding of insights.timeLossRanking) {
       expect(finding.referenceLapNumber).toBe(insights.referenceLapNumber);
-      expect(finding.medianLapNumber).toBe(insights.medianCleanLapNumber);
+      expect(finding.comparisonLapNumber).toBe(insights.comparisonLapNumber);
       if (finding.sectorLossMs !== null) expect(finding.sectorLossMs).toBeGreaterThanOrEqual(0);
     }
+  });
+
+  it('still compares at exactly two clean laps (H7)', () => {
+    const { insights } = analyze(circuit, 2);
+    expect(insights.cleanLapCount).toBe(2);
+    expect(insights.timeLossRanking.length).toBeGreaterThan(0);
+    expect(insights.comparisonLapNumber).not.toBe(insights.referenceLapNumber);
+    expect(renderReport(insights, 'en')).not.toMatch(FORBIDDEN);
+  });
+
+  it('uses the OBD and brand channels when the session carries them (tier 1/2)', () => {
+    const { insights } = analyze(circuit, 3, 'tier2');
+    for (const channel of ['accelPedalPct', 'brakePct', 'steeringDeg', 'latG', 'longG'] as const) {
+      expect(insights.availability.available).toContain(channel);
+    }
+    const metrics = insights.laps.flatMap((lap) => lap.corners);
+    expect(metrics.map((metric) => metric.brakeSource)).toContain('brakePct');
+    expect(metrics.map((metric) => metric.liftSource)).toContain('accelPedalPct');
+    expect(metrics.map((metric) => metric.turnInSource)).toContain('steeringDeg');
+    expect(metrics.some((metric) => (metric.frictionCircleMaxG ?? 0) > 0)).toBe(true);
+    expect(metrics.some((metric) => metric.throttleOnSource !== null)).toBe(true);
+    expect(renderReport(insights, 'ro')).not.toMatch(FORBIDDEN);
+  });
+
+  it('never reports a lap as clean when a safety check could not run (H5)', () => {
+    const session = driveCircuitSession(circuit, { laps: 2 }).map((entry) => ({
+      ...entry,
+      samples: entry.samples.map(({ tMonoMs, distanceM, speedKph }) => ({
+        tMonoMs,
+        distanceM,
+        speedKph,
+      })),
+    }));
+    const insights = analyzeSession(session, circuit.corners, {
+      totalLengthM: circuit.totalLengthM,
+      circuitId: circuit.profile.circuitId,
+      geometryValidated: circuit.geometryValidated,
+    });
+    expect(insights.cleanLapCount).toBe(0);
+    expect(insights.laps.every((lap) => lap.status === 'unverified')).toBe(true);
+    expect(insights.limitations.map((entry) => entry.code)).toContain('UNVERIFIED_LAPS');
   });
 
   it('scores consistency per corner between 0 and 100', () => {

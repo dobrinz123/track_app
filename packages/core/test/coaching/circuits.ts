@@ -65,6 +65,74 @@ export interface DriveSessionOptions {
   sampleRateHz?: number;
   /** Metres of the previous lap kept as the lead-in to corner 1. */
   leadInM?: number;
+  /**
+   * Which channel tiers the recorded session carries. `tier1` adds the
+   * accelerator pedal, `tier2` adds brake pressure, steering angle and the IMU.
+   * The values are derived from the SAME drive (speed derivative and centreline
+   * curvature), so they are consistent with the GPS trace rather than invented
+   * independently of it.
+   */
+  channels?: 'none' | 'tier1' | 'tier2';
+}
+
+const GRAVITY_MPS2 = 9.80665;
+
+function headingDelta(from: number, to: number): number {
+  let delta = (to - from) % 360;
+  if (delta > 180) delta -= 360;
+  if (delta <= -180) delta += 360;
+  return delta;
+}
+
+/**
+ * Derives tier-1/tier-2 channel values from an already-projected drive: pedal
+ * and brake from the longitudinal acceleration, steering and lateral G from the
+ * centreline curvature the car is actually following.
+ */
+function enrichChannels(
+  samples: readonly CornerLapSample[],
+  tier: 'tier1' | 'tier2',
+): CornerLapSample[] {
+  return samples.map((sample, index) => {
+    const next = samples[index + 1];
+    const channels: Record<string, number> = { ...(sample.channels ?? {}) };
+    const speedMps = (sample.speedKph ?? 0) / 3.6;
+    let accelMps2 = 0;
+    let yawDps = 0;
+    if (next !== undefined) {
+      const dtSeconds = (next.tMonoMs - sample.tMonoMs) / 1_000;
+      if (dtSeconds > 0) {
+        accelMps2 = ((next.speedKph ?? 0) - (sample.speedKph ?? 0)) / 3.6 / dtSeconds;
+      }
+    }
+    // A catalog centreline turns in discrete vertex steps; a real gyro and a
+    // real steering wheel do not. Take the yaw rate over a few samples so the
+    // derived channels look like a driver, not like a polyline.
+    const before = samples[Math.max(0, index - 2)];
+    const after = samples[Math.min(samples.length - 1, index + 2)];
+    if (
+      before !== undefined &&
+      after !== undefined &&
+      before !== after &&
+      before.centrelineHeadingDeg !== undefined &&
+      after.centrelineHeadingDeg !== undefined
+    ) {
+      const spanSeconds = (after.tMonoMs - before.tMonoMs) / 1_000;
+      if (spanSeconds > 0) {
+        yawDps = headingDelta(before.centrelineHeadingDeg, after.centrelineHeadingDeg) / spanSeconds;
+      }
+    }
+    channels.accelPedalPct = accelMps2 > 0.1 ? Math.min(100, 30 + accelMps2 * 25) : 0;
+    if (tier === 'tier2') {
+      channels.brakePct = accelMps2 < -0.5 ? Math.min(100, -accelMps2 * 20) : 0;
+      // A steering angle proportional to the path curvature the car follows.
+      channels.steeringDeg = speedMps > 1 ? (yawDps / speedMps) * 60 : 0;
+      channels.longG = accelMps2 / GRAVITY_MPS2;
+      channels.latG = (((yawDps * Math.PI) / 180) * speedMps) / GRAVITY_MPS2;
+      channels.yawRateDps = yawDps;
+    }
+    return { ...sample, channels };
+  });
 }
 
 /**
@@ -79,7 +147,9 @@ export function driveCircuitSession(
 ): SessionLapInput[] {
   const laps = options.laps;
   if (!Number.isInteger(laps) || laps < 1) throw new RangeError('laps must be a positive integer');
-  const leadInM = options.leadInM ?? 320;
+  // The approach window is derived from each corner's speed drop and can reach
+  // back several hundred metres, so the lead-in has to be at least that long.
+  const leadInM = options.leadInM ?? 460;
   const totalLengthM = circuit.totalLengthM;
   const vMax = 55;
   const accelMps2 = 3;
@@ -119,7 +189,9 @@ export function driveCircuitSession(
     speedMps: (context) => speedAt(context.distanceM, Math.max(0, context.lapIndex - 1)),
   });
 
-  const projected = projectLapSamples(circuit.runtime, raw).samples;
+  const tier = options.channels ?? 'none';
+  const projectedRaw = projectLapSamples(circuit.runtime, raw).samples;
+  const projected = tier === 'none' ? projectedRaw : enrichChannels(projectedRaw, tier);
   // Unwrap so laps can be sliced by absolute progress.
   const unwrapped: { sample: CornerLapSample; du: number }[] = [];
   let turns = 0;

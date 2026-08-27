@@ -48,6 +48,7 @@ export {
   analyzeSession,
 } from './sessionInsights';
 export type {
+  ConsistencyComponent,
   ConsistencyFinding,
   CornerInsight,
   CornerLapRow,
@@ -80,6 +81,7 @@ export type {
   LapAnomalyReason,
   LapCheckId,
   LapClassification,
+  LapStatus,
   LiftSource,
   ThrottleOnSource,
   TurnInSource,

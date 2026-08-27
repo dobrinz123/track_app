@@ -136,6 +136,58 @@ describe('renderReport', () => {
     }
   });
 
+  it('renders a NEGATIVE corner delta as a gain, never as "lost -0,20 s" (M5)', () => {
+    clock = 0;
+    // Lap 2 is slower overall (it coasts down the back straight) but brakes
+    // later and carries more speed through the corner window.
+    const laps = [
+      lapInput(1),
+      lapInput(2, {
+        accelAt: (distanceM) => {
+          if (distanceM < 420) return 0;
+          if (distanceM < 600) return -3;
+          if (distanceM < 660) return 0;
+          if (distanceM < 760) return 2;
+          return -2;
+        },
+      }),
+    ];
+    const insights = analyzeSession(laps, CORNERS, CONTEXT);
+    expect(insights.referenceLapNumber).toBe(1);
+    const finding = insights.timeLossRanking[0];
+    expect(finding?.deltaMs ?? 0).toBeLessThan(0);
+
+    const ro = renderReport(insights, 'ro');
+    const en = renderReport(insights, 'en');
+    expect(ro).toContain('ai câștigat');
+    expect(en).toContain('you gained');
+    expect(ro).not.toMatch(/pierdut\s+[-−]/);
+    expect(en).not.toMatch(/lost\s+[-−]/);
+    expect(ro).not.toMatch(FORBIDDEN);
+    expect(en).not.toMatch(FORBIDDEN);
+  });
+
+  it('says a lap could not be verified instead of inventing a reason (H5)', () => {
+    clock = 0;
+    const stripped = [lapInput(1), lapInput(2, { profileShiftM: 10 })].map((entry) => ({
+      ...entry,
+      samples: entry.samples.map(({ tMonoMs, distanceM, speedKph }) => ({
+        tMonoMs,
+        distanceM,
+        speedKph,
+      })),
+    }));
+    const insights = analyzeSession(stripped, CORNERS, CONTEXT);
+    const ro = renderReport(insights, 'ro');
+    const en = renderReport(insights, 'en');
+    expect(ro).toContain('nu au putut fi verificate');
+    expect(en).toContain('could not be verified');
+    expect(ro).not.toContain('motiv nespecificat');
+    expect(en).not.toContain('unspecified reason');
+    expect(ro).not.toMatch(FORBIDDEN);
+    expect(en).not.toMatch(FORBIDDEN);
+  });
+
   it('exposes structured sections for the mobile screen and refuses another language', () => {
     const report = buildReport(session(), 'ro');
     expect(report.sections.map((entry) => entry.id)).toContain('overview');
