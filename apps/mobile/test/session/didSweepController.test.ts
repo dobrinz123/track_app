@@ -547,6 +547,94 @@ describe('didSweepController: M3 -- observation cadence math (binding)', () => {
   });
 });
 
+describe('didSweepController: M2 -- observation delegates to core runDidObservation, one call for the whole window (binding, P4f-FIX3)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('keep-alive fires during a FAST-response observation window through the REAL SimulatedEnetTransport -- one long-lived core run owns the whole window instead of resetting the 2s keep-alive deadline on every poll (the REV3 defect this replaces)', async () => {
+    let keepAliveCount = 0;
+    const controller = createDidSweepController({
+      transportFactory: () => {
+        const transport = new SimulatedEnetTransport({
+          monotonicNow: () => Date.now(),
+          scenario: DEFAULT_ENET_DID_SCENARIO,
+          testerAddress: TESTER_ADDRESS,
+          targetAddress: TARGET_ADDRESS,
+        });
+        const parser = new HsfzFrameParser();
+        const realSend = transport.send.bind(transport);
+        transport.send = (line: string) => {
+          try {
+            for (const frame of parser.push(binaryStringToBytes(line))) {
+              if (frame.control === HSFZ_CONTROL.DIAGNOSTIC_REQ_RES && (frame.payload[0] ?? 0) === 0x3e) keepAliveCount += 1;
+            }
+          } catch {
+            // counting only -- never let a parse failure block the real send.
+          }
+          realSend(line);
+        };
+        return transport;
+      },
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+
+    // Sweep the 3 scripted DIDs first to populate `responders`.
+    controller.start({ from: 0x1e1c, to: 0x1e24 });
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().responders).toHaveLength(3);
+
+    keepAliveCount = 0; // only count keep-alives sent DURING the observation window below.
+    controller.startObservation(5_000); // > 2x the 2s keep-alive cadence; every individual poll answers in well under 2s, so the OLD per-poll-runner design (resetting the deadline every time) would have sent ZERO.
+    await vi.advanceTimersByTimeAsync(5_000);
+    await flush();
+
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+    expect(keepAliveCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it("the core runner's consecutive-error budget stops the observation window EARLY (never hanging for the full window) when the transport keeps failing", async () => {
+    const script = new Map<number, ScriptEntry>([[0x0001, { responses: [positivePdu(0x0001, [0x50])], delayMs: 5 }]]);
+    // The OBSERVATION phase opens a FRESH transport (H1/H2, binding) --
+    // `failSends` is shared across whichever instance `transportFactory`
+    // builds (the sweep's own, then observation's fresh one), toggled AFTER
+    // the sweep completes so the sweep itself still finds its one responder.
+    let failSends = false;
+    const controller = createDidSweepController({
+      transportFactory: () => {
+        const transport = new FakeSweepTransport(script);
+        const realSend = transport.send.bind(transport);
+        transport.send = (line: string) => {
+          if (failSends) throw new Error('adapter unplugged (test double)');
+          realSend(line);
+        };
+        return transport;
+      },
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+
+    controller.start({ from: 0x0001, to: 0x0001 });
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().responders).toHaveLength(1);
+
+    failSends = true; // every observation poll (and every keep-alive) fails from here on.
+    controller.startObservation(60_000); // if the error budget did NOT stop this early, it would run for the full 60s.
+    await vi.advanceTimersByTimeAsync(8_000); // comfortably past the ~5 consecutive-failure budget (default maxConsecutiveErrors=5).
+    await flush();
+
+    expect(controller.getSnapshot().phase).toBe('observationComplete'); // stopped ITSELF via the error budget, not left hanging for the full window.
+  });
+});
+
 describe('didSweepController: pause/resume/stop/tagging (regression -- still correct under the new lifecycle)', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -654,6 +742,100 @@ describe('didSweepController: pause/resume/stop/tagging (regression -- still cor
     await flush();
 
     expect(controller.getSnapshot().phase).toBe('observationComplete');
+  });
+});
+
+describe('didSweepController: P4f-FIX3 -- lifecycle race hardening (binding, after Codex P4f-REV3 HIGH)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a slow close in flight when stop() races in is JOINED, not bypassed -- release only happens after the SAME close settles, and the final phase is "stopped" (never overwritten by the natural completion\'s own "sweepComplete")', async () => {
+    const reservation = createEnetAdapterReservation();
+    let closeCallCount = 0;
+    let releaseCloseGate: (() => void) | null = null;
+    const controller = createDidSweepController({
+      transportFactory: () => {
+        const transport = new FakeSweepTransport(new Map()); // no scripted replies -- the one swept DID times out quickly.
+        const realClose = transport.close.bind(transport);
+        transport.close = () => {
+          closeCallCount += 1;
+          return new Promise<void>((resolve) => {
+            releaseCloseGate = () => {
+              void realClose().then(resolve);
+            };
+          });
+        };
+        return transport;
+      },
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      reservation,
+      requestTimeoutMs: 20, // fast -- the sweep "completes" (unscripted DID -> timeout) quickly.
+    });
+
+    controller.start({ from: 0x0001, to: 0x0001 });
+    await vi.advanceTimersByTimeAsync(30);
+    await flush();
+
+    // The sweep finished naturally (timeout, no reply) and is now awaiting
+    // its own gated close -- the reservation must still be held, and close()
+    // was called exactly once so far.
+    expect(controller.getSnapshot().phase).toBe('sweeping'); // still mid-teardown -- 'sweepComplete' hasn't been emitted yet.
+    expect(reservation.holder()).toBe('sweep');
+    expect(closeCallCount).toBe(1);
+    expect(releaseCloseGate).not.toBeNull();
+
+    controller.stop(); // races in WHILE the natural completion's own close is still pending.
+    await flush();
+
+    // The REV3 bug: `stop()` used to see `activeTransport` already nulled
+    // (cleared before the original close's `await`) and release IMMEDIATELY
+    // here, even though the real close had not settled. Fixed: `stop()`
+    // joins the SAME in-flight close, so nothing has settled yet.
+    expect(closeCallCount).toBe(1); // stop() did NOT start a second, redundant close.
+    expect(reservation.holder()).toBe('sweep'); // still held -- the shared close has not resolved.
+    expect(controller.getSnapshot().phase).toBe('stopped'); // stop() emits this synchronously, immediately.
+
+    releaseCloseGate!(); // let the ONE shared close settle.
+    await flush();
+
+    expect(reservation.holder()).toBeNull(); // released only now, after the close genuinely settled.
+    expect(controller.getSnapshot().phase).toBe('stopped'); // never overwritten by the natural completion's own 'sweepComplete' tail.
+  });
+
+  it('a synchronous throw from channel creation closes the transport and releases the claim (never leaked)', async () => {
+    const reservation = createEnetAdapterReservation();
+    let closeCalls = 0;
+    const controller = createDidSweepController({
+      transportFactory: () => ({
+        connect: async () => undefined,
+        send: () => undefined,
+        onData: () => {
+          throw new Error('onData registration boom (test double)'); // createRawUdsChannel calls this synchronously.
+        },
+        onClose: () => () => undefined,
+        close: async () => {
+          closeCalls += 1;
+        },
+      }),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      reservation,
+    });
+
+    controller.start({ from: 0x0001, to: 0x0001 });
+    await flush();
+
+    expect(closeCalls).toBe(1); // the transport WAS closed despite the sync throw during channel creation.
+    expect(reservation.holder()).toBeNull(); // the claim was NOT leaked.
+    expect(controller.getSnapshot().phase).toBe('stopped');
+    expect(controller.getSnapshot().error).toMatch(/onData registration boom/);
   });
 });
 

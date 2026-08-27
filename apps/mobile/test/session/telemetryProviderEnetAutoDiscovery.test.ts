@@ -527,6 +527,43 @@ describe('telemetryProvider: M1 -- stop() aborts an in-flight auto-discovery sca
 
     expect(reservation.holder()).toBeNull();
   });
+
+  it('M1 (binding, "observation runner & lifecycle race amendment", after Codex P4f-REV3 MEDIUM): stop() during a never-settling getNetworkInfo() read resolves PROMPTLY (never waiting out the 1500ms timeout), releases the token, and a next start() proceeds', async () => {
+    const reservation = createEnetAdapterReservation();
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet' }); // no host -> immediate discovery, which awaits getNetworkInfo() FIRST.
+
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: monotonicCounter(),
+      isDev: true,
+      getNetworkInfo: () => new Promise(() => undefined), // never settles, on its own.
+      enetAdapterReservation: reservation,
+    });
+
+    provider.start();
+    await flushMicrotasks();
+    expect(reservation.holder()).toBe('provider'); // held while the (forever-pending) network-info read is in flight.
+
+    const stopPromise = provider.stop();
+    await flushMicrotasks(); // NO fake-timer advance -- proves this settles without needing the 1500ms timeout to elapse.
+    await stopPromise;
+
+    expect(reservation.holder()).toBeNull();
+
+    // A next start() proceeds normally -- not refused by a stale claim. The
+    // SAME never-settling `getNetworkInfo` is still wired in (this provider
+    // was constructed with it), so this second attempt's OWN network-info
+    // read needs its 1500ms timeout to actually elapse (no second stop()
+    // here to abort it early) before discovery can proceed past it.
+    tracker.script.set('192.168.4.1:6801', 'level2');
+    provider.start();
+    await vi.advanceTimersByTimeAsync(1_500);
+    await flushMicrotasks();
+    expect(store.getSettings().enetHost).toBe('192.168.4.1');
+
+    await provider.stop();
+  });
 });
 
 describe('telemetryProvider: adapterType "elm327" never runs ENET discovery (offline mandate, binding)', () => {

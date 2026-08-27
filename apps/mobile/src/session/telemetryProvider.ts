@@ -360,6 +360,17 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   let discoveryAbortSignal: { aborted: boolean } | null = null;
   let discoveryInFlight: Promise<void> | null = null;
   /**
+   * M1 fix (binding, "observation runner & lifecycle race amendment", after
+   * Codex P4f-REV3 MEDIUM): "the network-info read is raced against the
+   * abort signal and a 1500ms timeout -- `stop()` cannot wait on it
+   * indefinitely." Set (and cleared) by `readNetworkInfoRaced()` below for
+   * the duration of one `readNetworkInfo()` call; `stop()` invokes it
+   * (alongside flipping `discoveryAbortSignal.aborted`) so a never-settling
+   * read can never block `stop()` -- or the whole auto-discovery attempt --
+   * past that point.
+   */
+  let networkInfoAbortNotify: (() => void) | null = null;
+  /**
    * P4e-FIX4 fix (binding, Codex P4e-REV4 HIGH finding -- "overlapping
    * provider generations bypass exclusivity"): while a `stop()` is tearing
    * down the current generation, this is the promise that resolves once
@@ -494,6 +505,43 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     return (host, port) => new EnetTcpTransport({ host, port, connectTimeoutMs: 300 });
   }
 
+  /** M1 (binding): "the network-info read is raced against ... a 1500ms timeout." */
+  const NETWORK_INFO_TIMEOUT_MS = 1500;
+
+  /**
+   * M1 fix (binding, after Codex P4f-REV3 MEDIUM): races `readNetworkInfo()`
+   * against a 1500ms timeout AND `stop()`'s abort -- `stop()` invokes
+   * `networkInfoAbortNotify()` (if one is armed) the SAME moment it flips
+   * `discoveryAbortSignal.aborted`, so a read that never settles can never
+   * block `stop()` (or the whole auto-discovery attempt) past that point.
+   * Never rejects -- resolves `null` on timeout, abort, or the read itself
+   * throwing/rejecting (an unreadable network info is already treated as
+   * "unknown" by every caller of `runAutoDiscovery`).
+   */
+  function readNetworkInfoRaced(): Promise<Awaited<ReturnType<typeof getNetworkInfo>>> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value: Awaited<ReturnType<typeof getNetworkInfo>>): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutTimer);
+        if (networkInfoAbortNotify === finishAborted) networkInfoAbortNotify = null;
+        resolve(value);
+      };
+      const finishAborted = (): void => finish(null);
+      networkInfoAbortNotify = finishAborted;
+      const timeoutTimer = setTimeout(() => finish(null), NETWORK_INFO_TIMEOUT_MS);
+      let readPromise: ReturnType<typeof getNetworkInfo>;
+      try {
+        readPromise = readNetworkInfo();
+      } catch {
+        finish(null);
+        return;
+      }
+      readPromise.then(finish).catch(() => finish(null));
+    });
+  }
+
   /**
    * Runs `@circuit/core`'s `runDiscovery` against the phone's own subnet plus
    * whatever host is currently configured (addendum: "candidates in this
@@ -511,12 +559,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
    */
   async function runAutoDiscovery(signal: DiscoveryAbortSignal): Promise<RunDiscoveryResult> {
     const settings = settingsStore.getSettings();
-    let phoneInfo: Awaited<ReturnType<typeof getNetworkInfo>> = null;
-    try {
-      phoneInfo = await readNetworkInfo();
-    } catch {
-      phoneInfo = null;
-    }
+    const phoneInfo = await readNetworkInfoRaced();
     if (signal.aborted) return { results: [], scanned: 0, elapsedMs: 0, truncated: true };
     const candidates = buildDiscoveryCandidates({
       configuredHost: settings.enetHost.trim() === '' ? undefined : settings.enetHost,
@@ -892,6 +935,11 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       // return immediately, leaving the scan (and its sockets, and the held
       // provider token) running for up to the full discovery budget.
       if (discoveryAbortSignal !== null) discoveryAbortSignal.aborted = true;
+      // M1 fix (binding, after Codex P4f-REV3 MEDIUM): a never-settling
+      // `readNetworkInfo()` read must never leave `stop()` (or the
+      // `discoveryInFlight` it awaits next) hanging -- see
+      // `readNetworkInfoRaced()`'s own doc comment.
+      if (networkInfoAbortNotify !== null) networkInfoAbortNotify();
       if (discoveryInFlight !== null) await discoveryInFlight;
       // F3 fix: capture THIS call's generation locally, synchronously,
       // before awaiting anything -- a `start()` racing in during the

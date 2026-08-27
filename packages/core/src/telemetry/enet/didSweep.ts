@@ -42,6 +42,7 @@
  */
 
 import type { MonotonicClock } from '../../contracts';
+import type { DidResponderSample, DidResponderSeries } from './didHeuristics';
 import { assertAllowedRequest, buildReadDataByIdentifierRequest, buildTesterPresentRequest, parseUdsResponse, UDS_NRC } from './udsCodec';
 
 export interface DidSweepRange {
@@ -290,31 +291,20 @@ export async function runDidSweep(input: RunDidSweepInput): Promise<DidSweepAccu
 
   let lastMeasuredRttMs: number | null = null;
   let nextRequestNotBeforeMs = input.clock.now();
-  let consecutiveErrors = 0;
-  let nextKeepAliveAtMs = input.clock.now() + keepAliveIntervalMs;
 
-  const recordCallOutcome = (ok: boolean): void => {
-    if (ok) {
-      consecutiveErrors = 0;
-    } else {
-      acc.errors += 1;
-      consecutiveErrors += 1;
-    }
-  };
-  const shouldStopForErrors = (): boolean => consecutiveErrors >= maxConsecutiveErrors;
-
-  /** Best-effort keep-alive tick -- checked both between DIDs and inside a single DID's own retry loop, so a slow multi-extension exchange still gets its keep-alives (amendment: "every 2 s"). */
-  const maybeKeepAlive = async (): Promise<void> => {
-    if (input.clock.now() < nextKeepAliveAtMs) return;
-    nextKeepAliveAtMs = input.clock.now() + keepAliveIntervalMs; // scheduled regardless of outcome -- never a tight retry loop on repeated failure.
-    const pdu = buildTesterPresentRequest();
-    assertAllowedRequest(pdu);
-    const result = await guardedCall(() => input.transport.keepAlive(pdu), requestTimeoutMs);
-    recordCallOutcome(result.ok);
-  };
+  const errorBudget = createErrorBudget(maxConsecutiveErrors, () => {
+    acc.errors += 1;
+  });
+  const maybeKeepAlive = createKeepAliveTicker(
+    input.transport,
+    input.clock,
+    keepAliveIntervalMs,
+    requestTimeoutMs,
+    errorBudget.recordCallOutcome,
+  );
 
   for (;;) {
-    if (input.control.stopped || input.control.paused || shouldStopForErrors()) break;
+    if (input.control.stopped || input.control.paused || errorBudget.shouldStop()) break;
     const did = input.plan.peek();
     if (did === null) break;
 
@@ -328,7 +318,7 @@ export async function runDidSweep(input: RunDidSweepInput): Promise<DidSweepAccu
     }
 
     await maybeKeepAlive();
-    if (shouldStopForErrors()) break; // a keep-alive failure just tipped us over -- stop before sending anything more.
+    if (errorBudget.shouldStop()) break; // a keep-alive failure just tipped us over -- stop before sending anything more.
 
     const sentAtMs = input.clock.now();
     const { outcome, unmatchedCount } = await resolveDid(
@@ -338,8 +328,8 @@ export async function runDidSweep(input: RunDidSweepInput): Promise<DidSweepAccu
       requestTimeoutMs,
       maxExtensions,
       maxUnmatchedRetries,
-      recordCallOutcome,
-      shouldStopForErrors,
+      errorBudget.recordCallOutcome,
+      errorBudget.shouldStop,
       maybeKeepAlive,
     );
     const rttMs = Math.max(0, input.clock.now() - sentAtMs);
@@ -370,6 +360,215 @@ export async function runDidSweep(input: RunDidSweepInput): Promise<DidSweepAccu
   }
 
   return acc;
+}
+
+// ---------- Observation runner (amendment: "observation runner & lifecycle race") ----------
+
+export interface RunDidObservationInput {
+  /** Fixed set of DIDs to poll round-robin. Order is preserved in the returned `series`. */
+  responders: readonly number[];
+  transport: SweepTransport;
+  clock: MonotonicClock;
+  durationMs: number;
+  /** default 1. Target full ROUNDS (one poll of every responder) per second -- amendment: "round-robin over responders at targetHz". Non-finite/non-positive falls back to the default. */
+  targetHz?: number;
+  pacing?: DidSweepPacing;
+  control: DidSweepControl;
+  /** Invoked for every correlated 0x62 response (DID-stripped payload), in addition to being accumulated into the returned `series`. */
+  onSample?: (did: number, raw: Uint8Array, tMs: number) => void;
+  /** default 1000. Same meaning as `RunDidSweepInput.requestTimeoutMs`, applied per responder poll. */
+  requestTimeoutMs?: number;
+  /** default 5. */
+  maxResponsePendingExtensions?: number;
+  /** default 3. */
+  maxUnmatchedRetries?: number;
+  /** default 2000. Owned by this ONE loop for the entire window (amendment/REV3 fix: a caller that instead re-invoked a per-DID runner for every poll reset this deadline every time, so keep-alive could go unsent for an entire fast-responding observation). */
+  keepAliveIntervalMs?: number;
+  /** default 5. Consecutive interface failures across the WHOLE window (not reset between responders) before the loop stops itself, same as `control.stopped`. */
+  maxConsecutiveErrors?: number;
+}
+
+export interface RunDidObservationResult {
+  /** One entry per input responder (same order), each ready to feed straight into `classifyResponders`. */
+  series: DidResponderSeries[];
+  /** Consecutive-interface-failure count across the whole window (see `RunDidSweepInput.maxConsecutiveErrors`'s doc for what counts as an "error"). */
+  errors: number;
+  /** True if ANY full round (one poll of every responder) took longer than `1000 / targetHz` ms. */
+  cadenceDegraded: boolean;
+}
+
+const DEFAULT_TARGET_HZ = 1;
+/** How often `runDidObservation` re-checks `control.paused`/the window deadline while paused. Not a tuning knob. */
+const PAUSE_POLL_INTERVAL_MS = 50;
+
+/**
+ * ONE long-running loop (amendment: "the mobile observation phase uses it --
+ * never per-DID sweep runs") that polls `responders` round-robin for
+ * `durationMs`, targeting `targetHz` full rounds per second. Keep-alive
+ * cadence, pacing, and the consecutive-error budget are owned by THIS loop
+ * for the WHOLE window -- the REV3 defect this fixes was re-invoking a
+ * per-DID sweep run for every single poll, which recreated (and therefore
+ * effectively disabled) all three every time a response arrived quickly.
+ * Every correlated 0x62 is reported via `onSample` AND accumulated into the
+ * returned per-responder `series` (same shape `classifyResponders` expects).
+ * `control` is re-checked at every responder boundary and while paused, same
+ * discipline as `runDidSweep`.
+ */
+export async function runDidObservation(input: RunDidObservationInput): Promise<RunDidObservationResult> {
+  if (input.responders.length === 0) {
+    return { series: [], errors: 0, cadenceDegraded: false };
+  }
+
+  const requestTimeoutMs = sanitizePositive(input.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
+  const maxExtensions = sanitizeNonNegativeInt(input.maxResponsePendingExtensions, DEFAULT_MAX_RESPONSE_PENDING_EXTENSIONS);
+  const maxUnmatchedRetries = sanitizeNonNegativeInt(input.maxUnmatchedRetries, DEFAULT_MAX_UNMATCHED_RETRIES);
+  const keepAliveIntervalMs = sanitizePositive(input.keepAliveIntervalMs, DEFAULT_KEEPALIVE_INTERVAL_MS);
+  const maxConsecutiveErrors = Math.max(1, sanitizeNonNegativeInt(input.maxConsecutiveErrors, DEFAULT_MAX_CONSECUTIVE_ERRORS));
+  const targetHz = sanitizePositive(input.targetHz, DEFAULT_TARGET_HZ);
+  const roundBudgetMs = 1_000 / targetHz;
+
+  const rttMultiplier = sanitizePositive(input.pacing?.rttMultiplier, 1);
+  const floorIntervalMs = sanitizeNonNegative(input.pacing?.minIntervalMs, 0);
+  const rawMaxRequestsPerSec = input.pacing?.maxRequestsPerSec;
+  const capIntervalMs =
+    rawMaxRequestsPerSec !== undefined && Number.isFinite(rawMaxRequestsPerSec) && rawMaxRequestsPerSec > 0
+      ? 1_000 / rawMaxRequestsPerSec
+      : 0;
+
+  let errors = 0;
+  const errorBudget = createErrorBudget(maxConsecutiveErrors, () => {
+    errors += 1;
+  });
+  const maybeKeepAlive = createKeepAliveTicker(
+    input.transport,
+    input.clock,
+    keepAliveIntervalMs,
+    requestTimeoutMs,
+    errorBudget.recordCallOutcome,
+  );
+
+  const samplesByDid = new Map<number, DidResponderSample[]>();
+  for (const did of input.responders) samplesByDid.set(did, []);
+
+  const startedAtMs = input.clock.now();
+  const endAtMs = startedAtMs + Math.max(0, input.durationMs);
+  let cadenceDegraded = false;
+  let lastMeasuredRttMs: number | null = null;
+  let nextRequestNotBeforeMs = startedAtMs;
+
+  /** Re-checked at every responder boundary (same discipline as `runDidSweep`'s pacing-wait recheck). Returns true once the caller should stop entirely -- `control.stopped`, or the window elapsing while paused. */
+  const waitWhilePaused = async (): Promise<boolean> => {
+    while (input.control.paused && !input.control.stopped) {
+      if (input.clock.now() >= endAtMs) return true;
+      await waitMs(PAUSE_POLL_INTERVAL_MS);
+    }
+    return input.control.stopped;
+  };
+
+  outer: while (input.clock.now() < endAtMs) {
+    if (input.control.stopped) break;
+    if (await waitWhilePaused()) break;
+    if (errorBudget.shouldStop()) break;
+
+    const roundStartMs = input.clock.now();
+
+    for (const did of input.responders) {
+      if (input.control.stopped) break outer;
+      if (await waitWhilePaused()) break outer;
+      if (errorBudget.shouldStop()) break outer;
+      if (input.clock.now() >= endAtMs) break outer;
+
+      const now = input.clock.now();
+      if (now < nextRequestNotBeforeMs) {
+        await waitMs(nextRequestNotBeforeMs - now);
+        if (input.control.stopped) break outer;
+      }
+
+      await maybeKeepAlive();
+      if (errorBudget.shouldStop()) break outer;
+
+      const sentAtMs = input.clock.now();
+      const { outcome } = await resolveDid(
+        did,
+        input.transport,
+        input.clock,
+        requestTimeoutMs,
+        maxExtensions,
+        maxUnmatchedRetries,
+        errorBudget.recordCallOutcome,
+        errorBudget.shouldStop,
+        maybeKeepAlive,
+      );
+      const rttMs = Math.max(0, input.clock.now() - sentAtMs);
+
+      if (outcome.type === 'responder') {
+        const tMs = input.clock.now();
+        samplesByDid.get(did)?.push({ tMs, raw: outcome.raw });
+        input.onSample?.(did, outcome.raw, tMs);
+        lastMeasuredRttMs = rttMs;
+      } else if (outcome.type === 'nrc') {
+        lastMeasuredRttMs = rttMs;
+      }
+
+      const rttBasedIntervalMs = lastMeasuredRttMs === null ? 0 : lastMeasuredRttMs * rttMultiplier;
+      const rawIntervalMs = Math.max(floorIntervalMs, capIntervalMs, rttBasedIntervalMs);
+      const minIntervalMs = clamp(rawIntervalMs, DID_SWEEP_PACING_MIN_MS, DID_SWEEP_PACING_MAX_MS);
+      nextRequestNotBeforeMs = input.clock.now() + minIntervalMs;
+    }
+
+    const roundElapsedMs = input.clock.now() - roundStartMs;
+    if (roundElapsedMs > roundBudgetMs) {
+      cadenceDegraded = true;
+    } else if (!input.control.stopped && input.clock.now() < endAtMs) {
+      const remainingMs = roundBudgetMs - roundElapsedMs;
+      if (remainingMs > 0) await waitMs(remainingMs);
+    }
+  }
+
+  const series: DidResponderSeries[] = input.responders.map((did) => ({ did, samples: samplesByDid.get(did) ?? [] }));
+  return { series, errors, cadenceDegraded };
+}
+
+interface ErrorBudget {
+  /** Call after EVERY interface (`send`/`nextResponse`/`keepAlive`) attempt: `true` resets the consecutive count, `false` bumps it (and invokes `onError`, e.g. to increment a caller-owned `.errors` counter). */
+  recordCallOutcome: (ok: boolean) => void;
+  /** True once `maxConsecutiveErrors` consecutive failures have been recorded. */
+  shouldStop: () => boolean;
+}
+
+/** Shared consecutive-interface-failure budget, used identically by `runDidSweep` and `runDidObservation` (extracted so both runners enforce the amendment's error-budget rule the SAME way, not two hand-copied ones). */
+function createErrorBudget(maxConsecutiveErrors: number, onError: () => void): ErrorBudget {
+  let consecutive = 0;
+  return {
+    recordCallOutcome: (ok) => {
+      if (ok) {
+        consecutive = 0;
+      } else {
+        onError();
+        consecutive += 1;
+      }
+    },
+    shouldStop: () => consecutive >= maxConsecutiveErrors,
+  };
+}
+
+/** Shared keep-alive ticker, used identically by `runDidSweep` and `runDidObservation`: best-effort, checked at call sites throughout each runner's own loop (between DIDs/responders AND inside a single exchange's own retry loop), never resetting its own schedule just because a call failed (amendment: "every 2 s"). */
+function createKeepAliveTicker(
+  transport: SweepTransport,
+  clock: MonotonicClock,
+  keepAliveIntervalMs: number,
+  requestTimeoutMs: number,
+  recordCallOutcome: (ok: boolean) => void,
+): () => Promise<void> {
+  let nextKeepAliveAtMs = clock.now() + keepAliveIntervalMs;
+  return async () => {
+    if (clock.now() < nextKeepAliveAtMs) return;
+    nextKeepAliveAtMs = clock.now() + keepAliveIntervalMs; // scheduled regardless of outcome -- never a tight retry loop on repeated failure.
+    const pdu = buildTesterPresentRequest();
+    assertAllowedRequest(pdu);
+    const result = await guardedCall(() => transport.keepAlive(pdu), requestTimeoutMs);
+    recordCallOutcome(result.ok);
+  };
 }
 
 /**

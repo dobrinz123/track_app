@@ -703,3 +703,16 @@ adapter, connects, and helps discover identifiers — no manual IP/port/DID typi
 - Under `telemetrySimulate` (dev) discovery (Find adapter and auto-connect) uses the simulated probe factory
   so the preview demonstrates the full flow.
 - Sweep progress text and any long monospace value shrinks/wraps at 360pt/1.3×.
+
+### P4f addendum — observation runner & lifecycle race amendment (2026-08-27, binding, after Codex P4f-REV3)
+- Core `runDidObservation({responders: number[], transport: SweepTransport, clock, durationMs, targetHz = 1, pacing?, control, onSample(did, raw, tMs), maxConsecutiveErrors?}) → {series: DidResponderSeries[], errors, cadenceDegraded}`:
+  ONE long-running loop that polls the responder set round-robin, owns the keep-alive cadence, pacing and the
+  consecutive-error budget for the whole window; correlation/0x78 rules identical to the sweep runner.
+  The mobile observation phase uses it — never per-DID sweep runs.
+- Discovery budget: `budgetMs ≤ 0` means no probes (empty result, `truncated: false`); otherwise `min(configured, 8000)`.
+- Sweep controller lifecycle: the transport reference is retained until `close()` settles (or its 200 ms race
+  elapses); `stop()` awaits any in-flight teardown before releasing; channel creation + run + observation are
+  inside one lifecycle `try/finally` that always closes then releases; continuations carry the run generation
+  and never overwrite a later terminal state (`stopped` wins over `sweepComplete`).
+- Provider auto-discovery: the network-info read is raced against the abort signal and a 1500 ms timeout;
+  `stop()` cannot wait on it indefinitely.

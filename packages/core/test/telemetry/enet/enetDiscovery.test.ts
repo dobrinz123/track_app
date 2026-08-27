@@ -269,6 +269,43 @@ describe('runDiscovery', () => {
     expect(result.results).toEqual([]);
   });
 
+  it('[P4f-FIX3] budgetMs <= 0 means NO probes at all -- empty result, truncated FALSE (not expanded to the 8000ms default)', async () => {
+    let probeCalls = 0;
+    const probe = (): ObdTransport => {
+      probeCalls += 1;
+      return stubTransport();
+    };
+    const candidates: DiscoveryCandidate[] = [
+      { host: '10.0.0.1', port: 6801 },
+      { host: '10.0.0.2', port: 6801 },
+    ];
+
+    for (const budgetMs of [0, -1, -1_000]) {
+      const result = await runDiscovery({
+        candidates,
+        probe,
+        clock: new FakeClock(),
+        testerAddress: 0xf4,
+        targetAddress: 0x12,
+        budgetMs,
+      });
+      expect(result).toEqual({ results: [], scanned: 0, elapsedMs: 0, truncated: false });
+    }
+    expect(probeCalls).toBe(0); // not one candidate was ever probed
+  });
+
+  it('an OMITTED/non-finite budgetMs still falls back to the 8000ms default (only an EXPLICIT <= 0 means "no probes")', async () => {
+    const result = await runDiscovery({
+      candidates: [{ host: '10.0.0.1', port: 6801 }],
+      probe: () => stubTransport(),
+      clock: new FakeClock(),
+      testerAddress: 0xf4,
+      targetAddress: 0x12,
+      budgetMs: Number.NaN,
+    });
+    expect(result.scanned).toBe(1); // NaN is "not configured", not "explicitly zero"
+  });
+
   it('a probe still "in flight" when the budget expires is cancelled and contributes NO result -- "truncated: true with only completed results"', async () => {
     const clock = new FakeClock();
     const candidates: DiscoveryCandidate[] = Array.from({ length: 5 }, (_, i) => ({ host: `10.0.2.${i}`, port: 6801 }));

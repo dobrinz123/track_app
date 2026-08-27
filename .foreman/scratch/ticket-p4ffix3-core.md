@@ -1,0 +1,6 @@
+# Ticket P4f-FIX3-core — observation runner + budget rule (core)
+Binding: "observation runner & lifecycle race amendment" (contracts.md, end). Review: `.foreman/scratch/p4frev3-codex-output.log`.
+Tests first (fail on HEAD ff92597), then fix:
+1. New `runDidObservation` in `packages/core/src/telemetry/enet/didSweep.ts` (or `didObservation.ts`, exported) per the amendment: single loop, round-robin over responders at targetHz (default 1), keep-alive every 2 s owned by the loop, pacing clamp, consecutive-error budget across the whole window, `cadenceDegraded` when a round exceeds 1/targetHz, `onSample` per correlated 0x62 (DID-stripped payload), returns `DidResponderSeries[]` ready for `classifyResponders`, control {paused, stopped}. Tests: keep-alive fires during a 10 s window of fast responses (the REV3 counterexample), error budget stops the run, cadence degradation reported, series shape.
+2. `sanitizeBudgetMs`: ≤ 0 → 0 probes (empty result, truncated false); else min(configured, 8000). Test.
+Gates (real exit codes): typecheck 0, core tests 0, lint 0. WRITE SET: packages/core/src/telemetry/enet/**, packages/core/test/telemetry/enet/**. API additive. No commit, no agents, never touch apps/mobile (parallel worker). Report the exact API.

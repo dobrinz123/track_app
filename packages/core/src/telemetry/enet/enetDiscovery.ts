@@ -173,7 +173,7 @@ export interface RunDiscoveryInput {
   connectTimeoutMs?: number;
   /** default 500 (addendum). */
   replyTimeoutMs?: number;
-  /** Hard-capped at 8000ms regardless of what's passed (amendment: "budgetMs = min(configured, 8000)"); a non-finite or non-positive value falls back to 8000. default 8000. */
+  /** Hard-capped at 8000ms regardless of what's passed (amendment: "budgetMs = min(configured, 8000)"); a non-finite value (e.g. omitted, `NaN`) falls back to 8000, but an EXPLICIT `<= 0` value means "no probes at all" -- an empty, non-truncated result, never expanded to 8000. default 8000. */
   budgetMs?: number;
   testerAddress: number;
   targetAddress: number;
@@ -210,18 +210,33 @@ function sanitizeConcurrency(value: number | undefined): number {
   return Math.min(HARD_MAX_CONCURRENCY, Math.floor(value));
 }
 
-/** Amendment: "budgetMs = min(configured, 8000)" -- a HARD ceiling regardless of what's configured (60_000 clamps to 8_000, matching every other numeric default's non-finite/non-positive fallback here). */
+/**
+ * Amendment: "budgetMs = min(configured, 8000)" -- a HARD ceiling regardless
+ * of what's configured (60_000 clamps to 8_000). A value that is EXPLICITLY
+ * <= 0 (a real, finite number the caller actually passed, e.g. `0`) is its
+ * OWN case: "no probes at all" (amendment: "budgetMs <= 0 means no probes"),
+ * NOT "not configured" -- it must NOT fall back to the 8000ms default (a
+ * caller using `budgetMs: 0` to mean "run nothing" must not accidentally get
+ * a full 8-second scan). Only `undefined`/non-finite (genuinely unconfigured,
+ * e.g. `NaN`) falls back to the default.
+ */
 function sanitizeBudgetMs(value: number | undefined): number {
-  if (value === undefined || !Number.isFinite(value) || value <= 0) return DEFAULT_BUDGET_MS;
+  if (value === undefined || !Number.isFinite(value)) return DEFAULT_BUDGET_MS;
+  if (value <= 0) return 0;
   return Math.min(DEFAULT_BUDGET_MS, value);
 }
 
-/** Runs discovery across `candidates`. Never throws on a per-candidate failure -- a refused/timed-out/erroring candidate simply contributes no result. */
+/** Runs discovery across `candidates`. Never throws on a per-candidate failure -- a refused/timed-out/erroring candidate simply contributes no result. `budgetMs <= 0` (see `sanitizeBudgetMs`) short-circuits to an empty, NOT truncated, result -- no candidate is ever probed. */
 export async function runDiscovery(input: RunDiscoveryInput): Promise<RunDiscoveryResult> {
   const concurrency = sanitizeConcurrency(input.concurrency);
   const connectTimeoutMs = input.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
   const replyTimeoutMs = input.replyTimeoutMs ?? DEFAULT_REPLY_TIMEOUT_MS;
   const budgetMs = sanitizeBudgetMs(input.budgetMs);
+  if (budgetMs <= 0) {
+    // "No probes" is an intentional configuration, not an interrupted scan --
+    // `truncated` must read false (amendment), unlike every other early-stop path.
+    return { results: [], scanned: 0, elapsedMs: 0, truncated: false };
+  }
   const { clock, signal } = input;
   const startedAtMs = clock.now();
   const deadlineMs = startedAtMs + budgetMs;

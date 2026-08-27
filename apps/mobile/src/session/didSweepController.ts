@@ -21,9 +21,10 @@
  * The controller's own job is ONLY: own the transport lifecycle (acquire the
  * `'sweep'` reservation -> open a fresh transport -> run -> close -> release,
  * strictly in that order on every path), drive `runDidSweep`/the shared
- * `DidSweepAccumulator` across pause/resume, and the observation phase
- * (round-robin re-polls via `runDidSweep` over a one-DID plan per tick --
- * see `pollObservationSample` -- never re-implementing correlation).
+ * `DidSweepAccumulator` across pause/resume, and (M2, P4f-FIX3) the
+ * observation phase, which delegates its ENTIRE round-robin/keep-alive/
+ * pacing/error-budget loop to core's `runDidObservation` -- ONE call for the
+ * whole window (see `runObservationOnChannel`) -- never re-implementing it.
  *
  * H1/H2 (binding): the CONTROLLER owns the transport lifecycle -- `start()`
  * acquires the `'sweep'` reservation FIRST (no generation bump before a
@@ -31,6 +32,19 @@
  * `transportFactory`, runs, closes the transport, and releases the
  * reservation -- release STRICTLY after close, on every path (complete,
  * stop, throw). The screen never connects a transport itself.
+ *
+ * LIFECYCLE RACE (binding, P4f-FIX3, after Codex P4f-REV3 HIGH): the active
+ * transport reference is retained until `close()` genuinely settles (or a
+ * 200 ms race elapses -- `teardownActiveTransport`, below) rather than being
+ * cleared before the `await`, so a `stop()` that races in while a natural
+ * completion's own close is still pending JOINS that same in-flight
+ * teardown (never releases early, never double-closes). Every exit path
+ * (normal completion, pause, stop, a synchronous throw from channel
+ * creation, an unexpected rejection from the core runner) shares ONE
+ * lifecycle guard (`runGuarded`) that always closes then releases; every
+ * continuation re-checks its own `generation` AFTER awaiting teardown (not
+ * only before), so a later terminal state (`stop()`'s `'stopped'`) can never
+ * be overwritten by an earlier attempt's `'sweepComplete'`.
  */
 import {
   bytesToBinaryString,
@@ -42,10 +56,11 @@ import {
   enetSpecsFromSuggestion,
   HSFZ_CONTROL,
   HsfzFrameParser,
+  runDidObservation,
   runDidSweep,
   type DidHeuristicContext,
   type DidHeuristicSuggestion,
-  type DidResponderSample,
+  type DidResponderSeries,
   type DidSweepAccumulator,
   type DidSweepControl,
   type DidSweepPlan,
@@ -256,8 +271,6 @@ export interface DidSweepController {
 }
 
 const DEFAULT_OBSERVATION_WINDOW_MS = 60_000;
-/** Binding (M3): "round-robin ~1 Hz per responder". */
-const OBSERVATION_ROUND_TARGET_MS = 1_000;
 
 type SweepOutcome = 'complete' | 'paused' | 'stopped';
 
@@ -274,16 +287,29 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
   let accumulator: DidSweepAccumulator | null = null;
   /** Shared, mutable, live-read by `@circuit/core`'s `runDidSweep` while it runs -- `pause()`/`stop()` flip these to make an in-flight call return promptly at its next check point. */
   let control: DidSweepControl = { paused: false, stopped: false };
+  /**
+   * M2 (binding, P4f-FIX3): shared with core's `runDidObservation` for the
+   * WHOLE observation window (a single call, never re-created per poll).
+   * `stopObservationEarly()` flips `.stopped` on this SAME object -- WITHOUT
+   * bumping `generation` -- to make that one call's loop end at its next
+   * boundary while still classifying whatever was sampled; a full `stop()`
+   * flips the SAME flag AND bumps `generation`, which is what
+   * `runObservationOnChannel` actually keys "skip classify" off of (see its
+   * own doc comment) -- not a second, separate cut-short flag.
+   */
   let observationControl: DidSweepControl = { paused: false, stopped: false };
-  /** `stopObservationEarly()`'s own flag -- distinct from `control.stopped` (a full `stop()`): ends the observation WINDOW early but still classifies whatever was sampled (phase 'observationComplete'), never 'stopped'. Never bumps `generation`. */
-  let observationCutShort = false;
   let startedAtMs = 0;
   let requestsIssued = 0;
   /** Bumped on `stop()` and on every fresh `start()`/observation-from-terminal-state -- a superseded async continuation checks this before touching shared state (transport/reservation/snapshot). */
   let generation = 0;
   let activeTransport: ObdTransport | null = null;
   let activeChannel: SweepTransport | null = null;
-  const observationSeries = new Map<number, DidResponderSample[]>();
+  /** M2 (binding): the fixed responder-DID set `runDidObservation` polls round-robin for the current/next observation run -- set once when an observation starts, never mutated mid-run (core owns the round-robin itself). */
+  let observationResponderDids: number[] = [];
+  /** REV3 fix (binding, HIGH): the in-flight `teardownActiveTransport()` call, if one is running -- a concurrent caller (e.g. `stop()` racing a natural completion's own close) JOINS this SAME promise instead of finding `activeTransport` already cleared and releasing early. */
+  let teardownInFlight: Promise<void> | null = null;
+  /** REV3 (binding): "close() settles (or its 200ms race elapses)" -- mirrors discovery's own close-race pattern (P4f-REV1) so a hanging real-world close can never block `stop()`/release indefinitely. */
+  const TEARDOWN_RACE_MS = 200;
 
   function emit(next: Partial<DidSweepSnapshot>): void {
     snapshot = { ...snapshot, ...next };
@@ -303,17 +329,55 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
     }
   }
 
-  /** Closes the active transport (if any) and clears the active transport/channel -- does NOT touch the reservation (callers release separately, strictly AFTER this resolves). */
-  async function teardownActiveTransport(): Promise<void> {
+  /**
+   * Closes the active transport (if any) -- does NOT touch the reservation
+   * (callers release separately, strictly AFTER this resolves). REV3
+   * (binding): retains `activeTransport`/`activeChannel` until `close()`
+   * settles (or the 200ms race elapses), NEVER before, and a concurrent call
+   * while one is already running joins the SAME promise rather than starting
+   * a second (redundant) close or -- the original bug -- finding the
+   * reference already nulled and returning as a no-op.
+   */
+  function teardownActiveTransport(): Promise<void> {
+    if (teardownInFlight !== null) return teardownInFlight;
     const transport = activeTransport;
-    activeTransport = null;
-    activeChannel = null;
-    if (transport !== null) {
+    if (transport === null) return Promise.resolve();
+    const promise = (async () => {
       try {
-        await transport.close();
-      } catch {
-        // Best-effort: a close failure must never block release/reporting.
+        await Promise.race([
+          transport.close().catch(() => undefined),
+          waitMs(TEARDOWN_RACE_MS),
+        ]);
+      } finally {
+        activeTransport = null;
+        activeChannel = null;
+        teardownInFlight = null;
       }
+    })();
+    teardownInFlight = promise;
+    return promise;
+  }
+
+  /**
+   * H1 (binding, REV3): the ONE lifecycle guard every entry point runs
+   * through -- `body` does its own work (connect, build the channel, run the
+   * core loop, and on a normal exit call `finishSweepRun`/its observation
+   * counterpart, which already close+release themselves). Whatever `body`
+   * does NOT catch (a synchronous throw from `transportFactory`/channel
+   * creation, a `connect()` rejection, or an unexpected rejection from the
+   * core runner) lands here: teardown (close) THEN release, on every path,
+   * with the run's OWN generation re-checked after the (possibly-joined)
+   * teardown resolves so a superseded attempt never re-emits over a later
+   * terminal state.
+   */
+  async function runGuarded(myGeneration: number, body: () => Promise<void>): Promise<void> {
+    try {
+      await body();
+    } catch (error) {
+      await teardownActiveTransport();
+      if (myGeneration !== generation) return; // a stop()/fresh start() already superseded this attempt -- it owns the final phase.
+      releaseReservation();
+      emit({ phase: 'stopped', error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -359,144 +423,117 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
     return 'complete'; // neither flag caused the return -- the plan is exhausted.
   }
 
-  /** H1/H2 (binding): acquires the reservation, opens a FRESH transport, runs `runSweepLoop`, and (on complete/stop, never on merely-paused) closes the transport THEN releases the reservation. */
-  async function openTransportAndSweep(myGeneration: number): Promise<void> {
-    let transport: ObdTransport;
-    try {
-      transport = deps.transportFactory();
-      activeTransport = transport;
-      await transport.connect();
-    } catch (error) {
-      await teardownActiveTransport();
-      if (myGeneration !== generation) return; // a stop() already superseded/released this attempt.
-      releaseReservation();
-      emit({ phase: 'stopped', error: error instanceof Error ? error.message : String(error) });
-      return;
-    }
-    if (myGeneration !== generation) {
-      // stop() raced in during connect() -- it already bumped generation and
-      // will close/release via its OWN teardown path; this attempt's
-      // `activeTransport` reference was already claimed by that path (or is
-      // about to be), so just get out without touching it again.
-      return;
-    }
-    const channel = createRawUdsChannel(transport, deps.testerAddress, deps.targetAddress);
-    activeChannel = channel;
-
-    const outcome = await runSweepLoop(myGeneration, channel);
+  /**
+   * Shared tail for a `runSweepLoop` outcome, whether reached from a fresh
+   * `start()` or a `resume()` on the SAME channel. `'paused'` leaves the
+   * transport/reservation held (untouched) for a later `resume()`/
+   * `startObservation()`; `'complete'`/`'stopped'` close then release --
+   * with the generation re-checked AFTER teardown (REV3, binding), so a
+   * `stop()` that raced in while THIS close was still settling (and already
+   * emitted its own `'stopped'`+released) is never overwritten here.
+   */
+  async function finishSweepRun(myGeneration: number, outcome: SweepOutcome): Promise<void> {
     if (myGeneration !== generation) return; // stop() already handled teardown/release.
     if (outcome === 'paused') {
       emit({ phase: 'paused' });
       return; // transport/reservation stay held -- resume() continues on the SAME channel.
     }
     await teardownActiveTransport();
+    if (myGeneration !== generation) return; // stop() raced in while close was settling -- it owns the final phase.
     emit({ phase: outcome === 'complete' ? 'sweepComplete' : 'stopped' });
     releaseReservation();
   }
 
+  /**
+   * H1/H2/REV3 (binding): acquires the reservation (by the caller, before
+   * this runs), opens a FRESH transport, builds the channel, runs
+   * `runSweepLoop`, and hands the outcome to `finishSweepRun` -- all inside
+   * ONE `runGuarded` lifecycle: a synchronous throw from `transportFactory`/
+   * `createRawUdsChannel`, a `connect()` rejection, or an unexpected
+   * rejection from the core runner are ALL caught by `runGuarded`, which
+   * closes the transport then releases the reservation before surfacing the
+   * error -- nothing here can leak an open transport or a held claim.
+   */
+  async function openTransportAndSweep(myGeneration: number): Promise<void> {
+    await runGuarded(myGeneration, async () => {
+      const transport = deps.transportFactory();
+      activeTransport = transport;
+      await transport.connect();
+      if (myGeneration !== generation) {
+        // stop() raced in during connect() -- it already bumped generation
+        // and will close/release via its OWN teardown path (joining this
+        // same in-flight transport reference); just get out.
+        return;
+      }
+      const channel = createRawUdsChannel(transport, deps.testerAddress, deps.targetAddress);
+      activeChannel = channel;
+      const outcome = await runSweepLoop(myGeneration, channel);
+      await finishSweepRun(myGeneration, outcome);
+    });
+  }
+
   // ---------------------------------------------------------------------
-  // Observation (M2/M3, binding). Re-polls each responder DID via
-  // `runDidSweep` over a fresh ONE-DID plan+accumulator per tick -- the SAME
-  // core runner the sweep itself uses, so correlation/0x78/unmatched
-  // handling is never re-implemented here either.
+  // Observation (M2/M3, binding). ONE call to core's `runDidObservation`
+  // owns the whole window: round-robin polling, keep-alive cadence, pacing,
+  // and the consecutive-error budget, all for the ENTIRE run (never
+  // re-created per poll -- the REV3 defect this replaces re-invoked a
+  // per-DID `runDidSweep` for every single poll, which reset the keep-alive
+  // deadline/pacing/error budget every time a response arrived quickly).
   // ---------------------------------------------------------------------
 
-  async function pollObservationSample(channel: SweepTransport, did: number): Promise<Uint8Array | null> {
-    const onePlan = createDidSweepPlan({ from: did, to: did });
-    const oneAcc = createDidSweepAccumulator();
-    await runDidSweep({
-      plan: onePlan,
-      transport: channel,
-      clock: deps.clock,
-      control: { paused: false, stopped: false },
-      accumulator: oneAcc,
-      requestTimeoutMs: deps.requestTimeoutMs,
-      // No 0x78 extension budget during observation re-polls -- a stalling
-      // ECU just costs this one tick's sample, not the whole re-poll loop.
-      maxResponsePendingExtensions: 0,
-    });
-    return oneAcc.responders[0]?.raw ?? null;
+  function finishObservation(series: readonly DidResponderSeries[], cadenceDegraded: boolean): void {
+    const context = deps.gnssSpeedContext?.();
+    const suggestions = classifyResponders(series, context);
+    emit({ phase: 'observationComplete', suggestions, observationCadenceDegraded: cadenceDegraded });
   }
 
   /**
-   * M3 (binding): round-robin every responder once per "round"; a round
-   * targets `OBSERVATION_ROUND_TARGET_MS` (1s) total -- if it finishes
-   * faster, the remainder is slept so each responder is genuinely sampled
-   * ~1 Hz; if the round itself takes LONGER (N responders x measured RTT
-   * exceeds 1s), no extra sleep is added (that would only make the real
-   * cadence worse) and `observationCadenceDegraded` is reported `true`.
+   * M2 (binding, P4f-FIX3): delegates the ENTIRE round-robin/keep-alive/
+   * pacing/error-budget loop to core's `runDidObservation` -- a SINGLE call
+   * for the whole window, never re-implemented here. `stopObservationEarly()`
+   * and a full `stop()` both end that one call early by flipping the SAME
+   * `observationControl.stopped` core polls; they are told apart AFTER the
+   * call resolves purely by `generation` (`stop()` bumps it, `stopObservationEarly()`
+   * does not) -- REV3's "generation re-checked after teardown, not only
+   * before" discipline is what keeps a full stop()'s own 'stopped' emit from
+   * ever being overwritten by this call's classify tail.
    */
-  async function runObservationLoop(
-    myGeneration: number,
-    channel: SweepTransport,
-    windowMs: number,
-  ): Promise<'complete' | 'cutShort' | 'stopped'> {
-    const dids = [...observationSeries.keys()];
-    const observationStartedAtMs = deps.clock.now();
-    if (dids.length === 0) return 'complete';
-
-    while (deps.clock.now() - observationStartedAtMs < windowMs) {
-      if (myGeneration !== generation || observationControl.stopped) return 'stopped';
-      if (observationCutShort) return 'cutShort';
-      const roundStartMs = deps.clock.now();
-      for (const did of dids) {
-        if (myGeneration !== generation || observationControl.stopped) return 'stopped';
-        if (observationCutShort) return 'cutShort';
-        const raw = await pollObservationSample(channel, did);
-        if (myGeneration !== generation) return 'stopped';
-        if (raw !== null) {
-          observationSeries.get(did)?.push({ tMs: deps.clock.now() - observationStartedAtMs, raw });
-        }
-      }
-      const roundElapsedMs = deps.clock.now() - roundStartMs;
-      const degraded = roundElapsedMs > OBSERVATION_ROUND_TARGET_MS;
-      emit({ observationElapsedMs: deps.clock.now() - observationStartedAtMs, observationCadenceDegraded: degraded });
-      if (!degraded) await waitMs(OBSERVATION_ROUND_TARGET_MS - roundElapsedMs);
-      if (myGeneration !== generation || observationControl.stopped) return 'stopped';
-      if (observationCutShort) return 'cutShort';
-    }
-    return 'complete';
-  }
-
-  function finishObservation(): void {
-    const series = [...observationSeries.entries()].map(([did, samples]) => ({ did, samples }));
-    const context = deps.gnssSpeedContext?.();
-    const suggestions = classifyResponders(series, context);
-    emit({ phase: 'observationComplete', suggestions });
-  }
-
   async function runObservationOnChannel(myGeneration: number, channel: SweepTransport, windowMs: number): Promise<void> {
-    const outcome = await runObservationLoop(myGeneration, channel, windowMs);
-    if (myGeneration !== generation) return; // a full stop() already handled teardown/release itself.
-    observationCutShort = false; // consumed -- reset so a LATER observation run starts clean.
+    const result = await runDidObservation({
+      responders: observationResponderDids,
+      transport: channel,
+      clock: deps.clock,
+      durationMs: windowMs,
+      pacing: deps.pacing,
+      control: observationControl,
+      requestTimeoutMs: deps.requestTimeoutMs,
+      maxResponsePendingExtensions: deps.maxResponsePendingExtensions,
+      onSample: (_did, _raw, tMs) => {
+        if (myGeneration !== generation) return;
+        emit({ observationElapsedMs: tMs });
+      },
+    });
+    if (myGeneration !== generation) return; // a full stop() already handled teardown/release + the final 'stopped' phase itself.
     await teardownActiveTransport();
-    if (outcome === 'stopped') {
-      emit({ phase: 'stopped' });
-    } else {
-      // 'complete' (window elapsed) or 'cutShort' (stopObservationEarly()) --
-      // BOTH classify whatever was sampled; only a full stop() skips it.
-      finishObservation();
-    }
+    if (myGeneration !== generation) return; // stop() raced in while close was settling -- it owns the final phase.
+    // Reaching here means this call was NOT superseded by a full stop() --
+    // window elapsed naturally, `stopObservationEarly()` ended it, or the
+    // error budget stopped it -- ALL classify whatever was sampled.
+    finishObservation(result.series, result.cadenceDegraded);
     releaseReservation();
   }
 
+  /** H1/REV3 (binding): same single `runGuarded` lifecycle as `openTransportAndSweep` -- a synchronous throw from `transportFactory`/`createRawUdsChannel`, a `connect()` rejection, or an unexpected rejection from the observation loop are ALL caught, closing then releasing before surfacing the error. */
   async function openTransportAndObserve(myGeneration: number, windowMs: number): Promise<void> {
-    let transport: ObdTransport;
-    try {
-      transport = deps.transportFactory();
+    await runGuarded(myGeneration, async () => {
+      const transport = deps.transportFactory();
       activeTransport = transport;
       await transport.connect();
-    } catch (error) {
-      await teardownActiveTransport();
-      if (myGeneration !== generation) return;
-      releaseReservation();
-      emit({ phase: 'stopped', error: error instanceof Error ? error.message : String(error) });
-      return;
-    }
-    if (myGeneration !== generation) return;
-    const channel = createRawUdsChannel(transport, deps.testerAddress, deps.targetAddress);
-    activeChannel = channel;
-    await runObservationOnChannel(myGeneration, channel, windowMs);
+      if (myGeneration !== generation) return; // stop() raced in during connect() -- it owns teardown/release.
+      const channel = createRawUdsChannel(transport, deps.testerAddress, deps.targetAddress);
+      activeChannel = channel;
+      await runObservationOnChannel(myGeneration, channel, windowMs);
+    });
   }
 
   function canStart(phase: DidSweepPhase): boolean {
@@ -539,10 +576,9 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       plan = freshPlan;
       accumulator = createDidSweepAccumulator();
       control = { paused: false, stopped: false };
-      observationCutShort = false;
       requestsIssued = 0;
       startedAtMs = deps.clock.now();
-      observationSeries.clear();
+      observationResponderDids = [];
       emit({ ...INITIAL_SNAPSHOT, error: null, phase: 'sweeping' });
       void openTransportAndSweep(myGeneration);
     },
@@ -558,17 +594,10 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       const myGeneration = generation; // SAME generation -- the transport/channel/reservation/accumulator are all still this run's own.
       emit({ phase: 'sweeping' });
       const channel = activeChannel;
-      void (async () => {
+      void runGuarded(myGeneration, async () => {
         const outcome = await runSweepLoop(myGeneration, channel);
-        if (myGeneration !== generation) return;
-        if (outcome === 'paused') {
-          emit({ phase: 'paused' });
-          return;
-        }
-        await teardownActiveTransport();
-        emit({ phase: outcome === 'complete' ? 'sweepComplete' : 'stopped' });
-        releaseReservation();
-      })();
+        await finishSweepRun(myGeneration, outcome);
+      });
     },
 
     stop(): void {
@@ -593,12 +622,11 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       // transport -- no second `tryAcquire`, no reconnect.
       if (snapshot.phase === 'paused' && activeChannel !== null) {
         observationControl = { paused: false, stopped: false };
-        observationCutShort = false;
         const myGeneration = generation; // SAME generation/token/transport.
-        observationSeries.clear();
-        for (const responder of snapshot.responders) observationSeries.set(responder.did, []);
+        const channel = activeChannel;
+        observationResponderDids = snapshot.responders.map((r) => r.did);
         emit({ phase: 'observing', observationElapsedMs: 0, observationCadenceDegraded: false, error: null });
-        void runObservationOnChannel(myGeneration, activeChannel, windowMs);
+        void runGuarded(myGeneration, () => runObservationOnChannel(myGeneration, channel, windowMs));
         return;
       }
 
@@ -613,21 +641,20 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       const myGeneration = generation;
       token = acquired;
       observationControl = { paused: false, stopped: false };
-      observationCutShort = false;
-      observationSeries.clear();
-      for (const responder of snapshot.responders) observationSeries.set(responder.did, []);
+      observationResponderDids = snapshot.responders.map((r) => r.did);
       emit({ phase: 'observing', observationElapsedMs: 0, observationCadenceDegraded: false, error: null });
       void openTransportAndObserve(myGeneration, windowMs);
     },
 
     stopObservationEarly(): void {
       if (snapshot.phase !== 'observing') return;
-      // Ends the WINDOW early, but this is NOT a full stop() -- the
-      // transport/reservation are still released, but via the 'cutShort'
-      // outcome (`runObservationOnChannel` still classifies whatever was
-      // sampled, landing on 'observationComplete', never 'stopped'). No
-      // generation bump -- the SAME run's own teardown handles it.
-      observationCutShort = true;
+      // M2 (binding, P4f-FIX3): flips the SAME `control.stopped` core's
+      // `runDidObservation` polls (ending that one call's loop at its next
+      // boundary) WITHOUT bumping `generation` -- `runObservationOnChannel`'s
+      // post-call generation check is what tells this apart from a full
+      // `stop()` (which flips the identical flag AND bumps `generation`):
+      // only a full `stop()` skips the classify tail; this always reaches it.
+      observationControl.stopped = true;
     },
 
     buildTaggedSpec(did, channel, dateIso): EnetChannelSpec | null {
