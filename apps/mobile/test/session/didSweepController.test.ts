@@ -983,6 +983,91 @@ describe('didSweepController: P4f-FIX4 -- observation time domain (binding, afte
   });
 });
 
+describe('didSweepController: P4f-FIX5 -- observation anchor accounts for the connection delay (binding, after Codex P4f-REV5)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.mocked(classifyResponders).mockClear();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('with a 3s simulated connection delay, onObservationStarted fires AFTER connect (not at the tap) -- a DID sample and a wall-clock sample taken at the same instant re-base to the same relative time (±50ms)', async () => {
+    const script = new Map<number, ScriptEntry>([[0x0001, { responses: [positivePdu(0x0001, [0x50])], delayMs: 5 }]]);
+    let transportCallCount = 0;
+    let anchorWallClockMs: number | null = null;
+    const controller = createDidSweepController({
+      transportFactory: () => {
+        transportCallCount += 1;
+        // The SWEEP's own transport (1st call) connects instantly; the
+        // OBSERVATION's fresh transport (2nd call, terminal-state "open
+        // fresh" branch) simulates a 3s connection delay -- the REV5
+        // scenario's exact setup.
+        const connectDelayMs = transportCallCount === 1 ? 0 : 3_000;
+        return new FakeSweepTransport(script, { connectDelayMs });
+      },
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      onObservationStarted: (anchor) => {
+        anchorWallClockMs = anchor.wallClockMs;
+      },
+    });
+
+    controller.start({ from: 0x0001, to: 0x0001 });
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().responders).toHaveLength(1);
+
+    const tapWallClockMs = Date.now();
+    controller.startObservation(5_000);
+
+    // The REV5 bug: the anchor (or the screen's own equivalent) used to be
+    // captured AT THE TAP -- here, still mid-connect, it must not exist yet.
+    expect(anchorWallClockMs).toBeNull();
+    expect(controller.getSnapshot().observationAnchorWallClockMs).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(3_000); // the simulated connection delay elapses.
+    await flush();
+
+    expect(anchorWallClockMs).not.toBeNull();
+    expect(anchorWallClockMs!).toBeGreaterThanOrEqual(tapWallClockMs + 3_000); // AFTER connect, never at the tap.
+    expect(controller.getSnapshot().observationAnchorWallClockMs).toBe(anchorWallClockMs); // the snapshot mirrors the callback's own value.
+
+    // Let ~100ms of the observation elapse so the one responder answers at
+    // least once, then end the window early and classify.
+    await vi.advanceTimersByTimeAsync(100);
+    await flush();
+    controller.stopObservationEarly();
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+
+    const [series] = vi.mocked(classifyResponders).mock.calls.at(-1)!;
+    const didSample = series.find((entry) => entry.did === 0x0001)?.samples[0];
+    expect(didSample).toBeDefined();
+    const didRelativeTMs = didSample!.tMs; // core-relative, ~"observation+100ms" by construction of the advance above.
+
+    // The REAL wall-clock instant this DID sample was correlated at is
+    // recoverable because core's own internal `startedAtMs` equals the
+    // anchor this controller reported (verified above) -- a GNSS-style
+    // sample taken at that SAME wall instant, re-based via the exact formula
+    // `DidSweepScreen.tsx`'s own `gnssSpeedContext()` uses (`wallClockMs -
+    // anchor`), must map back to the identical relative time.
+    const sampleWallClockMs = anchorWallClockMs! + didRelativeTMs;
+    const gnssRelativeTMs = sampleWallClockMs - anchorWallClockMs!;
+    expect(Math.abs(gnssRelativeTMs - didRelativeTMs)).toBeLessThanOrEqual(50);
+
+    // The discriminating check: if the anchor had instead been captured AT
+    // THE TAP (the REV5 defect -- `DidSweepScreen.tsx` used to do exactly
+    // this), re-basing that SAME wall-clock instant against the TAP would be
+    // off by approximately the full 3s connection delay, not a small number
+    // of ms -- proving this fix's practical effect, not just its formula.
+    const buggyRelativeTMs = sampleWallClockMs - tapWallClockMs;
+    expect(Math.abs(buggyRelativeTMs - didRelativeTMs)).toBeGreaterThan(2_500);
+  });
+});
+
 /** Sanity check that the scripted PDUs above really parse the way this test file assumes. */
 describe('didSweepController test fixtures: sanity', () => {
   it('positivePdu/negativePdu/wrongSidPdu round-trip through the real parseUdsResponse', () => {

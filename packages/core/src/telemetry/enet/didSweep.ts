@@ -303,22 +303,35 @@ export async function runDidSweep(input: RunDidSweepInput): Promise<DidSweepAccu
     errorBudget.recordCallOutcome,
   );
 
+  /**
+   * The SINGLE gate for "is it still okay to send the next request" (Codex
+   * P4f-REV5) -- no other check may gate a `resolveDid` call. Sweep has no
+   * time deadline of its own (unlike observation), so this is just
+   * stopped -> paused -> error budget, but it is still the ONE place that
+   * decision is made: called once for an early/cheap exit at the top of the
+   * loop, and called AGAIN immediately before every `resolveDid` (the actual
+   * send) -- specifically so a pause/stop that lands during the awaited
+   * `maybeKeepAlive()` (a real async gap) is never missed the way a lone
+   * `errorBudget.shouldStop()` check there previously missed it.
+   */
+  const shouldContinue = (): boolean => !input.control.stopped && !input.control.paused && !errorBudget.shouldStop();
+
   for (;;) {
-    if (input.control.stopped || input.control.paused || errorBudget.shouldStop()) break;
+    if (!shouldContinue()) break;
     const did = input.plan.peek();
     if (did === null) break;
 
     const now = input.clock.now();
     if (now < nextRequestNotBeforeMs) {
       await waitMs(nextRequestNotBeforeMs - now);
-      // Re-checked after every wait (amendment): pause/stop set WHILE we were
-      // waiting must take effect before this DID is ever sent, not just
-      // before the wait started.
-      if (input.control.stopped || input.control.paused) break;
     }
 
     await maybeKeepAlive();
-    if (errorBudget.shouldStop()) break; // a keep-alive failure just tipped us over -- stop before sending anything more.
+
+    // The ONE authoritative check right before the send -- covers a
+    // stop/pause/error-budget change during EITHER the pacing wait above OR
+    // the keep-alive await just before it, with no other path to `resolveDid`.
+    if (!shouldContinue()) break;
 
     const sentAtMs = input.clock.now();
     const { outcome, unmatchedCount } = await resolveDid(
@@ -478,34 +491,43 @@ export async function runDidObservation(input: RunDidObservationInput): Promise<
     return input.control.stopped;
   };
 
+  /**
+   * The SINGLE gate for "is it still okay to send the next request" (Codex
+   * P4f-REV5) -- stopped -> deadline -> paused-wait -> error budget, in that
+   * order, and no other check may gate a `resolveDid` call. Called for an
+   * early/cheap exit at each round/responder boundary, AND called AGAIN
+   * immediately before every `resolveDid` (the actual send) -- specifically
+   * so a stop/pause/expiry landing during the awaited `maybeKeepAlive()` (a
+   * real async gap) is never missed the way a lone `errorBudget.shouldStop()`
+   * check there previously missed it.
+   */
+  const shouldContinue = async (): Promise<boolean> => {
+    if (input.control.stopped) return false;
+    if (input.clock.now() >= endAtMs) return false;
+    if (await waitWhilePaused()) return false;
+    return !errorBudget.shouldStop();
+  };
+
   outer: while (input.clock.now() < endAtMs) {
-    if (input.control.stopped) break;
-    if (await waitWhilePaused()) break;
-    if (errorBudget.shouldStop()) break;
+    if (!(await shouldContinue())) break;
 
     const roundStartMs = input.clock.now();
 
     for (const did of input.responders) {
-      if (input.control.stopped) break outer;
-      if (await waitWhilePaused()) break outer;
-      if (errorBudget.shouldStop()) break outer;
-      if (input.clock.now() >= endAtMs) break outer;
+      if (!(await shouldContinue())) break outer;
 
       const now = input.clock.now();
       if (now < nextRequestNotBeforeMs) {
         await waitMs(nextRequestNotBeforeMs - now);
-        // Re-checked after every wait (Codex P4f-REV4 fix, same discipline as
-        // `runDidSweep`'s own pacing-wait recheck): `stopped`, THEN the
-        // window deadline, THEN `paused` -- all three must be re-verified
-        // right here, not just `stopped`, or one extra request could still
-        // be sent to a responder after pause/expiry landed mid-wait.
-        if (input.control.stopped) break outer;
-        if (input.clock.now() >= endAtMs) break outer;
-        if (await waitWhilePaused()) break outer;
       }
 
       await maybeKeepAlive();
-      if (errorBudget.shouldStop()) break outer;
+
+      // The ONE authoritative check right before the send -- covers a
+      // stop/pause/expiry/error-budget change during EITHER the pacing wait
+      // above OR the keep-alive await just before it, with no other path to
+      // `resolveDid`.
+      if (!(await shouldContinue())) break outer;
 
       const sentAtMs = input.clock.now();
       const { outcome } = await resolveDid(

@@ -480,6 +480,112 @@ describe('runDidSweep', () => {
       expect(Array.from(pdu)).toEqual([0x3e, 0x80]);
     }
   });
+
+  it('[P4f-REV5] control.stopped landing during a SLOW successful keep-alive prevents the next send -- no other path to send', async () => {
+    vi.useFakeTimers();
+    const plan = createDidSweepPlan({ from: 1, to: 5 });
+    const clock = new FakeClock();
+    const ctl = control();
+    const seen: number[] = [];
+    let resolveKeepAlive: (() => void) | undefined;
+    let keepAliveCalls = 0;
+    const transport = makeTransport({
+      send: (pdu) => {
+        seen.push(didOf(pdu));
+      },
+      // Advances the clock AFTER did 1's own send/response exchange fully
+      // completes (not in `send`, which would instead trip the DIFFERENT,
+      // intentionally error-budget-only keep-alive check `resolveDid` makes
+      // mid-exchange, before this main-loop, between-DIDs one).
+      nextResponse: (_t, sentPdus) => {
+        clock.advance(60); // crosses the 50ms keep-alive cadence
+        return positiveRaw(didOf(sentPdus[sentPdus.length - 1]!), [1]);
+      },
+      keepAlive: () => {
+        keepAliveCalls += 1;
+        // Slow AND successful -- resolves only when the test says so, well after `stopped` lands.
+        return new Promise((resolve) => {
+          resolveKeepAlive = resolve;
+        });
+      },
+    });
+
+    const resultPromise = runDidSweep({
+      plan,
+      transport,
+      clock,
+      control: ctl,
+      keepAliveIntervalMs: 50,
+      // Large on purpose: `guardedCall`'s OWN internal safety-timeout is also
+      // a real (fake-timer) `setTimeout` of `requestTimeoutMs` -- draining
+      // with `runAllTimersAsync()` here would advance PAST it and resolve
+      // the "slow" keep-alive as a timeout automatically, never letting the
+      // test itself decide when it resolves. Keeping it far above the small,
+      // precise advance below avoids that entirely.
+      requestTimeoutMs: 60_000,
+    });
+
+    // Drains did 1's exchange and the ~60ms pacing wait before did 2 -- NOT
+    // `runAllTimersAsync()` (see above) -- landing exactly inside the
+    // (hanging) main-loop keep-alive await.
+    await vi.advanceTimersByTimeAsync(100);
+    expect(keepAliveCalls).toBe(1);
+    expect(seen).toEqual([1]); // did 1 already went through; did 2 must not have, yet
+
+    ctl.stopped = true; // lands WHILE the keep-alive is still pending
+    resolveKeepAlive?.(); // the keep-alive now succeeds (does NOT trip the error budget)
+    await vi.runAllTimersAsync();
+    await resultPromise;
+
+    // Before the fix: only `errorBudget.shouldStop()` was checked after
+    // `maybeKeepAlive()`, so a stop landing here (with a SUCCESSFUL
+    // keep-alive) was invisible and one more DID request still went out.
+    expect(seen).toEqual([1]);
+  });
+
+  it('[P4f-REV5] control.paused landing during a SLOW successful keep-alive prevents the next send', async () => {
+    vi.useFakeTimers();
+    const plan = createDidSweepPlan({ from: 1, to: 5 });
+    const clock = new FakeClock();
+    const ctl = control();
+    const seen: number[] = [];
+    let resolveKeepAlive: (() => void) | undefined;
+    const transport = makeTransport({
+      send: (pdu) => {
+        seen.push(didOf(pdu));
+      },
+      nextResponse: (_t, sentPdus) => {
+        clock.advance(60);
+        return positiveRaw(didOf(sentPdus[sentPdus.length - 1]!), [1]);
+      },
+      keepAlive: () =>
+        new Promise((resolve) => {
+          resolveKeepAlive = resolve;
+        }),
+    });
+
+    const resultPromise = runDidSweep({
+      plan,
+      transport,
+      clock,
+      control: ctl,
+      keepAliveIntervalMs: 50,
+      requestTimeoutMs: 60_000, // see the sibling test's comment -- keeps `guardedCall`'s own safety timeout well out of reach
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(seen).toEqual([1]);
+
+    ctl.paused = true; // lands WHILE the keep-alive is still pending
+    resolveKeepAlive?.();
+    await vi.runAllTimersAsync();
+    await resultPromise;
+
+    // `runDidSweep`'s pause semantics simply end this call (resumed later via
+    // a fresh call with the same plan) -- either way, did 2 must never be sent.
+    expect(seen).toEqual([1]);
+    expect(plan.visitedCount).toBe(1);
+  });
 });
 
 /**

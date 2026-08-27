@@ -202,6 +202,16 @@ export interface DidSweepSnapshot {
   observationElapsedMs: number;
   /** M3 (binding): true whenever a completed observation round took longer than 1 s to cover every responder once -- true ~1 Hz per responder is not achievable given the measured RTT and responder count. */
   observationCadenceDegraded: boolean;
+  /**
+   * P4f-FIX5 (binding, after Codex P4f-REV5): the wall-clock instant (same
+   * domain as `Date.now()`) at which THIS observation run's core loop
+   * actually began -- i.e. AFTER the transport finished connecting, not at
+   * the moment `startObservation()` was tapped. `null` before an observation
+   * has started, or while one is still connecting. Mirrors (and is set at
+   * the exact same instant as) the `onObservationStarted` deps callback --
+   * exposed on the snapshot too for callers/tests that would rather poll it.
+   */
+  observationAnchorWallClockMs: number | null;
   /** Non-null exactly when something went wrong (invalid range, reservation refused, connect failure) -- never thrown across this API. */
   error: string | null;
 }
@@ -216,6 +226,7 @@ const INITIAL_SNAPSHOT: DidSweepSnapshot = {
   suggestions: [],
   observationElapsedMs: 0,
   observationCadenceDegraded: false,
+  observationAnchorWallClockMs: null,
   error: null,
 };
 
@@ -249,6 +260,22 @@ export interface DidSweepControllerDeps {
    * caller has no GNSS speed series to offer.
    */
   gnssSpeedContext?: () => DidHeuristicContext;
+  /**
+   * P4f-FIX5 (binding, after Codex P4f-REV5): fired ONCE per observation run,
+   * at the EXACT moment the core observation loop begins -- i.e. right
+   * before the `runDidObservation` call, AFTER the transport has finished
+   * connecting (or immediately, resuming from paused, where no connect delay
+   * applies). `anchor.wallClockMs` is `deps.clock.now()` captured at that
+   * instant -- the SAME clock instance/reading `runDidObservation` itself
+   * anchors `result.startedAtMs`/every relative `tMs` to. A caller collecting
+   * its OWN wall-clock-timestamped series (e.g. GNSS speed) to feed
+   * `gnssSpeedContext` MUST re-baseline against THIS anchor, not against
+   * whenever it happened to call `startObservation()` -- anchoring at the tap
+   * instead silently offsets every sample by the connection delay, corrupting
+   * `classifyResponders`' nearest-time correlation (the exact REV5 defect
+   * this callback exists to let the caller avoid).
+   */
+  onObservationStarted?: (anchor: { wallClockMs: number }) => void;
 }
 
 export interface DidSweepController {
@@ -517,6 +544,20 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
    * ever being overwritten by this call's classify tail.
    */
   async function runObservationOnChannel(myGeneration: number, channel: SweepTransport, windowMs: number): Promise<void> {
+    // P4f-FIX5 (binding, after Codex P4f-REV5): captured HERE -- right before
+    // the core loop actually begins, i.e. AFTER `openTransportAndObserve`'s
+    // own `await transport.connect()` (or immediately, resuming from paused,
+    // where there is no connect delay) -- NEVER at `startObservation()`'s own
+    // synchronous call, which happens BEFORE that connect delay elapses. This
+    // is the SAME clock instance/reading `runDidObservation` itself anchors
+    // `result.startedAtMs` to, so a caller re-baselining its own wall-clock
+    // series (e.g. GNSS speed) against this anchor lines up exactly with
+    // every relative `tMs` this call reports (onSample and `result.series`
+    // alike) -- fixing the connection-delay offset REV5 found.
+    const anchorWallClockMs = deps.clock.now();
+    if (myGeneration === generation) emit({ observationAnchorWallClockMs: anchorWallClockMs });
+    deps.onObservationStarted?.({ wallClockMs: anchorWallClockMs });
+
     const result = await runDidObservation({
       responders: observationResponderDids,
       transport: channel,
@@ -651,7 +692,7 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
         const myGeneration = generation; // SAME generation/token/transport.
         const channel = activeChannel;
         observationResponderDids = snapshot.responders.map((r) => r.did);
-        emit({ phase: 'observing', observationElapsedMs: 0, observationCadenceDegraded: false, error: null });
+        emit({ phase: 'observing', observationElapsedMs: 0, observationCadenceDegraded: false, observationAnchorWallClockMs: null, error: null });
         void runGuarded(myGeneration, () => runObservationOnChannel(myGeneration, channel, windowMs));
         return;
       }

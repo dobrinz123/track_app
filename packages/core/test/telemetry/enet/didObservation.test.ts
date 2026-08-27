@@ -342,4 +342,118 @@ describe('runDidObservation', () => {
 
     expect(seen).toEqual([1]); // did 2 never sent -- the window expired mid-wait
   });
+
+  it('[P4f-REV5] control.stopped landing during a SLOW successful keep-alive prevents the next send -- no other path to send', async () => {
+    vi.useFakeTimers();
+    const clock = new FakeClock();
+    const ctl = control();
+    const seen: number[] = [];
+    let resolveKeepAlive: (() => void) | undefined;
+    let keepAliveCalls = 0;
+    const transport: SweepTransport & { sentPdus: Uint8Array[] } = {
+      sentPdus: [],
+      async send(pdu) {
+        this.sentPdus.push(pdu);
+        seen.push(didOf(pdu));
+      },
+      // Advances the clock AFTER did 1's own send/response exchange fully
+      // completes (not in `send`, which would instead trip the DIFFERENT,
+      // intentionally error-budget-only keep-alive check `resolveDid` makes
+      // mid-exchange, before this main-loop, between-responders one).
+      async nextResponse(_timeoutMs) {
+        clock.advance(60); // crosses the 50ms keep-alive cadence
+        return positiveRaw(didOf(this.sentPdus[this.sentPdus.length - 1]!), [1]);
+      },
+      keepAlive() {
+        keepAliveCalls += 1;
+        // Slow AND successful -- resolves only when the test says so, well after `stopped` lands.
+        return new Promise((resolve) => {
+          resolveKeepAlive = resolve;
+        });
+      },
+    };
+
+    const resultPromise = runDidObservation({
+      responders: [1, 2],
+      transport,
+      clock,
+      durationMs: 10_000,
+      control: ctl,
+      keepAliveIntervalMs: 50,
+      // Large on purpose: `guardedCall`'s OWN internal safety-timeout is also
+      // a real (fake-timer) `setTimeout` of `requestTimeoutMs` -- draining
+      // with `runAllTimersAsync()` here would advance PAST it and resolve
+      // the "slow" keep-alive as a timeout automatically, never letting the
+      // test itself decide when it resolves. Keeping it far above the small,
+      // precise advance below avoids that entirely.
+      requestTimeoutMs: 60_000,
+    });
+
+    // Drains did 1's exchange and the ~60ms pacing wait before did 2 -- NOT
+    // `runAllTimersAsync()` (see above) -- landing exactly inside the
+    // (hanging) main-loop keep-alive await.
+    await vi.advanceTimersByTimeAsync(100);
+    expect(keepAliveCalls).toBe(1);
+    expect(seen).toEqual([1]); // did 1 already went through; did 2 must not have, yet
+
+    ctl.stopped = true; // lands WHILE the keep-alive is still pending
+    resolveKeepAlive?.(); // the keep-alive now succeeds (does NOT trip the error budget)
+    await vi.runAllTimersAsync();
+    await resultPromise;
+
+    // Before the fix: only `errorBudget.shouldStop()` was checked after
+    // `maybeKeepAlive()`, so a stop landing here (with a SUCCESSFUL
+    // keep-alive) was invisible and one more DID request still went out.
+    expect(seen).toEqual([1]);
+  });
+
+  it('[P4f-REV5] control.paused landing during a SLOW successful keep-alive prevents the next send', async () => {
+    vi.useFakeTimers();
+    const clock = new FakeClock();
+    const ctl = control();
+    const seen: number[] = [];
+    let resolveKeepAlive: (() => void) | undefined;
+    const transport: SweepTransport & { sentPdus: Uint8Array[] } = {
+      sentPdus: [],
+      async send(pdu) {
+        this.sentPdus.push(pdu);
+        seen.push(didOf(pdu));
+      },
+      async nextResponse(_timeoutMs) {
+        clock.advance(60);
+        return positiveRaw(didOf(this.sentPdus[this.sentPdus.length - 1]!), [1]);
+      },
+      keepAlive() {
+        return new Promise((resolve) => {
+          resolveKeepAlive = resolve;
+        });
+      },
+    };
+
+    const resultPromise = runDidObservation({
+      responders: [1, 2],
+      transport,
+      clock,
+      durationMs: 10_000,
+      control: ctl,
+      keepAliveIntervalMs: 50,
+      requestTimeoutMs: 60_000, // see the sibling test's comment -- keeps `guardedCall`'s own safety timeout well out of reach
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(seen).toEqual([1]);
+
+    ctl.paused = true; // lands WHILE the keep-alive is still pending
+    resolveKeepAlive?.();
+    // Let the (otherwise indefinite, since `clock` never reaches `endAtMs` on
+    // its own once nothing else advances it) paused-wait loop run for a
+    // while, proving did 2 is never sent while paused.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(seen).toEqual([1]);
+
+    ctl.stopped = true; // release the loop purely for cleanup
+    await vi.runAllTimersAsync();
+    await resultPromise;
+    expect(seen).toEqual([1]); // no DID request was ever sent while paused
+  });
 });

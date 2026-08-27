@@ -71,15 +71,27 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   // ONLY while an observation is actually running (cleared at each
   // `startObservation()`), read by the controller exactly once when the
   // observation phase finishes.
-  const gnssSpeedSamplesRef = React.useRef<Array<{ tMs: number; v: number }>>([]);
+  //
+  // P4f-FIX5 (binding, after Codex P4f-REV5): samples are buffered as RAW
+  // wall-clock instants (`Date.now()`), NOT pre-converted to an elapsed time
+  // -- the controller's `onObservationStarted` callback (below) supplies the
+  // REAL anchor (the moment its core observation loop actually begins, AFTER
+  // the transport finishes connecting), which arrives strictly LATER than
+  // this ref is reset at the tap (`handleStartObservation`). Anchoring at the
+  // tap instead (the REV5 defect) offset every GNSS sample by the connection
+  // delay relative to the DID series' own (post-connect) relative `tMs` --
+  // `gnssSpeedContext()` does the actual re-basing once the anchor is known,
+  // dropping any sample that landed before it (no corresponding DID-relative
+  // instant exists for those).
+  const gnssSpeedSamplesRef = React.useRef<Array<{ wallClockMs: number; v: number }>>([]);
   const observingRef = React.useRef(false);
-  const observationStartedAtMsRef = React.useRef(0);
+  const observationAnchorWallClockMsRef = React.useRef<number | null>(null);
 
   React.useEffect(
     () =>
       facade.subscribe((state) => {
         if (!observingRef.current || state.speedKph === null) return;
-        gnssSpeedSamplesRef.current.push({ tMs: Date.now() - observationStartedAtMsRef.current, v: state.speedKph });
+        gnssSpeedSamplesRef.current.push({ wallClockMs: Date.now(), v: state.speedKph });
       }),
     [],
   );
@@ -108,7 +120,22 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
       testerAddress: settingsRef.current.enetTesterAddress,
       targetAddress: settingsRef.current.enetTargetAddress,
       clock: { now: () => Date.now() },
-      gnssSpeedContext: () => ({ gnssSpeedKph: [...gnssSpeedSamplesRef.current] }),
+      // P4f-FIX5 (binding): the REAL anchor -- fired once the core
+      // observation loop actually begins (post-connect), in the SAME
+      // wall-clock domain `Date.now()` (above) already uses for GNSS
+      // samples.
+      onObservationStarted: (anchor) => {
+        observationAnchorWallClockMsRef.current = anchor.wallClockMs;
+      },
+      gnssSpeedContext: () => {
+        const anchor = observationAnchorWallClockMsRef.current;
+        if (anchor === null) return { gnssSpeedKph: [] }; // the loop never actually started (e.g. connect failed) -- nothing valid to offer.
+        return {
+          gnssSpeedKph: gnssSpeedSamplesRef.current
+            .map((sample) => ({ tMs: sample.wallClockMs - anchor, v: sample.v }))
+            .filter((sample) => sample.tMs >= 0), // drop samples collected before the anchor (the tap-to-connect gap) -- no corresponding DID-relative instant exists for them.
+        };
+      },
     });
     controllerRef.current = controller;
     controller.subscribe((next) => {
@@ -147,7 +174,12 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
     const seconds = Number.parseInt(observationWindowDraft, 10);
     const windowMs = Number.isFinite(seconds) && seconds > 0 ? seconds * 1_000 : undefined;
     gnssSpeedSamplesRef.current = [];
-    observationStartedAtMsRef.current = Date.now();
+    // P4f-FIX5 (binding): NOT `Date.now()` here (the REV5 defect) -- the real
+    // anchor arrives later, via `onObservationStarted`, once the core loop
+    // actually begins post-connect. `null` until then; any GNSS sample
+    // collected in the meantime is buffered (raw wall-clock) and re-based
+    // once the anchor lands.
+    observationAnchorWallClockMsRef.current = null;
     controllerRef.current?.startObservation(windowMs);
   }
 
