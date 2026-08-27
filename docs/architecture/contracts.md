@@ -783,3 +783,26 @@ No generic module (telemetry provider, corner metrics, export, UI) may hard-code
 brand-specific DID. Brand-specific knowledge lives only in vehicle-profile data (channel maps with provenance,
 first: Toyota Supra B58 via ENET); consumers read channel availability at runtime and degrade gracefully. Tier 0
 (GPS+IMU) must deliver the full beginner-trainer experience with no adapter at all.
+
+## Phase 5 — LLM corner coaching: safety contract (2026-08-28, binding)
+Purpose: post-session coaching (brake / lift / min-speed per corner) for beginners on any car, both circuits.
+1. **Deterministic numbers, LLM words.** All metrics come from a pure core module (`cornerMetrics`): per lap × corner — lift point, braking start (distance before the corner reference point), braking peak decel, min speed + its position, exit speed, max lateral G, sector time, from GPS+IMU (tier 0), enriched by OBD channels when present (`unsupportedChannels` respected). The LLM never computes or invents a number.
+2. **Demonstrated envelope.** From CLEAN laps only (on-track, no yaw/decel anomaly, valid GNSS quality) build per-corner bounds: latest clean braking point, highest clean min speed, earliest clean lift. This is the driver's own evidence.
+3. **Bounded suggestions + validator.** LLM output is a JSON schema (per corner: observation, suggestion, evidence lap ids, delta values). A pure `coachingValidator` REJECTS any suggestion beyond the demonstrated envelope, or with a step larger than `MAX_BRAKE_LATER_M = 10`, `MAX_MIN_SPEED_GAIN_KPH = 3`, or more than ONE brake/lift change per corner per session; rejected items never reach the UI. "Brake later than you ever have" is impossible by construction.
+4. **Post-session only.** No LLM-derived cue is ever shown or spoken while a session is active; the dashboard stays as is.
+5. **Honesty gates.** Missing channels, poor GNSS, < 2 clean laps, or an unvalidated circuit geometry (MotorPark today) → the analysis states the limitation and degrades (observations without suggestions).
+6. **Wording.** Coach, not authority: every suggestion cites the driver's own laps; standard disclaimer that the driver is responsible for track safety. No absolute braking markers.
+7. **Privacy / opt-in.** Export to an LLM is explicit per session; the payload is the structured metrics (no raw GPS unless the user enables it); provider-agnostic client; API key in secure storage only.
+8. **Circuit/car agnostic.** Keyed on catalog corners + channel availability; fixtures/tests on both Transilvania Motor Ring and MotorPark.
+
+## Phase 5 REVISION (user, 2026-08-28 01:30, binding — supersedes the LLM framing above)
+**No LLM, no backend, no API keys.** Phase 5 is a DETERMINISTIC on-device analysis engine ("un program de analiză
+sofisticat"): from the session's laps it produces a per-corner written report. Rules 1, 2, 5, 6, 8 of the safety
+contract above stay in force (deterministic numbers, demonstrated envelope from clean laps, honesty gates, coach
+wording with evidence, circuit/car agnostic); rules 3/4/7 become: suggestions (brake/lift later) are OFF in V1 —
+**observations only**; if enabled later they are bounded by the same envelope constants; post-session only; no
+data leaves the device (export is an explicit share). Report priorities (user): (1) where time is lost per corner/
+sector vs the driver's best clean lap, (2) consistency (dispersion of brake point, min speed, sector time),
+(3) brake / lift points per corner per lap, (4) min speed and exit speed. Session-only in V1 (no cross-session
+history). Report text is template-generated in RO and EN (setting), every sentence carries its numbers.
+Audience order: the user's own sessions first (Supra, TMR + MotorPark), then public.

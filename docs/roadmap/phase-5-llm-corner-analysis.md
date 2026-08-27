@@ -105,3 +105,17 @@ with provenance}` as data files, never constants in generic code; the DID sweep 
 for adding cars. (2) Corner analysis / LLM export consume **channels** (respect `unsupportedChannels`) and degrade
 gracefully (no OBD brake → IMU deceleration). (3) The car envelope is **learned from the car's own sessions**
 (max lateral G, braking G, acceleration), never from spec sheets — works for any car.
+
+## Decision: no user API keys (user, 2026-08-28)
+The LLM is reached through **our own backend** (holds the provider key, authenticates users, rate-limits/quotas,
+versions the prompt), never through an API key entered in the app. Payload = structured metrics (no raw GPS by
+default). The safety validator stays ON THE CLIENT so a bad model/backend answer can never reach the driver.
+Open items for the backend ticket: auth (Apple sign-in first), quota model, data retention, EU hosting.
+
+## REVISION 2026-08-28 01:30 — deterministic analysis engine, not an LLM
+User: "nu un LLM propriu-zis, doar un program de analiză sofisticat". Answers: audience = user first then public;
+format = written per-corner report; reference = own clean laps only; language = RO + EN setting; V1 = observations
+only (no brake/lift suggestions); priorities = time loss per corner, consistency, brake/lift points, min/exit speed;
+session-only. Build order: P5a core engine (cornerMetrics, cleanLap, envelope, sessionInsights, reportText RO/EN)
+→ P5b mobile: Analysis screen after a session + export of the report/metrics via share sheet → later: envelope-
+bounded suggestions, cross-session progress, public launch (accounts optional, still no server needed for analysis).

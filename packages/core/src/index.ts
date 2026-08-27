@@ -78,6 +78,7 @@ export type {
   LiveDeltaEngineConfig,
 } from './reference';
 
+export * from './coaching';
 export * from './fixtures';
 export * from './replay';
 export * from './controller';

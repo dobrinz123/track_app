@@ -1,0 +1,147 @@
+import { describe, expect, it } from 'vitest';
+
+import { analyzeSession, buildReport, renderReport } from '../../src/coaching';
+import type { SessionAnalysisContext, SessionInsights, SessionLapInput } from '../../src/coaching';
+
+import { SYNTHETIC_CORNER, SYNTHETIC_TOTAL_LENGTH_M, syntheticLap } from './syntheticLap';
+import type { SyntheticLapOptions } from './syntheticLap';
+
+const CORNERS = [SYNTHETIC_CORNER];
+const CONTEXT: SessionAnalysisContext = {
+  totalLengthM: SYNTHETIC_TOTAL_LENGTH_M,
+  circuitId: 'synthetic-oval',
+  circuitName: 'Synthetic Oval',
+};
+
+/** No sentence may ever render a missing number. */
+const FORBIDDEN = /undefined|NaN|null/;
+
+let clock = 0;
+
+function lapInput(lapNumber: number, options: SyntheticLapOptions = {}): SessionLapInput {
+  const samples = syntheticLap({ ...options, tStartMs: clock });
+  const first = samples[0];
+  const last = samples[samples.length - 1];
+  clock = (last?.tMonoMs ?? 0) + 1_000;
+  return {
+    lap: {
+      lapNumber,
+      durationMs: (last?.tMonoMs ?? 0) - (first?.tMonoMs ?? 0),
+      valid: true,
+      invalidReasons: [],
+      quality: 'good',
+    },
+    samples,
+  };
+}
+
+function session(options: { channels?: SyntheticLapOptions['channels'] } = {}): SessionInsights {
+  clock = 0;
+  const channels = options.channels;
+  const laps = [
+    lapInput(1, { channels, profileShiftM: 0 }),
+    lapInput(2, { channels, profileShiftM: 14, speedScale: 1.02 }),
+    lapInput(3, { channels, profileShiftM: -10, speedScale: 0.98 }),
+  ];
+  return analyzeSession(laps, CORNERS, CONTEXT);
+}
+
+describe('renderReport', () => {
+  for (const language of ['ro', 'en'] as const) {
+    it(`renders a ${language} report whose every sentence carries numbers and lap ids`, () => {
+      const insights = session();
+      const text = renderReport(insights, language);
+      expect(text).not.toMatch(FORBIDDEN);
+      expect(text.length).toBeGreaterThan(400);
+      // Reference lap, its time, and the corner are all named.
+      expect(text).toContain(String(insights.referenceLapNumber));
+      expect(text).toMatch(language === 'ro' ? /Virajul 1/ : /Corner 1/);
+      expect(text).toMatch(/\d/);
+    });
+
+    it(`ends the ${language} report with the fixed disclaimer and no suggestion`, () => {
+      const report = buildReport(session(), language);
+      expect(report.disclaimer.length).toBeGreaterThan(40);
+      expect(report.text.endsWith(report.disclaimer)).toBe(true);
+      // V1 is observations only: no imperative coaching verbs.
+      const banned =
+        language === 'ro' ? /frânează mai târziu|ar trebui să|încearcă să/i : /brake later|you should|try to/i;
+      expect(report.text).not.toMatch(banned);
+    });
+
+    it(`keeps the ${language} report deterministic for identical input`, () => {
+      expect(renderReport(session(), language)).toEqual(renderReport(session(), language));
+    });
+  }
+
+  it('uses the Romanian decimal comma and the English decimal point', () => {
+    const insights = session();
+    expect(renderReport(insights, 'ro')).toMatch(/\d,\d/);
+    expect(renderReport(insights, 'en')).toMatch(/\d\.\d/);
+  });
+
+  it('names the estimator behind every derived number', () => {
+    const gps = renderReport(session(), 'en');
+    expect(gps).toContain('estimated from GPS speed');
+    const pedal = renderReport(session({ channels: 'pedal' }), 'en');
+    expect(pedal).toContain('from the accelerator pedal');
+  });
+
+  it('writes the honesty gates as sentences the driver can read', () => {
+    clock = 0;
+    const single = analyzeSession([lapInput(1)], CORNERS, { ...CONTEXT, geometryValidated: false });
+    const ro = renderReport(single, 'ro');
+    const en = renderReport(single, 'en');
+    expect(ro).toContain('Doar 1 tur curat');
+    expect(ro).toContain('nu este validată pe teren');
+    expect(en).toContain('Only 1 clean lap');
+    expect(en).toContain('has not been validated on track');
+    expect(ro).not.toMatch(FORBIDDEN);
+    expect(en).not.toMatch(FORBIDDEN);
+  });
+
+  it('states an excluded lap’s reason in the report’s own language', () => {
+    clock = 0;
+    const insights = analyzeSession(
+      [lapInput(1), lapInput(2, { lateralM: () => 40 })],
+      CORNERS,
+      CONTEXT,
+    );
+    expect(insights.laps[1]?.reasons).toContain('offTrack');
+    const ro = renderReport(insights, 'ro');
+    expect(ro).toContain('turul 2: ieșire de pe traseu');
+    expect(ro).not.toContain('lateral offset');
+    expect(renderReport(insights, 'en')).toContain('lap 2: off-track excursion');
+  });
+
+  it('stays clean for a session with no laps at all', () => {
+    const empty = analyzeSession([], CORNERS, CONTEXT);
+    for (const language of ['ro', 'en'] as const) {
+      const text = renderReport(empty, language);
+      expect(text).not.toMatch(FORBIDDEN);
+      expect(text.length).toBeGreaterThan(100);
+    }
+  });
+
+  it('stays clean when a lap is anomalous and has no measurable corner', () => {
+    clock = 0;
+    const partial = lapInput(1);
+    const trimmed: SessionLapInput = {
+      ...partial,
+      samples: partial.samples.filter((sample) => sample.distanceM < 300),
+    };
+    const insights = analyzeSession([trimmed], CORNERS, CONTEXT);
+    for (const language of ['ro', 'en'] as const) {
+      expect(renderReport(insights, language)).not.toMatch(FORBIDDEN);
+    }
+  });
+
+  it('exposes structured sections for the mobile screen and refuses another language', () => {
+    const report = buildReport(session(), 'ro');
+    expect(report.sections.map((entry) => entry.id)).toContain('overview');
+    expect(report.sections.map((entry) => entry.id)).toContain('corner-1');
+    expect(report.sections.every((entry) => entry.heading.length > 0)).toBe(true);
+    // @ts-expect-error -- the guard exists for callers without TypeScript.
+    expect(() => buildReport(session(), 'de')).toThrow(RangeError);
+  });
+});
