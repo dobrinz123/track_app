@@ -84,8 +84,29 @@ export function createEnetAdapterReservation(): EnetAdapterReservation {
   let held: HeldReservation | null = null;
   const listeners = new Set<(holder: EnetAdapterOwner | null) => void>();
 
+  /**
+   * P4e-FIX5 HIGH fix (binding, Codex P4e-REV5): a subscriber callback must
+   * NEVER be able to affect `tryAcquire`/`release`'s own outcome -- each
+   * call is individually wrapped in try/catch (a throwing subscriber is
+   * `console.warn`ed and skipped, every OTHER subscriber still gets
+   * notified) so `notify()` itself can never throw. Before this fix,
+   * `notify()` called listeners unguarded: a throwing subscriber during
+   * `tryAcquire` would propagate OUT before the `return token` line ever
+   * ran, so the caller that legitimately just acquired the reservation
+   * never received its own token (permanently leaking the claim -- nothing
+   * left alive to ever release it); the SAME throw during `release` would
+   * propagate before `telemetryProvider.ts`'s `stop()` could reach its own
+   * `resolveStopping()` continuation, deadlocking every later ENET
+   * `start()` that queues behind `stopping` forever.
+   */
   function notify(): void {
-    for (const listener of [...listeners]) listener(held?.owner ?? null);
+    for (const listener of [...listeners]) {
+      try {
+        listener(held?.owner ?? null);
+      } catch (error) {
+        console.warn('[enetAdapterReservation] a subscriber threw -- ignored, other subscribers still notified', error);
+      }
+    }
   }
 
   return {
@@ -93,12 +114,18 @@ export function createEnetAdapterReservation(): EnetAdapterReservation {
       if (held !== null) return null; // ANYONE holding it (including this same owner) blocks a new acquire.
       const token: EnetAdapterToken = Symbol(owner);
       held = { owner, token };
+      // State is already committed above -- `notify()` can never throw
+      // (see its own doc comment), so this call can never prevent the
+      // token below from being returned to the caller that just acquired.
       notify();
       return token;
     },
     release(token: EnetAdapterToken): void {
       if (held === null || held.token !== token) return; // stale/foreign token -- never touches a newer holder's claim.
       held = null;
+      // Same guarantee as `tryAcquire` above: `held` is already cleared, and
+      // `notify()` can never throw, so a caller's own cleanup AFTER this
+      // call (e.g. `telemetryProvider.ts`'s `resolveStopping()`) always runs.
       notify();
     },
     holder(): EnetAdapterOwner | null {
@@ -106,7 +133,13 @@ export function createEnetAdapterReservation(): EnetAdapterReservation {
     },
     subscribe(cb: (holder: EnetAdapterOwner | null) => void): () => void {
       listeners.add(cb);
-      cb(held?.owner ?? null);
+      // Same guard as `notify()` above -- a throwing subscriber must not
+      // prevent `subscribe()` itself from returning its unsubscribe function.
+      try {
+        cb(held?.owner ?? null);
+      } catch (error) {
+        console.warn('[enetAdapterReservation] a subscriber threw on initial replay -- ignored', error);
+      }
       return () => listeners.delete(cb);
     },
   };

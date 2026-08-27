@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createEnetAdapterReservation } from '../../src/session/enetAdapterReservation';
 
 describe('enetAdapterReservation (P4e-FIX3 H2 / P4e-FIX4 token model, binding: single-client adapter reservation)', () => {
@@ -155,5 +155,104 @@ describe('enetAdapterReservation (P4e-FIX3 H2 / P4e-FIX4 token model, binding: s
     expect(a.holder()).toBe('provider');
     expect(b.holder()).toBeNull();
     expect(b.tryAcquire('probe')).not.toBeNull();
+  });
+
+  /**
+   * P4e-FIX5 HIGH fix (binding, Codex P4e-REV5): a subscriber notification
+   * must never affect state transitions. Before this fix, `tryAcquire`
+   * called `notify()` unguarded AFTER committing `held` but BEFORE
+   * returning the token -- a throwing subscriber propagated straight out of
+   * `tryAcquire`, so the caller that legitimately just acquired the
+   * reservation never received its own token (a permanent leak: nothing
+   * left alive to ever release it).
+   */
+  it('a throwing subscriber during tryAcquire does not prevent the token from being returned, and holder() is still correct', () => {
+    const reservation = createEnetAdapterReservation();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      reservation.subscribe(() => {
+        throw new Error('boom: throwing subscriber (test double)');
+      });
+
+      let token: ReturnType<typeof reservation.tryAcquire> = null;
+      expect(() => {
+        token = reservation.tryAcquire('provider');
+      }).not.toThrow();
+
+      expect(token).not.toBeNull();
+      expect(reservation.holder()).toBe('provider');
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  /**
+   * The `release()` counterpart of the same fix: a throwing subscriber
+   * during `release` used to propagate before `held` visibly settled to
+   * `null` for the CALLER's own subsequent logic (`telemetryProvider.ts`'s
+   * `resolveStopping()` in its own `finally`, right after calling
+   * `release`) -- deadlocking anything queued behind that. Proven here at
+   * the reservation layer: `release()` never throws, `holder()` reads
+   * `null` afterward, AND a subsequent `tryAcquire` (standing in for "a
+   * later ENET start() proceeds") succeeds -- no deadlock.
+   */
+  it('release() with a throwing subscriber still clears the claim (holder() null), never throws, and a subsequent tryAcquire succeeds (no deadlock)', () => {
+    const reservation = createEnetAdapterReservation();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const token = reservation.tryAcquire('provider');
+      expect(token).not.toBeNull();
+
+      reservation.subscribe(() => {
+        throw new Error('boom: throwing subscriber on release (test double)');
+      });
+
+      expect(() => reservation.release(token!)).not.toThrow();
+      expect(reservation.holder()).toBeNull();
+      expect(warnSpy).toHaveBeenCalled();
+
+      // Standing in for "a subsequent ENET start() proceeds" -- must
+      // succeed, proving nothing is deadlocked by the earlier throw.
+      const nextToken = reservation.tryAcquire('provider');
+      expect(nextToken).not.toBeNull();
+      expect(reservation.holder()).toBe('provider');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('a throwing subscriber never prevents OTHER subscribers from being notified', () => {
+    const reservation = createEnetAdapterReservation();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const seen: Array<'provider' | 'probe' | null> = [];
+      reservation.subscribe(() => {
+        throw new Error('boom (test double)');
+      });
+      reservation.subscribe((holder) => seen.push(holder));
+
+      reservation.tryAcquire('provider');
+      expect(seen).toEqual([null, 'provider']); // the well-behaved subscriber's initial replay + the change, both delivered.
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('subscribe()\'s own initial replay call does not throw (and still returns a working unsubscribe) when the callback itself throws', () => {
+    const reservation = createEnetAdapterReservation();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      let unsubscribe: (() => void) | undefined;
+      expect(() => {
+        unsubscribe = reservation.subscribe(() => {
+          throw new Error('boom on initial replay (test double)');
+        });
+      }).not.toThrow();
+      expect(typeof unsubscribe).toBe('function');
+      expect(() => unsubscribe!()).not.toThrow();
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Elm327State, TelemetrySample } from '@circuit/core';
+import type { Elm327Session, Elm327State, TelemetrySample } from '@circuit/core';
 import { InMemorySettingsStore } from '../../src/session/settingsStore';
 import { buildCustomPids, buildPollPlan, createTelemetryProvider } from '../../src/session/telemetryProvider';
 
@@ -459,5 +459,83 @@ describe('telemetryProvider: start() isolates a synchronous session-construction
     expect(provider.getDiagnostics().state).toBe('polling');
 
     await provider.stop();
+  });
+});
+
+/**
+ * P4e-FIX5 MED fix (binding, Codex P4e-REV5): the ENET-only reservation work
+ * (P4e-FIX4) introduced an unconditional `finally` around `stop()`'s
+ * cleanup that also applied to ELM327 -- a rejecting ELM `session.stop()`
+ * used to leave listener/diagnostics state INTACT (no unsubscribe, no
+ * `current` clearing -- the behavior at HEAD 3027d94, before that wave),
+ * but started being cleared regardless of the rejection. This pins the
+ * restored, byte-identical ELM327 behavior directly against a
+ * hand-built `Elm327Session` double whose `stop()` rejects.
+ */
+describe('telemetryProvider: ELM327 stop() semantics are byte-identical to pre-P4e-FIX4 (P4e-FIX5, binding)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a rejecting ELM stop() leaves listener/diagnostics state intact -- unsubscribe and current-clearing are SKIPPED, matching pre-wave behavior', async () => {
+    const store = new InMemorySettingsStore();
+    store.update({ telemetryEnabled: true, telemetrySimulate: true }); // adapterType defaults to 'elm327'.
+
+    const stateListeners = new Set<(state: Elm327State, detail?: string) => void>();
+    let stateUnsubscribed = false;
+    let sampleUnsubscribed = false;
+    const stopError = new Error('ELM stop failed (test double)');
+    const fakeSession: Elm327Session = {
+      start(): void {
+        queueMicrotask(() => {
+          for (const listener of [...stateListeners]) listener('polling');
+        });
+      },
+      stop(): Promise<void> {
+        return Promise.reject(stopError);
+      },
+      onSample(): () => void {
+        return () => {
+          sampleUnsubscribed = true;
+        };
+      },
+      onStateChange(cb: (state: Elm327State, detail?: string) => void): () => void {
+        stateListeners.add(cb);
+        return () => {
+          stateListeners.delete(cb);
+          stateUnsubscribed = true;
+        };
+      },
+      getDiagnostics() {
+        return { observedHzByChannel: { rpm: 5 }, errorCount: 3, lastError: 'diagnostic sentinel' };
+      },
+    };
+    vi.mocked(createElm327Session).mockImplementationOnce(() => fakeSession);
+
+    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
+    provider.start();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushMicrotasks();
+
+    expect(provider.getDiagnostics().state).toBe('polling');
+    expect(provider.getDiagnostics().errorCount).toBe(3);
+    expect(provider.getDiagnostics().lastError).toBe('diagnostic sentinel');
+
+    await expect(provider.stop()).rejects.toBe(stopError);
+
+    // Byte-identical to pre-P4e-FIX4 (HEAD 3027d94) behavior: a rejecting
+    // stop() propagates immediately, BEFORE any cleanup runs -- the
+    // generation's own listeners are still subscribed, `current` still
+    // points at it, and `getDiagnostics()` still reads its (unchanged) live
+    // values straight through.
+    expect(stateUnsubscribed).toBe(false);
+    expect(sampleUnsubscribed).toBe(false);
+    expect(provider.getDiagnostics().state).toBe('polling');
+    expect(provider.getDiagnostics().errorCount).toBe(3);
+    expect(provider.getDiagnostics().lastError).toBe('diagnostic sentinel');
   });
 });

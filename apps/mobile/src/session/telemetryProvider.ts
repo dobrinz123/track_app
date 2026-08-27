@@ -607,6 +607,22 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       const gen = current;
       if (gen === null) return;
 
+      // P4e-FIX5 fix (binding, Codex P4e-REV5 MED): the finally-based
+      // cleanup below applies ONLY to ENET generations. ELM327 keeps its
+      // ORIGINAL, pre-P4e-FIX4 semantics exactly (byte-identical, binding):
+      // cleanup happens ONLY after the awaited `session.stop()` RESOLVES --
+      // a rejection propagates immediately, leaving listener/diagnostics
+      // state (and `current`) intact, precisely as this app has always
+      // behaved for ELM327. `stopping`/the adapter reservation are ENET-only
+      // concepts; nothing below applies (or is even touched) for ELM327.
+      if (gen.kind !== 'enet') {
+        await gen.session.stop();
+        gen.unsubscribeSample();
+        gen.unsubscribeState();
+        if (current === gen) current = null;
+        return;
+      }
+
       // P4e-FIX4 fix (binding): tracked so a `start()` racing in WHILE this
       // stop() is still tearing down queues behind it instead of opening a
       // second ENET socket while the first is still closing (the review's
@@ -618,23 +634,34 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       stopping = stoppingPromise;
 
       try {
-        await gen.session.stop();
+        try {
+          await gen.session.stop();
+        } finally {
+          // P4e-FIX4 fix (binding): "stop() releases the claim in a finally
+          // AFTER the old session's stop settles (rejection included)" --
+          // released via THIS generation's OWN token, so a NEWER
+          // generation's (different) token/claim is never touched even if
+          // this stop() is slow. Cleanup below also lives in this
+          // `finally` (previously only ran when `gen.session.stop()`
+          // resolved, for ENET too) -- a rejection must not leave stale
+          // listeners subscribed to a generation nothing else believes is
+          // live any more.
+          enetAdapterReservation.release(gen.enetToken);
+          gen.unsubscribeSample();
+          gen.unsubscribeState();
+          // Only clear the shared `current` pointer if it's STILL this
+          // generation -- a racing `start()` already replaced it with its
+          // own, which this (now-finished) stop() must leave alone.
+          if (current === gen) current = null;
+        }
       } finally {
-        // P4e-FIX4 fix (binding): "stop() releases the claim in a finally
-        // AFTER the old session's stop settles (rejection included)" --
-        // released via THIS generation's OWN token, so a NEWER generation's
-        // (different) token/claim is never touched even if this stop() is
-        // slow. Cleanup below also moved into this `finally` (previously
-        // only ran when `gen.session.stop()` resolved) -- a rejection must
-        // not leave stale listeners subscribed to a generation nothing else
-        // believes is live any more.
-        if (gen.kind === 'enet') enetAdapterReservation.release(gen.enetToken);
-        gen.unsubscribeSample();
-        gen.unsubscribeState();
-        // Only clear the shared `current` pointer if it's STILL this
-        // generation -- a racing `start()` already replaced it with its
-        // own, which this (now-finished) stop() must leave alone.
-        if (current === gen) current = null;
+        // P4e-FIX5 fix (binding, Codex P4e-REV5 HIGH): NESTED in its own
+        // `finally` so `resolveStopping()` runs regardless of whether the
+        // inner `release`/unsubscribe block itself threw -- the
+        // reservation module's own `notify()` can no longer throw (its own
+        // FIX5 fix), but this nesting means a FUTURE change on either side
+        // still can never deadlock an ENET `start()` queued behind
+        // `stopping`.
         if (stopping === stoppingPromise) stopping = null;
         resolveStopping();
       }
