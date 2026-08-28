@@ -675,12 +675,13 @@ function detectBrake(
     });
     if (found !== null) {
       const startSpeed = series.speedKph[found] ?? null;
-      const endSpeed =
-        startSpeed === null
-          ? null
-          : valueAfterSustain(series, run, found, options.sustainMs, series.speedKph);
+      const endSpeed = valueAfterSustain(series, run, found, options.sustainMs, series.speedKph);
+      // A MISSING speed is not a confirmation. Without a speed at both ends of
+      // the sustain window there is no dv/ds to tell a real brake application
+      // from a phone lying in the cradle at an angle, so the IMU estimator
+      // stands down and the speed-derivative estimator below gets its turn.
       const confirmed =
-        startSpeed === null || endSpeed === null || endSpeed <= startSpeed - BRAKE_SPEED_DROP_KPH;
+        startSpeed !== null && endSpeed !== null && endSpeed <= startSpeed - BRAKE_SPEED_DROP_KPH;
       if (confirmed) return { index: found, source: 'longG' };
     }
   }
@@ -1137,6 +1138,15 @@ export function computeCornerMetrics(
           const index = run.indices[position];
           const nextIndex = run.indices[position + 1];
           if (index === undefined || nextIndex === undefined) continue;
+          // The two halves of a corner that wraps the start/finish line are
+          // joined into one run, but the join is VIRTUAL: the entries either
+          // side of it are a lap apart. A steering derivative -- and a
+          // correction -- may only be measured inside a contiguous run, so the
+          // seam is skipped and the correction chain restarts after it.
+          if (nextIndex !== index + 1) {
+            previousSign = 0;
+            continue;
+          }
           const current = steering[index];
           const next = steering[nextIndex];
           const dCurrent = series.distanceM[index];
@@ -1198,6 +1208,10 @@ export function computeCornerMetrics(
           const index = exitZone.run.indices[position];
           const nextIndex = exitZone.run.indices[position + 1];
           if (index === undefined || nextIndex === undefined) continue;
+          // The join between the two halves of a wrapping exit zone is virtual:
+          // it is not a metre of track, so it is neither driven distance nor
+          // full-throttle distance. Each contiguous run is accumulated on its own.
+          if (nextIndex !== index + 1) continue;
           const dCurrent = series.distanceM[index];
           const dNext = series.distanceM[nextIndex];
           if (dCurrent === undefined || dNext === undefined) continue;

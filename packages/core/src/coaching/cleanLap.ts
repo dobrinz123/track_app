@@ -1,4 +1,4 @@
-import { assertPositiveLength, normalizeDistance } from './distanceDomain';
+import { assertPositiveLength, forwardDistance, normalizeDistance } from './distanceDomain';
 import {
   GRAVITY_MPS2,
   type ClassifiableLap,
@@ -53,6 +53,18 @@ export interface ClassifyLapOptions {
   yawSpikeMs?: number;
   /** Fraction of the lap distance that must be covered by samples. Default 0.9. */
   minCoverageFraction?: number;
+  /**
+   * Fraction of the LAP DISTANCE a check's own evidence must span before the
+   * check counts as available. Default 0.9: a lateral offset recorded only for
+   * the first 100 m of a 1000 m lap proves nothing about the other 900.
+   */
+  minCheckCoverageFraction?: number;
+  /**
+   * Largest distance between two consecutive readings of a channel that still
+   * counts as continuous evidence, metres. Default 60 (the analysis grid's own
+   * bridging distance: 1.5 s at 150 km/h).
+   */
+  checkBridgeM?: number;
 }
 
 /** Fixed reporting/priority order: the first reason present becomes `reason`. */
@@ -97,11 +109,22 @@ function finite(value: number | undefined): value is number {
 }
 
 /**
- * How far the implied-yaw window may be widened, in samples, to absorb the
- * projection lag between the car's own heading and the centreline vertex it is
- * crossing.
+ * How far the implied-yaw window may be widened to absorb the projection lag
+ * between the car's own heading and the centreline vertex it is crossing.
+ * Expressed in METRES and MILLISECONDS, never in samples: the projection
+ * uncertainty is a few metres of track whatever the GNSS rate is, and a sample
+ * tolerance would silently become 16 m at 5 Hz and 40 m/s -- wide enough to
+ * borrow a 35 degree OSM vertex from the next straight and explain away a spin.
  */
-const YAW_IMPLIED_TOLERANCE_SAMPLES = 2;
+const YAW_IMPLIED_TOLERANCE_M = 8;
+const YAW_IMPLIED_TOLERANCE_MS = 400;
+/**
+ * Longest median sample interval the yaw rule can still say anything with. At
+ * 1 Hz a 200 ms window becomes a 1 s window and the check still runs; slower
+ * than that, a spin can start and end between two fixes, so the check is
+ * reported UNAVAILABLE (-> the lap is unverified) instead of "no spike found".
+ */
+const YAW_MAX_SAMPLE_INTERVAL_MS = 1_000;
 
 /**
  * Degrees of the measured turn that the centreline cannot explain, minimised
@@ -113,19 +136,29 @@ function smallestUnexplainedTurn(
   from: number,
   to: number,
   measuredTurn: number,
+  totalLengthM: number,
 ): number {
   let best = Math.abs(measuredTurn);
-  for (let a = Math.max(0, from - YAW_IMPLIED_TOLERANCE_SAMPLES); a <= from; a += 1) {
-    const start = samples[a];
-    if (start === undefined || !finite(start.centrelineHeadingDeg)) continue;
-    for (
-      let b = to;
-      b <= Math.min(samples.length - 1, to + YAW_IMPLIED_TOLERANCE_SAMPLES);
-      b += 1
-    ) {
-      const finish = samples[b];
-      if (finish === undefined || !finite(finish.centrelineHeadingDeg)) continue;
-      const implied = wrappedHeadingDelta(start.centrelineHeadingDeg, finish.centrelineHeadingDeg);
+  const start = samples[from];
+  const finish = samples[to];
+  if (start === undefined || finish === undefined) return best;
+  const withinTolerance = (probe: CornerLapSample, edge: CornerLapSample): boolean => {
+    const gapM = Math.min(
+      forwardDistance(probe.distanceM, edge.distanceM, totalLengthM),
+      forwardDistance(edge.distanceM, probe.distanceM, totalLengthM),
+    );
+    return gapM <= YAW_IMPLIED_TOLERANCE_M &&
+      Math.abs(probe.tMonoMs - edge.tMonoMs) <= YAW_IMPLIED_TOLERANCE_MS;
+  };
+  for (let a = from; a >= 0; a -= 1) {
+    const before = samples[a];
+    if (before === undefined || !withinTolerance(before, start)) break;
+    if (!finite(before.centrelineHeadingDeg)) continue;
+    for (let b = to; b < samples.length; b += 1) {
+      const after = samples[b];
+      if (after === undefined || !withinTolerance(after, finish)) break;
+      if (!finite(after.centrelineHeadingDeg)) continue;
+      const implied = wrappedHeadingDelta(before.centrelineHeadingDeg, after.centrelineHeadingDeg);
       const unexplained = Math.abs(measuredTurn - implied);
       if (unexplained < best) best = unexplained;
     }
@@ -134,10 +167,32 @@ function smallestUnexplainedTurn(
 }
 
 interface YawEvaluation {
-  /** False when the samples carry neither a gyro channel nor two headings. */
+  /**
+   * False when the samples carry neither a gyro channel nor two headings, or
+   * when the sample rate is too low for the rule to mean anything.
+   */
   available: boolean;
+  /** Which signal the measured turn came from -- the one coverage is judged on. */
+  source: 'yawRateDps' | 'headingDeg' | null;
   /** Worst excess over the implied yaw that satisfied every guard, deg/s. */
   worstDps: number | null;
+  /** The duration window the rule actually used, ms. */
+  windowMs: number;
+}
+
+/** Median of the positive intervals between consecutive samples, ms. */
+function medianSampleIntervalMs(samples: readonly CornerLapSample[]): number | null {
+  const intervals: number[] = [];
+  for (let index = 0; index + 1 < samples.length; index += 1) {
+    const current = samples[index];
+    const next = samples[index + 1];
+    if (current === undefined || next === undefined) continue;
+    const dt = next.tMonoMs - current.tMonoMs;
+    if (dt > 0 && Number.isFinite(dt)) intervals.push(dt);
+  }
+  if (intervals.length === 0) return null;
+  intervals.sort((a, b) => a - b);
+  return intervals[Math.floor((intervals.length - 1) / 2)] ?? null;
 }
 
 /** Degrees the gyro says the car turned between two indices. */
@@ -179,6 +234,7 @@ function evaluateYaw(
   yawSpikeMs: number,
   yawSpikeDps: number,
   yawSpikeLatG: number,
+  totalLengthM: number,
 ): YawEvaluation {
   let gyroCount = 0;
   let headingCount = 0;
@@ -187,14 +243,27 @@ function evaluateYaw(
     if (finite(sample.headingDeg)) headingCount += 1;
   }
   const useGyro = gyroCount >= 2;
-  if (!useGyro && headingCount < 2) return { available: false, worstDps: null };
+  const source = useGyro ? 'yawRateDps' : headingCount >= 2 ? 'headingDeg' : null;
+  if (source === null) {
+    return { available: false, source: null, worstDps: null, windowMs: yawSpikeMs };
+  }
+  // The rule is a DURATION rule, so a rate that cannot resolve that duration
+  // widens the window to one sample interval instead of skipping every window
+  // and reporting "no spike" -- and below `YAW_MAX_SAMPLE_INTERVAL_MS` it
+  // reports that it cannot judge at all.
+  const intervalMs = medianSampleIntervalMs(samples);
+  if (intervalMs === null || intervalMs > YAW_MAX_SAMPLE_INTERVAL_MS) {
+    return { available: false, source, worstDps: null, windowMs: yawSpikeMs };
+  }
+  const windowMs = Math.max(yawSpikeMs, intervalMs);
+  const maxWindowMs = Math.max(yawSpikeMs * 4, windowMs * 1.5);
 
   let worstDps: number | null = null;
   for (let index = 0; index < samples.length; index += 1) {
     const start = samples[index];
     if (start === undefined) continue;
     let end = index + 1;
-    while (end < samples.length && (samples[end]?.tMonoMs ?? 0) - start.tMonoMs < yawSpikeMs) {
+    while (end < samples.length && (samples[end]?.tMonoMs ?? 0) - start.tMonoMs < windowMs) {
       end += 1;
     }
     const finish = samples[end];
@@ -202,7 +271,7 @@ function evaluateYaw(
     const spanMs = finish.tMonoMs - start.tMonoMs;
     // The window must be the duration the rule asks for, and must not straddle
     // a data gap (which is already reported on its own).
-    if (spanMs < yawSpikeMs || spanMs > yawSpikeMs * 4) continue;
+    if (spanMs < windowMs || spanMs > maxWindowMs) continue;
     const measuredTurn = useGyro
       ? integratedGyroTurn(samples, index, end)
       : finite(start.headingDeg) && finite(finish.headingDeg)
@@ -217,7 +286,7 @@ function evaluateYaw(
     // `YAW_IMPLIED_TOLERANCE_SAMPLES` on each side and the reading that best
     // explains the measured turn wins. Nothing is widened for the measurement
     // itself, so a real rotation the track does not ask for still stands out.
-    const excessDeg = smallestUnexplainedTurn(samples, index, end, measuredTurn);
+    const excessDeg = smallestUnexplainedTurn(samples, index, end, measuredTurn, totalLengthM);
     const excessDps = excessDeg / (spanMs / 1_000);
     const speedMps = finite(start.speedKph) ? start.speedKph / 3.6 : null;
     const excessLatG =
@@ -226,7 +295,42 @@ function evaluateYaw(
     if (excessLatG !== null && excessLatG <= yawSpikeLatG) continue;
     if (worstDps === null || excessDps > worstDps) worstDps = excessDps;
   }
-  return { available: true, worstDps };
+  return { available: true, source, worstDps, windowMs };
+}
+
+/**
+ * Fraction of the LAP DISTANCE over which a channel is continuous evidence:
+ * the lap is split into `COVERAGE_BUCKETS` cells and every cell a pair of
+ * consecutive readings no more than `bridgeM` apart spans is counted. "The
+ * channel appeared once" is not evidence about the rest of the lap.
+ */
+function channelCoverageFraction(
+  samples: readonly CornerLapSample[],
+  carries: (sample: CornerLapSample) => boolean,
+  totalLengthM: number,
+  bridgeM: number,
+): number {
+  const bucketM = totalLengthM / COVERAGE_BUCKETS;
+  const buckets = new Array<boolean>(COVERAGE_BUCKETS).fill(false);
+  let previous: CornerLapSample | null = null;
+  for (const sample of samples) {
+    if (!Number.isFinite(sample.distanceM) || !carries(sample)) continue;
+    const from = normalizeDistance(sample.distanceM, totalLengthM);
+    buckets[Math.min(COVERAGE_BUCKETS - 1, Math.floor(from / bucketM))] = true;
+    if (previous !== null) {
+      const span = forwardDistance(previous.distanceM, sample.distanceM, totalLengthM);
+      if (span <= bridgeM) {
+        const start = normalizeDistance(previous.distanceM, totalLengthM);
+        const first = Math.floor(start / bucketM);
+        const steps = Math.floor(((start % bucketM) + span) / bucketM);
+        for (let step = 0; step <= steps; step += 1) {
+          buckets[(first + step) % COVERAGE_BUCKETS] = true;
+        }
+      }
+    }
+    previous = sample;
+  }
+  return buckets.filter(Boolean).length / COVERAGE_BUCKETS;
 }
 
 /**
@@ -249,6 +353,8 @@ export function classifyLap(
   const yawSpikeLatG = options.yawSpikeLatG ?? 2;
   const yawSpikeMs = options.yawSpikeMs ?? 200;
   const minCoverageFraction = options.minCoverageFraction ?? 0.9;
+  const minCheckCoverageFraction = options.minCheckCoverageFraction ?? 0.9;
+  const checkBridgeM = options.checkBridgeM ?? 60;
 
   const reasons = new Set<LapAnomalyReason>();
   const unavailable = new Set<LapCheckId>();
@@ -268,19 +374,22 @@ export function classifyLap(
   }
 
   // --- coverage -------------------------------------------------------------
-  const buckets = new Array<boolean>(COVERAGE_BUCKETS).fill(false);
   let sampleCount = 0;
   for (const sample of samples) {
     if (!Number.isFinite(sample.distanceM) || !Number.isFinite(sample.tMonoMs)) continue;
     sampleCount += 1;
-    const wrapped = normalizeDistance(sample.distanceM, options.totalLengthM);
-    const bucket = Math.min(
-      COVERAGE_BUCKETS - 1,
-      Math.floor((wrapped / options.totalLengthM) * COVERAGE_BUCKETS),
-    );
-    buckets[bucket] = true;
   }
-  const coverageFraction = buckets.filter(Boolean).length / COVERAGE_BUCKETS;
+  // The SAME rule the per-check coverage uses: two consecutive fixes no further
+  // apart than `checkBridgeM` cover the track between them. Counting "a fix
+  // landed in this 1 % of the lap" instead would call every 1 Hz lap incomplete
+  // -- at 40 m/s a 1 Hz receiver reports one fix per 4 % of a 1 km circuit, and
+  // 1 Hz is what the shipped app records on iPhone.
+  const coverageFraction = channelCoverageFraction(
+    samples,
+    (sample) => Number.isFinite(sample.tMonoMs),
+    options.totalLengthM,
+    checkBridgeM,
+  );
   if (sampleCount === 0) {
     unavailable.add('coverage');
     reasons.add('incomplete');
@@ -299,7 +408,21 @@ export function classifyLap(
   let accuracyCount = 0;
   let worstLateralM: number | null = null;
   let lateralCount = 0;
-  const yaw = evaluateYaw(samples, yawSpikeMs, yawSpikeDps, yawSpikeLatG);
+  const yaw = evaluateYaw(samples, yawSpikeMs, yawSpikeDps, yawSpikeLatG, options.totalLengthM);
+  // Availability is a COVERAGE question, not an existence one: a check may only
+  // speak for the lap if its evidence spans the lap (§3 / safety contract 2).
+  const coverageOf = (carries: (sample: CornerLapSample) => boolean): number =>
+    channelCoverageFraction(samples, carries, options.totalLengthM, checkBridgeM);
+  const checkCoverage: Record<LapCheckId, number> = {
+    offTrack: coverageOf((sample) => finite(sample.lateralM)),
+    yawSpike:
+      yaw.source === 'yawRateDps'
+        ? coverageOf((sample) => finite(sample.channels?.yawRateDps))
+        : coverageOf((sample) => finite(sample.headingDeg)),
+    decelSpike: coverageOf((sample) => finite(sample.speedKph)),
+    gnssPoor: coverageOf((sample) => finite(sample.accuracyM)),
+    coverage: coverageFraction,
+  };
   let speedCount = 0;
   let worstDecelG: number | null = null;
   let observedMaxGapMs: number | null = null;
@@ -341,33 +464,44 @@ export function classifyLap(
     }
   }
 
-  if (lateralCount === 0) unavailable.add('offTrack');
-  else if (worstLateralM !== null && worstLateralM > corridorHalfWidthM) {
+  // What a check DID see is always reported: an excursion observed over the
+  // first 100 m is a fact even when the rest of the lap carries no evidence.
+  // Thin coverage only removes the right to call the lap clean.
+  if (lateralCount === 0 || checkCoverage.offTrack < minCheckCoverageFraction) {
+    unavailable.add('offTrack');
+  }
+  if (worstLateralM !== null && worstLateralM > corridorHalfWidthM) {
     reasons.add('offTrack');
     details.push(
       `lateral offset reached ${formatMetres(worstLateralM)} (corridor ${formatMetres(corridorHalfWidthM)})`,
     );
   }
 
-  if (!yaw.available) unavailable.add('yawSpike');
-  else if (yaw.worstDps !== null) {
+  if (!yaw.available || checkCoverage.yawSpike < minCheckCoverageFraction) {
+    unavailable.add('yawSpike');
+  }
+  if (yaw.worstDps !== null) {
     reasons.add('yawSpike');
     details.push(
       `yaw rate exceeded the implied (centreline) yaw by ${Math.round(yaw.worstDps)} deg/s ` +
-        `over ${yawSpikeMs} ms (limit ${yawSpikeDps} deg/s)`,
+        `over ${Math.round(yaw.windowMs)} ms (limit ${yawSpikeDps} deg/s)`,
     );
   }
 
-  if (speedCount === 0) unavailable.add('decelSpike');
-  else if (worstDecelG !== null && worstDecelG > decelSpikeG) {
+  if (speedCount === 0 || checkCoverage.decelSpike < minCheckCoverageFraction) {
+    unavailable.add('decelSpike');
+  }
+  if (worstDecelG !== null && worstDecelG > decelSpikeG) {
     reasons.add('decelSpike');
     details.push(
       `deceleration reached ${worstDecelG.toFixed(2)} g (limit ${decelSpikeG.toFixed(2)} g)`,
     );
   }
 
-  if (accuracyCount === 0) unavailable.add('gnssPoor');
-  else if (poorAccuracyCount / accuracyCount > poorAccuracyFraction) {
+  if (accuracyCount === 0 || checkCoverage.gnssPoor < minCheckCoverageFraction) {
+    unavailable.add('gnssPoor');
+  }
+  if (accuracyCount > 0 && poorAccuracyCount / accuracyCount > poorAccuracyFraction) {
     reasons.add('gnssPoor');
     const percent = Math.round((poorAccuracyCount / accuracyCount) * 100);
     details.push(`${percent}% of fixes worse than ${formatMetres(poorAccuracyM)}`);
@@ -384,11 +518,17 @@ export function classifyLap(
   // not fail, but the evidence to call it clean was not there either.
   const status: LapStatus =
     ordered.length > 0 ? 'anomalous' : unavailableChecks.length > 0 ? 'unverified' : 'clean';
+  // The evidence percentage belongs in the sentence: "could not run" reads very
+  // differently from "ran over 11 % of the lap".
+  const listUnavailable = (): string =>
+    unavailableChecks
+      .map((check) => `${check} (evidence over ${Math.round(checkCoverage[check] * 100)} % of the lap)`)
+      .join(', ');
   const detail =
     details.length > 0
       ? details.join('; ')
       : status === 'unverified'
-        ? `no anomaly detected, but these checks could not run: ${unavailableChecks.join(', ')}`
+        ? `no anomaly detected, but these checks could not run: ${listUnavailable()}`
         : 'no anomaly detected';
   return {
     lapNumber: lap.lapNumber,
@@ -398,6 +538,7 @@ export function classifyLap(
     reasons: ordered,
     detail,
     unavailableChecks: [...unavailableChecks],
+    checkCoverage,
     coverageFraction,
     worstAccuracyM,
     maxSampleGapMs: observedMaxGapMs,

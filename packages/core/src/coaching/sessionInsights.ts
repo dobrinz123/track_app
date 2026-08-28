@@ -97,6 +97,8 @@ export interface LapInsight {
   detail: string;
   /** Safety checks this lap's samples could not support. */
   unavailableChecks: LapCheckId[];
+  /** Fraction of the lap distance each safety check had evidence over, 0..1. */
+  checkCoverage: Record<LapCheckId, number>;
   coverageFraction: number;
   corners: CornerMetrics[];
 }
@@ -212,7 +214,8 @@ export type LimitationCode =
   | 'MISSING_CHANNELS'
   | 'GNSS_QUALITY'
   | 'GEOMETRY_UNVALIDATED'
-  | 'CORNER_COVERAGE';
+  | 'CORNER_COVERAGE'
+  | 'TIME_INTEGRATION_DRIFT';
 
 export interface Limitation {
   code: LimitationCode;
@@ -223,6 +226,17 @@ export interface Limitation {
   cornerIds?: number[];
   /** Safety checks that could not run (`UNVERIFIED_LAPS`). */
   checks?: LapCheckId[];
+  /**
+   * Percentage of the lap distance the WEAKEST unavailable check had evidence
+   * over (`UNVERIFIED_LAPS`): "no data" and "data for 11 % of the lap" are two
+   * different statements and the report has to make the right one.
+   */
+  coveragePercent?: number;
+  /**
+   * Largest disagreement between the integrated `t(s)` and the recorded clock
+   * on any lap, milliseconds (`TIME_INTEGRATION_DRIFT`).
+   */
+  driftMs?: number;
 }
 
 export interface LapTimeConsistency {
@@ -351,6 +365,7 @@ export function analyzeSession(
       reasons: classification.reasons,
       detail: classification.detail,
       unavailableChecks: classification.unavailableChecks,
+      checkCoverage: classification.checkCoverage,
       coverageFraction: classification.coverageFraction,
       corners: computeCornerMetrics(entry.samples, orderedCorners, metricsOptions),
     };
@@ -698,11 +713,33 @@ export function analyzeSession(
       'coverage',
     ];
     const seen = new Set(unverifiedLaps.flatMap((lap) => lap.unavailableChecks));
+    const coverages = unverifiedLaps.flatMap((lap) =>
+      lap.unavailableChecks.map((check) => lap.checkCoverage[check] ?? 0),
+    );
     limitations.push({
       code: 'UNVERIFIED_LAPS',
       count: unverifiedLaps.length,
       lapNumbers: unverifiedLaps.map((lap) => lap.lapNumber),
       checks: checkOrder.filter((check) => seen.has(check)),
+      coveragePercent: Math.round(Math.min(...coverages, 1) * 100),
+    });
+  }
+  // `t(s)` is the integral of ds/v; when a lap's own timestamps disagree with
+  // that integral by more than the tolerance, the delta curve built from it is
+  // only as good as the speed channel, and the report has to say so.
+  const driftingLaps = orderedLaps
+    .map((entry) => ({ lapNumber: entry.lap.lapNumber, grid: grids.get(entry.lap.lapNumber) }))
+    .filter((entry) => entry.grid?.timeIntegrationDriftExceeded === true);
+  if (driftingLaps.length > 0) {
+    const worst = driftingLaps.reduce(
+      (best, entry) => Math.max(best, Math.abs(entry.grid?.timeIntegrationDriftMs ?? 0)),
+      0,
+    );
+    limitations.push({
+      code: 'TIME_INTEGRATION_DRIFT',
+      count: driftingLaps.length,
+      lapNumbers: driftingLaps.map((entry) => entry.lapNumber),
+      driftMs: Math.round(worst),
     });
   }
   if (availability.unsupported.length > 0) {

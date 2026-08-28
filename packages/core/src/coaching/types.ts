@@ -184,8 +184,14 @@ export interface LapClassification {
   reasons: LapAnomalyReason[];
   /** Human-readable, deterministic evidence string (never empty, never "NaN"). */
   detail: string;
-  /** Checks skipped for lack of input fields. */
+  /** Checks skipped because their evidence did not span the lap. */
   unavailableChecks: LapCheckId[];
+  /**
+   * Fraction of the LAP DISTANCE each required check had continuous evidence
+   * over, 0..1. A check below `minCheckCoverageFraction` is unavailable, and the
+   * number is what the report quotes instead of a bare "no data".
+   */
+  checkCoverage: Record<LapCheckId, number>;
   /** Fraction of the lap distance covered by samples, 0..1. */
   coverageFraction: number;
   /** Worst reported accuracy over the lap, metres. */

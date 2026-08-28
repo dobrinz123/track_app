@@ -405,6 +405,49 @@ describe('computeCornerMetrics: tier-2 channels', () => {
     expect(metric.steeringCorrections ?? -1).toBeGreaterThanOrEqual(0);
   });
 
+  it('never counts the virtual start/finish join as full-throttle distance (M8)', () => {
+    // Exit zone [apex 960, exit + 40 = 30]: 40 grid metres of the lap's END at
+    // full throttle and 31 of its START off it. The join between them is not a
+    // metre of track: 39 real full-throttle metres out of 69, never 40 of 70.
+    const corner: Corner = {
+      ...SYNTHETIC_CORNER,
+      id: 3,
+      entryDistanceM: 930,
+      apexDistanceM: 960,
+      exitDistanceM: 990,
+      lengthM: 60,
+    };
+    const samples = syntheticLap().map((sample) => ({
+      ...sample,
+      channels: { accelPedalPct: sample.distanceM >= 900 ? 100 : 0 },
+    }));
+    const result = computeCornerMetrics(samples, [corner], { ...OPTIONS, exitWindowM: 40 });
+    expect(result[0]?.fullThrottleFraction ?? 0).toBeCloseTo(39 / 69, 4);
+  });
+
+  it('never derives a steering rate across the virtual start/finish join (M8)', () => {
+    // The corner wraps the line, so its window is the END of the series joined
+    // to its START. Those two runs are ~28 s apart: -20 deg at 999 m followed by
+    // +20 deg at 0 m is not a 40 deg/m steering movement, and not a correction.
+    // One continuous degree per metre through each half of the window, so every
+    // real derivative is -1 deg/m and every real correction count is 0.
+    const steeringAt = (distanceM: number): number => {
+      if (distanceM >= 940) return -(distanceM - 940);
+      if (distanceM <= 60) return 60 - distanceM;
+      return 0;
+    };
+    const samples = syntheticLap().map((sample) => ({
+      ...sample,
+      channels: { steeringDeg: steeringAt(sample.distanceM) },
+    }));
+    const metric = metricsFor(samples, [WRAP_CORNER]);
+    expect(metric.quality.flags).not.toContain('NO_CORNER_COVERAGE');
+    expect(metric.steeringSmoothness).not.toBeNull();
+    // Each half ramps by 1 deg per metre; the seam contributes nothing.
+    expect(metric.steeringSmoothness ?? 0).toBeCloseTo(1, 2);
+    expect(metric.steeringCorrections).toBe(0);
+  });
+
   it('falls back to the gyro yaw rate for turn-in when there is no steering channel', () => {
     const metric = metricsFor(syntheticLap({ channels: 'yaw' }));
     expect(metric.turnInSource).toBe('yawRateDps');
@@ -436,6 +479,25 @@ describe('computeCornerMetrics: robustness gaps', () => {
       channels: { longG: -0.3 },
     }));
     const metric = metricsFor(samples);
+    expect(metric.brakeStartM).toBeNull();
+  });
+
+  it('does not confirm an IMU brake when the speed evidence is missing (M3)', () => {
+    // A tilted phone reads -0.3 g over the last 30 m of the approach window.
+    // The fixes carry no Doppler speed, and the derived speed runs out at the
+    // last raw sample, so the cross-check has nothing to confirm the brake with.
+    const samples: CornerLapSample[] = [];
+    for (let distanceM = 200; distanceM <= 620; distanceM += 20) {
+      samples.push({
+        tMonoMs: (distanceM - 200) * 25,
+        distanceM,
+        accuracyM: 4,
+        lateralM: 0,
+        channels: { longG: distanceM >= 600 ? -0.3 : 0 },
+      });
+    }
+    const metric = metricsFor(samples);
+    expect(metric.brakeSource).not.toBe('longG');
     expect(metric.brakeStartM).toBeNull();
   });
 

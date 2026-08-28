@@ -307,3 +307,70 @@ describe('grid speed and t(s) (M2)', () => {
     expect((grid.elapsedMs[300] ?? 0) - (grid.elapsedMs[100] ?? 0)).toBeCloseTo(5_000, 3);
   });
 });
+
+/**
+ * A lap as lap detection really hands it over: the first fix lands a few metres
+ * AFTER the start/finish line and the last one a few metres after the next
+ * crossing. `t(s)` must still be measured from the crossing itself.
+ */
+function lapSlicedAt(startM: number, options: Parameters<typeof syntheticLap>[0] = {}) {
+  const base = syntheticLap(options);
+  const last = base[base.length - 1];
+  const lapMs = (last?.tMonoMs ?? 0) + 100;
+  return [
+    ...base.filter((sample) => sample.distanceM >= startM),
+    ...base
+      .filter((sample) => sample.distanceM < startM)
+      .map((sample) => ({ ...sample, tMonoMs: sample.tMonoMs + lapMs })),
+  ];
+}
+
+describe('t(s) anchored at the start/finish crossing (H2 + M2)', () => {
+  it('measures time from the S/F crossing, not from the lap’s first recorded fix', () => {
+    const whole = resampleLapToDistanceGrid(syntheticLap({ speedScale: 0.9 }), OPTIONS);
+    const sliced = resampleLapToDistanceGrid(lapSlicedAt(20, { speedScale: 0.9 }), OPTIONS);
+    // Both grids describe the same lap; only the slicing point differs, so the
+    // time at a distance must agree to within the back-extrapolated 20 m.
+    for (const index of [100, 500, 900]) {
+      expect(sliced.elapsedMs[index], `s=${index}`).not.toBeNull();
+      expect(Math.abs((sliced.elapsedMs[index] ?? 0) - (whole.elapsedMs[index] ?? 0))).toBeLessThan(
+        5,
+      );
+    }
+    // The 20 m that belong to the NEXT lap never become "0 m of this one".
+    expect(sliced.elapsedMs[0]).toBeNull();
+  });
+
+  it('reports a small positive loss on a 950 -> 50 m sector, never a full-lap negative', () => {
+    const reference = resampleLapToDistanceGrid(syntheticLap(), OPTIONS);
+    const slower = resampleLapToDistanceGrid(lapSlicedAt(20, { speedScale: 0.9 }), OPTIONS);
+    const delta = deltaCurveMs(slower, reference);
+    const segment = deltaOverSegmentMs(delta, 950, 50, { stepM: 1, totalLengthM: L });
+    expect(segment).not.toBeNull();
+    // 100 m at 36 m/s instead of 40 m/s is ~0.28 s lost, not a lap's worth gained.
+    expect(segment ?? 0).toBeGreaterThan(100);
+    expect(segment ?? 0).toBeLessThan(1_000);
+  });
+
+  it('gives 10 m at 20 m/s 0.5 s even inside a 2 s timestamp gap', () => {
+    const samples: CornerLapSample[] = [];
+    let tMonoMs = 0;
+    for (let distanceM = 0; distanceM <= 990; distanceM += distanceM === 500 ? 10 : 20) {
+      samples.push({ tMonoMs, distanceM, speedKph: 72, accuracyM: 4, lateralM: 0 });
+      // The fix after 500 m arrives 2 s late although the car covered only 10 m.
+      tMonoMs += distanceM === 500 ? 2_000 : 1_000;
+    }
+    const grid = resampleLapToDistanceGrid(samples, OPTIONS);
+    expect((grid.elapsedMs[510] ?? 0) - (grid.elapsedMs[500] ?? 0)).toBeCloseTo(500, 3);
+    expect((grid.elapsedMs[520] ?? 0) - (grid.elapsedMs[500] ?? 0)).toBeCloseTo(1_000, 3);
+    // ... and the disagreement with the measured span is reported, not hidden.
+    expect(grid.timeIntegrationDriftMs ?? 0).toBeCloseTo(-1_500, 0);
+    expect(grid.timeIntegrationDriftExceeded).toBe(true);
+  });
+
+  it('reports no drift for a lap whose speed and timestamps agree', () => {
+    const grid = resampleLapToDistanceGrid(syntheticLap(), OPTIONS);
+    expect(grid.timeIntegrationDriftExceeded).toBe(false);
+    expect(Math.abs(grid.timeIntegrationDriftMs ?? 0)).toBeLessThan(500);
+  });
+});

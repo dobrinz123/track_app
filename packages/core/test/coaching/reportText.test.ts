@@ -188,6 +188,51 @@ describe('renderReport', () => {
     expect(en).not.toMatch(FORBIDDEN);
   });
 
+  it('says HOW MUCH of the lap the missing evidence covered, in both languages (H5)', () => {
+    clock = 0;
+    const thin = [lapInput(1), lapInput(2, { profileShiftM: 10 })].map((entry) => ({
+      ...entry,
+      samples: entry.samples.map((sample) =>
+        sample.distanceM <= 100
+          ? sample
+          : { tMonoMs: sample.tMonoMs, distanceM: sample.distanceM, speedKph: sample.speedKph },
+      ),
+    }));
+    const insights = analyzeSession(thin, CORNERS, CONTEXT);
+    const ro = renderReport(insights, 'ro');
+    const en = renderReport(insights, 'en');
+    expect(ro).toContain('din tur');
+    expect(en).toContain('% of the lap');
+    expect(ro).not.toMatch(FORBIDDEN);
+    expect(en).not.toMatch(FORBIDDEN);
+  });
+
+  it('says when the integrated time disagrees with the recorded clock (M2)', () => {
+    clock = 0;
+    const laps = [lapInput(1), lapInput(2, { profileShiftM: 10 }), lapInput(3)];
+    const drifting = laps.map((entry, index) => {
+      if (index !== 1) return entry;
+      const first = entry.samples[0]?.tMonoMs ?? 0;
+      const samples = entry.samples.map((sample) => ({
+        ...sample,
+        tMonoMs: first + (sample.tMonoMs - first) * 1.05,
+      }));
+      const last = samples[samples.length - 1];
+      return {
+        ...entry,
+        lap: { ...entry.lap, durationMs: (last?.tMonoMs ?? 0) - first },
+        samples,
+      };
+    });
+    const insights = analyzeSession(drifting, CORNERS, CONTEXT);
+    const ro = renderReport(insights, 'ro');
+    const en = renderReport(insights, 'en');
+    expect(ro).toContain('viteza înregistrată');
+    expect(en).toContain('recorded speed');
+    expect(ro).not.toMatch(FORBIDDEN);
+    expect(en).not.toMatch(FORBIDDEN);
+  });
+
   it('exposes structured sections for the mobile screen and refuses another language', () => {
     const report = buildReport(session(), 'ro');
     expect(report.sections.map((entry) => entry.id)).toContain('overview');

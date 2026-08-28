@@ -267,19 +267,35 @@ export interface DistanceGrid {
   totalLengthM: number;
   /** Grid distances from S/F, metres: `[0, stepM, 2*stepM, ...]`. */
   distanceM: number[];
-  /** Milliseconds since the lap's first projected sample, per grid point. */
+  /**
+   * `t(s)`: milliseconds since THIS LAP's start/finish crossing, per grid point.
+   * The origin is the line, never the first recorded fix, so two laps sliced at
+   * different points are still directly comparable.
+   */
   elapsedMs: (number | null)[];
   speedKph: (number | null)[];
   /** Resampled channel values, keyed by channel id; every array is grid-length. */
   channels: Partial<Record<CoachingChannelId, (number | null)[]>>;
   /** True where `elapsedMs` came from real samples close enough to interpolate. */
   covered: boolean[];
-  /** Lap distance of the first projected sample (the `elapsedMs` origin). */
+  /** Lap distance the clock is anchored at: the start/finish line, 0 m. */
   originDistanceM: number;
-  /** Monotonic timestamp of that first sample. */
+  /** Monotonic timestamp of that crossing (interpolated between the two fixes around it). */
   originTMonoMs: number;
   /** Fraction of grid points covered, 0..1. */
   coverageFraction: number;
+  /**
+   * `∫ds/v(s)` over the covered lap MINUS the measured span between the same two
+   * points, milliseconds. Positive = the integral is slower than the clock.
+   * `null` when the profile could not be integrated (no speed somewhere).
+   */
+  timeIntegrationDriftMs: number | null;
+  /**
+   * True when `|timeIntegrationDriftMs|` is more than
+   * `TIME_INTEGRATION_DRIFT_TOLERANCE` of the measured span: the speed profile
+   * and the timestamps disagree, and `t(s)` is only as good as the speeds.
+   */
+  timeIntegrationDriftExceeded: boolean;
 }
 
 interface UnwrappedSample {
@@ -361,7 +377,7 @@ const MIN_INTEGRATION_SPEED_MPS = 0.05;
 function fillDerivedSpeed(
   order: readonly number[],
   targets: readonly (number | null)[],
-  elapsedMs: readonly (number | null)[],
+  measuredAbsMs: readonly (number | null)[],
   speedKph: (number | null)[],
   stepM: number,
 ): void {
@@ -373,7 +389,7 @@ function fillDerivedSpeed(
     const after = order[Math.min(order.length - 1, position + 1)];
     if (before === undefined || after === undefined || before === after) continue;
     const ds = (targets[after] ?? 0) - (targets[before] ?? 0);
-    const dtMs = (elapsedMs[after] ?? 0) - (elapsedMs[before] ?? 0);
+    const dtMs = (measuredAbsMs[after] ?? 0) - (measuredAbsMs[before] ?? 0);
     if (!(ds > 0) || !(dtMs > 0)) continue;
     derived[position] = (ds / (dtMs / 1_000)) * 3.6;
   }
@@ -393,77 +409,151 @@ function fillDerivedSpeed(
   }
 }
 
+/** Relative disagreement between the integral and the clock that gets reported. */
+export const TIME_INTEGRATION_DRIFT_TOLERANCE = 0.02;
+
+interface TimeIntegration {
+  /** `elapsedMs` written for every covered grid point. */
+  originTMonoMs: number;
+  driftMs: number;
+  measuredMs: number;
+}
+
 /**
- * Turns `t(s)` into the integral the design asks for: `t(s) = sum ds / v(s)`.
+ * `t(s) = sum ds / v(s)`, anchored at the start/finish crossing
+ * (`analysis-engine.md` line 29). The measured timestamps do NOT distribute the
+ * time -- they only place the whole curve on the real clock and then VALIDATE
+ * it: the difference between the integral and the measured span is reported as
+ * `timeIntegrationDriftMs`. So 10 m covered at 20 m/s contribute 0.5 s even when
+ * the two fixes around them are 2 s apart.
  *
- * The speed profile decides HOW the time is distributed inside each pair of
- * real samples (so sub-sample resolution follows the physics, not timestamp
- * jitter), while the measured timestamps still anchor both ends of every
- * interval -- a standstill, where `ds/v` carries no clock at all, therefore
- * keeps its real duration. Where no speed profile exists the linear-in-distance
- * interpolation stands.
+ * The one thing `ds/v` cannot express is time that passes without distance: a
+ * standstill. Its measured duration is added at the distance where it happened,
+ * which is a measurement too, not an interpolation.
  */
-function integrateElapsedFromSpeed(
+function integrateElapsed(
   order: readonly number[],
   targets: readonly (number | null)[],
   elapsedMs: (number | null)[],
   speedKph: readonly (number | null)[],
   unwrapped: readonly UnwrappedSample[],
-  originTMonoMs: number,
-): void {
-  if (order.length < 2) return;
-  // Cumulative "model time" (seconds) along the grid: sum of ds / v.
+  measuredAbs: readonly (number | null)[],
+  anchorDu: number,
+): TimeIntegration | null {
+  if (order.length < 2) return null;
+  const duAt = (position: number): number => targets[order[position] as number] ?? 0;
+  const speedAt = (position: number): number | null => {
+    const value = speedKph[order[position] as number];
+    return value === null || value === undefined || !Number.isFinite(value) ? null : value;
+  };
+
+  // 1. the integral itself, seconds.
   const model: number[] = new Array<number>(order.length).fill(0);
   for (let position = 1; position < order.length; position += 1) {
-    const previous = order[position - 1];
-    const current = order[position];
-    if (previous === undefined || current === undefined) return;
-    const ds = (targets[current] ?? 0) - (targets[previous] ?? 0);
-    const a = speedKph[previous];
-    const b = speedKph[current];
-    if (a === null || a === undefined || b === null || b === undefined || !(ds > 0)) return;
+    const ds = duAt(position) - duAt(position - 1);
+    const a = speedAt(position - 1);
+    const b = speedAt(position);
+    if (a === null || b === null || !(ds > 0)) return null;
     const mean = Math.max(MIN_INTEGRATION_SPEED_MPS, (a + b) / 2 / 3.6);
     model[position] = (model[position - 1] ?? 0) + ds / mean;
   }
-  const modelAt = (du: number): number | null => {
+
+  // 2. time spent standing still, where `ds/v` carries no clock at all.
+  const stalls: { du: number; ms: number }[] = [];
+  for (let index = 0; index + 1 < unwrapped.length; index += 1) {
+    const a = unwrapped[index];
+    const b = unwrapped[index + 1];
+    if (a === undefined || b === undefined) continue;
+    const ms = b.tMonoMs - a.tMonoMs;
+    if (b.du > a.du || !(ms > 0)) continue;
+    stalls.push({ du: a.du, ms });
+  }
+  const stalledBefore = (du: number): number => {
+    let total = 0;
+    for (const stall of stalls) if (stall.du < du) total += stall.ms;
+    return total;
+  };
+  const timeAt = (position: number): number =>
+    (model[position] ?? 0) * 1_000 + stalledBefore(duAt(position));
+
+  // 3. the same curve at an arbitrary distance -- the start/finish crossing sits
+  //    between two grid points, or (a lap sliced a few metres late) just before
+  //    the first one, where the nearest speed extrapolates it.
+  const lastPosition = order.length - 1;
+  const timeAtDu = (du: number): number => {
+    if (du <= duAt(0)) {
+      const speed = speedAt(0);
+      const mps = speed === null ? null : Math.max(MIN_INTEGRATION_SPEED_MPS, speed / 3.6);
+      return timeAt(0) - (mps === null ? 0 : ((duAt(0) - du) / mps) * 1_000);
+    }
+    if (du >= duAt(lastPosition)) {
+      const speed = speedAt(lastPosition);
+      const mps = speed === null ? null : Math.max(MIN_INTEGRATION_SPEED_MPS, speed / 3.6);
+      return timeAt(lastPosition) + (mps === null ? 0 : ((du - duAt(lastPosition)) / mps) * 1_000);
+    }
     let low = 0;
-    let high = order.length - 1;
-    const firstTarget = targets[order[0] as number] ?? 0;
-    const lastTarget = targets[order[order.length - 1] as number] ?? 0;
-    if (du <= firstTarget) return model[0] ?? 0;
-    if (du >= lastTarget) return model[order.length - 1] ?? 0;
+    let high = lastPosition;
     while (high - low > 1) {
       const mid = (low + high) >> 1;
-      if ((targets[order[mid] as number] ?? 0) <= du) low = mid;
+      if (duAt(mid) <= du) low = mid;
       else high = mid;
     }
-    const lowTarget = targets[order[low] as number] ?? 0;
-    const highTarget = targets[order[high] as number] ?? 0;
-    const lowModel = model[low] ?? 0;
-    const highModel = model[high] ?? 0;
-    if (highTarget === lowTarget) return lowModel;
-    return lowModel + ((highModel - lowModel) * (du - lowTarget)) / (highTarget - lowTarget);
+    const span = duAt(high) - duAt(low);
+    if (!(span > 0)) return timeAt(low);
+    return timeAt(low) + ((timeAt(high) - timeAt(low)) * (du - duAt(low))) / span;
   };
 
-  let cursor = 0;
-  for (const index of order) {
-    const target = targets[index];
-    if (target === null || target === undefined) continue;
-    while (cursor + 1 < unwrapped.length && (unwrapped[cursor + 1]?.du ?? 0) < target) cursor += 1;
-    const a = unwrapped[cursor];
-    const b = unwrapped[cursor + 1];
-    if (a === undefined || b === undefined) continue;
-    if (target < a.du || target > b.du) continue;
-    const spanMs = b.tMonoMs - a.tMonoMs;
-    const modelA = modelAt(a.du);
-    const modelB = modelAt(b.du);
-    if (modelA === null || modelB === null) continue;
-    const modelSpan = modelB - modelA;
-    if (!(modelSpan > 0) || !Number.isFinite(spanMs)) continue;
-    const fraction = ((modelAt(target) ?? modelA) - modelA) / modelSpan;
-    if (!Number.isFinite(fraction)) continue;
-    elapsedMs[index] = a.tMonoMs + fraction * spanMs - originTMonoMs;
+  const anchorMs = timeAtDu(anchorDu);
+  for (let position = 0; position < order.length; position += 1) {
+    elapsedMs[order[position] as number] = timeAt(position) - anchorMs;
   }
+
+  const firstMeasured = measuredAbs[order[0] as number];
+  const lastMeasured = measuredAbs[order[lastPosition] as number];
+  const measuredMs =
+    firstMeasured === null ||
+    firstMeasured === undefined ||
+    lastMeasured === null ||
+    lastMeasured === undefined
+      ? 0
+      : lastMeasured - firstMeasured;
+  return {
+    originTMonoMs: (firstMeasured ?? 0) - (timeAt(0) - anchorMs),
+    driftMs: timeAt(lastPosition) - timeAt(0) - measuredMs,
+    measuredMs,
+  };
+}
+
+/**
+ * The start/finish crossing this lap's clock is anchored at, as unwrapped
+ * distance. A lap handed over with a lead-in from the previous lap crosses the
+ * line twice; the crossing that starts THIS lap is the one whose forward lap
+ * covers the most of the samples, and mapping every grid point off that single
+ * crossing is what keeps `t(s)` monotone from 0 m to the flag.
+ */
+function chooseAnchorDu(
+  firstDu: number,
+  lastDu: number,
+  totalLengthM: number,
+  stepM: number,
+  gridSize: number,
+): number {
+  let bestAnchor = 0;
+  let bestCount = -1;
+  const lastTurn = Math.max(0, Math.floor(lastDu / totalLengthM));
+  for (let turn = 0; turn <= lastTurn; turn += 1) {
+    const anchor = turn * totalLengthM;
+    let count = 0;
+    for (let index = 0; index < gridSize; index += 1) {
+      const target = anchor + index * stepM;
+      if (target >= firstDu && target <= lastDu) count += 1;
+    }
+    if (count > bestCount) {
+      bestCount = count;
+      bestAnchor = anchor;
+    }
+  }
+  return bestAnchor;
 }
 
 /**
@@ -526,6 +616,8 @@ export function resampleLapToDistanceGrid(
       originDistanceM: 0,
       originTMonoMs: 0,
       coverageFraction: 0,
+      timeIntegrationDriftMs: null,
+      timeIntegrationDriftExceeded: false,
     };
   }
 
@@ -534,27 +626,21 @@ export function resampleLapToDistanceGrid(
     .filter((sample) => sample.speedKph !== null)
     .map((sample) => ({ du: sample.du, value: sample.speedKph as number }));
 
-  // --- pass 1: coverage, the timestamp-interpolated time, Doppler speed ------
+  // --- pass 1: coverage, the measured time, Doppler speed --------------------
+  // Every grid point is measured off ONE start/finish crossing, so grid index 0
+  // is this lap's beginning and grid index n-1 its end -- never the lead-in of
+  // the previous lap that happens to sit at the same distance.
+  const anchorDu = chooseAnchorDu(first.du, last.du, totalLengthM, stepM, gridSize);
   const targets: (number | null)[] = new Array<number | null>(gridSize).fill(null);
+  const measuredAbs: (number | null)[] = new Array<number | null>(gridSize).fill(null);
   let coveredCount = 0;
   for (let index = 0; index < gridSize; index += 1) {
-    const base = index * stepM;
-    // The lap may start anywhere; try the wrap offsets that can land inside the
-    // sampled span, smallest first, so the mapping is deterministic.
-    let target: number | null = null;
-    for (let turn = Math.floor((first.du - base) / totalLengthM); ; turn += 1) {
-      const candidate = base + turn * totalLengthM;
-      if (candidate > last.du) break;
-      if (candidate >= first.du) {
-        target = candidate;
-        break;
-      }
-    }
-    if (target === null) continue;
+    const target = anchorDu + index * stepM;
+    if (target < first.du || target > last.du) continue;
     const t = interpolateAt(timePoints, target, maxBridgeM);
     if (t === null) continue;
     targets[index] = target;
-    elapsedMs[index] = t - first.tMonoMs;
+    measuredAbs[index] = t;
     covered[index] = true;
     coveredCount += 1;
     speedKph[index] = interpolateAt(speedPoints, target, maxBridgeM);
@@ -566,14 +652,33 @@ export function resampleLapToDistanceGrid(
     }
   }
 
-  // Grid points in TRAVEL order (a lap may start anywhere on the grid).
+  // Grid points in travel order -- the targets increase with the grid index.
   const order = distanceM
     .map((_value, index) => index)
-    .filter((index) => covered[index] === true)
-    .sort((a, b) => (targets[a] ?? 0) - (targets[b] ?? 0));
+    .filter((index) => covered[index] === true);
 
-  fillDerivedSpeed(order, targets, elapsedMs, speedKph, stepM);
-  integrateElapsedFromSpeed(order, targets, elapsedMs, speedKph, unwrapped, first.tMonoMs);
+  fillDerivedSpeed(order, targets, measuredAbs, speedKph, stepM);
+  const integration = integrateElapsed(
+    order,
+    targets,
+    elapsedMs,
+    speedKph,
+    unwrapped,
+    measuredAbs,
+    anchorDu,
+  );
+  // No usable speed profile: the measured clock stands in for the integral, and
+  // no drift is claimed. The crossing is still the origin.
+  const fallbackOrigin =
+    interpolateAt(timePoints, anchorDu, maxBridgeM) ??
+    measuredAbs[order[0] ?? -1] ??
+    first.tMonoMs;
+  if (integration === null) {
+    for (const index of order) {
+      const measured = measuredAbs[index];
+      if (measured !== null && measured !== undefined) elapsedMs[index] = measured - fallbackOrigin;
+    }
+  }
 
   return {
     stepM,
@@ -583,9 +688,14 @@ export function resampleLapToDistanceGrid(
     speedKph,
     channels,
     covered,
-    originDistanceM: normalizeDistance(first.du, totalLengthM),
-    originTMonoMs: first.tMonoMs,
+    originDistanceM: 0,
+    originTMonoMs: integration?.originTMonoMs ?? fallbackOrigin,
     coverageFraction: coveredCount / gridSize,
+    timeIntegrationDriftMs: integration?.driftMs ?? null,
+    timeIntegrationDriftExceeded:
+      integration !== null &&
+      integration.measuredMs > 0 &&
+      Math.abs(integration.driftMs) > TIME_INTEGRATION_DRIFT_TOLERANCE * integration.measuredMs,
   };
 }
 
@@ -617,7 +727,9 @@ export function deltaCurveMs(lap: DistanceGrid, reference: DistanceGrid): (numbe
  * `startM -> end of lap` and `start of lap -> endM` -- and its contribution is
  * their sum. Subtracting `delta[endM] - delta[startM]` across the line instead
  * would report a slower-everywhere lap as having GAINED almost a full lap's
- * delta on that sector.
+ * delta on that sector. Both terms only mean anything because each grid's
+ * `t(s)` is anchored at ITS OWN start/finish crossing: "start of lap" is then
+ * 0 m for every lap, however many metres after the line its first fix landed.
  */
 export function deltaOverSegmentMs(
   delta: readonly (number | null)[],

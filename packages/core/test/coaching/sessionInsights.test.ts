@@ -279,6 +279,57 @@ describe('analyzeSession: unverified laps (H5)', () => {
     expect(limitation?.lapNumbers).toEqual([1, 2]);
     expect(limitation?.checks).toContain('offTrack');
     expect(limitation?.checks).toContain('yawSpike');
+    expect(limitation?.coveragePercent).toBe(0);
+  });
+
+  it('quotes how much of the lap the thin evidence actually covered (H5)', () => {
+    clock = 0;
+    const thin = [lapInput(1), lapInput(2, { profileShiftM: 12 })].map((entry) => ({
+      ...entry,
+      samples: entry.samples.map((sample) =>
+        sample.distanceM <= 100
+          ? sample
+          : { tMonoMs: sample.tMonoMs, distanceM: sample.distanceM, speedKph: sample.speedKph },
+      ),
+    }));
+    const insights = analyzeSession(thin, CORNERS, CONTEXT);
+    expect(insights.laps.every((lap) => lap.status === 'unverified')).toBe(true);
+    expect(insights.laps[0]?.checkCoverage.offTrack ?? 1).toBeLessThan(0.15);
+    const limitation = insights.limitations.find((entry) => entry.code === 'UNVERIFIED_LAPS');
+    expect(limitation?.coveragePercent ?? 0).toBeGreaterThan(0);
+    expect(limitation?.coveragePercent ?? 100).toBeLessThan(15);
+  });
+});
+
+describe('analyzeSession: integrated t(s) vs the measured clock (M2)', () => {
+  /** A lap whose timestamps run 5 % longer than its own speed profile explains. */
+  function stretched(entry: SessionLapInput): SessionLapInput {
+    const first = entry.samples[0]?.tMonoMs ?? 0;
+    const samples = entry.samples.map((sample) => ({
+      ...sample,
+      tMonoMs: first + (sample.tMonoMs - first) * 1.05,
+    }));
+    const last = samples[samples.length - 1];
+    return {
+      ...entry,
+      lap: { ...entry.lap, durationMs: (last?.tMonoMs ?? 0) - first },
+      samples,
+    };
+  }
+
+  it('states the disagreement as a limitation instead of trusting t(s) silently', () => {
+    clock = 0;
+    const session = [lapInput(1), stretched(lapInput(2, { profileShiftM: 12 })), lapInput(3)];
+    const insights = analyzeSession(session, CORNERS, CONTEXT);
+    const limitation = insights.limitations.find((entry) => entry.code === 'TIME_INTEGRATION_DRIFT');
+    expect(limitation).toBeDefined();
+    expect(limitation?.lapNumbers).toEqual([2]);
+    expect(Math.abs(limitation?.driftMs ?? 0)).toBeGreaterThan(500);
+  });
+
+  it('says nothing when speed and timestamps agree on every lap', () => {
+    const insights = analyzeSession(threeLapSession(), CORNERS, CONTEXT);
+    expect(insights.limitations.map((entry) => entry.code)).not.toContain('TIME_INTEGRATION_DRIFT');
   });
 });
 

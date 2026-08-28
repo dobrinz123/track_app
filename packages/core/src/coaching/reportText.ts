@@ -353,9 +353,21 @@ function limitationLine(limitation: Limitation, language: ReportLanguage): strin
     case 'UNVERIFIED_LAPS': {
       const laps = limitation.lapNumbers ?? [];
       const one = laps.length === 1;
+      const checks = checkNames(limitation.checks ?? [], language);
+      const percent = limitation.coveragePercent ?? 0;
+      // Evidence that stops after a tenth of the lap is not "no data": the
+      // report says how much of the lap it actually covered.
+      const evidenceRo =
+        percent <= 0
+          ? `lipsesc datele pentru ${checks}`
+          : `datele pentru ${checks} acoperă doar ${percent} % din tur`;
+      const evidenceEn =
+        percent <= 0
+          ? `there is no data for ${checks}`
+          : `the data for ${checks} covers only ${percent} % of the lap`;
       return ro
-        ? `${one ? 'Turul' : 'Tururile'} ${lapList(laps, language)} nu ${one ? 'a putut fi verificat' : 'au putut fi verificate'}: lipsesc datele pentru ${checkNames(limitation.checks ?? [], language)}, așa că ${one ? 'nu poate fi declarat curat' : 'nu pot fi declarate curate'} și ${one ? 'nu intră' : 'nu intră'} în comparații.`
-        : `${one ? 'Lap' : 'Laps'} ${lapList(laps, language)} could not be verified: there is no data for ${checkNames(limitation.checks ?? [], language)}, so ${one ? 'it cannot be called clean' : 'they cannot be called clean'} and ${one ? 'it stays' : 'they stay'} out of the comparisons.`;
+        ? `${one ? 'Turul' : 'Tururile'} ${lapList(laps, language)} nu ${one ? 'a putut fi verificat' : 'au putut fi verificate'}: ${evidenceRo}, așa că ${one ? 'nu poate fi declarat curat' : 'nu pot fi declarate curate'} și ${one ? 'nu intră' : 'nu intră'} în comparații.`
+        : `${one ? 'Lap' : 'Laps'} ${lapList(laps, language)} could not be verified: ${evidenceEn}, so ${one ? 'it cannot be called clean' : 'they cannot be called clean'} and ${one ? 'it stays' : 'they stay'} out of the comparisons.`;
     }
     case 'UNSUPPORTED_CHANNELS':
       return ro
@@ -371,6 +383,14 @@ function limitationLine(limitation: Limitation, language: ReportLanguage): strin
       return ro
         ? `Calitate GPS slabă în ${one ? 'turul' : 'tururile'} ${lapList(laps, language)} — punctele de frânare de acolo sunt aproximative.`
         : `Poor GPS quality on ${one ? 'lap' : 'laps'} ${lapList(laps, language)} — braking points there are approximate.`;
+    }
+    case 'TIME_INTEGRATION_DRIFT': {
+      const laps = limitation.lapNumbers ?? [];
+      const one = laps.length === 1;
+      const gap = seconds(Math.abs(limitation.driftMs ?? 0), language);
+      return ro
+        ? `În ${one ? 'turul' : 'tururile'} ${lapList(laps, language)} viteza înregistrată și ceasul nu sunt de acord (${gap} pe tur), așa că timpii pe distanță de acolo sunt la fel de buni ca semnalul de viteză.`
+        : `On ${one ? 'lap' : 'laps'} ${lapList(laps, language)} the recorded speed and the clock disagree (${gap} over the lap), so the time-at-distance there is only as good as the speed signal.`;
     }
     case 'GEOMETRY_UNVALIDATED':
       return ro
