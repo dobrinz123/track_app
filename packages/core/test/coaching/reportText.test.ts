@@ -207,6 +207,52 @@ describe('renderReport', () => {
     expect(en).not.toMatch(FORBIDDEN);
   });
 
+  it('overview says "no data" only when an unavailable check truly has 0 % coverage (Q3)', () => {
+    clock = 0;
+    // Every safety channel besides speed is entirely absent: 0 % coverage.
+    const stripped = [lapInput(1), lapInput(2, { profileShiftM: 10 })].map((entry) => ({
+      ...entry,
+      samples: entry.samples.map(({ tMonoMs, distanceM, speedKph }) => ({
+        tMonoMs,
+        distanceM,
+        speedKph,
+      })),
+    }));
+    const insights = analyzeSession(stripped, CORNERS, CONTEXT);
+    const ro = renderReport(insights, 'ro');
+    const en = renderReport(insights, 'en');
+    expect(en).toContain('no data for');
+    expect(ro).toContain('lipsesc datele pentru');
+    expect(en).not.toContain('insufficient data');
+    expect(ro).not.toContain('date insuficiente');
+    expect(ro).not.toMatch(FORBIDDEN);
+    expect(en).not.toMatch(FORBIDDEN);
+  });
+
+  it('overview says "insufficient data (covers X %)" for a check with partial coverage, not "no data" (Q3)', () => {
+    clock = 0;
+    // Every safety channel besides speed stops after the first 100 m of a
+    // 1000 m lap: partial (~10 %) coverage, not zero.
+    const thin = [lapInput(1), lapInput(2, { profileShiftM: 10 })].map((entry) => ({
+      ...entry,
+      samples: entry.samples.map((sample) =>
+        sample.distanceM <= 100
+          ? sample
+          : { tMonoMs: sample.tMonoMs, distanceM: sample.distanceM, speedKph: sample.speedKph },
+      ),
+    }));
+    const insights = analyzeSession(thin, CORNERS, CONTEXT);
+    const ro = renderReport(insights, 'ro');
+    const en = renderReport(insights, 'en');
+    expect(en).toMatch(/insufficient data \(covers \d+ ?%\)/);
+    expect(ro).toMatch(/date insuficiente \(acoperă \d+ ?%\)/);
+    // "no data" would contradict the coverage percentage the report also gives.
+    expect(en).not.toContain('no data for');
+    expect(ro).not.toContain('lipsesc datele pentru');
+    expect(ro).not.toMatch(FORBIDDEN);
+    expect(en).not.toMatch(FORBIDDEN);
+  });
+
   it('says when the integrated time disagrees with the recorded clock (M2)', () => {
     clock = 0;
     const laps = [lapInput(1), lapInput(2, { profileShiftM: 10 }), lapInput(3)];

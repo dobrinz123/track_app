@@ -1,4 +1,4 @@
-import { assertPositiveLength, forwardDistance, normalizeDistance } from './distanceDomain';
+import { assertPositiveLength, forwardDistance } from './distanceDomain';
 import {
   GRAVITY_MPS2,
   type ClassifiableLap,
@@ -76,9 +76,6 @@ const REASON_PRIORITY: readonly LapAnomalyReason[] = Object.freeze([
   'gnssPoor',
 ]);
 
-/** Number of coverage buckets the lap distance is split into. */
-const COVERAGE_BUCKETS = 100;
-
 /**
  * Checks the Phase 5 safety contract (rule 2) requires before a lap may be
  * called CLEAN: "on-track, no yaw/decel anomaly, valid GNSS quality", plus the
@@ -119,12 +116,22 @@ function finite(value: number | undefined): value is number {
 const YAW_IMPLIED_TOLERANCE_M = 8;
 const YAW_IMPLIED_TOLERANCE_MS = 400;
 /**
- * Longest median sample interval the yaw rule can still say anything with. At
- * 1 Hz a 200 ms window becomes a 1 s window and the check still runs; slower
- * than that, a spin can start and end between two fixes, so the check is
- * reported UNAVAILABLE (-> the lap is unverified) instead of "no spike found".
+ * Longest single sample interval the yaw rule can still say anything with. At
+ * 1 Hz a 200 ms window becomes a 1 s window and the check still runs; an
+ * interval LONGER than this is a stretch of the lap where a spin could start
+ * and end between two fixes unseen.
  */
 const YAW_MAX_SAMPLE_INTERVAL_MS = 1_000;
+/**
+ * Fraction of the LAP DISTANCE that may sit behind an interval longer than
+ * `YAW_MAX_SAMPLE_INTERVAL_MS` before the whole check is reported UNAVAILABLE
+ * (-> the lap is unverified) instead of "no spike found". Judged PER INTERVAL,
+ * never by a single summary statistic over the lap: three consecutive gaps of
+ * 1000/1000/1200 ms have a 1000 ms MEDIAN -- exactly at the threshold, not
+ * over it -- which would leave the check silently "available" while the
+ * 1200 ms gap is exactly the kind of window a spin can hide inside.
+ */
+const YAW_MAX_UNCOVERED_FRACTION = 0.1;
 
 /**
  * Degrees of the measured turn that the centreline cannot explain, minimised
@@ -195,6 +202,27 @@ function medianSampleIntervalMs(samples: readonly CornerLapSample[]): number | n
   return intervals[Math.floor((intervals.length - 1) / 2)] ?? null;
 }
 
+/**
+ * Fraction of the lap distance that sits behind an interval strictly longer
+ * than `YAW_MAX_SAMPLE_INTERVAL_MS` -- windows too coarse for the yaw rule to
+ * see a spin inside. Evaluated interval by interval (never as one median) so
+ * a single bad gap cannot hide behind an otherwise fine sample rate.
+ */
+function yawUncoveredFraction(samples: readonly CornerLapSample[], totalLengthM: number): number {
+  let uncoveredM = 0;
+  for (let index = 0; index + 1 < samples.length; index += 1) {
+    const current = samples[index];
+    const next = samples[index + 1];
+    if (current === undefined || next === undefined) continue;
+    const dt = next.tMonoMs - current.tMonoMs;
+    if (!(dt > 0)) continue;
+    if (dt > YAW_MAX_SAMPLE_INTERVAL_MS) {
+      uncoveredM += forwardDistance(current.distanceM, next.distanceM, totalLengthM);
+    }
+  }
+  return totalLengthM > 0 ? uncoveredM / totalLengthM : 0;
+}
+
 /** Degrees the gyro says the car turned between two indices. */
 function integratedGyroTurn(
   samples: readonly CornerLapSample[],
@@ -249,10 +277,15 @@ function evaluateYaw(
   }
   // The rule is a DURATION rule, so a rate that cannot resolve that duration
   // widens the window to one sample interval instead of skipping every window
-  // and reporting "no spike" -- and below `YAW_MAX_SAMPLE_INTERVAL_MS` it
-  // reports that it cannot judge at all.
+  // and reporting "no spike".
   const intervalMs = medianSampleIntervalMs(samples);
-  if (intervalMs === null || intervalMs > YAW_MAX_SAMPLE_INTERVAL_MS) {
+  if (intervalMs === null) {
+    return { available: false, source, worstDps: null, windowMs: yawSpikeMs };
+  }
+  // Availability is judged PER INTERVAL against the lap distance behind it,
+  // never by the median interval alone -- see `YAW_MAX_UNCOVERED_FRACTION`.
+  const uncoveredFraction = yawUncoveredFraction(samples, totalLengthM);
+  if (uncoveredFraction > YAW_MAX_UNCOVERED_FRACTION) {
     return { available: false, source, worstDps: null, windowMs: yawSpikeMs };
   }
   const windowMs = Math.max(yawSpikeMs, intervalMs);
@@ -300,9 +333,15 @@ function evaluateYaw(
 
 /**
  * Fraction of the LAP DISTANCE over which a channel is continuous evidence:
- * the lap is split into `COVERAGE_BUCKETS` cells and every cell a pair of
- * consecutive readings no more than `bridgeM` apart spans is counted. "The
- * channel appeared once" is not evidence about the rest of the lap.
+ * the union, in METRES, of the spans between consecutive readings no more
+ * than `bridgeM` apart -- never a per-bucket presence flag. A reading with no
+ * such neighbour (isolated, further than `bridgeM` from the one before it)
+ * contributes ZERO: "the channel appeared once, in isolation" is not evidence
+ * about any stretch of the lap, so it must never mark a whole percentage
+ * point of it "covered" the way flagging the bucket a lone reading falls in
+ * would (that bucket-presence approach let 90 isolated readings spread one
+ * per bucket across a 6.1 km lap read as ~90 % covered with zero bridgeable
+ * metres between any of them).
  */
 function channelCoverageFraction(
   samples: readonly CornerLapSample[],
@@ -310,27 +349,17 @@ function channelCoverageFraction(
   totalLengthM: number,
   bridgeM: number,
 ): number {
-  const bucketM = totalLengthM / COVERAGE_BUCKETS;
-  const buckets = new Array<boolean>(COVERAGE_BUCKETS).fill(false);
+  let coveredM = 0;
   let previous: CornerLapSample | null = null;
   for (const sample of samples) {
     if (!Number.isFinite(sample.distanceM) || !carries(sample)) continue;
-    const from = normalizeDistance(sample.distanceM, totalLengthM);
-    buckets[Math.min(COVERAGE_BUCKETS - 1, Math.floor(from / bucketM))] = true;
     if (previous !== null) {
       const span = forwardDistance(previous.distanceM, sample.distanceM, totalLengthM);
-      if (span <= bridgeM) {
-        const start = normalizeDistance(previous.distanceM, totalLengthM);
-        const first = Math.floor(start / bucketM);
-        const steps = Math.floor(((start % bucketM) + span) / bucketM);
-        for (let step = 0; step <= steps; step += 1) {
-          buckets[(first + step) % COVERAGE_BUCKETS] = true;
-        }
-      }
+      if (span > 0 && span <= bridgeM) coveredM += span;
     }
     previous = sample;
   }
-  return buckets.filter(Boolean).length / COVERAGE_BUCKETS;
+  return totalLengthM > 0 ? Math.min(1, coveredM / totalLengthM) : 0;
 }
 
 /**

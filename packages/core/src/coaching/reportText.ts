@@ -323,10 +323,26 @@ function overviewLines(insights: SessionInsights, language: ReportLanguage): str
   const unverified = insights.laps.filter((lap) => lap.status === 'unverified');
   if (unverified.length > 0) {
     const checks = [...new Set(unverified.flatMap((lap) => lap.unavailableChecks))];
+    const coverages = unverified.flatMap((lap) =>
+      lap.unavailableChecks.map((check) => lap.checkCoverage[check] ?? 0),
+    );
+    // "No data" is only true at 0 %: a check that ran over part of the lap
+    // (§3) has PARTIAL evidence, and saying "no data" about it would
+    // contradict the coverage percentage the limitations section gives for
+    // the very same lap.
+    const percent = coverages.length > 0 ? Math.round(Math.min(...coverages, 1) * 100) : 0;
+    const evidenceRo =
+      percent <= 0
+        ? `lipsesc datele pentru ${checkNames(checks, language)}`
+        : `${checkNames(checks, language)}: date insuficiente (acoperă ${percent} %)`;
+    const evidenceEn =
+      percent <= 0
+        ? `no data for ${checkNames(checks, language)}`
+        : `${checkNames(checks, language)}: insufficient data (covers ${percent} %)`;
     lines.push(
       ro
-        ? `Tururile ${lapList(unverified.map((lap) => lap.lapNumber), language)} nu au putut fi verificate (lipsesc datele pentru: ${checkNames(checks, language)}), așa că nu intră în comparații.`
-        : `Laps ${lapList(unverified.map((lap) => lap.lapNumber), language)} could not be verified (no data for: ${checkNames(checks, language)}), so they stay out of the comparisons.`,
+        ? `Tururile ${lapList(unverified.map((lap) => lap.lapNumber), language)} nu au putut fi verificate (${evidenceRo}), așa că nu intră în comparații.`
+        : `Laps ${lapList(unverified.map((lap) => lap.lapNumber), language)} could not be verified (${evidenceEn}), so they stay out of the comparisons.`,
     );
   }
   if (insights.availability.available.length > 0) {

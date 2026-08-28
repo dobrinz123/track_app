@@ -1,0 +1,7 @@
+# Ticket P5a-FIX3 — Codex P5a-REV3 residuals (3 PARTIAL + 1 NEW MEDIUM), tests first, small, packages/core ONLY
+Source: `.foreman/scratch/p5arev3c-codex-output.log` (final "### Table" + NEW). HEAD 3f0f20b.
+Q1 Coverage fraction (per-check AND lap completeness) = union of SPANS between consecutive readings ≤ 60 m apart, measured in metres over the lap length — an isolated reading contributes 0 m (no bucket marking). Test: 6.1 km lap, 90 isolated readings 61 m apart → coverage ≈ 0 → check unavailable / lap incomplete; dense 1 Hz @ 40 m/s → ≥ 0.95.
+Q2 Yaw availability: unavailable if ANY interval inside the evaluated lap exceeds YAW_MAX_SAMPLE_INTERVAL_MS (1000 ms) — or, better, evaluate per interval and mark only the affected windows as unavailable; if > 10 % of the lap distance is uncovered → check unavailable. Test: intervals 1000/1000/1200 ms → yaw unavailable (or window flagged), never silently clean.
+Q3 Report overview wording: for an unavailable check with partial coverage say "insufficient data (covers X %)" (RO: "date insuficiente (acoperă X %)"), "no data" only at 0 % — consistent with the limitations sentence. Tests RO/EN.
+Gates (repo root, real exit codes): typecheck, test, lint all 0.
+WRITE SET: packages/core/src/coaching/{cleanLap.ts,reportText.ts,sessionInsights.ts,types.ts}, packages/core/test/coaching/**. No commit, no agents, no Expo server. Report DONE/DONE_WITH_CONCERNS/BLOCKED with evidence + totals.

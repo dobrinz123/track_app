@@ -217,6 +217,33 @@ describe('classifyLap', () => {
   it('rejects a non-positive totalLengthM', () => {
     expect(() => classifyLap(LAP, [], { totalLengthM: -1 })).toThrow(RangeError);
   });
+
+  it('gives ~0 coverage from 90 isolated readings 61 m apart on a 6.1 km lap (Q1)', () => {
+    // Each gap is 61 m -- 1 m over the 60 m bridge -- so NO pair of consecutive
+    // readings is continuous evidence. A per-bucket presence flag would have
+    // read this as ~90 % covered (one reading landing in each of 90 of the
+    // 100 buckets); the metre-span rule reads it for what it is: a lap with no
+    // bridgeable evidence anywhere.
+    const totalLengthM = 6_100;
+    const samples: CornerLapSample[] = Array.from({ length: 90 }, (_value, index) => ({
+      tMonoMs: index * 10_000,
+      distanceM: index * 61,
+      speedKph: 144,
+      accuracyM: 4,
+      lateralM: 0,
+    }));
+    const result = classifyLap(LAP, samples, { totalLengthM });
+    expect(result.coverageFraction).toBeLessThan(0.02);
+    expect(result.reasons).toContain('incomplete');
+    expect(result.status).not.toBe('clean');
+  });
+
+  it('gives >= 0.95 coverage for a dense 1 Hz lap at 40 m/s (Q1)', () => {
+    // 40 m between fixes, well inside the 60 m bridge: nearly the whole lap is
+    // one continuous bridged span.
+    const result = classifyLap(LAP, straightLap(1, () => 30), OPTIONS);
+    expect(result.coverageFraction).toBeGreaterThanOrEqual(0.95);
+  });
 });
 
 describe('classifyLap: yaw anomaly vs the implied yaw (H6)', () => {
@@ -310,6 +337,42 @@ describe('classifyLap: yaw anomaly vs the implied yaw (H6)', () => {
     const result = classifyLap(LAP, samples, OPTIONS);
     expect(result.unavailableChecks).not.toContain('yawSpike');
     expect(result.reasons).not.toContain('yawSpike');
+  });
+
+  it('marks yaw unavailable when >10% of the lap sits behind >1000 ms gaps, even though the MEDIAN interval is exactly 1000 ms (H6/Q2)', () => {
+    // Repeating 1000/1000/1200 ms intervals: the median interval is 1000 ms --
+    // AT the old threshold, not over it -- so the old median-gated rule left
+    // the check silently "available". Judged per interval, the 1200 ms gaps
+    // alone span well over 10 % of the lap distance, and every other check
+    // (constant speed/lateral/accuracy, gaps always <= 48 m) stays available:
+    // only the yaw check is starved of time resolution.
+    const speedMps = 40;
+    const pattern = [1000, 1000, 1200];
+    const samples: CornerLapSample[] = [];
+    let tMs = 0;
+    let distanceM = 0;
+    let index = 0;
+    while (distanceM < SYNTHETIC_TOTAL_LENGTH_M) {
+      samples.push({
+        tMonoMs: tMs,
+        distanceM,
+        speedKph: speedMps * 3.6,
+        accuracyM: 4,
+        lateralM: 0,
+        headingDeg: 30,
+        centrelineHeadingDeg: 30,
+      });
+      const dtMs = pattern[index % pattern.length] ?? 1000;
+      tMs += dtMs;
+      distanceM += (dtMs / 1_000) * speedMps;
+      index += 1;
+    }
+    const result = classifyLap(LAP, samples, OPTIONS);
+    expect(result.unavailableChecks).toContain('yawSpike');
+    expect(result.unavailableChecks).not.toContain('offTrack');
+    expect(result.unavailableChecks).not.toContain('decelSpike');
+    expect(result.unavailableChecks).not.toContain('gnssPoor');
+    expect(result.status).toBe('unverified');
   });
 
   it('keeps the implausible-lateral-g guard: crawling-speed heading noise is not a spike', () => {
