@@ -15,4 +15,5 @@ export type RootStackParamList = {
   DevReplay: undefined;
   DidProbe: undefined;
   DidSweep: undefined;
+  SignalFinder: undefined;
 };

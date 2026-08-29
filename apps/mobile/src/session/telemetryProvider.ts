@@ -44,6 +44,115 @@ import {
 /** User-facing diagnostics note (binding, P4e-FIX3 H2) when the ENET adapter is held by the dev DID-probe screen -- the MHD adapter accepts one ECU client at a time. */
 export const ENET_ADAPTER_RESERVED_BY_PROBE_DETAIL = 'adapter reserved by probe';
 
+// ---------------------------------------------------------------------------
+// Signal Finder channel bindings (ticket P4l S3; contracts.md "Signal Finder
+// (Phase 4l)" item 5, binding): "the ENET telemetry provider reads bindings
+// from the profile registry (data, not code). Existing `accelPedalPct`
+// (mode-01 0x5A) stays the default binding."
+//
+// This is the LOOKUP half, pure and additive: it turns whatever the Signal
+// Finder confirmed into the concrete request/decode a poll would need. It is
+// deliberately the only Signal Finder code in this file -- every existing
+// spec-resolution path (`buildEnetConfig`, `resolveEnetChannelSpecs`, the
+// 0x5A/0x49 pedal fallback) is untouched.
+//
+// LIMITATION, disclosed rather than papered over: `brakePct`/`brakeSwitch`
+// are NOT members of `@circuit/core`'s `TelemetryChannelId` union (which is
+// what `EnetChannelSpec.channel`, the poll plan, `TelemetrySample` and the
+// recorder are all typed by) -- they exist today only as `CoachingChannelId`
+// extras. Turning a resolved binding into a real POLL entry therefore
+// requires adding those two ids to that core union (and to the exhaustive
+// `Record<TelemetryChannelId, ...>` in `LapDetailScreen.tsx`), which is
+// outside ticket P4l's write set. Everything up to that boundary is
+// implemented and tested here.
+// ---------------------------------------------------------------------------
+
+/** The telemetry channel a confirmed brake binding feeds: a switch is reported as a percentage (0 or 100) so a single consumer handles both. */
+export type BrakeBindingChannel = 'brakePct' | 'brakeSwitch';
+
+export interface ResolvedBrakeBinding {
+  channel: BrakeBindingChannel;
+  /** ECU (HSFZ target) address the DID must be requested from. */
+  ecu: number;
+  /** 4 hex chars, the `did` spec convention (`EnetChannelSpec.requestHex`). */
+  requestHex: string;
+  length: number | null;
+  /** `boolean-0-100`: anything off the rest level reads 100. `scaled-0-100`: the observed min..max range mapped onto 0..100. */
+  decodeKind: 'boolean-0-100' | 'scaled-0-100';
+  /** Which byte of the response carries the signal (0 for a plain 1–4 byte response). */
+  byteOffset: number;
+  /** Hex of the whole rest-level response, from the finder's evidence; `null` when the evidence blob was unreadable. */
+  restValueHex: string | null;
+  /** Observed range, from the finder's evidence — the scaling reference for `scaled-0-100`. */
+  observedMin: number | null;
+  observedMax: number | null;
+  provenance: string;
+}
+
+interface BindingEvidence {
+  restValueHex?: unknown;
+  min?: unknown;
+  max?: unknown;
+  byteOffset?: unknown;
+}
+
+/** Read defensively — a corrupt/older evidence blob degrades to "no evidence", never a throw. */
+function parseBindingEvidence(evidenceJson: string): BindingEvidence {
+  try {
+    const parsed: unknown = JSON.parse(evidenceJson);
+    return typeof parsed === 'object' && parsed !== null ? (parsed as BindingEvidence) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** A brake PRESSURE binding is a real analog and always wins over a bare switch; only `field-confirmed` bindings are ever used to drive telemetry. */
+const BRAKE_BINDING_PREFERENCE: readonly string[] = ['brakePressure', 'brakeSwitch'];
+
+export function resolveBrakeBindingFromProfile(
+  bindings: readonly { channel: string; ecu: number; did: number; length: number | null; decode: string; status: string; evidenceJson: string }[],
+): ResolvedBrakeBinding | null {
+  for (const channel of BRAKE_BINDING_PREFERENCE) {
+    const binding = bindings.find((candidate) => candidate.channel === channel && candidate.status === 'field-confirmed');
+    if (binding === undefined) continue;
+    const evidence = parseBindingEvidence(binding.evidenceJson);
+    const byteOffset = typeof evidence.byteOffset === 'number' && evidence.byteOffset >= 0 ? Math.floor(evidence.byteOffset) : 0;
+    return {
+      channel: channel === 'brakePressure' ? 'brakePct' : 'brakeSwitch',
+      ecu: binding.ecu,
+      requestHex: binding.did.toString(16).toUpperCase().padStart(4, '0'),
+      length: binding.length,
+      decodeKind: channel === 'brakePressure' ? 'scaled-0-100' : 'boolean-0-100',
+      byteOffset,
+      restValueHex: typeof evidence.restValueHex === 'string' ? evidence.restValueHex : null,
+      observedMin: typeof evidence.min === 'number' ? evidence.min : null,
+      observedMax: typeof evidence.max === 'number' ? evidence.max : null,
+      provenance: `Signal Finder field-confirmed binding (${binding.decode})`,
+    };
+  }
+  return null;
+}
+
+/**
+ * Decodes ONE response for `binding` into 0..100. `null` when the response is
+ * too short for the binding's own byte offset (an ECU that changed what it
+ * answers must never silently produce a fabricated brake reading).
+ */
+export function decodeBrakeBindingValue(binding: ResolvedBrakeBinding, raw: Uint8Array): number | null {
+  const value = raw[binding.byteOffset];
+  if (value === undefined) return null;
+  if (binding.decodeKind === 'boolean-0-100') {
+    if (binding.restValueHex === null) return null;
+    const restByte = Number.parseInt(binding.restValueHex.slice(binding.byteOffset * 2, binding.byteOffset * 2 + 2), 16);
+    if (!Number.isFinite(restByte)) return null;
+    return value === restByte ? 0 : 100;
+  }
+  const min = binding.observedMin;
+  const max = binding.observedMax;
+  if (min === null || max === null || max <= min) return null;
+  return Math.min(100, Math.max(0, ((value - min) / (max - min)) * 100));
+}
+
 /**
  * Telemetry addendum — channel revision (2026-08-11, binding) poll plan,
  * extended by the field revision (2026-08-27, binding): rpm 5Hz (record-only

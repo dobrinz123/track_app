@@ -34,8 +34,19 @@ import type { SqlDatabase } from '@circuit/core';
  * `nrc_counts_json` is a small JSON blob (`Record<nrcHex, count>`) rather
  * than a separate table -- in practice a handful of distinct NRC values per
  * run, never worth a join.
+ *
+ * Ticket P4l (binding, contracts.md "Signal Finder (Phase 4l)" item 5):
+ * schema v3 adds `vehicle_profile_bindings` -- what "Confirm as <target>"
+ * writes when the Signal Finder proves a channel (`ecu`, `did`, `length`,
+ * `decode` guess, `status`, evidence summary, timestamp), keyed by
+ * (`profile_id`, `channel`) so re-confirming a channel REPLACES rather than
+ * accumulates. Another plain `CREATE TABLE IF NOT EXISTS` addition -- no
+ * column was added to an existing table, so an app upgrading from v1/v2
+ * needs no `ALTER TABLE` and no data migration; the version row simply moves
+ * to 3. It is deliberately NOT keyed by `run_id`: a binding outlives the
+ * sweep run that discovered it (and survives the five-run retention).
  */
-export const DID_SWEEP_SCHEMA_VERSION = 2;
+export const DID_SWEEP_SCHEMA_VERSION = 3;
 
 const DID_SWEEP_DDL = `
 CREATE TABLE IF NOT EXISTS did_sweep_schema_migrations (
@@ -97,6 +108,21 @@ CREATE TABLE IF NOT EXISTS did_sweep_observation_summaries (
 );
 
 CREATE INDEX IF NOT EXISTS idx_did_sweep_observation_summaries_run ON did_sweep_observation_summaries (run_id);
+
+CREATE TABLE IF NOT EXISTS vehicle_profile_bindings (
+  profile_id TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  ecu INTEGER NOT NULL,
+  did INTEGER NOT NULL,
+  length INTEGER,
+  decode TEXT NOT NULL,
+  status TEXT NOT NULL,
+  evidence_json TEXT NOT NULL DEFAULT '{}',
+  updated_at_utc TEXT NOT NULL,
+  PRIMARY KEY (profile_id, channel)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vehicle_profile_bindings_profile ON vehicle_profile_bindings (profile_id);
 `;
 
 /** Applies `DID_SWEEP_DDL` and records/bumps the schema version row. Safe to call on every app launch (idempotent), and safe to call more than once against the same `db` within a single launch. */

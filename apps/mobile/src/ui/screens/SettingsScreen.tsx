@@ -1140,6 +1140,23 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
             </Text>
           </Pressable>
         ) : null}
+        {
+          // Ticket P4l (binding, contracts.md "Signal Finder (Phase 4l)"):
+          // the target-driven finder, reached from the SAME developer section
+          // with the same `isDev || developerModeEnabled` gating as DID Probe
+          // / DID Sweep above.
+          isDev || settings.developerModeEnabled ? (
+          <Pressable
+            style={styles.devButton}
+            onPress={() => navigation.navigate('SignalFinder')}
+            accessibilityRole="button"
+            accessibilityLabel="Open the ENET signal finder"
+          >
+            <Text style={styles.devButtonText} maxFontSizeMultiplier={1.3}>
+              Dev: Signal Finder (ENET)
+            </Text>
+          </Pressable>
+        ) : null}
       </ScrollView>
     </SafeAreaView>
   );

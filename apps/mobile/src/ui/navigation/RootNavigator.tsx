@@ -23,6 +23,12 @@ import { TelemetryScreen } from '../screens/TelemetryScreen';
 // unconditionally never pulls fixture data into a release bundle.
 import { DidProbeScreen } from '../screens/DidProbeScreen';
 import { DidSweepScreen } from '../screens/DidSweepScreen';
+// Ticket P4l (binding, contracts.md "Signal Finder (Phase 4l)"): same
+// unconditional route registration as DidProbe/DidSweep above -- only its
+// Settings entry point is gated on `developerModeEnabled`/`__DEV__`. It
+// imports no DevReplay fixtures either, so shipping it always costs a
+// release bundle nothing beyond the screen itself.
+import { SignalFinderScreen } from '../screens/SignalFinderScreen';
 // F6 fix (B4 residue): NO top-level import of `DevReplayScreen` -- see the
 // inline `require` below for why. `typeof import(...)` (used at that call
 // site) gives full type-checking on the resolved component with zero
@@ -83,6 +89,7 @@ export function RootNavigator(): React.JSX.Element {
         // `DidProbe` immediately above.
       }
       <Stack.Screen name="DidSweep" component={DidSweepScreen} options={{ title: 'DID Sweep' }} />
+      <Stack.Screen name="SignalFinder" component={SignalFinderScreen} options={{ title: 'Signal Finder' }} />
       {
         // B4 fix: DevReplay must not ship in a release build -- SettingsScreen's
         // entry point to it is already __DEV__-gated; this gates the route

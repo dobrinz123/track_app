@@ -675,3 +675,152 @@ export function createSqlDidSweepStore(db: SqlDatabase): DidSweepStore {
 export function createDidSweepStore(db: SqlDatabase | null): DidSweepStore {
   return db === null ? createInMemoryDidSweepStore() : createSqlDidSweepStore(db);
 }
+
+// ---------------------------------------------------------------------------
+// Vehicle-profile channel bindings (ticket P4l, contracts.md "Signal Finder
+// (Phase 4l)" item 5, binding): "'Confirm as <target>' writes a channel
+// binding (ecu, did, length, decode guess, status `field-confirmed`, evidence
+// summary, timestamp) into the persisted vehicle profile (SQLite, exportable
+// JSON identical to `data/vehicle-profiles/*.json`)."
+//
+// A SEPARATE interface/factory pair rather than more methods on
+// `DidSweepStore`: a binding is not scoped to a sweep run at all -- it
+// outlives the run that discovered it (and the five-run retention that
+// eventually deletes that run), and the Signal Finder can confirm one from a
+// session that never ran a sweep. Keeping it separate also means every
+// existing `DidSweepStore` implementation/test double keeps compiling
+// unchanged.
+// ---------------------------------------------------------------------------
+
+/** Same status vocabulary as `data/vehicle-profiles/*.json`'s own `status` field, so a binding round-trips into the profile JSON without translation. */
+export type VehicleProfileBindingStatus = 'hypothesis' | 'weak' | 'field-observed' | 'field-confirmed';
+
+export interface VehicleProfileBinding {
+  /** e.g. `'toyota-supra-b58'`; `'generic'` for an unprofiled car. */
+  profileId: string;
+  /** A `SignalTargetId` (`brakeSwitch`, `steeringAngle`, ...) -- stored as TEXT so a target added later needs no migration. */
+  channel: string;
+  /** ECU (HSFZ target) address, e.g. `0x29`. */
+  ecu: number;
+  did: number;
+  /** Response length in bytes, or `null` when it was never established. */
+  length: number | null;
+  /** Human-readable decode guess (e.g. `'bit0 (0x04 released -> 0x05 pressed)'`) -- never executable code. */
+  decode: string;
+  status: VehicleProfileBindingStatus;
+  /** JSON blob summarising the evidence that earned this binding (matched edges, baseline changes, raw min/max, the finder session id). */
+  evidenceJson: string;
+  updatedAtUtc: string;
+}
+
+export interface VehicleProfileBindingStore {
+  /** Inserts or REPLACES the binding for `(profileId, channel)` -- confirming a channel twice never accumulates rows. */
+  upsertBinding(binding: VehicleProfileBinding): Promise<void>;
+  /** Every binding for `profileId`, ordered by channel (stable/deterministic). */
+  listBindings(profileId: string): Promise<VehicleProfileBinding[]>;
+  /** One channel's binding, or `null`. */
+  getBinding(profileId: string, channel: string): Promise<VehicleProfileBinding | null>;
+  deleteBinding(profileId: string, channel: string): Promise<void>;
+}
+
+export function createInMemoryVehicleProfileBindingStore(): VehicleProfileBindingStore {
+  const rows = new Map<string, VehicleProfileBinding>();
+  const keyOf = (profileId: string, channel: string): string => `${profileId} ${channel}`;
+  return {
+    async upsertBinding(binding): Promise<void> {
+      rows.set(keyOf(binding.profileId, binding.channel), { ...binding });
+    },
+    async listBindings(profileId): Promise<VehicleProfileBinding[]> {
+      return [...rows.values()]
+        .filter((row) => row.profileId === profileId)
+        .map((row) => ({ ...row }))
+        .sort((a, b) => (a.channel < b.channel ? -1 : a.channel > b.channel ? 1 : 0));
+    },
+    async getBinding(profileId, channel): Promise<VehicleProfileBinding | null> {
+      const row = rows.get(keyOf(profileId, channel));
+      return row === undefined ? null : { ...row };
+    },
+    async deleteBinding(profileId, channel): Promise<void> {
+      rows.delete(keyOf(profileId, channel));
+    },
+  };
+}
+
+interface BindingRow {
+  profile_id: string;
+  channel: string;
+  ecu: number;
+  did: number;
+  length: number | null;
+  decode: string;
+  status: string;
+  evidence_json: string;
+  updated_at_utc: string;
+}
+
+function rowToBinding(row: BindingRow): VehicleProfileBinding {
+  return {
+    profileId: row.profile_id,
+    channel: row.channel,
+    ecu: row.ecu,
+    did: row.did,
+    length: row.length ?? null,
+    decode: row.decode,
+    status: row.status as VehicleProfileBindingStatus,
+    evidenceJson: row.evidence_json,
+    updatedAtUtc: row.updated_at_utc,
+  };
+}
+
+export function createSqlVehicleProfileBindingStore(db: SqlDatabase): VehicleProfileBindingStore {
+  return {
+    async upsertBinding(binding): Promise<void> {
+      await db.runAsync(
+        `INSERT INTO vehicle_profile_bindings (profile_id, channel, ecu, did, length, decode, status, evidence_json, updated_at_utc)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(profile_id, channel) DO UPDATE SET
+           ecu = excluded.ecu,
+           did = excluded.did,
+           length = excluded.length,
+           decode = excluded.decode,
+           status = excluded.status,
+           evidence_json = excluded.evidence_json,
+           updated_at_utc = excluded.updated_at_utc`,
+        [
+          binding.profileId,
+          binding.channel,
+          binding.ecu,
+          binding.did,
+          binding.length,
+          binding.decode,
+          binding.status,
+          binding.evidenceJson,
+          binding.updatedAtUtc,
+        ],
+      );
+    },
+    async listBindings(profileId): Promise<VehicleProfileBinding[]> {
+      const rows = await db.getAllAsync<BindingRow>(
+        'SELECT * FROM vehicle_profile_bindings WHERE profile_id = ? ORDER BY channel ASC',
+        [profileId],
+      );
+      return rows.map(rowToBinding);
+    },
+    async getBinding(profileId, channel): Promise<VehicleProfileBinding | null> {
+      const rows = await db.getAllAsync<BindingRow>(
+        'SELECT * FROM vehicle_profile_bindings WHERE profile_id = ? AND channel = ? LIMIT 1',
+        [profileId, channel],
+      );
+      const row = rows[0];
+      return row === undefined ? null : rowToBinding(row);
+    },
+    async deleteBinding(profileId, channel): Promise<void> {
+      await db.runAsync('DELETE FROM vehicle_profile_bindings WHERE profile_id = ? AND channel = ?', [profileId, channel]);
+    },
+  };
+}
+
+/** Same `db !== null` ternary convention as {@link createDidSweepStore} -- the web preview gets the in-memory implementation. */
+export function createVehicleProfileBindingStore(db: SqlDatabase | null): VehicleProfileBindingStore {
+  return db === null ? createInMemoryVehicleProfileBindingStore() : createSqlVehicleProfileBindingStore(db);
+}
