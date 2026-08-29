@@ -21,10 +21,38 @@
  * Blocks (>= 5 bytes) are scored PER BYTE OFFSET and reported by their best
  * offset — same discipline as `didObservationPhases.ts`'s
  * `computeDidBlockCandidateSummaries`, so a 12-byte struct with one live
- * brake bit is still discoverable. `baselineChanges` is nevertheless reported
- * at the WHOLE-RESPONSE level (did anything in this response move while the
- * driver held still?), which is what makes a counter block visibly restless
- * even when its own quiet offsets score nothing.
+ * brake bit is still discoverable.
+ *
+ * P4l-FIX2 (Codex review P4l-REV1, findings 1, 2, 4, 6, 10) — four rules the
+ * first cut got wrong, all of them cases where a DID that is NOT answering
+ * the driver could still be ranked:
+ *
+ *  1. `baselineChanges` is a PER-DID rule, not a per-offset one. A block with
+ *     a rolling counter byte next to a brake byte has a perfectly quiet
+ *     winning offset; the DID as a whole is restless, so the whole DID is
+ *     capped at `unrelated` ({@link SignalCandidateScore.didBaselineChanges},
+ *     `verdictCapReason: 'response-baseline-changes'`). For analogs the
+ *     per-DID count is noise-floor aware (a jittering LSB is not movement),
+ *     which is why it is computed from the scored series rather than from raw
+ *     hex equality — {@link SignalCandidateScore.responseBaselineChanges}
+ *     keeps reporting the raw-hex view, and IS decisive for `boolean-edge`,
+ *     where hex equality is the semantics.
+ *  2. `analog-bipolar` means BOTH sides of rest (steering left AND right).
+ *     A one-sided excursion is capped at `probable`, never `found`
+ *     ({@link SignalCandidateScore.bipolarSides}).
+ *  3. Edges are ORDERED TRANSITIONS, not mere presence: a rest->active
+ *     transition must ARRIVE inside a (settle-shifted) press/hold window and
+ *     an active->rest transition inside that repetition's release window.
+ *     Every other in-window transition — a flip during the baseline or the
+ *     hold, a second flip inside one window — is an EXTRA transition and is
+ *     subtracted from the matched edges before the ratio is taken, which is
+ *     what separates a brake switch from a DID that merely toggles at its own
+ *     rhythm. (A transition whose ARRIVING sample lands in the window counts:
+ *     that is how a press window that reads `[05, 05]` after a release window
+ *     that read `[04, 04]` is credited — the driver pressed at the boundary.)
+ *  4. The `< 2 samples per window` gate is applied to EVERY step of the
+ *     timeline on its own (press and hold are separate windows), before any
+ *     aggregation.
  *
  * Pure, deterministic — no I/O.
  */
@@ -47,6 +75,12 @@ export type SignalVerdict = 'found' | 'probable' | 'unrelated' | 'insufficient';
 /** Why a DID could not be judged at all (never mixed in with the ranked verdicts). */
 export type SignalInsufficientReason = 'undersampled' | 'length-inconsistent' | 'no-response';
 
+/** Why a DID's verdict was lowered below what its edge ratio alone would have given. */
+export type SignalVerdictCapReason = 'response-baseline-changes' | 'one-sided-bipolar' | 'extra-transitions';
+
+/** Which sides of rest an analog DID actually visited during the press windows. */
+export type SignalBipolarSides = 'both' | 'positive' | 'negative' | 'none';
+
 export interface SignalCandidateScore {
   ecu: number;
   did: number;
@@ -64,17 +98,30 @@ export interface SignalCandidateScore {
   restValueHex: string | null;
   /** Hex of the most recent sample overall. */
   lastRawHex: string;
-  /** Unsigned big-endian decode across every sample, for 1–4 byte responses; `null` for blocks. */
+  /** Unsigned big-endian decode across every sample for 1–4 byte responses; for blocks, the SELECTED byte offset's own range. `null` only without a scored series. */
   min: number | null;
   max: number | null;
   sampleCount: number;
-  /** Evidence windows (baseline + each press group + each release) that held fewer than `minSamplesPerWindow` samples. */
+  /** Timeline steps (each press, hold, release and the baseline on their own) that held fewer than `minSamplesPerWindow` samples. */
   windowsBelowMinimum: number;
   /** Blocks only: the byte offset this score was computed on. `null` for a 1–4 byte response. */
   byteOffset: number | null;
   /** Analog shapes: the sign of the pressed-vs-rest mean shift (0 inside the noise floor). `null` for `boolean-edge`. */
   correlationSign: 1 | -1 | 0 | null;
   insufficientReason: SignalInsufficientReason | null;
+  /**
+   * P4l-FIX2 (finding 1): baseline samples at which ANY scored series of this
+   * DID moved — the per-DID reading of item 3's "baselineChanges (must be 0)".
+   * Optional only so existing callers' object literals keep compiling;
+   * {@link scoreSignalCandidates} always sets it.
+   */
+  didBaselineChanges?: number;
+  /** P4l-FIX2 (finding 10): in-window transitions that no expected edge accounts for (baseline/hold flips, second flips inside one window). Subtracted from `matchedEdges` before the ratio. */
+  extraTransitions?: number;
+  /** P4l-FIX2 (finding 2): which sides of rest the press windows visited. `null` for shapes other than `analog-bipolar`. */
+  bipolarSides?: SignalBipolarSides | null;
+  /** P4l-FIX2: why the verdict is lower than the edge ratio alone would give; `null` when nothing capped it. */
+  verdictCapReason?: SignalVerdictCapReason | null;
 }
 
 export interface SignalScoringOptions {
@@ -160,77 +207,156 @@ function modeOf(values: readonly number[]): number | null {
   return best;
 }
 
-interface WindowedValues {
-  baseline: number[];
-  /** Press + hold values, keyed by repetition. */
-  pressByRepetition: Map<number, number[]>;
-  releaseByRepetition: Map<number, number[]>;
+/** One projected sample in tMs order, with the metronome step it is evidence for (`null` outside every evidence window). */
+interface SeriesPoint {
+  value: number;
+  step: MetronomeStep | null;
 }
 
 interface SeriesScore {
   matchedEdges: number;
+  extraTransitions: number;
   baselineChanges: number;
+  /** Per baseline sample, in order: did THIS series move there? (OR-ed across offsets to get the per-DID count.) */
+  baselineActive: boolean[];
   correlationSign: 1 | -1 | 0 | null;
+  bipolarSides: SignalBipolarSides | null;
   byteOffset: number | null;
   verdict: SignalVerdict;
+  /** The extra transitions alone lowered this series' verdict. */
+  cappedByExtraTransitions: boolean;
 }
 
-/** Scores ONE numeric series (a whole 1–4 byte response, or one byte offset of a block) against the metronome. */
+type ScoringThresholds = Required<Omit<SignalScoringOptions, 'minSamplesPerWindow'>>;
+
+/**
+ * Scores ONE numeric series (a whole 1–4 byte response, or one byte offset of
+ * a block) against the metronome, as ORDERED TRANSITIONS (see this module's
+ * doc comment, P4l-FIX2 rule 3).
+ */
 function scoreSeries(
-  windows: WindowedValues,
+  points: readonly SeriesPoint[],
   shape: SignalExpectedShape,
+  repetitions: readonly number[],
   expectedEdges: number,
   byteOffset: number | null,
-  options: Required<Omit<SignalScoringOptions, 'minSamplesPerWindow'>>,
+  options: ScoringThresholds,
 ): SeriesScore {
   const boolean = shape === 'boolean-edge';
-  const restValue = boolean ? modeOf(windows.baseline) : meanOf(windows.baseline);
+  const baselineValues = points.filter((p) => p.step?.kind === 'baseline').map((p) => p.value);
+  const restValue = boolean ? modeOf(baselineValues) : meanOf(baselineValues);
   const noiseFloor = boolean
     ? 0
-    : Math.max(options.analogMarginRawUnits, options.analogMarginMultiplier * spreadP90P10(windows.baseline));
+    : Math.max(options.analogMarginRawUnits, options.analogMarginMultiplier * spreadP90P10(baselineValues));
 
-  const changed = (value: number): boolean =>
+  /** "Away from rest" — the noise floor makes this a real excursion for analogs. */
+  const active = (value: number): boolean =>
     boolean ? value !== restValue : Math.abs(value - (restValue as number)) > noiseFloor;
-  /** `analog-monotone` only ever counts a change in the POSITIVE direction (a brake pressure that falls when pressed is not a brake pressure). */
-  const changedInExpectedDirection = (value: number): boolean =>
-    changed(value) && (shape !== 'analog-monotone' || value > (restValue as number));
 
-  const baselineChanges = windows.baseline.filter(changed).length;
+  const baselineActive = baselineValues.map(active);
+  const baselineChanges = baselineActive.filter(Boolean).length;
 
-  let matchedEdges = 0;
-  const allPressValues: number[] = [];
-  for (const [repetition, pressValues] of windows.pressByRepetition) {
-    allPressValues.push(...pressValues);
-    const pressMatched = pressValues.some(changedInExpectedDirection);
-    if (pressMatched) matchedEdges += 1;
-    const releaseValues = windows.releaseByRepetition.get(repetition) ?? [];
-    const lastRelease = releaseValues[releaseValues.length - 1];
-    // A "change back" only counts if the value actually LEFT the rest level
-    // in this repetition's press window first -- otherwise a DID that never
-    // moves at all would score every release edge for free.
-    if (pressMatched && lastRelease !== undefined && !changed(lastRelease)) matchedEdges += 1;
+  const pressValuesByRepetition = new Map<number, number[]>();
+  const releaseValuesByRepetition = new Map<number, number[]>();
+  for (const point of points) {
+    const step = point.step;
+    if (step === null) continue;
+    if (step.kind === 'press' || step.kind === 'hold') {
+      const list = pressValuesByRepetition.get(step.repetition) ?? [];
+      list.push(point.value);
+      pressValuesByRepetition.set(step.repetition, list);
+    } else if (step.kind === 'release') {
+      const list = releaseValuesByRepetition.get(step.repetition) ?? [];
+      list.push(point.value);
+      releaseValuesByRepetition.set(step.repetition, list);
+    }
   }
 
+  // Ordered transitions, attributed to the step the ARRIVING sample belongs to.
+  interface Transition {
+    step: MetronomeStep;
+    up: boolean;
+    value: number;
+  }
+  const transitions: Transition[] = [];
+  for (let i = 1; i < points.length; i += 1) {
+    const previous = points[i - 1] as SeriesPoint;
+    const current = points[i] as SeriesPoint;
+    const arrivedActive = active(current.value);
+    if (arrivedActive === active(previous.value)) continue;
+    if (current.step === null) continue; // landed outside every evidence window — unattributable, not evidence either way.
+    transitions.push({ step: current.step, up: arrivedActive, value: current.value });
+  }
+
+  let matchedEdges = 0;
+  for (const repetition of repetitions) {
+    const pressUp = transitions.filter(
+      (t) =>
+        t.up &&
+        t.step.repetition === repetition &&
+        (t.step.kind === 'press' || t.step.kind === 'hold') &&
+        // `analog-monotone` only ever counts an excursion in the POSITIVE
+        // direction (a brake pressure that falls when pressed is not a brake
+        // pressure).
+        (shape !== 'analog-monotone' || t.value > (restValue as number)),
+    );
+    if (pressUp.length === 0) continue;
+    matchedEdges += 1;
+    const releaseDown = transitions.filter(
+      (t) => !t.up && t.step.repetition === repetition && t.step.kind === 'release',
+    );
+    const releaseValues = releaseValuesByRepetition.get(repetition) ?? [];
+    const lastRelease = releaseValues[releaseValues.length - 1];
+    // A "change back" needs BOTH an observed active->rest transition inside
+    // this release window and a window that actually ends at rest.
+    if (releaseDown.length > 0 && lastRelease !== undefined && !active(lastRelease)) matchedEdges += 1;
+  }
+  // Every in-window transition that no matched edge accounts for is noise the
+  // DID produced on its own schedule.
+  const extraTransitions = Math.max(0, transitions.length - matchedEdges);
+
+  const allPressValues = [...pressValuesByRepetition.values()].flat();
   let correlationSign: 1 | -1 | 0 | null = null;
+  let bipolarSides: SignalBipolarSides | null = null;
   if (!boolean) {
     const shift = meanOf(allPressValues) - (restValue as number);
     correlationSign = Math.abs(shift) <= noiseFloor ? 0 : shift > 0 ? 1 : -1;
   }
-
-  const ratio = expectedEdges > 0 ? matchedEdges / expectedEdges : 0;
-  const directionOk = shape !== 'analog-monotone' || correlationSign === 1;
-  let verdict: SignalVerdict;
-  if (baselineChanges > 0 || !directionOk) {
-    verdict = 'unrelated';
-  } else if (ratio >= options.foundEdgeRatio) {
-    verdict = 'found';
-  } else if (ratio >= options.probableEdgeRatio) {
-    verdict = 'probable';
-  } else {
-    verdict = 'unrelated';
+  if (shape === 'analog-bipolar') {
+    let positive = false;
+    let negative = false;
+    for (const value of allPressValues) {
+      if (value - (restValue as number) > noiseFloor) positive = true;
+      else if ((restValue as number) - value > noiseFloor) negative = true;
+    }
+    bipolarSides = positive && negative ? 'both' : positive ? 'positive' : negative ? 'negative' : 'none';
   }
 
-  return { matchedEdges, baselineChanges, correlationSign, byteOffset, verdict };
+  const verdictForEdges = (edges: number): SignalVerdict => {
+    const ratio = expectedEdges > 0 ? edges / expectedEdges : 0;
+    if (ratio >= options.foundEdgeRatio) return 'found';
+    if (ratio >= options.probableEdgeRatio) return 'probable';
+    return 'unrelated';
+  };
+
+  const directionOk = shape !== 'analog-monotone' || correlationSign === 1;
+  const disqualified = baselineChanges > 0 || !directionOk;
+  const netEdges = Math.max(0, matchedEdges - extraTransitions);
+  const verdict = disqualified ? 'unrelated' : verdictForEdges(netEdges);
+  const cappedByExtraTransitions =
+    !disqualified && extraTransitions > 0 && verdictForEdges(matchedEdges) !== verdict;
+
+  return {
+    matchedEdges,
+    extraTransitions,
+    baselineChanges,
+    baselineActive,
+    correlationSign,
+    bipolarSides,
+    byteOffset,
+    verdict,
+    cappedByExtraTransitions,
+  };
 }
 
 /**
@@ -240,7 +366,7 @@ function scoreSeries(
  */
 export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): SignalCandidateScore[] {
   const minSamplesPerWindow = input.options?.minSamplesPerWindow ?? DEFAULT_MIN_SAMPLES_PER_WINDOW;
-  const thresholds = {
+  const thresholds: ScoringThresholds = {
     foundEdgeRatio: input.options?.foundEdgeRatio ?? DEFAULT_FOUND_RATIO,
     probableEdgeRatio: input.options?.probableEdgeRatio ?? DEFAULT_PROBABLE_RATIO,
     analogMarginRawUnits: input.options?.analogMarginRawUnits ?? DEFAULT_MARGIN_RAW_UNITS,
@@ -249,12 +375,18 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
   const { timeline } = input;
   const repetitions = [...new Set(timeline.steps.filter((s) => s.repetition > 0).map((s) => s.repetition))];
 
+  interface Entry {
+    tMs: number;
+    raw: Uint8Array;
+    step: MetronomeStep | null;
+  }
   interface Group {
     ecu: number;
     did: number;
-    raws: Uint8Array[];
-    /** Evidence raws per step index. */
-    byStep: Map<number, Uint8Array[]>;
+    /** Every sample, in tMs order — the ordered-transition rule needs the sequence, not just the buckets. */
+    entries: Entry[];
+    /** How many samples each timeline step collected (the per-window sufficiency gate). */
+    countByStep: Map<number, number>;
     length: number | null;
     lengthConsistent: boolean;
   }
@@ -263,58 +395,45 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
     const key = `${sample.ecu}:${sample.did}`;
     let group = groups.get(key);
     if (group === undefined) {
-      group = { ecu: sample.ecu, did: sample.did, raws: [], byStep: new Map(), length: null, lengthConsistent: true };
+      group = { ecu: sample.ecu, did: sample.did, entries: [], countByStep: new Map(), length: null, lengthConsistent: true };
       groups.set(key, group);
     }
-    group.raws.push(sample.raw);
     if (group.length === null) group.length = sample.raw.length;
     else if (group.length !== sample.raw.length) group.lengthConsistent = false;
     const step = metronomeStepForSample(timeline, sample.tMs);
-    if (step !== null) {
-      const list = group.byStep.get(step.index) ?? [];
-      list.push(sample.raw);
-      group.byStep.set(step.index, list);
-    }
+    if (step !== null) group.countByStep.set(step.index, (group.countByStep.get(step.index) ?? 0) + 1);
+    group.entries.push({ tMs: sample.tMs, raw: sample.raw, step });
   }
 
   const scores: SignalCandidateScore[] = [];
   for (const group of groups.values()) {
-    const lastRawHex = bytesToHex(group.raws[group.raws.length - 1] ?? new Uint8Array());
+    group.entries.sort((a, b) => a.tMs - b.tMs);
+    const raws = group.entries.map((e) => e.raw);
+    const lastRawHex = bytesToHex(raws[raws.length - 1] ?? new Uint8Array());
     let min: number | null = null;
     let max: number | null = null;
-    for (const raw of group.raws) {
+    for (const raw of raws) {
       const decoded = decodeUnsigned(raw);
       if (decoded === null) continue;
       min = min === null ? decoded : Math.min(min, decoded);
       max = max === null ? decoded : Math.max(max, decoded);
     }
 
-    const rawsOfKind = (kind: MetronomeStep['kind'], repetition: number): Uint8Array[] => {
-      const out: Uint8Array[] = [];
-      for (const step of timeline.steps) {
-        if (step.kind !== kind || step.repetition !== repetition) continue;
-        out.push(...(group.byStep.get(step.index) ?? []));
-      }
-      return out;
-    };
-    const baselineRaws = rawsOfKind('baseline', 0);
-    const pressRawsByRepetition = new Map<number, Uint8Array[]>();
-    const releaseRawsByRepetition = new Map<number, Uint8Array[]>();
-    for (const repetition of repetitions) {
-      pressRawsByRepetition.set(repetition, [...rawsOfKind('press', repetition), ...rawsOfKind('hold', repetition)]);
-      releaseRawsByRepetition.set(repetition, rawsOfKind('release', repetition));
+    // P4l-FIX2 (finding 6): EVERY step of the timeline is gated on its own —
+    // press and hold are separate evidence windows, so a script that collects
+    // nothing during the press but two samples during the hold is
+    // undersampled, not "sufficient".
+    let windowsBelowMinimum = 0;
+    for (const step of timeline.steps) {
+      if (step.durationMs <= 0) continue;
+      if ((group.countByStep.get(step.index) ?? 0) < minSamplesPerWindow) windowsBelowMinimum += 1;
     }
 
-    let windowsBelowMinimum = baselineRaws.length < minSamplesPerWindow ? 1 : 0;
-    for (const repetition of repetitions) {
-      if ((pressRawsByRepetition.get(repetition) ?? []).length < minSamplesPerWindow) windowsBelowMinimum += 1;
-      if ((releaseRawsByRepetition.get(repetition) ?? []).length < minSamplesPerWindow) windowsBelowMinimum += 1;
-    }
-
-    // `baselineChanges` at the WHOLE-RESPONSE level: did ANYTHING in this
-    // response move while the driver was holding still? (A block's own quiet
-    // byte offsets must not make a restless counter look calm.)
-    const baselineHexes = baselineRaws.map(bytesToHex);
+    // Whole-response restlessness, at raw-hex level: did ANYTHING in this
+    // response move while the driver was holding still?
+    const baselineHexes = group.entries
+      .filter((e) => e.step?.kind === 'baseline')
+      .map((e) => bytesToHex(e.raw));
     const restHexCounts = new Map<string, number>();
     for (const hex of baselineHexes) restHexCounts.set(hex, (restHexCounts.get(hex) ?? 0) + 1);
     let restValueHex: string | null = null;
@@ -338,7 +457,7 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
       lastRawHex,
       min,
       max,
-      sampleCount: group.raws.length,
+      sampleCount: raws.length,
       windowsBelowMinimum,
       responseBaselineChanges,
     };
@@ -352,9 +471,13 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
         verdict: 'insufficient',
         matchedEdges: 0,
         baselineChanges: responseBaselineChanges,
+        didBaselineChanges: responseBaselineChanges,
+        extraTransitions: 0,
+        bipolarSides: null,
         byteOffset: null,
         correlationSign: null,
         insufficientReason: 'length-inconsistent',
+        verdictCapReason: null,
       });
       continue;
     }
@@ -365,17 +488,30 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
 
     const seriesScores: SeriesScore[] = [];
     for (const offset of seriesOffsets) {
-      const project = (raws: readonly Uint8Array[]): number[] =>
-        offset === null
-          ? raws.map((raw) => decodeUnsigned(raw) ?? 0)
-          : raws.map((raw) => raw[offset] ?? 0);
-      const windows: WindowedValues = {
-        baseline: project(baselineRaws),
-        pressByRepetition: new Map([...pressRawsByRepetition].map(([r, raws]) => [r, project(raws)])),
-        releaseByRepetition: new Map([...releaseRawsByRepetition].map(([r, raws]) => [r, project(raws)])),
-      };
-      seriesScores.push(scoreSeries(windows, input.shape, timeline.expectedEdges, offset, thresholds));
+      const points: SeriesPoint[] = group.entries.map((entry) => ({
+        value: offset === null ? decodeUnsigned(entry.raw) ?? 0 : entry.raw[offset] ?? 0,
+        step: entry.step,
+      }));
+      seriesScores.push(
+        scoreSeries(points, input.shape, repetitions, timeline.expectedEdges, offset, thresholds),
+      );
     }
+
+    // P4l-FIX2 (finding 1): item 3's "baselineChanges (must be 0)" is a
+    // per-DID rule. A baseline sample counts as movement when ANY scored
+    // series of this DID moved there -- so a block's rolling counter byte
+    // disqualifies the whole DID even though the brake byte next to it is
+    // perfectly quiet -- while the analog noise floor still keeps a jittering
+    // LSB from disqualifying an otherwise clean analog.
+    let didBaselineChanges = 0;
+    const baselineSampleCount = baselineHexes.length;
+    for (let i = 0; i < baselineSampleCount; i += 1) {
+      if (seriesScores.some((series) => series.baselineActive[i] === true)) didBaselineChanges += 1;
+    }
+    // For `boolean-edge` the raw-hex view IS the semantics (no noise floor),
+    // so a restless response disqualifies even if no single offset's mode says so.
+    const restlessBaseline =
+      didBaselineChanges > 0 || (input.shape === 'boolean-edge' && responseBaselineChanges > 0);
 
     // The DID is reported by its STRONGEST offset (a block's one live brake
     // bit is what matters), ties broken by more matched edges, then fewer
@@ -389,28 +525,66 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
           (a.byteOffset ?? -1) - (b.byteOffset ?? -1),
       )[0] ?? null;
 
-    if (best === null || group.raws.length === 0) {
+    if (best === null || raws.length === 0) {
       scores.push({
         ...base,
         verdict: 'insufficient',
         matchedEdges: 0,
         baselineChanges: responseBaselineChanges,
+        didBaselineChanges,
+        extraTransitions: 0,
+        bipolarSides: null,
         byteOffset: null,
         correlationSign: null,
         insufficientReason: 'no-response',
+        verdictCapReason: null,
       });
       continue;
+    }
+
+    // P4l-FIX2 (finding 4): a block reports the SELECTED offset's own range,
+    // so the summary never carries a null min/max for a scored candidate.
+    if (best.byteOffset !== null) {
+      const offset = best.byteOffset;
+      min = null;
+      max = null;
+      for (const raw of raws) {
+        const value = raw[offset] ?? 0;
+        min = min === null ? value : Math.min(min, value);
+        max = max === null ? value : Math.max(max, value);
+      }
+    }
+
+    let verdict = best.verdict;
+    let verdictCapReason: SignalVerdictCapReason | null = best.cappedByExtraTransitions
+      ? 'extra-transitions'
+      : null;
+    if (restlessBaseline && verdict !== 'unrelated') {
+      verdict = 'unrelated';
+      verdictCapReason = 'response-baseline-changes';
+    }
+    // P4l-FIX2 (finding 2): a bipolar target must have been seen on BOTH
+    // sides of rest before it can be `found`.
+    if (input.shape === 'analog-bipolar' && best.bipolarSides !== 'both' && verdict === 'found') {
+      verdict = 'probable';
+      verdictCapReason = 'one-sided-bipolar';
     }
 
     const insufficient = windowsBelowMinimum > 0;
     scores.push({
       ...base,
-      verdict: insufficient ? 'insufficient' : best.verdict,
+      min,
+      max,
+      verdict: insufficient ? 'insufficient' : verdict,
       matchedEdges: best.matchedEdges,
       baselineChanges: best.baselineChanges,
+      didBaselineChanges,
+      extraTransitions: best.extraTransitions,
+      bipolarSides: best.bipolarSides,
       byteOffset: best.byteOffset,
       correlationSign: best.correlationSign,
       insufficientReason: insufficient ? 'undersampled' : null,
+      verdictCapReason: insufficient ? null : verdictCapReason,
     });
   }
 

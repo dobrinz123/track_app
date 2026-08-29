@@ -345,3 +345,174 @@ describe('scoreSignalCandidates -- analog shapes', () => {
     expect(score).toMatchObject({ baselineChanges: 0, verdict: 'found' });
   });
 });
+
+/**
+ * Ticket P4l-FIX2 (Codex P4l-REV1 findings 1, 2, 4, 6, 10) -- the scoring
+ * rules the first cut got wrong. Same binding text as above; these fixtures
+ * are the adversarial cases the review constructed.
+ */
+describe('scoreSignalCandidates -- P4l-FIX2 review findings', () => {
+  const timeline = buildMetronomeTimeline(SCRIPT);
+
+  it('G1: a block with a rolling counter byte AND a brake byte is UNRELATED, not found', () => {
+    // The winning byte offset (the brake byte) is perfectly quiet during the
+    // baseline, but the DID as a whole is not: byte 0 rolls on every read.
+    // Item 3's "baselineChanges (must be 0)" is a per-DID rule.
+    let counter = 0x10;
+    const block = (brake: string): string =>
+      `${(counter++ & 0xff).toString(16).toUpperCase().padStart(2, '0')}0000FF${brake}`;
+    const perWindow: string[][] = [];
+    perWindow.push([block('04'), block('04')]);
+    for (let repetition = 0; repetition < 5; repetition += 1) {
+      perWindow.push([block('05'), block('05')]);
+      perWindow.push([block('04'), block('04')]);
+    }
+    const samples = layOnTimeline(timeline, ECU_29, 0x5100, perWindow);
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'boolean-edge' });
+    expect(score).toMatchObject({ did: 0x5100, verdict: 'unrelated', byteOffset: 4, matchedEdges: 10 });
+    expect(score!.responseBaselineChanges).toBeGreaterThan(0);
+    expect(score!.didBaselineChanges).toBeGreaterThan(0);
+    expect(score!.verdictCapReason).toBe('response-baseline-changes');
+  });
+
+  it('G2: analog-bipolar with a ONE-SIDED excursion is never found', () => {
+    // rest 100 (0x64), pressed 120 (0x78), released back to 100 -- it never
+    // goes BELOW rest, so it cannot be a steering angle / lateral g.
+    const rest = ['64', '64'];
+    const samples = layOnTimeline(
+      timeline,
+      0x30,
+      0x1235,
+      cycles(rest, [
+        [['78', '78'], rest],
+        [['78', '78'], rest],
+        [['78', '78'], rest],
+        [['78', '78'], rest],
+        [['78', '78'], rest],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'analog-bipolar' });
+    expect(score!.matchedEdges).toBe(10);
+    expect(score!.verdict).not.toBe('found');
+    expect(score).toMatchObject({ verdict: 'probable', bipolarSides: 'positive', verdictCapReason: 'one-sided-bipolar' });
+  });
+
+  it('G2: a genuine two-sided bipolar swing keeps its `found` verdict', () => {
+    const swing = layOnTimeline(
+      timeline,
+      0x30,
+      0x1234,
+      cycles(['8000', '8000'], [
+        [['9000', '9500'], ['8000', '8000']],
+        [['7000', '6B00'], ['8000', '8000']],
+        [['9000', '9500'], ['8000', '8000']],
+        [['7000', '6B00'], ['8000', '8000']],
+        [['9000', '9500'], ['8000', '8000']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples: swing, timeline, shape: 'analog-bipolar' });
+    expect(score).toMatchObject({ verdict: 'found', bipolarSides: 'both', verdictCapReason: null });
+  });
+
+  it('G3: a 2-byte response is compared as ONE big-endian scalar (0x500B 0002 -> 0006)', () => {
+    // Field: data/field/sweeps/2026-08-29-test4-ecu29-0x5000-0x58F2.json,
+    // 0x29 DID 0x500B -- byte 0 never moves, so a per-byte comparison of
+    // byte 0 would see nothing; the scalar 2 -> 6 is the edge.
+    const rest = ['0002', '0002'];
+    const samples = layOnTimeline(
+      timeline,
+      ECU_29,
+      0x500b,
+      cycles(rest, [
+        [['0006', '0006'], rest],
+        [['0006', '0006'], rest],
+        [['0006', '0006'], rest],
+        [['0006', '0006'], rest],
+        [['0006', '0006'], rest],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'boolean-edge' });
+    expect(score).toMatchObject({ did: 0x500b, verdict: 'found', matchedEdges: 10, byteOffset: null, length: 2 });
+    expect(score!.min).toBe(2);
+    expect(score!.max).toBe(6);
+  });
+
+  it('G3: a block reports the SELECTED offset min/max, never null', () => {
+    const rest = ['0001020304', '0001020304'];
+    const pressed = ['0001020305', '0001020305'];
+    const samples = layOnTimeline(
+      timeline,
+      ECU_29,
+      0x5101,
+      cycles(rest, [
+        [pressed, rest],
+        [pressed, rest],
+        [pressed, rest],
+        [pressed, rest],
+        [pressed, rest],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'boolean-edge' });
+    expect(score).toMatchObject({ did: 0x5101, verdict: 'found', byteOffset: 4, length: 5 });
+    expect(score!.min).toBe(4);
+    expect(score!.max).toBe(5);
+  });
+
+  it('G4: every non-empty metronome step is gated on its own (0 press + 2 hold = insufficient)', () => {
+    const holdTimeline = buildMetronomeTimeline({ ...SCRIPT, repetitions: 1, holdMs: 2_000 });
+    expect(holdTimeline.steps.map((s) => s.kind)).toEqual(['baseline', 'press', 'hold', 'release']);
+    const samples = layOnTimeline(holdTimeline, ECU_29, 0x500c, [
+      ['04', '04'], // baseline
+      [], // press -- nothing came back inside this window
+      ['05', '05'], // hold
+      ['04', '04'], // release
+    ]);
+    const [score] = scoreSignalCandidates({ samples, timeline: holdTimeline, shape: 'boolean-edge' });
+    expect(score).toMatchObject({ verdict: 'insufficient', insufficientReason: 'undersampled' });
+    expect(score!.windowsBelowMinimum).toBe(1);
+  });
+
+  it('G5: a quiet-baseline random toggler is NOT found -- extra transitions count against it', () => {
+    // Baseline is perfectly still, and each press/release window happens to
+    // contain a rest->active and an active->rest transition; but the DID
+    // toggles TWICE per window, which no brake switch does.
+    const rest4 = ['00', '00', '00', '00'];
+    const samples = layOnTimeline(
+      timeline,
+      ECU_29,
+      0x5102,
+      cycles(rest4, [
+        [['00', '01', '00', '01'], ['01', '00', '01', '00']],
+        [['00', '01', '00', '01'], ['01', '00', '01', '00']],
+        [['00', '01', '00', '01'], ['01', '00', '01', '00']],
+        [['00', '01', '00', '01'], ['01', '00', '01', '00']],
+        [['00', '01', '00', '01'], ['01', '00', '01', '00']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'boolean-edge' });
+    expect(score!.baselineChanges).toBe(0);
+    expect(score!.extraTransitions).toBeGreaterThan(0);
+    expect(score!.verdict).not.toBe('found');
+    expect(score!.verdict).toBe('unrelated');
+  });
+
+  it('G5: with no transition anywhere, no press edge is credited', () => {
+    // Never leaves rest at all: no rest->active transition, so no press edge
+    // can be credited (and therefore no change-back edge either).
+    const rest = ['04', '04'];
+    const samples = layOnTimeline(
+      timeline,
+      ECU_29,
+      0x5103,
+      cycles(rest, [
+        [rest, rest],
+        [rest, rest],
+        [rest, rest],
+        [rest, rest],
+        [rest, rest],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'boolean-edge' });
+    expect(score).toMatchObject({ verdict: 'unrelated', matchedEdges: 0, extraTransitions: 0 });
+  });
+});
