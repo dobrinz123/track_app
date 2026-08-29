@@ -806,3 +806,36 @@ sector vs the driver's best clean lap, (2) consistency (dispersion of brake poin
 (3) brake / lift points per corner per lap, (4) min speed and exit speed. Session-only in V1 (no cross-session
 history). Report text is template-generated in RO and EN (setting), every sentence carries its numbers.
 Audience order: the user's own sessions first (Supra, TMR + MotorPark), then public.
+
+## Signal Finder (Phase 4l, 2026-08-29) — target-driven signal discovery (binding)
+
+Motivation (user, field tests 1–4): the range-based DID sweep + generic phases wasted fuel and time; the user wants a tool that
+"has targets: find the brake → reads the channels we think carry the brake → tells me to press the brake 5 times → shows the
+candidates that changed → brake found; then the next missing signal".
+
+1. **Targets** are data (`packages/core/src/telemetry/signalFinder/targets.ts` + the vehicle-profile registry), never UI
+   constants: `brakeSwitch`, `brakePressure`, `steeringAngle`, `accelPedal`, `longG`, `latG`. Each target declares:
+   `engineRequirement` (`off-ok` | `running`), `actionScript` (metronome: e.g. brake = 5 × {press 2 s, release 2 s}),
+   `expectedShape` (`boolean-edge` | `analog-monotone` | `analog-bipolar`), and `sources`: hypothesis DIDs per ECU address
+   (with provenance) + `discoveryRanges` per ECU (used ONLY when the user asks for the next step, with the minutes shown).
+2. **Sources read in one session across ECUs**: the finder iterates target addresses itself (0x12, 0x29, 0x30, …) using the
+   existing ENET transport/reservation; it polls at most 16 DIDs per ECU per pass (rate-derived, like the batched flow) and
+   ALSO includes cached responders of that ECU from previous sweep runs stored in SQLite (`did_sweep_responders`), filtered
+   by the target's expected shape (1–4 bytes for switches/analogs; blocks with per-byte diff allowed).
+3. **Metronome, not free-form phases**: the screen paces the driver (PRESS / HOLD / RELEASE with a countdown and haptic)
+   so the expected timeline is known. A settle window (P4k) applies at every step edge. Scoring is per DID:
+   `matchedEdges / expectedEdges` (a change inside a press window and a change back inside the release window), `baselineChanges`
+   (must be 0), and, for analogs, correlation sign. Verdicts: `found` (≥ 4/5 edges, 0 baseline changes), `probable` (≥ 3/5),
+   `unrelated`. Insufficient samples (< 2 per window) → `insufficient`, never ranked.
+4. **Honesty**: if nothing is `found`, the result screen says which ECUs/DIDs were read, the engine state, and the next concrete
+   step with its duration (e.g. "sweep 0x29 0x58F3–0x6FFF, ≈ 7 min, engine off"). Never "no brake on this car".
+5. **Confirm → profile**: "Confirm as <target>" writes a channel binding (ecu, did, length, decode guess, status
+   `field-confirmed`, evidence summary, timestamp) into the persisted vehicle profile (SQLite, exportable JSON identical to
+   `data/vehicle-profiles/*.json`); the ENET telemetry provider reads bindings from the profile registry (data, not code).
+   Existing `accelPedalPct` (mode-01 0x5A) stays the default binding.
+6. Export: the finder session (targets, steps timeline, per-DID samples, verdicts) is shareable JSON (`schemaVersion` 1 of
+   `trace-signal-finder`), reusing the sweep export machinery.
+7. Tests first; no vehicle constants in generic code; both existing flows (sweep, batched/focused observation) stay untouched.
+8. **Exportable reports (user requirement, binding for 4l and 5b)**: every result screen (Signal Finder session, post-session
+   corner analysis) shares with one tap a full JSON plus a ≤ 1-page human-readable summary (`.md`, RO/EN), named
+   `trace-<kind>-<date>-<subject>`; the summary is what the user forwards, the JSON is for tooling.

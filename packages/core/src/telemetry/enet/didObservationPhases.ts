@@ -52,6 +52,32 @@ export const DID_OBSERVATION_PHASES: readonly DidObservationPhaseSpec[] = [
 /** Phases whose "changed" flag counts toward candidate ranking below -- `baseline` is the control/reference phase, never itself "active" driver input. */
 const ACTIVE_PHASES: readonly DidObservationPhaseId[] = ['brake', 'steering', 'throttle'];
 
+/**
+ * Ticket P4k (binding). Field evidence (test 4,
+ * `data/field/sweeps/2026-08-29-test4-ecu29-0x5000-0x58F2.json`, DID 0x500C):
+ * baseline/brake read 0x04 (brake genuinely swung to 0x05 mid-phase), but the
+ * FIRST steering sample (tMs 312) still read 0x05 -- the driver's foot was
+ * still on the brake pedal when the phase prompt switched. That one
+ * carried-over sample made steering look "changed" too, mis-ranking a clean
+ * single-phase brake signal as `changedInSeveral`. Same pattern: DME 0x5422,
+ * a single 0x00 at tMs 815 of the steering phase.
+ *
+ * The fix is a fixed SETTLE WINDOW at the start of every phase (`baseline`
+ * excepted -- it is the reference the driver is already asked to hold still
+ * for BEFORE the phase begins, so it needs no settle of its own): a sample
+ * whose `tMs` (relative to ITS OWN phase's start -- the same convention every
+ * caller of this module already uses) falls inside the window is EXCLUDED
+ * from that phase's own change evidence (and, in the mobile controller, from
+ * the per-phase sample-count guarantee) -- never from the exported/persisted
+ * sample log itself.
+ */
+export const SETTLE_MS = 1_500;
+
+/** True iff `tMs` (relative to `phase`'s OWN start) falls inside the {@link SETTLE_MS}-style settle window and should be excluded from that phase's own change evidence -- `baseline` is NEVER settling (see {@link SETTLE_MS}'s doc comment). */
+export function isSettlingSample(phase: DidObservationPhaseId, tMs: number, settleMs: number): boolean {
+  return phase !== 'baseline' && tMs < settleMs;
+}
+
 /** One correlated 0x62 response observed for `did` during `phase`, timestamped RELATIVE to that phase's own start (same convention as `runDidObservation`'s `series[].samples[].tMs` -- see didSweep.ts). */
 export interface DidPhaseSample {
   did: number;
@@ -222,6 +248,8 @@ export interface DidCandidateRankingOptions {
   marginMultiplier?: number;
   /** Default 3 ("> 3 raw units") -- the floor applied even when the baseline range is 0. */
   marginRawUnits?: number;
+  /** Ticket P4k (binding): a sample of an ACTIVE phase whose `tMs` (relative to that phase's own start) is below this excludes it from that phase's own change evidence (see {@link isSettlingSample}/{@link SETTLE_MS}) -- `baseline` is never affected. Default 0 (no settle window -- byte-identical to the pre-ticket behaviour). */
+  settleMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -378,6 +406,7 @@ export function computeDidCandidateSummaries(
 ): DidCandidateSummary[] {
   const minSamplesPerPhase = options.minSamplesPerPhase ?? 1;
   const useMarginRule = options.useMarginRule ?? false;
+  const settleMs = options.settleMs ?? 0;
   const thresholds: DidChangeRuleThresholds = {
     marginMultiplier: options.marginMultiplier ?? DEFAULT_MARGIN_MULTIPLIER,
     marginRawUnits: options.marginRawUnits ?? DEFAULT_MARGIN_RAW_UNITS,
@@ -402,12 +431,18 @@ export function computeDidCandidateSummaries(
       byDid.set(sample.did, entry);
     }
     const hex = bytesToHex(sample.raw);
-    const phaseHexes = entry.hexesByPhase.get(sample.phase) ?? [];
-    phaseHexes.push(hex);
-    entry.hexesByPhase.set(sample.phase, phaseHexes);
-    const phaseRaws = entry.rawsByPhase.get(sample.phase) ?? [];
-    phaseRaws.push(sample.raw);
-    entry.rawsByPhase.set(sample.phase, phaseRaws);
+    // Ticket P4k (binding): a settling sample still contributes to the
+    // DID's overall stats (allHexes/allRaws/length below) -- it is only
+    // excluded from THIS PHASE's own change evidence, never from the
+    // sample log itself (the controller still exports/persists it).
+    if (!isSettlingSample(sample.phase, sample.tMs, settleMs)) {
+      const phaseHexes = entry.hexesByPhase.get(sample.phase) ?? [];
+      phaseHexes.push(hex);
+      entry.hexesByPhase.set(sample.phase, phaseHexes);
+      const phaseRaws = entry.rawsByPhase.get(sample.phase) ?? [];
+      phaseRaws.push(sample.raw);
+      entry.rawsByPhase.set(sample.phase, phaseRaws);
+    }
     if (entry.length === null) entry.length = sample.raw.length;
     else if (entry.length !== sample.raw.length) entry.lengthConsistent = false;
     entry.allHexes.push(hex);
@@ -529,6 +564,8 @@ export interface DidBlockCandidateOptions {
   minLen?: number;
   /** Default 32. */
   maxLen?: number;
+  /** Ticket P4k (binding): same settle window as {@link DidCandidateRankingOptions.settleMs} -- excludes a settling sample from that phase's own per-offset evidence. Default 0 (no settle window). */
+  settleMs?: number;
 }
 
 /**
@@ -549,6 +586,7 @@ export function computeDidBlockCandidateSummaries(
   };
   const minLen = options.minLen ?? 9;
   const maxLen = options.maxLen ?? 32;
+  const settleMs = options.settleMs ?? 0;
 
   interface Accum {
     byPhase: Map<DidObservationPhaseId, Uint8Array[]>;
@@ -566,9 +604,15 @@ export function computeDidBlockCandidateSummaries(
     if (entry.length === null) entry.length = sample.raw.length;
     else if (entry.length !== sample.raw.length) entry.consistentLength = false;
     entry.sampleCount += 1;
-    const list = entry.byPhase.get(sample.phase) ?? [];
-    list.push(sample.raw);
-    entry.byPhase.set(sample.phase, list);
+    // Ticket P4k (binding): same settle-window exclusion as the numeric
+    // summaries -- a settling sample still counts toward `sampleCount`/length
+    // consistency above, but never toward this phase's own per-offset
+    // evidence below.
+    if (!isSettlingSample(sample.phase, sample.tMs, settleMs)) {
+      const list = entry.byPhase.get(sample.phase) ?? [];
+      list.push(sample.raw);
+      entry.byPhase.set(sample.phase, list);
+    }
   }
 
   const summaries: DidBlockCandidateSummary[] = [];

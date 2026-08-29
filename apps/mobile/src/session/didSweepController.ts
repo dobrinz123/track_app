@@ -71,8 +71,10 @@ import {
   planObservationBatches,
   HSFZ_CONTROL,
   HsfzFrameParser,
+  isSettlingSample,
   runDidObservation,
   runDidSweep,
+  SETTLE_MS,
   type DidBlockCandidateSummary,
   type DidCandidateSummary,
   type DidChangeSamplePair,
@@ -1301,8 +1303,10 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
   let pendingObservationPauseResolvers: Array<() => void> = [];
   /** H3 (binding): index into `guidedSamples` up to which persistence has already appended -- only the slice past this is written at each checkpoint. */
   let persistedSampleIndex = 0;
-  /** H1 (binding): per-DID, per-phase POSITIVE sample counts for the current observation run -- keyed `did:phase`. */
+  /** H1 (binding): per-DID, per-phase POSITIVE sample counts for the current observation run -- keyed `did:phase`. Ticket P4k (binding): counts only NON-settling samples (see {@link isSettlingSample}) -- a phase's own count guarantee must be met by samples taken AFTER the settle window, never by the settling ones alone. */
   let phaseSampleCounts = new Map<string, number>();
+  /** Ticket P4k (binding): per-DID, per-phase count of EVERY positive sample (settling included) -- used ONLY to detect whether a slice's round-robin pass reached a DID at all (see `runCountGuaranteedPhase`'s miss-budget check). A genuine response that happens to land inside the settle window must reset the miss counter same as any other -- it is not a timeout, only not-yet-countable. */
+  let phaseResponseCounts = new Map<string, number>();
   /** H1 (binding): DIDs that exhausted the failure budget / hit the phase hard cap in at least one phase of the current run. */
   let insufficientDids = new Set<number>();
 
@@ -1311,6 +1315,7 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
     guidedSamplesRunId = currentRunId;
     persistedSampleIndex = 0;
     phaseSampleCounts = new Map();
+    phaseResponseCounts = new Map();
     insufficientDids = new Set();
     // H3 (binding): a fresh `start()`/`resumePersistedRun()` must not leave a
     // PRIOR run's `observationId` addressable -- the next observation mints
@@ -1700,7 +1705,10 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
           lastMeasuredReqPerSec || undefined,
           1,
         );
-        const before = new Map(pending.map((did) => [did, phaseSampleCounts.get(phaseCountKey(did, phase.id)) ?? 0]));
+        // Ticket P4k (binding): the miss/no-miss check uses `phaseResponseCounts`
+        // (every positive sample, settling included) -- a response that lands
+        // inside the settle window is still a RESPONSE, never a timeout.
+        const before = new Map(pending.map((did) => [did, phaseResponseCounts.get(phaseCountKey(did, phase.id)) ?? 0]));
         // V5 (binding): how far into this WHOLE phase (not this slice) we
         // are right now -- added to every sample this slice collects so
         // exported timestamps stay monotone across every slice, not just
@@ -1710,7 +1718,7 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
         if (myGeneration !== generation) break;
 
         for (const did of pending) {
-          const after = phaseSampleCounts.get(phaseCountKey(did, phase.id)) ?? 0;
+          const after = phaseResponseCounts.get(phaseCountKey(did, phase.id)) ?? 0;
           if (after > (before.get(did) ?? 0)) misses.set(did, 0);
           else misses.set(did, (misses.get(did) ?? 0) + 1); // (2) NRC/timeout budget.
         }
@@ -1794,7 +1802,15 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
             : { did, phase: phase.id, tMs: phaseRelativeTMs, raw, batchIndex, observationId },
         );
         const key = phaseCountKey(did, phase.id);
-        phaseSampleCounts.set(key, (phaseSampleCounts.get(key) ?? 0) + 1);
+        // Ticket P4k (binding): `phaseResponseCounts` tracks EVERY positive
+        // sample (settling included -- see the miss-budget check above);
+        // `phaseSampleCounts` -- the one the count guarantee itself reads --
+        // only ever counts a sample taken AFTER this phase's own settle
+        // window (baseline is never settling; see `isSettlingSample`).
+        phaseResponseCounts.set(key, (phaseResponseCounts.get(key) ?? 0) + 1);
+        if (!isSettlingSample(phase.id, phaseRelativeTMs, SETTLE_MS)) {
+          phaseSampleCounts.set(key, (phaseSampleCounts.get(key) ?? 0) + 1);
+        }
       },
     });
     return { nextResponderIndex: result.nextResponderIndex };
@@ -1864,7 +1880,11 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
           if (advanced) highestElapsedMs = tMs;
           emit({
             ...(advanced ? { guidedPhaseElapsedMs: tMs } : {}),
-            candidateSummaries: computeDidCandidateSummaries(guidedSamples),
+            // Ticket P4k (binding): the settle window applies here too --
+            // `startGuidedObservation()`'s single fixed-duration pass is the
+            // SAME phase plan (baseline/brake/steering/throttle) with the
+            // SAME phase-transition contamination risk.
+            candidateSummaries: computeDidCandidateSummaries(guidedSamples, { settleMs: SETTLE_MS }),
           });
         },
       });
@@ -1905,12 +1925,12 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
     if (myGeneration !== generation) return; // a full stop() already handled teardown/release + the final phase itself.
     await teardownActiveTransport();
     if (myGeneration !== generation) return; // stop() raced in while close was settling -- it owns the final phase.
-    emit({ phase: 'observationComplete', guidedPhase: null, candidateSummaries: computeDidCandidateSummaries(guidedSamples) });
+    emit({ phase: 'observationComplete', guidedPhase: null, candidateSummaries: computeDidCandidateSummaries(guidedSamples, { settleMs: SETTLE_MS }) });
     await persistObservationSamples();
     await persistObservationSummary({
       observationId: currentObservationId,
       mode: 'guided',
-      candidates: computeDidCandidateSummaries(guidedSamples),
+      candidates: computeDidCandidateSummaries(guidedSamples, { settleMs: SETTLE_MS }),
       blockCandidates: [],
       inconsistentDids: [],
       insufficientDids: [],
@@ -1991,12 +2011,12 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
     return { numeric, block, inconsistentDids: inconsistentDids.sort((a, b) => a - b) };
   }
 
-  /** Recomputes and emits the ranked candidate/block summaries from whatever has been sampled so far, under the H2 margin rule (never the naive fallback). */
+  /** Recomputes and emits the ranked candidate/block summaries from whatever has been sampled so far, under the H2 margin rule (never the naive fallback). Ticket P4k (binding): `settleMs` excludes each phase's own settling samples from the change evidence -- see `didObservationPhases.ts`. */
   function emitLiveCandidateSummaries(minSamplesPerPhase: number): void {
     const { numeric, block, inconsistentDids } = groupSamplesForRanking(guidedSamples);
     emit({
-      candidateSummaries: computeDidCandidateSummaries(numeric, { useMarginRule: true, minSamplesPerPhase }),
-      blockCandidateSummaries: computeDidBlockCandidateSummaries(block, { minSamplesPerPhase }),
+      candidateSummaries: computeDidCandidateSummaries(numeric, { useMarginRule: true, minSamplesPerPhase, settleMs: SETTLE_MS }),
+      blockCandidateSummaries: computeDidBlockCandidateSummaries(block, { minSamplesPerPhase, settleMs: SETTLE_MS }),
       inconsistentCandidateDids: inconsistentDids,
     });
   }
@@ -2009,8 +2029,8 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
    */
   async function finishGuidedRun(observedDids: readonly number[], minSamplesPerPhase: number): Promise<void> {
     const { numeric, block, inconsistentDids } = groupSamplesForRanking(guidedSamples);
-    const candidateSummaries = computeDidCandidateSummaries(numeric, { useMarginRule: true, minSamplesPerPhase });
-    const blockCandidateSummaries = computeDidBlockCandidateSummaries(block, { minSamplesPerPhase });
+    const candidateSummaries = computeDidCandidateSummaries(numeric, { useMarginRule: true, minSamplesPerPhase, settleMs: SETTLE_MS });
+    const blockCandidateSummaries = computeDidBlockCandidateSummaries(block, { minSamplesPerPhase, settleMs: SETTLE_MS });
     const sampledDids = new Set(guidedSamples.map((s) => s.did));
     const noResponseDids = observedDids.filter((did) => !sampledDids.has(did)).sort((a, b) => a - b);
     for (const did of noResponseDids) insufficientDids.add(did);

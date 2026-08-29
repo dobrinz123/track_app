@@ -7,6 +7,7 @@ import {
   DEFAULT_ENET_DID_SCENARIO,
   DID_OBSERVATION_PHASES,
   MAX_FOCUSED_SHORTLIST_SIZE,
+  SETTLE_MS,
   filterCandidatePool,
   type DidCandidateSummary,
   type ObdTransport,
@@ -828,7 +829,17 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
                       that NOMINAL window; when the phase runs past it to
                       finish the per-DID sample guarantee it says "extending…"
                       rather than silently stalling at 0s. */}
-                  {guidedPhaseSpec.prompt} —{' '}
+                  {/* Ticket P4k (binding): "Get ready…" during the settle
+                      window at the start of every phase except baseline
+                      (field: DID 0x500C's first STEERING sample still read
+                      the BRAKE value because the driver's foot was still on
+                      the pedal when the phase prompt switched) -- reuses the
+                      SAME countdown text below, just swaps the phase's own
+                      prompt for the settle-window one. */}
+                  {snapshot.guidedPhase !== 'baseline' && !snapshot.guidedPhaseExtending && snapshot.guidedPhaseElapsedMs < SETTLE_MS
+                    ? 'Get ready…'
+                    : guidedPhaseSpec.prompt}{' '}
+                  —{' '}
                   {snapshot.guidedPhaseExtending
                     ? 'extending… (finishing the sample count)'
                     : `${Math.max(0, Math.ceil((snapshot.guidedPhaseDurationMs - snapshot.guidedPhaseElapsedMs) / 1_000))}s`}

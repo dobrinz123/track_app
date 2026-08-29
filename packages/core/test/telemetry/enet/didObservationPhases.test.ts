@@ -6,7 +6,9 @@ import {
   computeDidCandidateSummaries,
   computeGuidedPhaseDurationMs,
   DID_OBSERVATION_PHASES,
+  isSettlingSample,
   MIN_SAMPLES_PER_CANDIDATE_PER_PHASE,
+  SETTLE_MS,
   type DidPhaseSample,
 } from '../../../src/telemetry/enet/didObservationPhases';
 
@@ -644,5 +646,164 @@ describe('computeDidBlockCandidateSummaries (ticket P4j, binding: mid-size block
     expect(summary?.phaseEvidence.throttle).toBe('insufficient');
     expect(summary?.changedOffsetsByPhase.brake).toEqual([4]); // brake's OWN evidence is still a genuine change...
     expect(summary?.rank).toBe('insufficient'); // ...but excluded from ranking regardless.
+  });
+});
+
+/**
+ * Ticket P4k (binding). Field evidence (test 4,
+ * `data/field/sweeps/2026-08-29-test4-ecu29-0x5000-0x58F2.json`, DID 0x500C):
+ * baseline read 0x04 five times; brake read 0x04 then 0x05 x3 then 0x04;
+ * steering's FIRST sample (tMs 312) still read 0x05 -- the driver's foot was
+ * still on the brake when the phase prompt switched -- then 0x04 for the rest
+ * (tMs 1441, 2561, 3721, 4871). Without a settle window that lone
+ * carried-over steering sample makes steering look "changed" too, so the DID
+ * is ranked `changedInSeveral` instead of the true single-phase
+ * `brakeCandidate`.
+ */
+describe('settle window at phase transitions (ticket P4k, binding)', () => {
+  it('SETTLE_MS is the ticket-specified 1500ms', () => {
+    expect(SETTLE_MS).toBe(1_500);
+  });
+
+  it('isSettlingSample: baseline is NEVER settling (no settle window needed for the reference phase)', () => {
+    expect(isSettlingSample('baseline', 0, 1_500)).toBe(false);
+    expect(isSettlingSample('baseline', 100, 1_500)).toBe(false);
+  });
+
+  it('isSettlingSample: an active phase sample is settling iff tMs is within the settle window from that PHASE\'s own start', () => {
+    expect(isSettlingSample('brake', 0, 1_500)).toBe(true);
+    expect(isSettlingSample('brake', 1_499, 1_500)).toBe(true);
+    expect(isSettlingSample('brake', 1_500, 1_500)).toBe(false);
+    expect(isSettlingSample('brake', 3_000, 1_500)).toBe(false);
+  });
+
+  function fieldSample(phase: DidPhaseSample['phase'], tMs: number, rawHexByte: number): DidPhaseSample {
+    return { did: 0x500c, phase, tMs, raw: Uint8Array.from([rawHexByte]) };
+  }
+
+  /** Field test 4's own DID 0x500C series, verbatim (see the describe-block comment above). */
+  const did500cSamples: DidPhaseSample[] = [
+    fieldSample('baseline', 488, 0x04),
+    fieldSample('baseline', 1_591, 0x04),
+    fieldSample('baseline', 2_743, 0x04),
+    fieldSample('baseline', 3_891, 0x04),
+    fieldSample('baseline', 5_041, 0x04),
+    fieldSample('brake', 579, 0x04),
+    fieldSample('brake', 1_541, 0x05),
+    fieldSample('brake', 2_610, 0x05),
+    fieldSample('brake', 3_658, 0x05),
+    fieldSample('brake', 4_779, 0x04),
+    fieldSample('steering', 312, 0x05), // still the BRAKE value -- foot hadn't left the pedal yet.
+    fieldSample('steering', 1_441, 0x04),
+    fieldSample('steering', 2_561, 0x04),
+    fieldSample('steering', 3_721, 0x04),
+    fieldSample('steering', 4_871, 0x04),
+    fieldSample('throttle', 347, 0x04),
+    fieldSample('throttle', 1_387, 0x04),
+    fieldSample('throttle', 2_428, 0x04),
+    fieldSample('throttle', 3_427, 0x04),
+    fieldSample('throttle', 4_470, 0x04),
+  ];
+
+  it('0x500C WITHOUT a settle window: ranked `changedInSeveral` -- documents the pre-fix behaviour (the carried-over steering sample looks like a second changed phase)', () => {
+    const [summary] = computeDidCandidateSummaries(did500cSamples);
+    expect(summary?.changedInPhase.brake).toBe(true);
+    expect(summary?.changedInPhase.steering).toBe(true);
+    expect(summary?.rank).toBe('changedInSeveral');
+  });
+
+  it('0x500C WITH settle: 1500ms -- the carried-over steering sample (tMs 312) is excluded from steering\'s own evidence, so only brake changed -> `brakeCandidate`', () => {
+    const [summary] = computeDidCandidateSummaries(did500cSamples, { settleMs: 1_500 });
+    expect(summary?.changedInPhase.brake).toBe(true);
+    expect(summary?.changedInPhase.steering).toBe(false);
+    expect(summary?.rank).toBe('brakeCandidate');
+  });
+
+  /**
+   * Field pattern, generalised (ticket: "Same pattern: DME 0x5422 single 0x00
+   * at tMs 815 of the steering phase"): a DID with NO real brake/steering/
+   * throttle signal, but whose steering phase's first sample -- still within
+   * the settle window -- carried over the (different) baseline-adjacent
+   * value from the PRIOR phase. Without settle this single early sample
+   * would flag steering as changed; with settle it is excluded, and the DID
+   * is genuinely `static` everywhere.
+   */
+  it('0x5422-like single-sample-at-start (tMs 815 < settle): ranked `static` WITH settle -- the lone contaminated early sample never taints the phase', () => {
+    const samples: DidPhaseSample[] = [
+      fieldSample('baseline', 0, 0x00),
+      fieldSample('baseline', 1_000, 0x00),
+      fieldSample('baseline', 2_000, 0x00),
+      fieldSample('brake', 0, 0x00),
+      fieldSample('brake', 1_000, 0x00),
+      fieldSample('brake', 2_000, 0x00),
+      fieldSample('steering', 815, 0x00), // carried-over/contaminated read, still inside the settle window.
+      fieldSample('steering', 1_900, 0x00),
+      fieldSample('steering', 2_900, 0x00),
+      fieldSample('steering', 3_900, 0x00),
+      fieldSample('throttle', 0, 0x00),
+      fieldSample('throttle', 1_000, 0x00),
+      fieldSample('throttle', 2_000, 0x00),
+    ];
+    const [summary] = computeDidCandidateSummaries(samples, { settleMs: 1_500 });
+    expect(summary?.rank).toBe('static');
+  });
+
+  it('a genuine change at tMs 3000 of the steering phase (well past the 1500ms settle window) is still ranked `steeringCandidate` (margin rule, matching how the mobile controller actually pairs settleMs with useMarginRule)', () => {
+    const samples: DidPhaseSample[] = [
+      fieldSample('baseline', 0, 10),
+      fieldSample('baseline', 1_000, 10),
+      fieldSample('baseline', 2_000, 10),
+      fieldSample('baseline', 3_000, 10),
+      fieldSample('brake', 1_600, 10),
+      fieldSample('brake', 2_600, 10),
+      fieldSample('brake', 3_600, 10),
+      fieldSample('brake', 4_600, 10),
+      // steering: the first two samples are still inside the settle window
+      // (excluded); the phase then genuinely shifts to 200 at tMs 3000+.
+      fieldSample('steering', 0, 10),
+      fieldSample('steering', 1_000, 10),
+      fieldSample('steering', 3_000, 200),
+      fieldSample('steering', 4_000, 200),
+      fieldSample('steering', 5_000, 200),
+      fieldSample('steering', 6_000, 200),
+      fieldSample('throttle', 1_600, 10),
+      fieldSample('throttle', 2_600, 10),
+      fieldSample('throttle', 3_600, 10),
+      fieldSample('throttle', 4_600, 10),
+    ];
+    const [summary] = computeDidCandidateSummaries(samples, { settleMs: 1_500, useMarginRule: true, minSamplesPerPhase: 4 });
+    expect(summary?.changedInPhase.steering).toBe(true);
+    expect(summary?.rank).toBe('steeringCandidate');
+  });
+
+  it('settleMs defaults to 0 (no exclusion) when omitted -- byte-identical to the pre-ticket behaviour', () => {
+    const [summary] = computeDidCandidateSummaries(did500cSamples, {});
+    expect(summary?.rank).toBe('changedInSeveral');
+  });
+
+  it('computeDidBlockCandidateSummaries also honours settleMs: an early contaminated block sample is excluded from that phase\'s per-offset evidence', () => {
+    function block(fill: number, len = 10): number[] {
+      return new Array(len).fill(fill);
+    }
+    const contaminated = [...block(0x00)];
+    contaminated[2] = 0xaa; // the carried-over BRAKE-phase offset value.
+    const samples: DidPhaseSample[] = [
+      { did: 0x40f0, phase: 'baseline', tMs: 0, raw: Uint8Array.from(block(0x00)) },
+      { did: 0x40f0, phase: 'baseline', tMs: 1_000, raw: Uint8Array.from(block(0x00)) },
+      { did: 0x40f0, phase: 'brake', tMs: 1_600, raw: Uint8Array.from(block(0x00)) },
+      { did: 0x40f0, phase: 'brake', tMs: 2_600, raw: Uint8Array.from(block(0x00)) },
+      { did: 0x40f0, phase: 'steering', tMs: 200, raw: Uint8Array.from(contaminated) }, // settling.
+      { did: 0x40f0, phase: 'steering', tMs: 1_800, raw: Uint8Array.from(block(0x00)) },
+      { did: 0x40f0, phase: 'steering', tMs: 2_800, raw: Uint8Array.from(block(0x00)) },
+      { did: 0x40f0, phase: 'throttle', tMs: 1_600, raw: Uint8Array.from(block(0x00)) },
+      { did: 0x40f0, phase: 'throttle', tMs: 2_600, raw: Uint8Array.from(block(0x00)) },
+    ];
+    const withoutSettle = computeDidBlockCandidateSummaries(samples)[0];
+    expect(withoutSettle?.changedOffsetsByPhase.steering).toEqual([2]);
+    expect(withoutSettle?.rank).toBe('steeringCandidate');
+
+    const withSettle = computeDidBlockCandidateSummaries(samples, { settleMs: 1_500 })[0];
+    expect(withSettle?.changedOffsetsByPhase.steering).toEqual([]);
+    expect(withSettle?.rank).toBe('static');
   });
 });
