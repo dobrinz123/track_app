@@ -722,28 +722,38 @@ describe('settle window at phase transitions (ticket P4k, binding)', () => {
   /**
    * Field pattern, generalised (ticket: "Same pattern: DME 0x5422 single 0x00
    * at tMs 815 of the steering phase"): a DID with NO real brake/steering/
-   * throttle signal, but whose steering phase's first sample -- still within
-   * the settle window -- carried over the (different) baseline-adjacent
-   * value from the PRIOR phase. Without settle this single early sample
-   * would flag steering as changed; with settle it is excluded, and the DID
-   * is genuinely `static` everywhere.
+   * throttle signal (every phase reads 0x01), but whose steering phase's
+   * first sample -- still within the settle window -- carried over the
+   * (different, 0x00) value from the PRIOR phase. Without settle this single
+   * early sample would flag steering as changed; with settle it is excluded,
+   * and the DID is genuinely `static` everywhere.
+   *
+   * Ticket P4k-FIX1 K2 (binding, after Codex P4k-REV1): the pre-fix fixture
+   * used 0x00 for EVERY sample, including the "real" ones -- so the fixture
+   * stayed `static` even if settle exclusion were entirely removed, and
+   * never actually exercised the exclusion this test claims to cover. The
+   * `withoutSettle` assertion below is what makes that failure visible.
    */
-  it('0x5422-like single-sample-at-start (tMs 815 < settle): ranked `static` WITH settle -- the lone contaminated early sample never taints the phase', () => {
+  it('0x5422-like single-sample-at-start (tMs 815 < settle): ranked `steeringCandidate` WITHOUT settle (the contaminated early sample looks like a real change), `static` WITH settle -- the lone contaminated early sample never taints the phase', () => {
     const samples: DidPhaseSample[] = [
-      fieldSample('baseline', 0, 0x00),
-      fieldSample('baseline', 1_000, 0x00),
-      fieldSample('baseline', 2_000, 0x00),
-      fieldSample('brake', 0, 0x00),
-      fieldSample('brake', 1_000, 0x00),
-      fieldSample('brake', 2_000, 0x00),
+      fieldSample('baseline', 0, 0x01),
+      fieldSample('baseline', 1_000, 0x01),
+      fieldSample('baseline', 2_000, 0x01),
+      fieldSample('brake', 0, 0x01),
+      fieldSample('brake', 1_000, 0x01),
+      fieldSample('brake', 2_000, 0x01),
       fieldSample('steering', 815, 0x00), // carried-over/contaminated read, still inside the settle window.
-      fieldSample('steering', 1_900, 0x00),
-      fieldSample('steering', 2_900, 0x00),
-      fieldSample('steering', 3_900, 0x00),
-      fieldSample('throttle', 0, 0x00),
-      fieldSample('throttle', 1_000, 0x00),
-      fieldSample('throttle', 2_000, 0x00),
+      fieldSample('steering', 1_900, 0x01),
+      fieldSample('steering', 2_900, 0x01),
+      fieldSample('steering', 3_900, 0x01),
+      fieldSample('throttle', 0, 0x01),
+      fieldSample('throttle', 1_000, 0x01),
+      fieldSample('throttle', 2_000, 0x01),
     ];
+    const withoutSettle = computeDidCandidateSummaries(samples)[0];
+    expect(withoutSettle?.changedInPhase.steering).toBe(true);
+    expect(withoutSettle?.rank).toBe('steeringCandidate');
+
     const [summary] = computeDidCandidateSummaries(samples, { settleMs: 1_500 });
     expect(summary?.rank).toBe('static');
   });

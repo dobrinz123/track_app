@@ -1697,13 +1697,24 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
         if (myGeneration !== generation || observationControl.stopped) break;
         const pending = order.filter(stillShort);
         if (pending.length === 0) break;
-        if (deps.clock.now() - phaseStartedAtMs >= hardCapMs) break; // (3) hard cap.
+        // K1 fix (P4k-FIX1, binding, after Codex P4k-REV1 MEDIUM #1: "the 3x
+        // hard cap is checked only before launching a full slice -- the
+        // final slice can overrun the cap"): the remaining budget is
+        // computed HERE, once, and used both to break (when exhausted) and
+        // to CLAMP the slice actually run -- a full-length slice can no
+        // longer carry the phase past `hardCapMs`, however large the
+        // candidate-count/rate formula below sizes it.
+        const remainingHardCapMs = hardCapMs - (deps.clock.now() - phaseStartedAtMs);
+        if (remainingHardCapMs <= 0) break; // (3) hard cap.
 
-        const sliceMs = computeGuidedPhaseDurationMs(
-          pending.length,
-          PHASE_SLICE_BASE_MS,
-          lastMeasuredReqPerSec || undefined,
-          1,
+        const sliceMs = Math.min(
+          computeGuidedPhaseDurationMs(
+            pending.length,
+            PHASE_SLICE_BASE_MS,
+            lastMeasuredReqPerSec || undefined,
+            1,
+          ),
+          remainingHardCapMs,
         );
         // Ticket P4k (binding): the miss/no-miss check uses `phaseResponseCounts`
         // (every positive sample, settling included) -- a response that lands
