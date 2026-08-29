@@ -470,10 +470,15 @@ function brakeLine(corner: CornerInsight, row: CornerLapRow, language: ReportLan
   const parts: string[] = [];
   if (row.brakeStartM !== null) {
     const source = row.brakeSource === null ? '' : ` (${BRAKE_SOURCE_LABELS[language][row.brakeSource]})`;
+    // P4l-FIX4 N3 (binding): a brake SWITCH sampled at 1-5 Hz can only place
+    // the onset to within one sampling interval. The report says so rather
+    // than printing a metre reading it cannot support.
+    const band =
+      row.brakeOnsetUncertaintyM === null ? '' : ` ±${metres(row.brakeOnsetUncertaintyM, language)}`;
     parts.push(
       ro
-        ? `ai frânat cu ${metres(row.brakeStartM, language)} înainte de intrare${source}`
-        : `you braked ${metres(row.brakeStartM, language)} before the entry${source}`,
+        ? `ai frânat cu ${metres(row.brakeStartM, language)}${band} înainte de intrare${source}`
+        : `you braked ${metres(row.brakeStartM, language)}${band} before the entry${source}`,
     );
   }
   // With no pedal channel the lift and the braking onset are the same

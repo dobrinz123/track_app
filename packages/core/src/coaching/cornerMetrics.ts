@@ -311,6 +311,23 @@ function buildRawSeries(
   return finishSeries({ distanceM, du, tMonoMs, accuracyM, speedKph, channels });
 }
 
+/**
+ * Ticket P4l-FIX4 N3 (binding, Codex P4l-REV2b finding 7): channels whose
+ * values are STATES, not quantities. A brake switch reads 0 or 100 and
+ * nothing in between; there is no such thing as "half pressed" between two
+ * samples, so it is resampled onto the metre grid by zero-order HOLD -- the
+ * value of the last observed sample -- never by linear interpolation.
+ *
+ * Interpolating it invented a ramp across the sampling interval, and
+ * `detectBrake`'s 5 % threshold then fired ~5 % into that ramp: with an ECU
+ * answering at 1 Hz at 40 m/s, an onset up to ~38 m before the pedal was ever
+ * observed pressed -- which then fed the demonstrated latest-brake SAFETY
+ * bound. What is left after holding is honest ignorance, not error: the true
+ * onset lies somewhere inside one sampling interval, reported as
+ * {@link CornerMetrics.brakeOnsetUncertaintyM}.
+ */
+const STEP_HELD_CHANNELS: ReadonlySet<CoachingChannelId> = new Set<CoachingChannelId>(['brakeSwitch']);
+
 function lerp(a: number, b: number, ratio: number): number {
   return a + (b - a) * ratio;
 }
@@ -373,11 +390,20 @@ function buildGridSeries(raw: LapSeries, options: ResolvedOptions): LapSeries {
       tMonoMs.push(lerp(tLow, tHigh, ratio));
       accuracyM.push(lerpNullable(raw.accuracyM[cursor], raw.accuracyM[cursor + 1], ratio));
       speedKph.push(lerpNullable(raw.speedKph[cursor], raw.speedKph[cursor + 1], ratio));
+      // P4l-FIX4 N3: a held channel takes the last OBSERVED sample at or
+      // before this grid point -- `ratio >= 1` means the grid point has
+      // already reached (or passed) the later raw sample, so that one is the
+      // last observed value.
+      const holdIndex = ratio >= 1 ? cursor + 1 : cursor;
       for (const channel of ANALYSIS_CHANNELS) {
         const source = raw.channels.get(channel);
         channels
           .get(channel)
-          ?.push(lerpNullable(source?.[cursor], source?.[cursor + 1], ratio));
+          ?.push(
+            STEP_HELD_CHANNELS.has(channel)
+              ? (source?.[holdIndex] ?? null)
+              : lerpNullable(source?.[cursor], source?.[cursor + 1], ratio),
+          );
       }
     }
   }
@@ -777,6 +803,7 @@ function emptyMetrics(cornerId: number, flags: CornerQualityFlag[]): CornerMetri
     liftSource: null,
     brakeStartM: null,
     brakeSource: null,
+    brakeOnsetUncertaintyM: null,
     peakDecelG: null,
     minSpeedKph: null,
     minSpeedPositionM: null,
@@ -962,6 +989,27 @@ export function cornerWindows(
   };
 }
 
+/**
+ * P4l-FIX4 N3: the distance the car covered over the RAW sampling interval
+ * that contains `du` -- the width of "somewhere in here" for an event a
+ * held (state) channel can only place at one of its own samples. `null`
+ * when there is no earlier raw sample to measure the interval against.
+ */
+function sampleIntervalAtM(raw: LapSeries, du: number | null): number | null {
+  if (du === null) return null;
+  let index = -1;
+  for (let position = 0; position < raw.du.length; position += 1) {
+    if ((raw.du[position] ?? Number.POSITIVE_INFINITY) > du) break;
+    index = position;
+  }
+  if (index < 1) return null;
+  const current = raw.du[index];
+  const previous = raw.du[index - 1];
+  if (current === undefined || previous === undefined) return null;
+  const interval = current - previous;
+  return interval > 0 ? interval : null;
+}
+
 /** Elapsed time over a run: the sum of its real intervals, joins excluded. */
 function runDurationMs(series: LapSeries, run: Run): number | null {
   let total = 0;
@@ -1079,6 +1127,16 @@ export function computeCornerMetrics(
         if (distance !== undefined) {
           base.brakeStartM = forwardDistance(distance, entryM, totalLengthM);
           base.brakeSource = brake.source;
+          // P4l-FIX4 N3: a switch says WHEN it was first seen pressed, not
+          // when the pedal moved. The pedal moved somewhere in the interval
+          // between the last released sample and that one, so the whole
+          // interval -- in metres of track -- is the honest error bar. Only
+          // a held (state) channel carries one; a continuously sampled
+          // pressure channel is already at the grid's own resolution.
+          base.brakeOnsetUncertaintyM =
+            brake.source === 'brakeSwitch'
+              ? sampleIntervalAtM(raw, series.du[brake.index] ?? null)
+              : null;
         }
       }
       let peak: number | null = null;

@@ -154,7 +154,19 @@ export function buildDemonstratedEnvelope(
     const exitSpeed = collect(laps, cornerId, ENVELOPE_CORNER_EXCLUDING_FLAGS, (m) => m.exitSpeedKph);
     const latG = collect(laps, cornerId, ENVELOPE_CORNER_EXCLUDING_FLAGS, (m) => m.maxLatG);
 
-    const latestBrake = pick(brake, (candidate, incumbent) => candidate < incumbent);
+    // Ticket P4l-FIX4 N3 (binding, Codex P4l-REV2b finding 7): the LATEST
+    // demonstrated braking point is a safety bound -- the app leans on it to
+    // say "you have already braked this late and it worked". An onset taken
+    // from a sparsely sampled brake SWITCH is only known to within one
+    // sampling interval, and the true pedal press can only have happened
+    // EARLIER than the first pressed sample. So the bound takes the
+    // pessimistic edge of that interval (`brakeStartM + uncertainty`, further
+    // from the corner = braking earlier); every other statistic keeps the
+    // measured value.
+    const pessimisticBrake = collect(laps, cornerId, ENVELOPE_APPROACH_EXCLUDING_FLAGS, (m) =>
+      m.brakeStartM === null ? null : m.brakeStartM + (m.brakeOnsetUncertaintyM ?? 0),
+    );
+    const latestBrake = pick(pessimisticBrake, (candidate, incumbent) => candidate < incumbent);
     const earliestBrake = pick(brake, (candidate, incumbent) => candidate > incumbent);
     const earliestLift = pick(lift, (candidate, incumbent) => candidate > incumbent);
     const latestLift = pick(lift, (candidate, incumbent) => candidate < incumbent);

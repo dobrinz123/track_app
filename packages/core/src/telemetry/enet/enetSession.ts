@@ -23,7 +23,12 @@ import {
   UDS_NRC,
   UNSUPPORTED_CHANNEL_NRCS,
 } from './udsCodec';
-import { decodeEnetChannelValue, validateEnetChannelSpecs, type EnetChannelSpec } from './enetChannelSpecs';
+import {
+  decodeEnetChannelValue,
+  EnetBindingDecodeError,
+  validateEnetChannelSpecs,
+  type EnetChannelSpec,
+} from './enetChannelSpecs';
 
 // ---------- Public types ----------
 
@@ -106,6 +111,19 @@ export interface EnetDiagnostics {
    * amendment: "no error-counter reset").
    */
   decodeErrors: number;
+  /**
+   * Ticket P4l-FIX4 N5/N6: channels still in the poll rotation that are NOT
+   * currently delivering usable samples -- a binding-sourced entry backed off
+   * because its ECU is silent, or a channel whose binding could not decode
+   * five consecutive responses. Distinct from `unsupportedChannels` (removed
+   * for good after a definitive NRC): a degraded channel is still polled, at
+   * a trickle, and clears itself the moment it answers.
+   */
+  degradedChannels: TelemetryChannelId[];
+  /** One human-readable reason per entry in `degradedChannels`, for the monitor screen. */
+  channelWarnings: string[];
+  /** The rate each channel is CURRENTLY polled at -- below its poll-plan rate while backed off. */
+  effectiveHzByChannel: Record<string, number>;
 }
 
 /** Same shape as `TelemetrySession<EnetState>`, with `getDiagnostics()` narrowed (covariantly) to the richer `EnetDiagnostics` this engine actually returns. */
@@ -123,9 +141,43 @@ const MAX_ACK_LATENCY_SAMPLES = 500;
 interface PollEntry {
   channel: TelemetryChannelId;
   spec: EnetChannelSpec;
+  /** The rate this entry is CURRENTLY polled at (back-off lowers it; a success restores it). */
   weight: number;
+  /** The rate the poll plan asked for -- what recovery returns to. */
+  nominalWeight: number;
   currentWeight: number;
+  /** P4l-FIX4 N5: this entry's own request timeout, ms. */
+  timeoutMs: number;
+  /** P4l-FIX4 N5: a binding-sourced entry, i.e. one built from field evidence and/or addressed to a SECOND ECU -- the only kind that can be silent while the link is perfectly healthy. */
+  bindingSourced: boolean;
+  /** P4l-FIX4 N5: consecutive requests this entry got no answer to (or an error for); reset by any successful sample. */
+  consecutiveMisses: number;
+  /** P4l-FIX4 N6: consecutive responses this entry's own binding could not decode; reset by any successful sample. */
+  decodeSkips: number;
 }
+
+/**
+ * Ticket P4l-FIX4 N5 (binding, Codex P4l-REV2b finding 9): a Signal-Finder
+ * binding is the first poll entry addressed to a SECOND ECU (0x29) inside a
+ * DME (0x12) session, and an ECU that is not on this bus answers nothing at
+ * all. The scheduler has ONE in-flight slot, so at the production
+ * `commandTimeoutMs` of 1.5 s each of that entry's 5 Hz turns would freeze
+ * every DME channel the driver actually sees.
+ *
+ * 300 ms is well above the p95 ack/response latency the ENET addendum
+ * records for a real answering ECU (tens of ms over Wi-Fi) and far below the
+ * general 1.5 s, which exists for a DME that legitimately stalls with 0x78
+ * responsePending -- a mechanism a silent ECU never uses. Three consecutive
+ * misses (not one: a single dropped frame is normal on Wi-Fi) then start an
+ * exponential back-off down to a 0.25 Hz trickle, which is cheap enough to
+ * keep polling forever and still notices within ~4 s when the ECU wakes up.
+ */
+const BINDING_REQUEST_TIMEOUT_MS = 300;
+const BINDING_MISSES_BEFORE_BACKOFF = 3;
+const BINDING_BACKOFF_FACTOR = 4;
+const BINDING_MIN_HZ = 0.25;
+/** P4l-FIX4 N6: consecutive undecodable responses before a channel is reported degraded. */
+const CHANNEL_DECODE_SKIPS_BEFORE_DEGRADED = 5;
 
 type RequestOutcome =
   | { kind: 'positive'; sid: number; dataBytes: Uint8Array; arrivedAtMonoMs: number }
@@ -190,6 +242,10 @@ class EnetSessionEngine implements EnetSession {
   private unmatchedResponses = 0;
   private malformedResponses = 0;
   private decodeErrorsCount = 0;
+  /** P4l-FIX4 N5/N6: channels still in the rotation but not delivering usable samples (backed off, or undecodable). */
+  private readonly degradedChannels = new Set<TelemetryChannelId>();
+  /** P4l-FIX4 N5/N6: one human-readable reason per degraded channel. */
+  private readonly channelWarnings = new Map<TelemetryChannelId, string>();
   /** L2: the head bytes (SID + first data byte) of the last REAL diagnostic request sent -- TesterPresent/alive-check replies never set this, so their acks never match it. */
   private lastDiagnosticRequestHead: Uint8Array | null = null;
   private lastDiagnosticRequestSentAtMonoMs: number | null = null;
@@ -212,9 +268,30 @@ class EnetSessionEngine implements EnetSession {
       if (spec.mode === 'obd01' && !config.attemptObd01) continue;
       const existing = entries.get(item.channel);
       if (existing === undefined) {
-        entries.set(item.channel, { channel: item.channel, spec, weight: item.hz, currentWeight: 0 });
+        // P4l-FIX4 N5: "binding-sourced" = built from field evidence
+        // (`decodeValue`, which only ever exists on a confirmed Signal Finder
+        // binding) or addressed away from this session's own ECU. Both are
+        // the cases where silence says nothing about the link's health.
+        const bindingSourced =
+          spec.mode === 'did' &&
+          (spec.decodeValue !== undefined ||
+            (spec.targetAddress !== undefined && spec.targetAddress !== config.targetAddress));
+        entries.set(item.channel, {
+          channel: item.channel,
+          spec,
+          weight: item.hz,
+          nominalWeight: item.hz,
+          currentWeight: 0,
+          timeoutMs: bindingSourced
+            ? Math.min(config.commandTimeoutMs, BINDING_REQUEST_TIMEOUT_MS)
+            : config.commandTimeoutMs,
+          bindingSourced,
+          consecutiveMisses: 0,
+          decodeSkips: 0,
+        });
       } else {
         existing.weight += item.hz;
+        existing.nominalWeight += item.hz;
       }
       this.sampleCounts.set(item.channel, 0);
     }
@@ -283,6 +360,11 @@ class EnetSessionEngine implements EnetSession {
       unmatchedResponses: this.unmatchedResponses,
       malformedResponses: this.malformedResponses,
       decodeErrors: this.decodeErrorsCount,
+      degradedChannels: [...this.degradedChannels],
+      channelWarnings: [...this.channelWarnings.values()],
+      effectiveHzByChannel: Object.fromEntries(
+        this.pollEntries.map((entry) => [entry.channel, entry.weight] as const),
+      ),
     };
   }
 
@@ -367,6 +449,7 @@ class EnetSessionEngine implements EnetSession {
     try {
       pdu = entry.spec.mode === 'obd01' ? buildObdMode01Request(requestValue) : buildReadDataByIdentifierRequest(requestValue);
     } catch (error) {
+      this.recordEntryMiss(entry);
       this.recordChannelError(entry.channel, errorMessage(error));
       return;
     }
@@ -377,13 +460,14 @@ class EnetSessionEngine implements EnetSession {
       outcome = await this.executeDiagnosticRequest(
         pdu,
         targetAddress,
-        this.config.commandTimeoutMs,
+        entry.timeoutMs,
         entry.spec.mode,
         requestValue,
       );
     } catch (error) {
       if (this.stopRequested || requestGeneration !== this.generation) return;
       if (this.transportClosed) throw error;
+      this.recordEntryMiss(entry);
       this.recordChannelError(entry.channel, errorMessage(error));
       return;
     }
@@ -398,6 +482,7 @@ class EnetSessionEngine implements EnetSession {
     }
     if (outcome.kind === 'nrcOther') {
       this.lastNrcByChannel.set(entry.channel, outcome.nrc);
+      this.recordEntryMiss(entry);
       this.recordChannelError(entry.channel, `NRC 0x${outcome.nrc.toString(16).padStart(2, '0')}`);
       return;
     }
@@ -409,6 +494,7 @@ class EnetSessionEngine implements EnetSession {
           ? extractObdMode01Data(outcome.sid, outcome.dataBytes, requestValue)
           : extractReadDataByIdentifierData(outcome.sid, outcome.dataBytes, requestValue);
     } catch (error) {
+      this.recordEntryMiss(entry);
       this.recordChannelError(entry.channel, errorMessage(error));
       return;
     }
@@ -417,6 +503,16 @@ class EnetSessionEngine implements EnetSession {
     try {
       value = decodeEnetChannelValue(entry.spec, dataBytes);
     } catch (error) {
+      // P4l-FIX4 N6: "this binding cannot read this response" is a fact about
+      // ONE channel's evidence -- the ECU answered, the link is fine. It is
+      // charged to that channel's own budget (degraded after five in a row)
+      // and never to the session-wide consecutive-error budget, which exists
+      // to notice a dead connection and used to kill every other channel
+      // after five bad brake reads.
+      if (error instanceof EnetBindingDecodeError) {
+        this.recordChannelDecodeSkip(entry);
+        return;
+      }
       this.recordChannelError(entry.channel, errorMessage(error));
       return;
     }
@@ -433,8 +529,59 @@ class EnetSessionEngine implements EnetSession {
     }
 
     this.consecutiveErrors = 0;
+    this.recordEntryRecovery(entry);
     this.sampleCounts.set(entry.channel, (this.sampleCounts.get(entry.channel) ?? 0) + 1);
     this.emitSample({ channel: entry.channel, value, tMonoMs: outcome.arrivedAtMonoMs });
+  }
+
+  /**
+   * P4l-FIX4 N5: one more unanswered turn for this entry. Only a
+   * binding-sourced entry backs off -- a DME channel that stops answering is
+   * a link problem the session-wide budget is there to surface, not something
+   * to quietly poll less often.
+   */
+  private recordEntryMiss(entry: PollEntry): void {
+    entry.consecutiveMisses += 1;
+    if (!entry.bindingSourced || entry.consecutiveMisses < BINDING_MISSES_BEFORE_BACKOFF) return;
+    const steps = entry.consecutiveMisses - BINDING_MISSES_BEFORE_BACKOFF + 1;
+    const backedOff = Math.max(
+      BINDING_MIN_HZ,
+      entry.nominalWeight / BINDING_BACKOFF_FACTOR ** steps,
+    );
+    if (backedOff >= entry.weight) return; // already at (or below) this rate.
+    entry.weight = backedOff;
+    this.totalHz = sumWeights(this.pollEntries);
+    this.degradedChannels.add(entry.channel);
+    this.channelWarnings.set(
+      entry.channel,
+      `${entry.channel}: no response from 0x${(entry.spec.targetAddress ?? this.config.targetAddress)
+        .toString(16)
+        .padStart(2, '0')} after ${entry.consecutiveMisses} requests -- backed off to ${backedOff} Hz`,
+    );
+  }
+
+  /** P4l-FIX4 N5/N6: one good sample clears both per-channel budgets and restores the configured rate. */
+  private recordEntryRecovery(entry: PollEntry): void {
+    entry.consecutiveMisses = 0;
+    entry.decodeSkips = 0;
+    if (entry.weight !== entry.nominalWeight) {
+      entry.weight = entry.nominalWeight;
+      this.totalHz = sumWeights(this.pollEntries);
+    }
+    this.degradedChannels.delete(entry.channel);
+    this.channelWarnings.delete(entry.channel);
+  }
+
+  /** P4l-FIX4 N6: a response this channel's own binding could not decode -- its budget, not the session's. */
+  private recordChannelDecodeSkip(entry: PollEntry): void {
+    entry.decodeSkips += 1;
+    this.decodeErrorsCount += 1;
+    if (entry.decodeSkips < CHANNEL_DECODE_SKIPS_BEFORE_DEGRADED) return;
+    this.degradedChannels.add(entry.channel);
+    this.channelWarnings.set(
+      entry.channel,
+      `${entry.channel}: ${entry.decodeSkips} consecutive responses its binding could not decode -- channel degraded`,
+    );
   }
 
   private markUnsupported(channel: TelemetryChannelId, nrc: number): void {
@@ -442,6 +589,10 @@ class EnetSessionEngine implements EnetSession {
     this.lastNrcByChannel.set(channel, nrc);
     this.pollEntries = this.pollEntries.filter((entry) => entry.channel !== channel);
     this.totalHz = sumWeights(this.pollEntries);
+    // A channel that has LEFT the rotation is `unsupported`, not `degraded` --
+    // reporting both would say two different things about the same channel.
+    this.degradedChannels.delete(channel);
+    this.channelWarnings.delete(channel);
     // A definitive UNSUPPORTED determination is a graceful outcome, not a
     // transient failure -- it must not push the session toward 'failed'.
     this.consecutiveErrors = 0;

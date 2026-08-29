@@ -702,6 +702,9 @@ function makeControllableEnetSession(config: { stopResult: () => Promise<void> }
         unmatchedResponses: 0,
         malformedResponses: 0,
         decodeErrors: 0,
+        degradedChannels: [],
+        channelWarnings: [],
+        effectiveHzByChannel: {},
       };
     },
   };

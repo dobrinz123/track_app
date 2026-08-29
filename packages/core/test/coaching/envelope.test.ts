@@ -11,6 +11,7 @@ function metric(overrides: Partial<CornerMetrics> & { cornerId: number }): Corne
     liftSource: 'decelOnset',
     brakeStartM: 200,
     brakeSource: 'gpsSpeed',
+    brakeOnsetUncertaintyM: null,
     peakDecelG: 0.9,
     minSpeedKph: 70,
     minSpeedPositionM: 640,

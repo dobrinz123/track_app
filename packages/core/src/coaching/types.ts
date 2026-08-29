@@ -117,6 +117,17 @@ export interface CornerMetrics {
   /** Metres BEFORE the corner entry where sustained braking started. */
   brakeStartM: number | null;
   brakeSource: BrakeSource | null;
+  /**
+   * Ticket P4l-FIX4 N3 (binding, Codex P4l-REV2b finding 7): how wide the
+   * "when" of `brakeStartM` really is, in metres -- the distance covered over
+   * one sampling interval of the channel the onset came from. Non-null only
+   * for a HELD (state) channel such as `brakeSwitch`, which can place the
+   * onset no more precisely than "at one of its own samples"; a continuously
+   * sampled pressure channel is already at the grid's resolution and reports
+   * `null`. The true brake point is never LATER than `brakeStartM` says, so
+   * the demonstrated latest-brake safety bound uses `brakeStartM + this`.
+   */
+  brakeOnsetUncertaintyM: number | null;
   /** Peak deceleration in the braking zone, positive magnitude, g. */
   peakDecelG: number | null;
   minSpeedKph: number | null;

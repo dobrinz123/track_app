@@ -391,10 +391,12 @@ describe('scoreSignalCandidates -- P4l-FIX2 review findings', () => {
         [['78', '78'], rest],
       ]),
     );
+    // P4l-FIX4 N2 (Codex P4l-REV2b finding 2): `probable` was still a RANKED
+    // verdict for one-sided evidence -- both sides are now required for both.
     const [score] = scoreSignalCandidates({ samples, timeline, shape: 'analog-bipolar' });
     expect(score!.matchedEdges).toBe(10);
     expect(score!.verdict).not.toBe('found');
-    expect(score).toMatchObject({ verdict: 'probable', bipolarSides: 'positive', verdictCapReason: 'one-sided-bipolar' });
+    expect(score).toMatchObject({ verdict: 'unrelated', bipolarSides: 'positive', verdictCapReason: 'one-sided-bipolar' });
   });
 
   it('G2: a genuine two-sided bipolar swing keeps its `found` verdict', () => {
@@ -514,5 +516,124 @@ describe('scoreSignalCandidates -- P4l-FIX2 review findings', () => {
     );
     const [score] = scoreSignalCandidates({ samples, timeline, shape: 'boolean-edge' });
     expect(score).toMatchObject({ verdict: 'unrelated', matchedEdges: 0, extraTransitions: 0 });
+  });
+});
+
+/**
+ * Ticket P4l-FIX4 (Codex P4l-REV2b findings 1 and 2) -- the two rules
+ * P4l-FIX2 only got half right.
+ *
+ * N1: the whole-response baseline-restlessness cap was decisive for
+ * `boolean-edge` ONLY. For an analog shape a rolling counter byte escaped
+ * both gates at once: its own byte offset is hidden by the analog noise
+ * floor (a +1 step is inside `analogMarginRawUnits`), and the raw-hex view
+ * was never consulted. The noise floor is a statement about the SCORED
+ * series -- the byte the verdict is about -- so it now applies to that byte
+ * alone; every OTHER byte of the same response is compared exactly, for
+ * every shape.
+ *
+ * N2: `analog-bipolar` means both sides of rest. One-sided evidence is not a
+ * weaker version of a steering channel, it is a different signal -- so it is
+ * `unrelated`, not `probable`.
+ */
+describe('scoreSignalCandidates -- P4l-FIX4 review findings', () => {
+  const timeline = buildMetronomeTimeline(SCRIPT);
+
+  it('N1: an ANALOG block with a rolling counter byte is UNRELATED, never found', () => {
+    // byte 0 increments by exactly 1 on every read (inside the >= 3-unit
+    // analog noise floor, so its own offset scores nothing); byte 5 is a
+    // clean analog that tracks the metronome perfectly.
+    let counter = 0x10;
+    const block = (action: string): string =>
+      `${(counter++ & 0xff).toString(16).toUpperCase().padStart(2, '0')}0000FF00${action}`;
+    const perWindow: string[][] = [[block('10'), block('10')]];
+    for (let repetition = 0; repetition < 5; repetition += 1) {
+      perWindow.push([block('60'), block('60')]);
+      perWindow.push([block('10'), block('10')]);
+    }
+    const samples = layOnTimeline(timeline, ECU_29, 0x5200, perWindow);
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'analog-monotone' });
+    expect(score!.byteOffset).toBe(5);
+    expect(score!.matchedEdges).toBe(10);
+    expect(score!.verdict).toBe('unrelated');
+    expect(score!.verdictCapReason).toBe('response-baseline-changes');
+    expect(score!.didBaselineChanges).toBeGreaterThan(0);
+  });
+
+  it('N1: the analog noise floor still protects the SCORED byte (a jittering LSB is not restlessness)', () => {
+    const jitter = layOnTimeline(
+      timeline,
+      ECU_12,
+      0x4522,
+      cycles(['0129', '0131'], [
+        [['0300', '0300'], ['0129', '0131']],
+        [['0300', '0300'], ['0129', '0131']],
+        [['0300', '0300'], ['0129', '0131']],
+        [['0300', '0300'], ['0129', '0131']],
+        [['0300', '0300'], ['0129', '0131']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples: jitter, timeline, shape: 'analog-monotone' });
+    expect(score).toMatchObject({ baselineChanges: 0, didBaselineChanges: 0, verdict: 'found' });
+  });
+
+  it('N2: a ONE-SIDED analog-bipolar candidate is UNRELATED, not probable', () => {
+    const rest = ['64', '64'];
+    const samples = layOnTimeline(
+      timeline,
+      0x30,
+      0x1235,
+      cycles(rest, [
+        [['78', '78'], rest],
+        [['78', '78'], rest],
+        [['78', '78'], rest],
+        [['78', '78'], rest],
+        [['78', '78'], rest],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'analog-bipolar' });
+    expect(score!.matchedEdges).toBe(10);
+    expect(score).toMatchObject({
+      verdict: 'unrelated',
+      bipolarSides: 'positive',
+      verdictCapReason: 'one-sided-bipolar',
+    });
+  });
+
+  it('N2: a one-sided candidate that only reached the PROBABLE ratio is unrelated too', () => {
+    const rest = ['64', '64'];
+    const pressed = ['78', '78'];
+    const samples = layOnTimeline(
+      timeline,
+      0x30,
+      0x1236,
+      cycles(rest, [
+        [pressed, rest],
+        [pressed, rest],
+        [pressed, rest],
+        [rest, rest],
+        [rest, rest],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'analog-bipolar' });
+    expect(score!.matchedEdges).toBe(6); // 3/5 cycles -- the `probable` ratio
+    expect(score).toMatchObject({ verdict: 'unrelated', verdictCapReason: 'one-sided-bipolar' });
+  });
+
+  it('N2: a genuine two-sided swing is untouched', () => {
+    const swing = layOnTimeline(
+      timeline,
+      0x30,
+      0x1234,
+      cycles(['8000', '8000'], [
+        [['9000', '9500'], ['8000', '8000']],
+        [['7000', '6B00'], ['8000', '8000']],
+        [['9000', '9500'], ['8000', '8000']],
+        [['7000', '6B00'], ['8000', '8000']],
+        [['9000', '9500'], ['8000', '8000']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples: swing, timeline, shape: 'analog-bipolar' });
+    expect(score).toMatchObject({ verdict: 'found', bipolarSides: 'both', verdictCapReason: null });
   });
 });

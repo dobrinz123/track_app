@@ -35,16 +35,34 @@ export class SqlSettingsStore implements SettingsStore {
     this.settings = initial;
   }
 
-  static async create(db: SqlDatabase): Promise<SqlSettingsStore> {
+  /**
+   * `readLocale` is injectable ONLY so the language-default rule can be
+   * pinned by a test without a native locale API; production always uses the
+   * device's own `readDeviceLocale`.
+   */
+  static async create(
+    db: SqlDatabase,
+    readLocale: () => string | null = readDeviceLocale,
+  ): Promise<SqlSettingsStore> {
     const rows = await db.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
       SETTINGS_KEY,
     ]);
     let initial = DEFAULT_SETTINGS;
+    // Ticket P4l-FIX4 N7 (binding, Codex P4l-REV2b finding 11): whether the
+    // USER ever chose a language is a fact about the ROW, and it has to be
+    // captured BEFORE the merge below -- `DEFAULT_SETTINGS.language` is a
+    // perfectly valid `'en'`, so after merging, a row written by any build
+    // that predates the setting is indistinguishable from a deliberate
+    // English choice, and the device-locale default was never reachable.
+    let rowHasLanguage = false;
     const raw = rows[0]?.value;
     if (raw !== undefined) {
       try {
         const parsed: unknown = JSON.parse(raw);
-        if (isPartialAppSettings(parsed)) initial = { ...DEFAULT_SETTINGS, ...parsed };
+        if (isPartialAppSettings(parsed)) {
+          rowHasLanguage = parsed.language === 'ro' || parsed.language === 'en';
+          initial = { ...DEFAULT_SETTINGS, ...parsed };
+        }
       } catch {
         // Corrupt/legacy row: fall back to defaults rather than throw --
         // settings are non-critical and never block app startup.
@@ -69,14 +87,15 @@ export class SqlSettingsStore implements SettingsStore {
     if (typeof initial.developerModeEnabled !== 'boolean') {
       initial = { ...initial, developerModeEnabled: false };
     }
-    // Ticket P4l-FIX1 F2 (binding): the language DEFAULT comes from the
-    // device locale, applied here and only here -- when nothing valid was
-    // ever persisted. A user's own stored choice always wins (it is not
-    // re-derived on later launches), and a persisted value outside the
-    // two-value vocabulary is repaired the same defensive way
-    // `developerModeEnabled` above is.
-    if (initial.language !== 'ro' && initial.language !== 'en') {
-      initial = { ...initial, language: defaultLanguageForLocale(readDeviceLocale()) };
+    // Ticket P4l-FIX1 F2 (binding), corrected by P4l-FIX4 N7: the language
+    // DEFAULT comes from the device locale, applied here and only here --
+    // whenever the persisted ROW did not itself carry a valid choice (no row
+    // at all, a row from before the setting existed, or a value outside the
+    // two-value vocabulary, repaired the same defensive way
+    // `developerModeEnabled` above is). A user's own stored choice always
+    // wins and is never re-derived on later launches.
+    if (!rowHasLanguage) {
+      initial = { ...initial, language: defaultLanguageForLocale(readLocale()) };
     }
     return new SqlSettingsStore(db, initial);
   }

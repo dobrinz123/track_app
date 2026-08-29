@@ -266,6 +266,27 @@ function provenanceRejection(spec: EnetChannelSpec): string | null {
 }
 
 /**
+ * Ticket P4l-FIX4 N6 (binding, Codex P4l-REV2b finding 10): the specific
+ * failure "THIS response cannot be read by THIS binding" -- a `decodeValue`
+ * that returned `null`. It is a statement about one channel's own evidence
+ * (an ECU that changed what it answers, a length that no longer matches the
+ * confirmation), NOT about the link, so `enetSession` charges it to that
+ * channel's own budget and quarantines the channel, instead of spending the
+ * session-wide consecutive-error budget that exists to notice a dead
+ * connection. A distinct class rather than a message match: the poll loop
+ * has to tell the two apart with certainty.
+ */
+export class EnetBindingDecodeError extends Error {
+  constructor(
+    readonly channel: TelemetryChannelId,
+    readonly responseLength: number,
+  ) {
+    super(`Channel ${channel}: its binding could not decode this ${responseLength}-byte response`);
+    this.name = 'EnetBindingDecodeError';
+  }
+}
+
+/**
  * Decodes one channel's raw UDS response data bytes into its telemetry
  * value. `obd01` specs REUSE `pidCodec`'s own decode formulas by round-
  * tripping the raw bytes through the same ASCII response shape
@@ -287,7 +308,7 @@ export function decodeEnetChannelValue(spec: EnetChannelSpec, dataBytes: Uint8Ar
   if (spec.decodeValue !== undefined) {
     const value = spec.decodeValue(dataBytes);
     if (value === null) {
-      throw new Error(`Channel ${spec.channel}: its binding could not decode this ${dataBytes.length}-byte response`);
+      throw new EnetBindingDecodeError(spec.channel, dataBytes.length);
     }
     return value;
   }

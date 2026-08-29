@@ -36,9 +36,13 @@
  *     which is why it is computed from the scored series rather than from raw
  *     hex equality — {@link SignalCandidateScore.responseBaselineChanges}
  *     keeps reporting the raw-hex view, and IS decisive for `boolean-edge`,
- *     where hex equality is the semantics.
+ *     where hex equality is the semantics. P4l-FIX4 (N1) narrows the noise
+ *     floor to the SCORED byte alone: every other byte of the same response
+ *     is compared exactly, for every shape, so a counter advancing by one
+ *     per read can no longer hide inside the analog floor.
  *  2. `analog-bipolar` means BOTH sides of rest (steering left AND right).
- *     A one-sided excursion is capped at `probable`, never `found`
+ *     A one-sided excursion is `unrelated` -- P4l-FIX4 (N2); FIX2 only
+ *     demoted it to `probable`, which is still a ranked verdict
  *     ({@link SignalCandidateScore.bipolarSides}).
  *  3. Edges are ORDERED TRANSITIONS, not mere presence: a rest->active
  *     transition must ARRIVE inside a (settle-shifted) press/hold window and
@@ -217,8 +221,15 @@ interface SeriesScore {
   matchedEdges: number;
   extraTransitions: number;
   baselineChanges: number;
-  /** Per baseline sample, in order: did THIS series move there? (OR-ed across offsets to get the per-DID count.) */
+  /** Per baseline sample, in order: did THIS series move there? (noise-floor aware; used for the SCORED series). */
   baselineActive: boolean[];
+  /**
+   * P4l-FIX4 (N1): the same question asked EXACTLY -- did this byte differ
+   * from its own modal baseline value, no noise floor? Used for every series
+   * the verdict is NOT about, so a rolling counter byte sitting next to the
+   * scored byte is restlessness whatever the shape.
+   */
+  baselineActiveStrict: boolean[];
   correlationSign: 1 | -1 | 0 | null;
   bipolarSides: SignalBipolarSides | null;
   byteOffset: number | null;
@@ -255,6 +266,11 @@ function scoreSeries(
 
   const baselineActive = baselineValues.map(active);
   const baselineChanges = baselineActive.filter(Boolean).length;
+  // P4l-FIX4 (N1): the noise-floor-free view of the same window. `modeOf`
+  // (not the mean) is the rest level here -- an exact comparison needs an
+  // exact reference.
+  const strictRest = modeOf(baselineValues);
+  const baselineActiveStrict = baselineValues.map((value) => value !== strictRest);
 
   const pressValuesByRepetition = new Map<number, number[]>();
   const releaseValuesByRepetition = new Map<number, number[]>();
@@ -351,6 +367,7 @@ function scoreSeries(
     extraTransitions,
     baselineChanges,
     baselineActive,
+    baselineActiveStrict,
     correlationSign,
     bipolarSides,
     byteOffset,
@@ -497,22 +514,6 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
       );
     }
 
-    // P4l-FIX2 (finding 1): item 3's "baselineChanges (must be 0)" is a
-    // per-DID rule. A baseline sample counts as movement when ANY scored
-    // series of this DID moved there -- so a block's rolling counter byte
-    // disqualifies the whole DID even though the brake byte next to it is
-    // perfectly quiet -- while the analog noise floor still keeps a jittering
-    // LSB from disqualifying an otherwise clean analog.
-    let didBaselineChanges = 0;
-    const baselineSampleCount = baselineHexes.length;
-    for (let i = 0; i < baselineSampleCount; i += 1) {
-      if (seriesScores.some((series) => series.baselineActive[i] === true)) didBaselineChanges += 1;
-    }
-    // For `boolean-edge` the raw-hex view IS the semantics (no noise floor),
-    // so a restless response disqualifies even if no single offset's mode says so.
-    const restlessBaseline =
-      didBaselineChanges > 0 || (input.shape === 'boolean-edge' && responseBaselineChanges > 0);
-
     // The DID is reported by its STRONGEST offset (a block's one live brake
     // bit is what matters), ties broken by more matched edges, then fewer
     // baseline changes, then the lower offset -- fully deterministic.
@@ -524,6 +525,31 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
           a.baselineChanges - b.baselineChanges ||
           (a.byteOffset ?? -1) - (b.byteOffset ?? -1),
       )[0] ?? null;
+
+    // P4l-FIX2 (finding 1) as corrected by P4l-FIX4 (N1): item 3's
+    // "baselineChanges (must be 0)" is a per-DID rule, and the analog noise
+    // floor is a statement about the SCORED series only.
+    //
+    // The scored byte is the one the verdict is about, so its own jitter is
+    // judged with the noise floor (a wobbling LSB is not the driver). Every
+    // OTHER byte of the same response is judged EXACTLY: a rolling counter
+    // advancing by one per read used to slip through both gates at once --
+    // inside the >= 3-unit analog floor on its own offset, and never seen at
+    // the whole-response level because that view was consulted for
+    // `boolean-edge` alone. Whatever the shape, a response that moves while
+    // the driver is holding still is not answering the driver.
+    let didBaselineChanges = 0;
+    const baselineSampleCount = baselineHexes.length;
+    for (let i = 0; i < baselineSampleCount; i += 1) {
+      const restless = seriesScores.some((series) =>
+        series === best ? series.baselineActive[i] === true : series.baselineActiveStrict[i] === true,
+      );
+      if (restless) didBaselineChanges += 1;
+    }
+    // For `boolean-edge` the raw-hex view IS the semantics (no noise floor),
+    // so a restless response disqualifies even if no single offset's mode says so.
+    const restlessBaseline =
+      didBaselineChanges > 0 || (input.shape === 'boolean-edge' && responseBaselineChanges > 0);
 
     if (best === null || raws.length === 0) {
       scores.push({
@@ -563,10 +589,17 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
       verdict = 'unrelated';
       verdictCapReason = 'response-baseline-changes';
     }
-    // P4l-FIX2 (finding 2): a bipolar target must have been seen on BOTH
-    // sides of rest before it can be `found`.
-    if (input.shape === 'analog-bipolar' && best.bipolarSides !== 'both' && verdict === 'found') {
-      verdict = 'probable';
+    // P4l-FIX2 (finding 2) as corrected by P4l-FIX4 (N2): a bipolar target
+    // must have been seen on BOTH sides of rest before it can be RANKED at
+    // all. One-sided evidence is not a weaker steering angle -- a channel
+    // that only ever leaves rest upwards is a different signal, and calling
+    // it `probable` invited exactly the wrong binding to be confirmed.
+    if (
+      input.shape === 'analog-bipolar' &&
+      best.bipolarSides !== 'both' &&
+      (verdict === 'found' || verdict === 'probable')
+    ) {
+      verdict = 'unrelated';
       verdictCapReason = 'one-sided-bipolar';
     }
 

@@ -294,3 +294,55 @@ describe('SqlSettingsStore (against sql.js)', () => {
     expect(store3.getSettings().language).toBe(defaultLanguageForLocale(readDeviceLocale()));
   });
 });
+
+/**
+ * Ticket P4l-FIX4 N7 (Codex P4l-REV2b finding 11, LOW): hydration merged the
+ * persisted row over `DEFAULT_SETTINGS` FIRST, and `DEFAULT_SETTINGS.language`
+ * is `'en'` -- so a row written before the language setting existed (or by any
+ * older build) always produced a perfectly VALID `'en'`, and the device-locale
+ * default was never reached. The question the default answers is "did the USER
+ * ever choose?", so it is the parsed ROW that must be asked, not the merged
+ * result. A row that does own a valid choice is never touched.
+ *
+ * `readLocale` is injected here for exactly this test -- production still
+ * reads the device locale through `readDeviceLocale`.
+ */
+describe('SqlSettingsStore language default (P4l-FIX4 N7)', () => {
+  async function storeWith(row: unknown | undefined, locale: string | null) {
+    const db = await createSqlJsDatabase();
+    await SqlSessionRepository.create(db);
+    if (row !== undefined) {
+      await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+        'app-settings',
+        JSON.stringify(row),
+      ]);
+    }
+    return SqlSettingsStore.create(db, () => locale);
+  }
+
+  it('defaults to Romanian on a ro device when the persisted row has no language at all', async () => {
+    const store = await storeWith({ units: 'mph' }, 'ro-RO');
+    expect(store.getSettings().language).toBe('ro');
+    expect(store.getSettings().units).toBe('mph'); // the rest of the row is untouched
+  });
+
+  it('defaults to English on a non-ro device when the persisted row has no language', async () => {
+    const store = await storeWith({ units: 'mph' }, 'en-GB');
+    expect(store.getSettings().language).toBe('en');
+  });
+
+  it('defaults from the locale when there is no persisted row at all', async () => {
+    expect((await storeWith(undefined, 'ro-RO')).getSettings().language).toBe('ro');
+    expect((await storeWith(undefined, 'de-DE')).getSettings().language).toBe('en');
+  });
+
+  it('never flips a language the user actually chose', async () => {
+    expect((await storeWith({ language: 'en' }, 'ro-RO')).getSettings().language).toBe('en');
+    expect((await storeWith({ language: 'ro' }, 'en-US')).getSettings().language).toBe('ro');
+  });
+
+  it('repairs a persisted value outside the vocabulary from the locale', async () => {
+    expect((await storeWith({ language: 'klingon' }, 'ro-RO')).getSettings().language).toBe('ro');
+    expect((await storeWith({ language: 7 }, 'en-US')).getSettings().language).toBe('en');
+  });
+});

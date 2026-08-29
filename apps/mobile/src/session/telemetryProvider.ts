@@ -184,6 +184,14 @@ function brakeBindingRestValue(binding: ResolvedBrakeBinding): number | null {
  * answers must never silently produce a fabricated brake reading.
  */
 export function decodeBrakeBindingValue(binding: ResolvedBrakeBinding, raw: Uint8Array): number | null {
+  // Ticket P4l-FIX4 N4 (binding, Codex P4l-REV2b finding 8): the LENGTH is
+  // part of the confirmation. The Signal Finder scored one series of one
+  // shape; a live response of a different length is a different series, and
+  // decoding it anyway fabricates readings -- a 2-byte binding handed a
+  // single byte produces a scalar that cannot equal the 2-byte rest value, so
+  // the boolean rule reads it as FULL BRAKE. No decode, no sample: the poll
+  // entry's own channel-error path is the honest answer.
+  if (binding.length !== null && raw.length !== binding.length) return null;
   const value = brakeBindingSeriesValue(binding, raw);
   if (value === null) return null;
   if (binding.decodeKind === 'boolean-0-100') {

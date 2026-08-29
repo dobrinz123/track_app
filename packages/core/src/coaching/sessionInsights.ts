@@ -108,6 +108,8 @@ export interface CornerLapRow {
   clean: boolean;
   brakeStartM: number | null;
   brakeSource: CornerMetrics['brakeSource'];
+  /** P4l-FIX4 N3: the sampling-interval width of `brakeStartM`, metres; non-null only for a held (state) brake channel. */
+  brakeOnsetUncertaintyM: number | null;
   liftPointM: number | null;
   liftSource: CornerMetrics['liftSource'];
   peakDecelG: number | null;
@@ -447,6 +449,7 @@ export function analyzeSession(
         clean: lap.clean,
         brakeStartM: metrics?.brakeStartM ?? null,
         brakeSource: metrics?.brakeSource ?? null,
+        brakeOnsetUncertaintyM: metrics?.brakeOnsetUncertaintyM ?? null,
         liftPointM: metrics?.liftPointM ?? null,
         liftSource: metrics?.liftSource ?? null,
         peakDecelG: metrics?.peakDecelG ?? null,

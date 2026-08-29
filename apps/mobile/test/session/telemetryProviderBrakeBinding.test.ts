@@ -178,3 +178,70 @@ describe('decodeBrakeBindingValue', () => {
     });
   });
 });
+
+/**
+ * Ticket P4l-FIX4 N4 (Codex P4l-REV2b finding 8, HIGH): the live response
+ * length was never checked against the length the Signal Finder actually
+ * confirmed. A 2-byte binding that suddenly gets one byte back (a different
+ * ECU answering, a firmware change, a truncated frame) was still decoded as
+ * a scalar -- and since that scalar cannot equal the 2-byte rest value, the
+ * boolean rule read it as 100: a fabricated FULL BRAKE reading. The binding's
+ * own length is part of the confirmation; a response that disagrees with it
+ * is not this signal, so it produces no sample at all.
+ */
+describe('P4l-FIX4 N4: a live response must match the confirmed binding length', () => {
+  const twoByte = resolveBrakeBindingFromProfile([
+    binding({
+      did: 0x500b,
+      length: 2,
+      evidenceJson: JSON.stringify({ restValueHex: '0002', min: 2, max: 6, byteOffset: null }),
+    }),
+  ]) as ResolvedBrakeBinding;
+
+  it('decodes a response of exactly the confirmed length', () => {
+    expect(decodeBrakeBindingValue(twoByte, Uint8Array.from([0x00, 0x02]))).toBe(0);
+    expect(decodeBrakeBindingValue(twoByte, Uint8Array.from([0x00, 0x06]))).toBe(100);
+  });
+
+  it('refuses a SHORTER response rather than reading it as pressed', () => {
+    expect(decodeBrakeBindingValue(twoByte, Uint8Array.from([0x02]))).toBeNull();
+    expect(decodeBrakeBindingValue(twoByte, Uint8Array.from([0x06]))).toBeNull();
+  });
+
+  it('refuses a LONGER response rather than reading it as pressed', () => {
+    expect(decodeBrakeBindingValue(twoByte, Uint8Array.from([0x00, 0x00, 0x00, 0x02]))).toBeNull();
+    expect(decodeBrakeBindingValue(twoByte, Uint8Array.from([0x00, 0x02, 0x00]))).toBeNull();
+  });
+
+  it('applies to an analog binding too (no fabricated pressure from a mis-sized frame)', () => {
+    const pressure = resolveBrakeBindingFromProfile([
+      binding({
+        channel: 'brakePressure',
+        did: 0x500b,
+        length: 2,
+        evidenceJson: JSON.stringify({ restValueHex: '0000', min: 0, max: 1_000, byteOffset: null }),
+      }),
+    ]) as ResolvedBrakeBinding;
+    expect(decodeBrakeBindingValue(pressure, Uint8Array.from([0x01, 0xf4]))).toBe(50);
+    expect(decodeBrakeBindingValue(pressure, Uint8Array.from([0xf4]))).toBeNull();
+    expect(decodeBrakeBindingValue(pressure, Uint8Array.from([0x00, 0x01, 0xf4]))).toBeNull();
+  });
+
+  it('a block binding is length-checked the same way', () => {
+    const block = resolveBrakeBindingFromProfile([
+      binding({
+        did: 0x4000,
+        length: 12,
+        evidenceJson: JSON.stringify({
+          restValueHex: '000000000000000000000000',
+          min: null,
+          max: null,
+          byteOffset: 3,
+        }),
+      }),
+    ]) as ResolvedBrakeBinding;
+    expect(decodeBrakeBindingValue(block, Uint8Array.from([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]))).toBe(100);
+    // Long enough for the offset, but NOT the confirmed length -- still refused.
+    expect(decodeBrakeBindingValue(block, Uint8Array.from([0, 0, 0, 1, 0, 0]))).toBeNull();
+  });
+});
