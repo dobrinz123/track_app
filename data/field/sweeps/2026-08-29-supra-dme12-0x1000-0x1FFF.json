@@ -1,0 +1,961 @@
+{
+  "schemaVersion": 1,
+  "generatedAtUtc": "2026-08-29T10:44:41.060Z",
+  "resumeBound": "≤1s of DIDs may be re-sent after a hard kill",
+  "run": {
+    "runId": "did-sweep-1787999947203-fgrt",
+    "adapterType": "enet",
+    "targetAddress": 18,
+    "rangeFromHex": "0x1000",
+    "rangeToHex": "0x1FFF",
+    "lastDidHex": "0x1FFF",
+    "startedAtUtc": "2026-08-29T10:39:07.203Z",
+    "updatedAtUtc": "2026-08-29T10:43:17.821Z",
+    "status": "complete"
+  },
+  "counters": {
+    "visitedCount": 4096,
+    "responderCount": 17,
+    "timeoutCount": 20,
+    "unmatchedCount": 1,
+    "errorCount": 0,
+    "nrcCounts": {
+      "0x10": 1,
+      "0x25": 6,
+      "0x31": 4052
+    }
+  },
+  "responders": [
+    {
+      "didHex": "0x1000",
+      "length": 3,
+      "rawHex": "010000",
+      "firstSeenUtc": "2026-08-29T10:39:08.222Z",
+      "lastSeenUtc": "2026-08-29T10:39:08.222Z",
+      "sampleCount": 1
+    },
+    {
+      "didHex": "0x1001",
+      "length": 24,
+      "rawHex": "01031A01012217311B180000075DC00101FD940000000000",
+      "firstSeenUtc": "2026-08-29T10:39:08.222Z",
+      "lastSeenUtc": "2026-08-29T10:39:08.222Z",
+      "sampleCount": 1
+    },
+    {
+      "didHex": "0x1002",
+      "length": 6,
+      "rawHex": "010200070000",
+      "firstSeenUtc": "2026-08-29T10:39:08.222Z",
+      "lastSeenUtc": "2026-08-29T10:39:08.222Z",
+      "sampleCount": 1
+    },
+    {
+      "didHex": "0x1003",
+      "length": 78,
+      "rawHex": "0100220000031A00000017000039FE00000000000000000000001E0000001E000000000000006E000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "firstSeenUtc": "2026-08-29T10:39:08.222Z",
+      "lastSeenUtc": "2026-08-29T10:39:08.222Z",
+      "sampleCount": 1
+    },
+    {
+      "didHex": "0x100A",
+      "length": 1,
+      "rawHex": "00",
+      "firstSeenUtc": "2026-08-29T10:39:08.222Z",
+      "lastSeenUtc": "2026-08-29T10:39:08.222Z",
+      "sampleCount": 1
+    },
+    {
+      "didHex": "0x100E",
+      "length": 1,
+      "rawHex": "00",
+      "firstSeenUtc": "2026-08-29T10:39:08.222Z",
+      "lastSeenUtc": "2026-08-29T10:39:08.222Z",
+      "sampleCount": 1
+    },
+    {
+      "didHex": "0x1600",
+      "length": 1,
+      "rawHex": "09",
+      "firstSeenUtc": "2026-08-29T10:40:43.703Z",
+      "lastSeenUtc": "2026-08-29T10:40:43.703Z",
+      "sampleCount": 1
+    },
+    {
+      "didHex": "0x1601",
+      "length": 24,
+      "rawHex": "3F80FFFFFFFFFFFF0102000004FFFFFF0000000CFFFFFFFF",
+      "firstSeenUtc": "2026-08-29T10:40:43.703Z",
+      "lastSeenUtc": "2026-08-29T10:40:43.703Z",
+      "sampleCount": 1
+    },
+    {
+      "didHex": "0x1603",
+      "length": 24,
+      "rawHex": "3D80FFFFFFFFFFFF006400AFFE24111500016020C213FF14",
+      "firstSeenUtc": "2026-08-29T10:40:43.703Z",
+      "lastSeenUtc": "2026-08-29T10:40:43.703Z",
+      "sampleCount": 1
+    },
+    {
+      "didHex": "0x1607",
+      "length": 24,
+      "rawHex": "3B00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+      "firstSeenUtc": "2026-08-29T10:40:43.703Z",
+      "lastSeenUtc": "2026-08-29T10:40:43.703Z",
+      "sampleCount": 1
+    },
+    {
+      "didHex": "0x1700",
+      "length": 3,
+      "rawHex": "0039FE",
+      "firstSeenUtc": "2026-08-29T10:40:59.159Z",
+      "lastSeenUtc": "2026-08-29T10:40:59.159Z",
+      "sampleCount": 1
+    },
+    {
+      "didHex": "0x1701",
+      "length": 4,
+      "rawHex": "03065299",
+      "firstSeenUtc": "2026-08-29T10:40:59.159Z",
+      "lastSeenUtc": "2026-08-29T10:40:59.159Z",
+      "sampleCount": 1
+    },
+    {
+      "didHex": "0x1702",
+      "length": 3,
+      "rawHex": "000000",
+      "firstSeenUtc": "2026-08-29T10:40:59.159Z",
+      "lastSeenUtc": "2026-08-29T10:40:59.159Z",
+      "sampleCount": 1
+    },
+    {
+      "didHex": "0x1721",
+      "length": 4,
+      "rawHex": "00004003",
+      "firstSeenUtc": "2026-08-29T10:41:01.539Z",
+      "lastSeenUtc": "2026-08-29T10:41:01.539Z",
+      "sampleCount": 1
+    },
+    {
+      "didHex": "0x1731",
+      "length": 1,
+      "rawHex": "00",
+      "firstSeenUtc": "2026-08-29T10:41:04.669Z",
+      "lastSeenUtc": "2026-08-29T10:41:04.669Z",
+      "sampleCount": 1
+    },
+    {
+      "didHex": "0x1750",
+      "length": 1,
+      "rawHex": "AA",
+      "firstSeenUtc": "2026-08-29T10:41:06.750Z",
+      "lastSeenUtc": "2026-08-29T10:41:06.750Z",
+      "sampleCount": 1
+    },
+    {
+      "didHex": "0x1751",
+      "length": 3,
+      "rawHex": "011202",
+      "firstSeenUtc": "2026-08-29T10:41:06.750Z",
+      "lastSeenUtc": "2026-08-29T10:41:06.750Z",
+      "sampleCount": 1
+    }
+  ],
+  "candidates": [
+    {
+      "didHex": "0x1701",
+      "rank": "changedInSeveral",
+      "lastRawHex": "03065373",
+      "sampleCount": 24,
+      "min": null,
+      "max": null,
+      "distinctValueCount": 21,
+      "changedInPhase": {
+        "baseline": true,
+        "brake": true,
+        "steering": true,
+        "throttle": true
+      }
+    },
+    {
+      "didHex": "0x100A",
+      "rank": "static",
+      "lastRawHex": "00",
+      "sampleCount": 20,
+      "min": 0,
+      "max": 0,
+      "distinctValueCount": 1,
+      "changedInPhase": {
+        "baseline": false,
+        "brake": false,
+        "steering": false,
+        "throttle": false
+      }
+    },
+    {
+      "didHex": "0x100E",
+      "rank": "static",
+      "lastRawHex": "00",
+      "sampleCount": 24,
+      "min": 0,
+      "max": 0,
+      "distinctValueCount": 1,
+      "changedInPhase": {
+        "baseline": false,
+        "brake": false,
+        "steering": false,
+        "throttle": false
+      }
+    },
+    {
+      "didHex": "0x1600",
+      "rank": "static",
+      "lastRawHex": "09",
+      "sampleCount": 24,
+      "min": 9,
+      "max": 9,
+      "distinctValueCount": 1,
+      "changedInPhase": {
+        "baseline": false,
+        "brake": false,
+        "steering": false,
+        "throttle": false
+      }
+    },
+    {
+      "didHex": "0x1731",
+      "rank": "static",
+      "lastRawHex": "00",
+      "sampleCount": 24,
+      "min": 0,
+      "max": 0,
+      "distinctValueCount": 1,
+      "changedInPhase": {
+        "baseline": false,
+        "brake": false,
+        "steering": false,
+        "throttle": false
+      }
+    },
+    {
+      "didHex": "0x1750",
+      "rank": "static",
+      "lastRawHex": "AA",
+      "sampleCount": 23,
+      "min": 170,
+      "max": 170,
+      "distinctValueCount": 1,
+      "changedInPhase": {
+        "baseline": false,
+        "brake": false,
+        "steering": false,
+        "throttle": false
+      }
+    }
+  ],
+  "observationSeries": [
+    {
+      "didHex": "0x100A",
+      "phase": "baseline",
+      "samples": [
+        {
+          "tMs": 19,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 1019,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 2030,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 3033,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 4029,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 5039,
+          "rawHex": "00"
+        }
+      ]
+    },
+    {
+      "didHex": "0x100E",
+      "phase": "baseline",
+      "samples": [
+        {
+          "tMs": 69,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 1070,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 2089,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 3089,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 4091,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 5089,
+          "rawHex": "00"
+        }
+      ]
+    },
+    {
+      "didHex": "0x1600",
+      "phase": "baseline",
+      "samples": [
+        {
+          "tMs": 129,
+          "rawHex": "09"
+        },
+        {
+          "tMs": 1119,
+          "rawHex": "09"
+        },
+        {
+          "tMs": 2139,
+          "rawHex": "09"
+        },
+        {
+          "tMs": 3139,
+          "rawHex": "09"
+        },
+        {
+          "tMs": 4139,
+          "rawHex": "09"
+        },
+        {
+          "tMs": 5139,
+          "rawHex": "09"
+        }
+      ]
+    },
+    {
+      "didHex": "0x1701",
+      "phase": "baseline",
+      "samples": [
+        {
+          "tMs": 190,
+          "rawHex": "0306535B"
+        },
+        {
+          "tMs": 1173,
+          "rawHex": "0306535C"
+        },
+        {
+          "tMs": 2194,
+          "rawHex": "0306535D"
+        },
+        {
+          "tMs": 3189,
+          "rawHex": "0306535E"
+        },
+        {
+          "tMs": 4189,
+          "rawHex": "0306535F"
+        },
+        {
+          "tMs": 5189,
+          "rawHex": "03065360"
+        }
+      ]
+    },
+    {
+      "didHex": "0x1731",
+      "phase": "baseline",
+      "samples": [
+        {
+          "tMs": 249,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 1219,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 2260,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 3240,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 4250,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 5239,
+          "rawHex": "00"
+        }
+      ]
+    },
+    {
+      "didHex": "0x1750",
+      "phase": "baseline",
+      "samples": [
+        {
+          "tMs": 310,
+          "rawHex": "AA"
+        },
+        {
+          "tMs": 1269,
+          "rawHex": "AA"
+        },
+        {
+          "tMs": 2324,
+          "rawHex": "AA"
+        },
+        {
+          "tMs": 3289,
+          "rawHex": "AA"
+        },
+        {
+          "tMs": 4312,
+          "rawHex": "AA"
+        },
+        {
+          "tMs": 5289,
+          "rawHex": "AA"
+        }
+      ]
+    },
+    {
+      "didHex": "0x100A",
+      "phase": "brake",
+      "samples": [
+        {
+          "tMs": 36,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 1025,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 2041,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 3045,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 5425,
+          "rawHex": "00"
+        }
+      ]
+    },
+    {
+      "didHex": "0x100E",
+      "phase": "brake",
+      "samples": [
+        {
+          "tMs": 105,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 1095,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 2105,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 3105,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 5101,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 5475,
+          "rawHex": "00"
+        }
+      ]
+    },
+    {
+      "didHex": "0x1600",
+      "phase": "brake",
+      "samples": [
+        {
+          "tMs": 155,
+          "rawHex": "09"
+        },
+        {
+          "tMs": 1155,
+          "rawHex": "09"
+        },
+        {
+          "tMs": 2155,
+          "rawHex": "09"
+        },
+        {
+          "tMs": 3157,
+          "rawHex": "09"
+        },
+        {
+          "tMs": 5176,
+          "rawHex": "09"
+        },
+        {
+          "tMs": 5525,
+          "rawHex": "09"
+        }
+      ]
+    },
+    {
+      "didHex": "0x1701",
+      "phase": "brake",
+      "samples": [
+        {
+          "tMs": 205,
+          "rawHex": "03065361"
+        },
+        {
+          "tMs": 1205,
+          "rawHex": "03065362"
+        },
+        {
+          "tMs": 2205,
+          "rawHex": "03065363"
+        },
+        {
+          "tMs": 3205,
+          "rawHex": "03065364"
+        },
+        {
+          "tMs": 5246,
+          "rawHex": "03065366"
+        },
+        {
+          "tMs": 5579,
+          "rawHex": "03065366"
+        }
+      ]
+    },
+    {
+      "didHex": "0x1731",
+      "phase": "brake",
+      "samples": [
+        {
+          "tMs": 259,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 1255,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 2255,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 3265,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 5315,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 5646,
+          "rawHex": "00"
+        }
+      ]
+    },
+    {
+      "didHex": "0x1750",
+      "phase": "brake",
+      "samples": [
+        {
+          "tMs": 327,
+          "rawHex": "AA"
+        },
+        {
+          "tMs": 1317,
+          "rawHex": "AA"
+        },
+        {
+          "tMs": 2305,
+          "rawHex": "AA"
+        },
+        {
+          "tMs": 3327,
+          "rawHex": "AA"
+        },
+        {
+          "tMs": 5375,
+          "rawHex": "AA"
+        },
+        {
+          "tMs": 5705,
+          "rawHex": "AA"
+        }
+      ]
+    },
+    {
+      "didHex": "0x100A",
+      "phase": "steering",
+      "samples": [
+        {
+          "tMs": 51,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 1040,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 2050,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 3061,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 5369,
+          "rawHex": "00"
+        }
+      ]
+    },
+    {
+      "didHex": "0x100E",
+      "phase": "steering",
+      "samples": [
+        {
+          "tMs": 140,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 1090,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 2119,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 3119,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 5110,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 5434,
+          "rawHex": "00"
+        }
+      ]
+    },
+    {
+      "didHex": "0x1600",
+      "phase": "steering",
+      "samples": [
+        {
+          "tMs": 190,
+          "rawHex": "09"
+        },
+        {
+          "tMs": 1140,
+          "rawHex": "09"
+        },
+        {
+          "tMs": 2170,
+          "rawHex": "09"
+        },
+        {
+          "tMs": 3170,
+          "rawHex": "09"
+        },
+        {
+          "tMs": 5170,
+          "rawHex": "09"
+        },
+        {
+          "tMs": 5510,
+          "rawHex": "09"
+        }
+      ]
+    },
+    {
+      "didHex": "0x1701",
+      "phase": "steering",
+      "samples": [
+        {
+          "tMs": 240,
+          "rawHex": "03065367"
+        },
+        {
+          "tMs": 1190,
+          "rawHex": "03065368"
+        },
+        {
+          "tMs": 2220,
+          "rawHex": "03065369"
+        },
+        {
+          "tMs": 3222,
+          "rawHex": "0306536A"
+        },
+        {
+          "tMs": 5221,
+          "rawHex": "0306536C"
+        },
+        {
+          "tMs": 5569,
+          "rawHex": "0306536D"
+        }
+      ]
+    },
+    {
+      "didHex": "0x1731",
+      "phase": "steering",
+      "samples": [
+        {
+          "tMs": 290,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 1240,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 2270,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 3269,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 5271,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 5619,
+          "rawHex": "00"
+        }
+      ]
+    },
+    {
+      "didHex": "0x1750",
+      "phase": "steering",
+      "samples": [
+        {
+          "tMs": 340,
+          "rawHex": "AA"
+        },
+        {
+          "tMs": 1294,
+          "rawHex": "AA"
+        },
+        {
+          "tMs": 2323,
+          "rawHex": "AA"
+        },
+        {
+          "tMs": 3319,
+          "rawHex": "AA"
+        },
+        {
+          "tMs": 5319,
+          "rawHex": "AA"
+        },
+        {
+          "tMs": 5670,
+          "rawHex": "AA"
+        }
+      ]
+    },
+    {
+      "didHex": "0x100A",
+      "phase": "throttle",
+      "samples": [
+        {
+          "tMs": 26,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 1046,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 3360,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 5705,
+          "rawHex": "00"
+        }
+      ]
+    },
+    {
+      "didHex": "0x100E",
+      "phase": "throttle",
+      "samples": [
+        {
+          "tMs": 85,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 1105,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 3106,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 3425,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 5399,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 5776,
+          "rawHex": "00"
+        }
+      ]
+    },
+    {
+      "didHex": "0x1600",
+      "phase": "throttle",
+      "samples": [
+        {
+          "tMs": 158,
+          "rawHex": "09"
+        },
+        {
+          "tMs": 1156,
+          "rawHex": "09"
+        },
+        {
+          "tMs": 3155,
+          "rawHex": "09"
+        },
+        {
+          "tMs": 3485,
+          "rawHex": "09"
+        },
+        {
+          "tMs": 5459,
+          "rawHex": "09"
+        },
+        {
+          "tMs": 5859,
+          "rawHex": "09"
+        }
+      ]
+    },
+    {
+      "didHex": "0x1701",
+      "phase": "throttle",
+      "samples": [
+        {
+          "tMs": 236,
+          "rawHex": "0306536E"
+        },
+        {
+          "tMs": 1205,
+          "rawHex": "0306536E"
+        },
+        {
+          "tMs": 3205,
+          "rawHex": "03065370"
+        },
+        {
+          "tMs": 3536,
+          "rawHex": "03065371"
+        },
+        {
+          "tMs": 5526,
+          "rawHex": "03065373"
+        },
+        {
+          "tMs": 5925,
+          "rawHex": "03065373"
+        }
+      ]
+    },
+    {
+      "didHex": "0x1731",
+      "phase": "throttle",
+      "samples": [
+        {
+          "tMs": 285,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 1260,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 3256,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 3585,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 5579,
+          "rawHex": "00"
+        },
+        {
+          "tMs": 5976,
+          "rawHex": "00"
+        }
+      ]
+    },
+    {
+      "didHex": "0x1750",
+      "phase": "throttle",
+      "samples": [
+        {
+          "tMs": 336,
+          "rawHex": "AA"
+        },
+        {
+          "tMs": 1325,
+          "rawHex": "AA"
+        },
+        {
+          "tMs": 3307,
+          "rawHex": "AA"
+        },
+        {
+          "tMs": 3635,
+          "rawHex": "AA"
+        },
+        {
+          "tMs": 5645,
+          "rawHex": "AA"
+        }
+      ]
+    }
+  ],
+  "suggestions": []
+}
