@@ -45,7 +45,8 @@ import { circuitCatalog, resolveSelectedCircuit, type BundledCircuit } from './c
 import { createLifecycleLock } from './lifecycleLock';
 import type { DevReplayScenario } from './devReplayScenarios';
 import { startVoiceCoach } from './voiceCoach';
-import { createTelemetryProvider, type TelemetryProvider } from './telemetryProvider';
+import { createTelemetryProvider, type TelemetryProvider, type VehicleProfileBindingLike } from './telemetryProvider';
+import { createVehicleProfileBindingStore } from '../persistence/didSweepStore';
 import { createGForceProvider, type GForceProvider } from './gforceProvider';
 import { TelemetryRecorder } from '../persistence/telemetryRecorder';
 import { PASSTHROUGH_WRITE_GATE, type SqlWriteGate } from '../persistence/sqlWriteGate';
@@ -571,11 +572,75 @@ const telemetryClock = new PerformanceNowClock();
 // production actually wires it, per this ticket's binding design.
 // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
 const telemetryIsDev = typeof __DEV__ !== 'undefined' ? __DEV__ : false;
-export const telemetryProvider: TelemetryProvider = createTelemetryProvider({
+
+// ---------------------------------------------------------------------------
+// P4l-FIX3 J5 (binding, after Codex P4l-REV1 finding 3/HIGH "Confirmed
+// bindings never reach live ENET telemetry" -- FIX1 concern 1, the P4l
+// worker's own note): `telemetryProvider.ts`'s `readVehicleProfileBindings`
+// dep is read SYNCHRONOUSLY (see its own doc comment, `buildEnetConfig()`),
+// but the underlying SQLite read is async -- so this composition layer keeps
+// a CACHED snapshot for it to read, refreshed asynchronously.
+//
+// Which profile: the Signal Finder has no persisted profile SETTING yet
+// (`SignalFinderScreen.tsx`'s own `useState('generic')`) -- this is that
+// SAME default, so a binding confirmed from the screen's default state is
+// picked up without the user ever choosing a profile chip. When a persisted
+// vehicle-profile setting exists, this should read THAT instead of a fixed
+// constant.
+// ---------------------------------------------------------------------------
+const VEHICLE_PROFILE_ID_FOR_TELEMETRY = 'generic';
+
+let vehicleProfileBindingsCache: readonly VehicleProfileBindingLike[] = [];
+
+/**
+ * Re-reads confirmed vehicle-profile bindings from storage into the cache
+ * above. Refreshed (a) once bootstrap resolves `db` (see `runBootstrap()`),
+ * (b) whenever the Signal Finder confirms a channel (`SignalFinderScreen.tsx`'s
+ * `handleConfirm` calls this), and (c) defensively on every
+ * `telemetryProvider.start()` below -- (c) cannot affect the START it is
+ * called from (the read is async, `readVehicleProfileBindings()` is not),
+ * only the NEXT one, so (a)/(b) are what make a freshly confirmed binding
+ * actually reach the very next start. Never throws: a read failure just
+ * leaves the previous (or empty) cache in place, matching every other
+ * "telemetry must never fail to start" discipline in this module.
+ */
+export async function refreshVehicleProfileBindingsCache(): Promise<void> {
+  try {
+    const store = createVehicleProfileBindingStore(getTelemetryReadDb());
+    vehicleProfileBindingsCache = await store.listBindings(VEHICLE_PROFILE_ID_FOR_TELEMETRY);
+  } catch (error) {
+    console.warn('[composition] could not refresh the vehicle profile bindings cache', error);
+  }
+}
+
+/** Test/diagnostic visibility into the cache above. */
+export function getVehicleProfileBindingsCache(): readonly VehicleProfileBindingLike[] {
+  return vehicleProfileBindingsCache;
+}
+
+const baseTelemetryProvider: TelemetryProvider = createTelemetryProvider({
   settingsStore,
   monotonicNow: () => telemetryClock.now(),
   isDev: telemetryIsDev,
+  readVehicleProfileBindings: () => vehicleProfileBindingsCache,
 });
+
+/**
+ * Thin wrapper, not a second implementation: every method delegates straight
+ * to {@link baseTelemetryProvider}, EXCEPT `start()`, which also fires a
+ * defensive cache refresh (fire-and-forget -- see (c) above) before
+ * delegating. Both of this app's `start()` call sites --
+ * `startTelemetryRecording()` below and `TelemetryScreen.tsx`'s manual
+ * monitor -- go through this SAME exported singleton, so neither needs its
+ * own refresh call.
+ */
+export const telemetryProvider: TelemetryProvider = {
+  ...baseTelemetryProvider,
+  start(): void {
+    void refreshVehicleProfileBindingsCache();
+    baseTelemetryProvider.start();
+  },
+};
 
 // ---------------------------------------------------------------------------
 // G-force telemetry (Telemetry addendum — channel revision, binding):
@@ -1572,6 +1637,14 @@ async function runBootstrap(): Promise<void> {
       dbWriteGate = opened.writeGate;
       repository = opened.repository;
     }
+
+    // P4l-FIX3 J5 (binding): primes the vehicle-profile bindings cache as
+    // soon as `db` is available, so a binding confirmed by an EARLIER app
+    // run is already live for the very first `telemetryProvider.start()` of
+    // THIS run, not just ones after the next Signal Finder confirm. Never
+    // awaited -- `refreshVehicleProfileBindingsCache()` never throws, and
+    // bootstrap must never wait on it.
+    void refreshVehicleProfileBindingsCache();
 
     gnssProvider = new GnssLocationProvider();
 

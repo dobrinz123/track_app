@@ -93,7 +93,11 @@ function makeController(
 /** Runs the whole find, driving fake timers until it settles. */
 async function runFind(harness: Harness, targetId: 'brakeSwitch' | 'steeringAngle' = 'brakeSwitch'): Promise<void> {
   const done = harness.controller.find(targetId);
-  for (let i = 0; i < 200; i += 1) {
+  // P4l-FIX3 J1: a target whose ECU needs several ≤16-DID passes (instead of
+  // one truncated one) runs the whole metronome once per pass, sequentially
+  // -- 400 iterations gives up to 80s of virtual time, comfortably covering
+  // several passes' worth of a short test script rather than just one or two.
+  for (let i = 0; i < 400; i += 1) {
     await vi.advanceTimersByTimeAsync(200);
     if (harness.controller.getSnapshot().phase === 'result' || harness.controller.getSnapshot().phase === 'error') break;
   }
@@ -181,7 +185,58 @@ describe('createSignalFinderController -- one session across ECUs', () => {
     expect(pass29!.dids).not.toContain(0x5056);
   });
 
-  it('never polls more than the per-pass cap (16 DIDs)', async () => {
+  it('never polls more than 16 DIDs in a single pass -- but partitions an ECU with more eligible DIDs into several CONSECUTIVE passes, so every one is still read (P4l-FIX3 J1, after Codex P4l-REV1 M5)', async () => {
+    const sweepStore = createInMemoryDidSweepStore();
+    await sweepStore.createRun({
+      runId: 'run-29',
+      adapterType: 'enet',
+      targetAddress: 0x29,
+      rangeFrom: 0x5000,
+      rangeTo: 0x5fff,
+      lastDid: 0x5fff,
+      startedAtUtc: '2026-08-29T17:32:56.879Z',
+      updatedAtUtc: '2026-08-29T17:35:38.263Z',
+      status: 'complete',
+      visitedCount: 4_096,
+      timeoutCount: 0,
+      unmatchedCount: 0,
+      errorCount: 0,
+      nrcCounts: {},
+    });
+    // 39 cached responders + the ECU's own 1 hypothesis (0x500c) = 40 eligible
+    // DIDs -- the ticket's own example ("40 eligible DIDs -> 3 passes, all 40
+    // read").
+    await sweepStore.upsertResponders(
+      'run-29',
+      Array.from({ length: 39 }, (_v, i) => ({ did: 0x5100 + i, raw: bytes('00'), rttMs: 10 })),
+      '2026-08-29T17:33:00.000Z',
+    );
+
+    const harness = makeController(() => bytes('00'), { sweepStore });
+    await runFind(harness);
+    const snapshot = harness.controller.getSnapshot();
+
+    const passes29 = snapshot.passes.filter((p) => p.ecu === 0x29);
+    // 3 passes: ceil(40 / 16) -- every one of them capped at 16, none empty.
+    expect(passes29).toHaveLength(3);
+    expect(passes29.map((p) => p.dids.length)).toEqual([16, 16, 8]);
+    for (const pass of passes29) expect(pass.dids.length).toBeLessThanOrEqual(16);
+    expect(passes29[0]!.dids[0]).toBe(0x500c); // the hypothesis leads the very first pass.
+
+    // ALL 40 were actually read -- no DID silently dropped by the cap.
+    const allDidsRead = passes29.flatMap((p) => p.dids);
+    expect(allDidsRead).toHaveLength(40);
+    expect(new Set(allDidsRead).size).toBe(40); // no duplicate across passes.
+    const answeredEcu29 = new Set(harness.controller.getSamples().filter((s) => s.ecu === 0x29).map((s) => s.did));
+    expect(answeredEcu29.size).toBe(40);
+
+    // The snapshot exposes pass index/total (across every ECU pass, this
+    // ECU's 3 included) so the screen can say "pass N/total" -- `passes`
+    // itself is the flattened list `passIndex` counts through while reading.
+    expect(snapshot.passes.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('drives passIndex through every one of an ECU s several passes while reading (screen "pass N/total")', async () => {
     const sweepStore = createInMemoryDidSweepStore();
     await sweepStore.createRun({
       runId: 'run-29',
@@ -201,15 +256,21 @@ describe('createSignalFinderController -- one session across ECUs', () => {
     });
     await sweepStore.upsertResponders(
       'run-29',
-      Array.from({ length: 40 }, (_v, i) => ({ did: 0x5100 + i, raw: bytes('00'), rttMs: 10 })),
+      Array.from({ length: 39 }, (_v, i) => ({ did: 0x5100 + i, raw: bytes('00'), rttMs: 10 })),
       '2026-08-29T17:33:00.000Z',
     );
-
     const harness = makeController(() => bytes('00'), { sweepStore });
+    const seenPassIndexes: number[] = [];
+    harness.controller.subscribe((s) => {
+      if (s.phase === 'reading' && (seenPassIndexes.length === 0 || seenPassIndexes[seenPassIndexes.length - 1] !== s.passIndex)) {
+        seenPassIndexes.push(s.passIndex);
+      }
+    });
     await runFind(harness);
-    const pass29 = harness.controller.getSnapshot().passes.find((p) => p.ecu === 0x29);
-    expect(pass29!.dids).toHaveLength(16);
-    expect(pass29!.dids[0]).toBe(0x500c); // the hypothesis is never squeezed out by cached responders.
+    // 4 total passes (3 for 0x29, 1 for 0x12) -- every index visited in
+    // order (a transient -1 precedes index 0: `phase` flips to `'reading'`
+    // a tick before the first pass's own `passIndex` emit).
+    expect(seenPassIndexes).toEqual([-1, 0, 1, 2, 3]);
   });
 
   it('tolerates NRC -- the DID is reported as "no response", the run still completes', async () => {

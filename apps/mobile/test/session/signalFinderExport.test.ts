@@ -39,13 +39,21 @@ import { buildMetronomeTimeline, type SignalActionScript, type SignalCandidateSc
 import {
   SIGNAL_FINDER_EXPORT_KIND,
   SIGNAL_FINDER_EXPORT_SCHEMA_VERSION,
+  VEHICLE_PROFILE_EXPORT_KIND,
+  VEHICLE_PROFILE_EXPORT_SCHEMA_VERSION,
   buildSignalFinderExportDocument,
   buildSignalFinderSummaryMarkdown,
+  buildVehicleProfileDocument,
   shareSignalFinderExport,
   shareSignalFinderJson,
+  shareVehicleProfileExport,
   signalFinderExportFileName,
+  signalFinderExportInputFromSnapshot,
+  vehicleProfileExportFileName,
   type SignalFinderExportInput,
 } from '../../src/session/signalFinderExport';
+import type { SignalFinderSnapshot } from '../../src/session/signalFinderController';
+import type { VehicleProfileBinding } from '../../src/persistence/didSweepStore';
 
 /**
  * Ticket P4l S5 (user requirement 2026-08-29, binding) / contracts.md
@@ -115,6 +123,30 @@ function input(overrides: Partial<SignalFinderExportInput> = {}): SignalFinderEx
   };
 }
 
+function snapshot(overrides: Partial<SignalFinderSnapshot> = {}): SignalFinderSnapshot {
+  return {
+    phase: 'result',
+    profileId: 'toyota-supra-b58',
+    targetId: 'brakeSwitch',
+    targetLabel: 'Brake switch',
+    engineRequirement: 'off-ok',
+    timeline: TIMELINE,
+    passes: [{ ecu: 0x29, dids: [0x500c], hypothesisDids: [0x500c], cachedDids: [] }],
+    passIndex: -1,
+    ecu: null,
+    step: null,
+    scores: [score()],
+    noResponseDids: [],
+    nextStep: null,
+    confirmedChannels: [],
+    sessionId: 'signal-finder-1788-abc',
+    startedAtUtc: '2026-08-29T18:10:00.000Z',
+    measuredReqPerSec: 15.8,
+    error: null,
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   fileSystemTracker.writeCalls = [];
   fileSystemTracker.writeShouldThrow = false;
@@ -149,6 +181,46 @@ describe('buildSignalFinderExportDocument', () => {
     expect(doc.samples[0]).toMatchObject({ ecuHex: '0x29', didHex: '0x500C', tMs: 1_250, rawHex: '04' });
   });
 
+  /**
+   * P4l-FIX3 J6 (binding — Codex P4l re-review finding L12, added mid-ticket
+   * by the coordinator): verdicts are computed from `netEdges` (=
+   * `matchedEdges - extraTransitions`), not the gross `matchedEdges` — the
+   * export must carry that same net figure plus the extras/cap-reason
+   * fields P4l-FIX2 added to `SignalCandidateScore`, so a reader of the JSON
+   * sees the SAME evidence the verdict was actually based on.
+   */
+  it('carries netEdges (matchedEdges minus extraTransitions) and the P4l-FIX2 extras on every candidate', () => {
+    const doc = buildSignalFinderExportDocument(
+      input({
+        scores: [
+          score({
+            did: 0x500c,
+            verdict: 'probable',
+            matchedEdges: 5,
+            expectedEdges: 5,
+            extraTransitions: 1,
+            didBaselineChanges: 0,
+            bipolarSides: null,
+            verdictCapReason: 'extra-transitions',
+          }),
+        ],
+      }),
+    );
+    expect(doc.candidates[0]).toMatchObject({
+      matchedEdges: 5,
+      extraTransitions: 1,
+      netEdges: 4, // 5 - 1
+      didBaselineChanges: 0,
+      bipolarSides: null,
+      verdictCapReason: 'extra-transitions',
+    });
+  });
+
+  it('netEdges defaults to matchedEdges (extraTransitions 0) when the score carries none of the optional P4l-FIX2 fields', () => {
+    const doc = buildSignalFinderExportDocument(input({ scores: [score({ matchedEdges: 10, expectedEdges: 10 })] }));
+    expect(doc.candidates[0]).toMatchObject({ netEdges: 10, extraTransitions: 0, didBaselineChanges: 0, bipolarSides: null, verdictCapReason: null });
+  });
+
   it('names the files after the date and target', () => {
     expect(signalFinderExportFileName('2026-08-29T18:12:03.000Z', 'brakeSwitch', 'json')).toBe(
       'trace-signal-finder-2026-08-29-brakeSwitch.json',
@@ -156,6 +228,80 @@ describe('buildSignalFinderExportDocument', () => {
     expect(signalFinderExportFileName('2026-08-29T18:12:03.000Z', 'brakeSwitch', 'md')).toBe(
       'trace-signal-finder-2026-08-29-brakeSwitch.md',
     );
+  });
+});
+
+describe('signalFinderExportInputFromSnapshot (P4l-FIX3 J2, after Codex P4l-REV1 M7)', () => {
+  /**
+   * "the on-screen summary/export document is built from
+   * `controller.getSnapshot()` after `find()` resolves ... never from the
+   * closure that started the run." A component-render test is not available
+   * in this repo (no `@testing-library/react-native` dependency) -- verified
+   * here at the level the screen's `buildDocument()` now delegates to: a
+   * PURE function of whichever snapshot it is handed, so `SignalFinderScreen.tsx`
+   * calling it with `controller.getSnapshot()` (the fresh, post-`find()`
+   * snapshot) can never combine data from an earlier run the way closing
+   * over React's `snapshot` STATE did.
+   */
+  it('returns null when the given snapshot has no target yet (nothing has run)', () => {
+    expect(signalFinderExportInputFromSnapshot(snapshot({ targetId: null }), [], [], '2026-08-29T18:12:03.000Z')).toBeNull();
+  });
+
+  it('builds an input that reproduces the GIVEN snapshot exactly, never a memoized one', () => {
+    const samples = [{ ecu: 0x29, did: 0x500c, tMs: 1_250, raw: Uint8Array.from([0x04]) }];
+    const result = signalFinderExportInputFromSnapshot(snapshot(), samples, [], '2026-08-29T18:12:03.000Z');
+    expect(result).toMatchObject({
+      nowIso: '2026-08-29T18:12:03.000Z',
+      sessionId: 'signal-finder-1788-abc',
+      profileId: 'toyota-supra-b58',
+      targetId: 'brakeSwitch',
+      targetLabel: 'Brake switch',
+      engineRequirement: 'off-ok',
+      startedAtUtc: '2026-08-29T18:10:00.000Z',
+      measuredReqPerSec: 15.8,
+      passes: [{ ecu: 0x29, dids: [0x500c] }],
+      nextStep: null,
+    });
+    expect(result!.samples).toBe(samples);
+  });
+
+  it('a SECOND call with a DIFFERENT (later) snapshot reflects ONLY that later run -- no leakage from the first (the exact bug: a stale closure combining two runs)', () => {
+    const run1 = snapshot({
+      sessionId: 'signal-finder-run-1',
+      targetId: 'brakeSwitch',
+      scores: [score({ did: 0x500c, verdict: 'unrelated', matchedEdges: 1 })],
+    });
+    const run2 = snapshot({
+      sessionId: 'signal-finder-run-2',
+      targetId: 'steeringAngle',
+      targetLabel: 'Steering angle',
+      scores: [score({ did: 0x4000, verdict: 'found', matchedEdges: 10 })],
+    });
+    const first = signalFinderExportInputFromSnapshot(run1, [], [], '2026-08-29T18:12:03.000Z')!;
+    const second = signalFinderExportInputFromSnapshot(run2, [], [], '2026-08-29T18:14:00.000Z')!;
+    expect(first.sessionId).toBe('signal-finder-run-1');
+    expect(first.targetId).toBe('brakeSwitch');
+    expect(second.sessionId).toBe('signal-finder-run-2');
+    expect(second.targetId).toBe('steeringAngle');
+    expect(second.scores).toEqual([score({ did: 0x4000, verdict: 'found', matchedEdges: 10 })]);
+  });
+
+  it('carries the confirmed bindings and samples handed to it (screen-supplied, not part of the controller snapshot)', () => {
+    const bindings = [
+      {
+        profileId: 'toyota-supra-b58',
+        channel: 'brakeSwitch',
+        ecu: 0x29,
+        did: 0x500c,
+        length: 1,
+        decode: 'bit0',
+        status: 'field-confirmed' as const,
+        evidenceJson: '{}',
+        updatedAtUtc: '2026-08-29T18:12:00.000Z',
+      },
+    ];
+    const result = signalFinderExportInputFromSnapshot(snapshot(), [], bindings, '2026-08-29T18:12:03.000Z');
+    expect(result!.confirmedBindings).toBe(bindings);
   });
 });
 
@@ -189,6 +335,55 @@ describe('buildSignalFinderSummaryMarkdown (pure, <= 1 page)', () => {
     expect(md).toContain('bit0 (0x04 released -> 0x05 pressed)');
     // <= 1 page: the summary never dumps the raw sample log.
     expect(md.split('\n').length).toBeLessThanOrEqual(60);
+  });
+
+  /**
+   * P4l-FIX3 J6 (binding, Codex re-review L12): the table's evidence column
+   * shows NET edges (what the verdict is actually based on), and states the
+   * extras/cap reason in one short line -- e.g. "4/5 edges (1 extra), capped:
+   * one-sided" -- whenever they are present, so a reader is never left
+   * looking at a bare edge count that doesn't explain a lower-than-expected
+   * verdict.
+   */
+  it('shows netEdges as the primary evidence plus extraTransitions and the cap reason in one short line', () => {
+    const doc = buildSignalFinderExportDocument(
+      input({
+        scores: [
+          score({
+            did: 0x500c,
+            verdict: 'probable',
+            matchedEdges: 5,
+            expectedEdges: 5,
+            extraTransitions: 1,
+            didBaselineChanges: 0,
+            verdictCapReason: 'one-sided-bipolar',
+          }),
+        ],
+      }),
+    );
+    const md = buildSignalFinderSummaryMarkdown(doc, 'en');
+    // netEdges (4 = 5 - 1) over expectedEdges, never the gross matchedEdges (5).
+    expect(md).toMatch(/\b4\/5\b/);
+    expect(md).not.toMatch(/\b5\/5\b/);
+    expect(md).toContain('1 extra');
+    expect(md).toMatch(/capped:.*one-sided/);
+  });
+
+  it('shows didBaselineChanges when present and nonzero, alongside the edge count', () => {
+    const doc = buildSignalFinderExportDocument(
+      input({
+        scores: [score({ did: 0x500c, verdict: 'unrelated', matchedEdges: 2, expectedEdges: 10, didBaselineChanges: 3 })],
+      }),
+    );
+    const md = buildSignalFinderSummaryMarkdown(doc, 'en');
+    expect(md).toMatch(/baseline.*3/i);
+  });
+
+  it('omits every extras marker when the score carries none of them (the common case)', () => {
+    const doc = buildSignalFinderExportDocument(input({ scores: [score({ matchedEdges: 10, expectedEdges: 10 })] }));
+    const md = buildSignalFinderSummaryMarkdown(doc, 'en');
+    expect(md).not.toContain('extra');
+    expect(md).not.toContain('capped');
   });
 
   it('says what to do next, with minutes, whenever nothing was found (honesty, item 4)', () => {
@@ -228,6 +423,46 @@ describe('buildSignalFinderSummaryMarkdown (pure, <= 1 page)', () => {
     const md = buildSignalFinderSummaryMarkdown(buildSignalFinderExportDocument(input()), 'en');
     expect(md.toLowerCase()).toContain('no response');
     expect(md).toContain('0x58B7');
+  });
+
+  /**
+   * P4l-FIX3 J3 (binding, after Codex P4l-REV1 M8/MEDIUM: "the Markdown
+   * exporter does not guarantee the binding <= 1-page limit" -- candidate
+   * rows were capped, but the no-response DID list and binding decode
+   * strings were NOT, and counting SOURCE lines never bounded the rendered
+   * page). Total budget: ~60 lines / ~4 KB, hard-enforced regardless of how
+   * many/how long the variable-length sections are; every truncated section
+   * carries an explicit "(+N more...)" marker.
+   */
+  it('a 200-DID no-response list and a 500-char decode string stay within the ~60-line/~4KB budget, with a truncation marker', () => {
+    const noResponseDids = Array.from({ length: 200 }, (_v, i) => ({ ecu: 0x29, did: 0x5000 + i }));
+    const longDecode = 'x'.repeat(500);
+    const doc = buildSignalFinderExportDocument(
+      input({
+        noResponseDids,
+        confirmedBindings: [
+          {
+            profileId: 'toyota-supra-b58',
+            channel: 'brakeSwitch',
+            ecu: 0x29,
+            did: 0x500c,
+            length: 1,
+            decode: longDecode,
+            status: 'field-confirmed',
+            evidenceJson: '{}',
+            updatedAtUtc: '2026-08-29T18:12:00.000Z',
+          },
+        ],
+      }),
+    );
+    const md = buildSignalFinderSummaryMarkdown(doc, 'en');
+    expect(md.length).toBeLessThanOrEqual(4_096);
+    expect(md.split('\n').length).toBeLessThanOrEqual(60);
+    // The full 500-char decode string never appears verbatim -- it was
+    // truncated -- and SOME "more" marker is present (the no-response list
+    // alone cannot possibly fit all 200 entries under the budget above).
+    expect(md).not.toContain(longDecode);
+    expect(md).toMatch(/\(\+\d+ more/);
   });
 });
 
@@ -270,6 +505,115 @@ describe('shareSignalFinderExport', () => {
     const result = await shareSignalFinderExport(buildSignalFinderExportDocument(input()), 'en');
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/share sheet failed/);
+    logSpy.mockRestore();
+  });
+});
+
+/**
+ * P4l-FIX3 J4 (binding — contracts.md "Signal Finder (Phase 4l)" item 5:
+ * "exportable JSON identical to `data/vehicle-profiles/*.json`"):
+ * `buildVehicleProfileDocument(profileId, bindings)` merges PERSISTED
+ * bindings (`VehicleProfileBindingStore.listBindings()`) into the canonical
+ * vehicle-profile shape -- `profileId`, `make`/`model` when the profile is a
+ * known one, `transport`, `ecus`, and `channels[]` carrying each binding's
+ * own `status`/`decode`/evidence.
+ */
+function binding(overrides: Partial<VehicleProfileBinding> = {}): VehicleProfileBinding {
+  return {
+    profileId: 'toyota-supra-b58',
+    channel: 'brakeSwitch',
+    ecu: 0x29,
+    did: 0x500c,
+    length: 1,
+    decode: 'bit0 (0x04 released -> 0x05 pressed)',
+    status: 'field-confirmed',
+    evidenceJson: JSON.stringify({ restValueHex: '04', min: 4, max: 5, byteOffset: null }),
+    updatedAtUtc: '2026-08-29T18:12:00.000Z',
+    ...overrides,
+  };
+}
+
+describe('buildVehicleProfileDocument', () => {
+  it('is schemaVersion 1 of trace-vehicle-profile', () => {
+    const doc = buildVehicleProfileDocument('toyota-supra-b58', [], '2026-08-29T18:12:03.000Z');
+    expect(doc.schemaVersion).toBe(VEHICLE_PROFILE_EXPORT_SCHEMA_VERSION);
+    expect(doc.schemaVersion).toBe(1);
+    expect(doc.kind).toBe(VEHICLE_PROFILE_EXPORT_KIND);
+    expect(doc.kind).toBe('trace-vehicle-profile');
+    expect(doc.profileId).toBe('toyota-supra-b58');
+    expect(doc.transport).toBe('enet');
+  });
+
+  it('two confirmed bindings become channels[] with status field-confirmed and evidence (the ticket s own test)', () => {
+    const bindings = [
+      binding(),
+      binding({
+        channel: 'brakePressure',
+        ecu: 0x12,
+        did: 0x58b7,
+        length: 1,
+        decode: 'u8 hPa',
+        evidenceJson: JSON.stringify({ restValueHex: '00', min: 0, max: 200, byteOffset: null }),
+      }),
+    ];
+    const doc = buildVehicleProfileDocument('toyota-supra-b58', bindings, '2026-08-29T18:12:03.000Z');
+    expect(doc.channels).toHaveLength(2);
+    for (const channel of doc.channels) {
+      expect(channel.status).toBe('field-confirmed');
+      expect(channel.evidence).not.toBeNull();
+      expect(channel.evidence).not.toBeUndefined();
+    }
+    expect(doc.channels[0]).toMatchObject({ channel: 'brakeSwitch', ecu: '0x29', did: '0x500C', source: 'did' });
+    expect(doc.channels[0]!.evidence).toMatchObject({ min: 4, max: 5 });
+    expect(doc.channels[1]).toMatchObject({ channel: 'brakePressure', ecu: '0x12', did: '0x58B7' });
+  });
+
+  it('make/model are filled in for a known profile, absent for an unknown one', () => {
+    const known = buildVehicleProfileDocument('toyota-supra-b58', [], '2026-08-29T18:12:03.000Z');
+    expect(known.make).toBeTruthy();
+    expect(known.model).toBeTruthy();
+    const unknown = buildVehicleProfileDocument('generic', [], '2026-08-29T18:12:03.000Z');
+    expect(unknown.make).toBeUndefined();
+    expect(unknown.model).toBeUndefined();
+  });
+
+  it('collects every distinct ECU address seen across bindings', () => {
+    const doc = buildVehicleProfileDocument(
+      'toyota-supra-b58',
+      [binding({ ecu: 0x29 }), binding({ channel: 'brakePressure', ecu: 0x12, did: 0x58b7 })],
+      '2026-08-29T18:12:03.000Z',
+    );
+    expect(Object.keys(doc.ecus).sort()).toEqual(['0x12', '0x29']);
+  });
+
+  it('a corrupt evidence blob never throws -- the raw string is carried instead', () => {
+    const doc = buildVehicleProfileDocument('toyota-supra-b58', [binding({ evidenceJson: 'not json{' })], '2026-08-29T18:12:03.000Z');
+    expect(doc.channels[0]!.evidence).toBe('not json{');
+  });
+
+  it('names the file after the profile and the date', () => {
+    expect(vehicleProfileExportFileName('toyota-supra-b58', '2026-08-29T18:12:03.000Z')).toBe(
+      'trace-vehicle-profile-toyota-supra-b58-2026-08-29.json',
+    );
+  });
+});
+
+describe('shareVehicleProfileExport', () => {
+  it('writes and shares the profile JSON, never throws', async () => {
+    const doc = buildVehicleProfileDocument('toyota-supra-b58', [binding()], '2026-08-29T18:12:03.000Z');
+    const result = await shareVehicleProfileExport(doc);
+    expect(result).toMatchObject({ ok: true, shared: true });
+    expect(sharingTracker.shareCalls[0]!.url).toContain('.json');
+    expect(fileSystemTracker.writeCalls[0]!.path).toBe('trace-vehicle-profile-toyota-supra-b58-2026-08-29.json');
+    expect(JSON.parse(fileSystemTracker.writeCalls[0]!.content)).toMatchObject({ kind: 'trace-vehicle-profile', profileId: 'toyota-supra-b58' });
+  });
+
+  it('falls back (never throws) when sharing is unavailable', async () => {
+    sharingTracker.available = false;
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const doc = buildVehicleProfileDocument('toyota-supra-b58', [], '2026-08-29T18:12:03.000Z');
+    const result = await shareVehicleProfileExport(doc);
+    expect(result).toMatchObject({ ok: true, shared: false });
     logSpy.mockRestore();
   });
 });

@@ -85,7 +85,7 @@ export type SignalFinderPhase = 'idle' | 'preparing' | 'reading' | 'scoring' | '
 /** One ECU's worth of work: which DIDs will be polled, and where each came from. */
 export interface SignalFinderEcuPass {
   ecu: number;
-  /** The full poll list, hypotheses first, capped at {@link MAX_DIDS_PER_PASS}. */
+  /** This pass's OWN slice of the ECU's full poll list, capped at {@link MAX_DIDS_PER_PASS}. */
   dids: readonly number[];
   /** The subset that came from the target's own hypotheses (data). */
   hypothesisDids: readonly number[];
@@ -307,8 +307,11 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     }
   }
 
-  /** Item 2 (binding): the DID list for ONE ECU — hypotheses first, then cached responders of that ECU, capped. */
-  async function buildPass(target: SignalTargetDefinition, ecu: number): Promise<SignalFinderEcuPass> {
+  /** Item 2 (binding): the FULL DID list for ONE ECU — hypotheses first, then cached responders of that ECU, filtered by shape. Every eligible DID goes in here; capping to {@link MAX_DIDS_PER_PASS} happens in {@link partitionIntoPasses} below, across as many passes as it takes. */
+  async function collectEcuCandidates(
+    target: SignalTargetDefinition,
+    ecu: number,
+  ): Promise<{ hypothesisDids: number[]; cachedDids: number[] }> {
     const hypothesisDids = target.hypotheses.filter((h) => h.ecu === ecu).map((h) => h.did);
     const seen = new Set(hypothesisDids);
     const cachedDids: number[] = [];
@@ -331,9 +334,33 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         cachedDids.push(did);
       }
     }
-    const dids = [...hypothesisDids, ...cachedDids].slice(0, maxDidsPerPass);
-    const keptCached = cachedDids.filter((did) => dids.includes(did));
-    return { ecu, dids, hypothesisDids, cachedDids: keptCached };
+    return { hypothesisDids, cachedDids };
+  }
+
+  /**
+   * P4l-FIX3 J1 (binding, after Codex P4l-REV1 M5/MEDIUM: "cached responders
+   * after the first 16 are silently discarded"): "it polls at most 16 DIDs
+   * per ECU per pass" — an ECU with MORE eligible DIDs than that gets SEVERAL
+   * consecutive passes instead of one truncated one, so every DID the target
+   * is eligible to read on that ECU is actually read. Hypotheses always lead
+   * the very first pass (never squeezed out by cached responders, same as
+   * before); each pass keeps only the hypothesis/cached DIDs that landed in
+   * ITS OWN slice, so `SignalFinderExportPass`'s existing per-pass provenance
+   * split stays accurate.
+   */
+  function partitionIntoPasses(ecu: number, hypothesisDids: number[], cachedDids: number[]): SignalFinderEcuPass[] {
+    const all = [...hypothesisDids, ...cachedDids];
+    const passes: SignalFinderEcuPass[] = [];
+    for (let start = 0; start < all.length; start += maxDidsPerPass) {
+      const dids = all.slice(start, start + maxDidsPerPass);
+      passes.push({
+        ecu,
+        dids,
+        hypothesisDids: dids.filter((did) => hypothesisDids.includes(did)),
+        cachedDids: dids.filter((did) => cachedDids.includes(did)),
+      });
+    }
+    return passes;
   }
 
   /** Runs the whole metronome once against ONE ECU on a FRESH transport. */
@@ -406,8 +433,8 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
       }
       const passes: SignalFinderEcuPass[] = [];
       for (const ecu of [...ecus].sort((a, b) => a - b)) {
-        const pass = await buildPass(target, ecu);
-        if (pass.dids.length > 0) passes.push(pass);
+        const { hypothesisDids, cachedDids } = await collectEcuCandidates(target, ecu);
+        passes.push(...partitionIntoPasses(ecu, hypothesisDids, cachedDids));
       }
 
       const widestPass = passes.reduce((max, pass) => Math.max(max, pass.dids.length), 1);

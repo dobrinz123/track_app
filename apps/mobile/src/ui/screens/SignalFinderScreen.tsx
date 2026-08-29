@@ -13,7 +13,7 @@ import {
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
-import { getTelemetryReadDb, settingsStore } from '../../session/composition';
+import { getTelemetryReadDb, refreshVehicleProfileBindingsCache, settingsStore } from '../../session/composition';
 import { useSettings } from '../hooks/useSettings';
 import { EnetTcpTransport } from '../../session/enetTcpTransport';
 import { createDidSweepStore, createVehicleProfileBindingStore, type VehicleProfileBinding } from '../../persistence/didSweepStore';
@@ -21,8 +21,11 @@ import { createSignalFinderController, type SignalFinderSnapshot } from '../../s
 import {
   buildSignalFinderExportDocument,
   buildSignalFinderSummaryMarkdown,
+  buildVehicleProfileDocument,
   shareSignalFinderExport,
   shareSignalFinderJson,
+  shareVehicleProfileExport,
+  signalFinderExportInputFromSnapshot,
   type SignalFinderExportDocument,
 } from '../../session/signalFinderExport';
 
@@ -58,6 +61,24 @@ function didHex(did: number): string {
 
 function ecuHex(ecu: number): string {
   return `0x${ecu.toString(16).toUpperCase().padStart(2, '0')}`;
+}
+
+/** P4l-FIX3 J6 (binding, Codex re-review finding L12): the SAME `netEdges`-first evidence line as the `.md`/JSON export (`signalFinderExport.ts`'s `evidenceCell`) — what the verdict was ACTUALLY computed from, plus the P4l-FIX2 extras/cap reason when present. */
+const CAP_REASON_LABEL: Readonly<Record<string, string>> = {
+  'response-baseline-changes': 'restless baseline',
+  'one-sided-bipolar': 'one-sided',
+  'extra-transitions': 'extra transitions',
+};
+
+function evidenceLine(score: SignalCandidateScore): string {
+  const extraTransitions = score.extraTransitions ?? 0;
+  const didBaselineChanges = score.didBaselineChanges ?? 0;
+  const netEdges = Math.max(0, score.matchedEdges - extraTransitions);
+  let line = `${netEdges}/${score.expectedEdges} edges`;
+  if (extraTransitions > 0) line += ` (${extraTransitions} extra)`;
+  if (didBaselineChanges > 0) line += `, baseline moved ${didBaselineChanges}x`;
+  if (score.verdictCapReason != null) line += `, capped: ${CAP_REASON_LABEL[score.verdictCapReason] ?? score.verdictCapReason}`;
+  return line;
 }
 
 export function SignalFinderScreen(_props: Props): React.JSX.Element {
@@ -145,26 +166,23 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
 
   const busy = snapshot !== null && (snapshot.phase === 'preparing' || snapshot.phase === 'reading' || snapshot.phase === 'scoring');
 
+  /**
+   * P4l-FIX3 J2 (binding, after Codex P4l-REV1 M7/MEDIUM: "the on-screen
+   * summary is built from a stale React snapshot"): reads `controller`'s
+   * CURRENT `getSnapshot()`, never the `snapshot` REACT STATE variable --
+   * that state is whatever the render that STARTED a `find()` closed over,
+   * so a `buildDocument()` reading it after `await find()` resolves could
+   * mix a previous run's confirmed state into the JUST-finished run's
+   * export. `signalFinderExportInputFromSnapshot` is the pure bridge (unit
+   * tested directly in `signalFinderExport.test.ts` -- no
+   * `@testing-library/react-native` in this repo to render-test the
+   * component itself).
+   */
   function buildDocument(): SignalFinderExportDocument | null {
     const controller = controllerRef.current;
-    if (controller === null || snapshot === null || snapshot.targetId === null) return null;
-    return buildSignalFinderExportDocument({
-      nowIso: new Date().toISOString(),
-      sessionId: snapshot.sessionId,
-      profileId: snapshot.profileId,
-      targetId: snapshot.targetId,
-      targetLabel: snapshot.targetLabel ?? snapshot.targetId,
-      engineRequirement: snapshot.engineRequirement ?? 'off-ok',
-      startedAtUtc: snapshot.startedAtUtc,
-      measuredReqPerSec: snapshot.measuredReqPerSec,
-      timeline: snapshot.timeline,
-      passes: snapshot.passes,
-      scores: snapshot.scores,
-      noResponseDids: snapshot.noResponseDids,
-      samples: controller.getSamples(),
-      confirmedBindings: bindings,
-      nextStep: snapshot.nextStep,
-    });
+    if (controller === null) return null;
+    const input = signalFinderExportInputFromSnapshot(controller.getSnapshot(), controller.getSamples(), bindings, new Date().toISOString());
+    return input === null ? null : buildSignalFinderExportDocument(input);
   }
 
   async function handleFind(target: SignalTargetDefinition): Promise<void> {
@@ -185,6 +203,10 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
         : `Confirmed ${written.channel} = ${ecuHex(written.ecu)} ${didHex(written.did)}`,
     );
     setBindings(await bindingStoreRef.current.listBindings(profileId));
+    // P4l-FIX3 J5 (binding): a confirmed channel must reach live telemetry
+    // without the user restarting the app -- refreshes composition.ts's own
+    // cached snapshot so the NEXT `telemetryProvider.start()` picks it up.
+    if (written !== null) void refreshVehicleProfileBindingsCache();
   }
 
   async function handleShare(kind: 'summary' | 'json'): Promise<void> {
@@ -203,6 +225,24 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
             : 'JSON shared.'
           : result.error ?? 'Sharing is unavailable on this platform (the files were still built).',
       );
+    } finally {
+      setSharing(false);
+    }
+  }
+
+  /**
+   * P4l-FIX3 J4 (binding): "Share profile" — the whole car's accumulated
+   * confirmed bindings (not tied to any one find session), merged into the
+   * canonical vehicle-profile shape. Independent of `busy`/`phase === 'result'`
+   * on purpose: a profile can be shared any time bindings already exist, even
+   * before this screen's very first find in the current app run.
+   */
+  async function handleShareProfile(): Promise<void> {
+    setSharing(true);
+    try {
+      const doc = buildVehicleProfileDocument(profileId, bindings, new Date().toISOString());
+      const result = await shareVehicleProfileExport(doc);
+      setBanner(result.shared ? 'Vehicle profile shared.' : result.error ?? 'Sharing is unavailable on this platform (the file was still built).');
     } finally {
       setSharing(false);
     }
@@ -237,6 +277,15 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
             ))}
           </View>
           <Text style={styles.caption}>{catalog.label} ({catalog.profileId})</Text>
+          <Pressable
+            style={[styles.secondaryButton, sharing || bindings.length === 0 ? styles.buttonDisabled : null]}
+            disabled={sharing || bindings.length === 0}
+            onPress={() => void handleShareProfile()}
+            accessibilityRole="button"
+            accessibilityLabel="Share the vehicle profile"
+          >
+            <Text style={styles.secondaryButtonText}>Share profile</Text>
+          </Pressable>
         </View>
 
         {banner !== null ? <Text style={styles.banner}>{banner}</Text> : null}
@@ -306,8 +355,7 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
                     {score.byteOffset === null ? '' : ` b${score.byteOffset}`} · {ecuHex(score.ecu)}
                   </Text>
                   <Text style={styles.caption}>
-                    {score.matchedEdges}/{score.expectedEdges} edges · baseline {score.baselineChanges} · raw{' '}
-                    {score.restValueHex ?? '-'} → {score.min ?? '-'}..{score.max ?? '-'}
+                    {evidenceLine(score)} · raw {score.restValueHex ?? '-'} → {score.min ?? '-'}..{score.max ?? '-'}
                     {score.insufficientReason === null ? '' : ` · ${score.insufficientReason}`}
                   </Text>
                 </View>

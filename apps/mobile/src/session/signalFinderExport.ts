@@ -1,15 +1,18 @@
 import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
-import type {
-  MetronomeTimeline,
-  NextDiscoveryStep,
-  SignalCandidateScore,
-  SignalEngineRequirement,
-  SignalFinderSample,
-  SignalTargetId,
+import {
+  resolveSignalTargetCatalog,
+  type MetronomeTimeline,
+  type NextDiscoveryStep,
+  type SignalBipolarSides,
+  type SignalCandidateScore,
+  type SignalEngineRequirement,
+  type SignalFinderSample,
+  type SignalTargetId,
+  type SignalVerdictCapReason,
 } from '@circuit/core';
-import type { VehicleProfileBinding } from '../persistence/didSweepStore';
-import type { SignalFinderEcuPass } from './signalFinderController';
+import type { VehicleProfileBinding, VehicleProfileBindingStatus } from '../persistence/didSweepStore';
+import type { SignalFinderEcuPass, SignalFinderSnapshot } from './signalFinderController';
 
 /**
  * Signal Finder export (ticket P4l S5, binding — the user's own 2026-08-29
@@ -82,6 +85,21 @@ export interface SignalFinderExportCandidate {
   sampleCount: number;
   windowsBelowMinimum: number;
   insufficientReason: string | null;
+  /**
+   * P4l-FIX3 J6 (binding, Codex re-review finding L12): what the verdict is
+   * ACTUALLY based on -- `matchedEdges - extraTransitions`, floored at 0.
+   * The primary evidence figure; `matchedEdges` above stays for anyone still
+   * reading the gross count.
+   */
+  netEdges: number;
+  /** P4l-FIX2's own field, carried through: in-window transitions no expected edge accounts for. 0 when the score never set it. */
+  extraTransitions: number;
+  /** P4l-FIX2's own field: baseline samples at which ANY scored series of this DID moved. 0 when the score never set it. */
+  didBaselineChanges: number;
+  /** P4l-FIX2's own field: which sides of rest an `analog-bipolar` candidate's press windows visited. `null` for every other shape, or when the score never set it. */
+  bipolarSides: SignalBipolarSides | null;
+  /** P4l-FIX2's own field: why the verdict is lower than the edge ratio alone would give. `null` when nothing capped it. */
+  verdictCapReason: SignalVerdictCapReason | null;
 }
 
 export interface SignalFinderExportDocument {
@@ -132,6 +150,44 @@ function ecuHex(ecu: number): string {
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0').toUpperCase()).join('');
+}
+
+/**
+ * P4l-FIX3 J2 (binding, after Codex P4l-REV1 M7/MEDIUM: "the on-screen
+ * summary is built from a stale React snapshot"): the PURE bridge from a
+ * `SignalFinderController` snapshot (plus the two things it never owns --
+ * the session's samples and the persisted confirmed bindings) to
+ * {@link SignalFinderExportInput}. A plain function of its own arguments, no
+ * closure over anything from an earlier call -- `SignalFinderScreen.tsx`
+ * calls this with `controller.getSnapshot()` taken AFTER `find()` resolves
+ * (never the React `snapshot` state captured when the run started), so two
+ * consecutive finds can never have their data combined. `null` only when the
+ * snapshot has no target yet (nothing has ever run).
+ */
+export function signalFinderExportInputFromSnapshot(
+  snap: SignalFinderSnapshot,
+  samples: readonly SignalFinderSample[],
+  confirmedBindings: readonly VehicleProfileBinding[],
+  nowIso: string,
+): SignalFinderExportInput | null {
+  if (snap.targetId === null) return null;
+  return {
+    nowIso,
+    sessionId: snap.sessionId,
+    profileId: snap.profileId,
+    targetId: snap.targetId,
+    targetLabel: snap.targetLabel ?? snap.targetId,
+    engineRequirement: snap.engineRequirement ?? 'off-ok',
+    startedAtUtc: snap.startedAtUtc,
+    measuredReqPerSec: snap.measuredReqPerSec,
+    timeline: snap.timeline,
+    passes: snap.passes,
+    scores: snap.scores,
+    noResponseDids: snap.noResponseDids,
+    samples,
+    confirmedBindings,
+    nextStep: snap.nextStep,
+  };
 }
 
 /** Builds the FULL export document (pure — no I/O). */
@@ -186,6 +242,16 @@ export function buildSignalFinderExportDocument(input: SignalFinderExportInput):
       min: score.min,
       max: score.max,
       length: score.length,
+      // P4l-FIX3 J6: `netEdges` is what the verdict was ACTUALLY computed
+      // from (`@circuit/core`'s `scoreSignalCandidates`) -- every field here
+      // is optional on `SignalCandidateScore` (older callers' object
+      // literals still compile), so absent means "0/none", never `undefined`
+      // leaking into the export.
+      netEdges: Math.max(0, score.matchedEdges - (score.extraTransitions ?? 0)),
+      extraTransitions: score.extraTransitions ?? 0,
+      didBaselineChanges: score.didBaselineChanges ?? 0,
+      bipolarSides: score.bipolarSides ?? null,
+      verdictCapReason: score.verdictCapReason ?? null,
       sampleCount: score.sampleCount,
       windowsBelowMinimum: score.windowsBelowMinimum,
       insufficientReason: score.insufficientReason,
@@ -248,6 +314,13 @@ interface SummaryStrings {
   minutes: (value: number) => string;
   evidenceEdges: string;
   generated: string;
+  /** P4l-FIX3 J6: `"1 extra"` — an in-window transition no expected edge accounts for. */
+  extraSuffix: (n: number) => string;
+  /** P4l-FIX3 J6: `"baseline moved 3x"` — {@link SignalCandidateScore.didBaselineChanges}. */
+  baselineMoved: (n: number) => string;
+  /** P4l-FIX3 J6: `"capped: one-sided"`. */
+  cappedLabel: (reason: string) => string;
+  capReasons: Record<SignalVerdictCapReason, string>;
 }
 
 const EN: SummaryStrings = {
@@ -269,6 +342,14 @@ const EN: SummaryStrings = {
   minutes: (value) => `≈ ${Math.max(1, Math.round(value))} min`,
   evidenceEdges: 'edges matched',
   generated: 'Generated',
+  extraSuffix: (n) => `${n} extra`,
+  baselineMoved: (n) => `baseline moved ${n}x`,
+  cappedLabel: (reason) => `capped: ${reason}`,
+  capReasons: {
+    'response-baseline-changes': 'restless baseline',
+    'one-sided-bipolar': 'one-sided',
+    'extra-transitions': 'extra transitions',
+  },
 };
 
 const RO: SummaryStrings = {
@@ -290,7 +371,81 @@ const RO: SummaryStrings = {
   minutes: (value) => `≈ ${Math.max(1, Math.round(value))} min`,
   evidenceEdges: 'fronturi potrivite',
   generated: 'Generat',
+  extraSuffix: (n) => `${n} în plus`,
+  baselineMoved: (n) => `repaus schimbat de ${n} ori`,
+  cappedLabel: (reason) => `plafonat: ${reason}`,
+  capReasons: {
+    'response-baseline-changes': 'repaus neliniștit',
+    'one-sided-bipolar': 'unilateral',
+    'extra-transitions': 'tranziții în plus',
+  },
 };
+
+/**
+ * P4l-FIX3 J3 (binding, after Codex P4l-REV1 M8/MEDIUM: "the Markdown
+ * exporter does not guarantee the binding <= 1-page limit" -- the candidate
+ * table was capped, but the no-response DID list and binding decode strings
+ * were NOT, and counting SOURCE lines never bounded the RENDERED page).
+ * Total budget, hard-enforced regardless of how many/how long the
+ * variable-length sections are.
+ */
+const SUMMARY_MAX_LINES = 60;
+const SUMMARY_MAX_CHARS = 4_096;
+/** No-response DIDs are the single most likely section to blow the budget (a wide unswept range NRCs on every DID) — listed up to this many, then a marker. */
+const SUMMARY_MAX_NO_RESPONSE_LISTED = 20;
+/** Confirmed bindings are rare (usually 1-6) but each one's DECODE string is free-text (item 5's "decode guess") and has no length limit at the source. */
+const SUMMARY_MAX_CONFIRMED_LISTED = 10;
+const SUMMARY_MAX_DECODE_CHARS = 80;
+
+/** `item, item, item (+N more)` — every variable-length list section renders through this ONE helper, so the marker text/format never drifts between sections. */
+function joinWithMoreMarker<T>(items: readonly T[], max: number, render: (item: T) => string): string {
+  const shown = items.slice(0, max).map(render).join(', ');
+  const omitted = items.length - max;
+  return omitted > 0 ? `${shown} (+${omitted} more)` : shown;
+}
+
+/** Truncates free-text (a binding's decode guess) to `maxChars`, marking how much was cut. Never splits a section's OWN "(+N more)" convention — this is chars, not items, so the wording says so. */
+function truncateText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}… (+${text.length - maxChars} more chars)`;
+}
+
+/**
+ * Hard backstop UNDERNEATH every per-section cap above: even if every
+ * section individually stayed inside its own limit, many small sections
+ * together could still exceed the total budget (many confirmed channels,
+ * say). Truncates whole trailing LINES (never mid-line) and appends one
+ * final marker line — the one place a truncation can still occur without a
+ * dedicated "(+N more)" of its own, so it gets one here.
+ */
+function enforceTotalBudget(lines: readonly string[]): string {
+  let text = lines.join('\n');
+  if (text.length <= SUMMARY_MAX_CHARS && lines.length <= SUMMARY_MAX_LINES) return text;
+  let kept = lines;
+  if (kept.length > SUMMARY_MAX_LINES) kept = kept.slice(0, SUMMARY_MAX_LINES - 1);
+  text = kept.join('\n');
+  while (text.length > SUMMARY_MAX_CHARS - 40 && kept.length > 1) {
+    kept = kept.slice(0, kept.length - 1);
+    text = kept.join('\n');
+  }
+  return `${text}\n_(+ more, truncated to stay within the summary budget)_`;
+}
+
+/**
+ * P4l-FIX3 J6 (binding, Codex re-review finding L12): the primary evidence
+ * for one candidate — `netEdges/expectedEdges` (what the verdict was
+ * ACTUALLY computed from), plus `extraTransitions`, `didBaselineChanges` and
+ * `verdictCapReason` in the SAME short line whenever any of them is present.
+ * The common case (nothing extra, nothing capped) renders exactly like the
+ * old plain `matchedEdges/expectedEdges` cell.
+ */
+function evidenceCell(candidate: SignalFinderExportCandidate, s: SummaryStrings): string {
+  let cell = `${candidate.netEdges}/${candidate.expectedEdges}`;
+  if (candidate.extraTransitions > 0) cell += ` (${s.extraSuffix(candidate.extraTransitions)})`;
+  if (candidate.didBaselineChanges > 0) cell += `, ${s.baselineMoved(candidate.didBaselineChanges)}`;
+  if (candidate.verdictCapReason !== null) cell += `, ${s.cappedLabel(s.capReasons[candidate.verdictCapReason])}`;
+  return cell;
+}
 
 /** The <= 1-page summary. Never dumps the raw sample log — that is what the JSON is for. */
 export function buildSignalFinderSummaryMarkdown(
@@ -321,25 +476,29 @@ export function buildSignalFinderSummaryMarkdown(
   for (const candidate of tabulated) {
     const offset = candidate.byteOffset === null ? '' : ` b${candidate.byteOffset}`;
     lines.push(
-      `| ${candidate.didHex}${offset} | ${candidate.ecuHex} | ${s.verdicts[candidate.verdict]} | ${candidate.matchedEdges}/${candidate.expectedEdges} | ${candidate.baselineChanges} | ${candidate.restValueHex ?? '-'} → ${candidate.min ?? '-'}..${candidate.max ?? '-'} |`,
+      `| ${candidate.didHex}${offset} | ${candidate.ecuHex} | ${s.verdicts[candidate.verdict]} | ${evidenceCell(candidate, s)} | ${candidate.baselineChanges} | ${candidate.restValueHex ?? '-'} → ${candidate.min ?? '-'}..${candidate.max ?? '-'} |`,
     );
   }
   lines.push('');
   if (doc.candidates.length > tabulated.length) {
-    lines.push(`_… ${doc.candidates.length - tabulated.length} × ${s.verdicts.unrelated}_`);
+    lines.push(`_… ${doc.candidates.length - tabulated.length} × ${s.verdicts.unrelated} (+${doc.candidates.length - tabulated.length} more)_`);
     lines.push('');
   }
   if (doc.noResponse.length > 0) {
-    lines.push(`**${s.noResponse}:** ${doc.noResponse.map((entry) => `${entry.didHex} (${entry.ecuHex})`).join(', ')}`);
+    lines.push(
+      `**${s.noResponse}:** ${joinWithMoreMarker(doc.noResponse, SUMMARY_MAX_NO_RESPONSE_LISTED, (entry) => `${entry.didHex} (${entry.ecuHex})`)}`,
+    );
     lines.push('');
   }
   lines.push(
     `**${s.confirmed}:** ${
       doc.confirmedBindings.length === 0
         ? s.none
-        : doc.confirmedBindings
-            .map((b) => `${b.channel} = ${b.ecuHex} ${b.didHex} — ${b.decode}`)
-            .join('; ')
+        : joinWithMoreMarker(
+            doc.confirmedBindings,
+            SUMMARY_MAX_CONFIRMED_LISTED,
+            (b) => `${b.channel} = ${b.ecuHex} ${b.didHex} — ${truncateText(b.decode, SUMMARY_MAX_DECODE_CHARS)}`,
+          )
     }`,
   );
   if (doc.nextStep !== null) {
@@ -352,7 +511,7 @@ export function buildSignalFinderSummaryMarkdown(
   }
   lines.push('');
   lines.push(`_${s.generated}: ${doc.generatedAtUtc} · ${doc.kind} v${doc.schemaVersion}_`);
-  return lines.join('\n');
+  return enforceTotalBudget(lines);
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +600,165 @@ export async function shareSignalFinderJson(doc: SignalFinderExportDocument): Pr
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.log(`[signalFinderExport] JSON export failed (falling back) -- JSON is ${json.length} bytes: ${message}`);
+    return { ok: false, shared: false, markdownUri: null, jsonUri: null, markdownLength: 0, jsonLength: json.length, error: message };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// P4l-FIX3 J4 (binding — contracts.md "Signal Finder (Phase 4l)" item 5:
+// "'Confirm as <target>' writes a channel binding ... into the persisted
+// vehicle profile (SQLite, exportable JSON identical to
+// `data/vehicle-profiles/*.json`)"): the persisted `VehicleProfileBinding`
+// rows (`didSweepStore.ts`) merged into the SAME top-level shape as the
+// canonical profile files — `profileId`, `make`/`model` (when the profile is
+// a known one; the hypothesis-free 'generic' profile carries neither),
+// `transport`, `ecus`, `channels[]`. A SEPARATE document from
+// {@link SignalFinderExportDocument} above (which is one FIND SESSION's own
+// record) — this one is the whole car's accumulated, confirmed knowledge,
+// independent of which session confirmed which channel.
+// ---------------------------------------------------------------------------
+
+export const VEHICLE_PROFILE_EXPORT_SCHEMA_VERSION = 1;
+export const VEHICLE_PROFILE_EXPORT_KIND = 'trace-vehicle-profile';
+
+/** Only every ENET transport exists in this app today (contracts.md); a per-profile `transport` field is still emitted (matching the canonical file's own key) rather than assumed by every reader. */
+const VEHICLE_PROFILE_TRANSPORT = 'enet';
+
+export interface VehicleProfileChannelDocument {
+  channel: string;
+  source: 'did';
+  ecu: string;
+  did: string;
+  length: number | null;
+  decode: string;
+  status: VehicleProfileBindingStatus;
+  /** A short human note on where this came from — the canonical file's own `provenance` field. */
+  provenance: string;
+  /** The binding's own evidence summary — parsed JSON when `evidenceJson` is well-formed, else the raw string (never thrown away, never throws). */
+  evidence: unknown;
+  updatedAtUtc: string;
+}
+
+export interface VehicleProfileEcuDocument {
+  address: string;
+  /** The STRONGEST status any binding on this ECU has reached (`field-confirmed` > `field-observed` > `weak` > `hypothesis`). */
+  status: VehicleProfileBindingStatus;
+}
+
+export interface VehicleProfileDocument {
+  schemaVersion: number;
+  kind: string;
+  generatedAtUtc: string;
+  profileId: string;
+  make?: string;
+  model?: string;
+  transport: string;
+  ecus: Record<string, VehicleProfileEcuDocument>;
+  channels: VehicleProfileChannelDocument[];
+}
+
+/** `field-confirmed` outranks every other status a binding can carry — used to pick the ECU-level status when several bindings share an ECU. */
+const BINDING_STATUS_RANK: Readonly<Record<VehicleProfileBindingStatus, number>> = {
+  hypothesis: 0,
+  weak: 1,
+  'field-observed': 2,
+  'field-confirmed': 3,
+};
+
+/**
+ * Splits a catalog's own descriptive `label` (e.g. `'Toyota GR Supra
+ * (A90/J29), BMW B58'`, `targets.ts`'s own data) into `make`/`model` at the
+ * first space. A deliberately light heuristic for PRESENTATION metadata
+ * only (never fed back into decoding/scoring) — the alternative would be a
+ * second, hand-maintained make/model table in this file, duplicating data
+ * that already lives in exactly one place (the catalog registry).
+ */
+function makeAndModelFromCatalogLabel(label: string): { make?: string; model?: string } {
+  const idx = label.indexOf(' ');
+  if (idx <= 0) return {};
+  return { make: label.slice(0, idx), model: label.slice(idx + 1) };
+}
+
+function parseEvidence(evidenceJson: string): unknown {
+  try {
+    return JSON.parse(evidenceJson);
+  } catch {
+    return evidenceJson;
+  }
+}
+
+/** `trace-vehicle-profile-<profileId>-<yyyy-mm-dd>.json` (mirrors {@link signalFinderExportFileName}'s own pattern). */
+export function vehicleProfileExportFileName(profileId: string, generatedAtUtc: string): string {
+  return `${VEHICLE_PROFILE_EXPORT_KIND}-${profileId}-${generatedAtUtc.slice(0, 10)}.json`;
+}
+
+/**
+ * Merges every persisted binding for `profileId` into the canonical
+ * vehicle-profile shape (pure — no I/O; `bindings` comes from
+ * `VehicleProfileBindingStore.listBindings(profileId)`). Every binding
+ * becomes one `channels[]` entry; `ecus` is derived from the distinct ECU
+ * addresses actually seen, each carrying the STRONGEST status recorded for
+ * it.
+ */
+export function buildVehicleProfileDocument(
+  profileId: string,
+  bindings: readonly VehicleProfileBinding[],
+  generatedAtUtc: string,
+): VehicleProfileDocument {
+  const catalog = profileId === 'generic' ? null : resolveSignalTargetCatalog(profileId);
+  const { make, model } = catalog === null ? {} : makeAndModelFromCatalogLabel(catalog.label);
+
+  const ecus: Record<string, VehicleProfileEcuDocument> = {};
+  for (const b of bindings) {
+    const address = ecuHex(b.ecu);
+    const existing = ecus[address];
+    if (existing === undefined || BINDING_STATUS_RANK[b.status] > BINDING_STATUS_RANK[existing.status]) {
+      ecus[address] = { address, status: b.status };
+    }
+  }
+
+  const channels: VehicleProfileChannelDocument[] = bindings.map((b) => ({
+    channel: b.channel,
+    source: 'did',
+    ecu: ecuHex(b.ecu),
+    did: didHex(b.did),
+    length: b.length,
+    decode: b.decode,
+    status: b.status,
+    provenance: `Signal Finder — ${b.status} (${b.updatedAtUtc})`,
+    evidence: parseEvidence(b.evidenceJson),
+    updatedAtUtc: b.updatedAtUtc,
+  }));
+
+  return {
+    schemaVersion: VEHICLE_PROFILE_EXPORT_SCHEMA_VERSION,
+    kind: VEHICLE_PROFILE_EXPORT_KIND,
+    generatedAtUtc,
+    profileId,
+    ...(make === undefined ? {} : { make }),
+    ...(model === undefined ? {} : { model }),
+    transport: VEHICLE_PROFILE_TRANSPORT,
+    ecus,
+    channels,
+  };
+}
+
+/** Writes and shares the vehicle-profile JSON on its own (one file, `expo-sharing`'s own one-file-per-call limit) — the screen's "Share profile" button. Never throws, mirrors {@link shareSignalFinderJson}'s own contract. */
+export async function shareVehicleProfileExport(doc: VehicleProfileDocument): Promise<SignalFinderShareResult> {
+  const json = JSON.stringify(doc, null, 2);
+  try {
+    const available = await Sharing.isAvailableAsync();
+    if (!available) {
+      console.log(`[signalFinderExport] Sharing unavailable on this platform -- vehicle profile JSON is ${json.length} bytes`);
+      return { ok: true, shared: false, markdownUri: null, jsonUri: null, markdownLength: 0, jsonLength: json.length };
+    }
+    const file = new File(Paths.cache, vehicleProfileExportFileName(doc.profileId, doc.generatedAtUtc));
+    file.write(json);
+    await Sharing.shareAsync(file.uri, { mimeType: 'application/json', dialogTitle: 'Share vehicle profile' });
+    return { ok: true, shared: true, markdownUri: null, jsonUri: file.uri, markdownLength: 0, jsonLength: json.length };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(`[signalFinderExport] vehicle profile export failed (falling back) -- JSON is ${json.length} bytes: ${message}`);
     return { ok: false, shared: false, markdownUri: null, jsonUri: null, markdownLength: 0, jsonLength: json.length, error: message };
   }
 }
