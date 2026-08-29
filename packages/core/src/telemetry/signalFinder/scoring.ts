@@ -80,7 +80,12 @@ export type SignalVerdict = 'found' | 'probable' | 'unrelated' | 'insufficient';
 export type SignalInsufficientReason = 'undersampled' | 'length-inconsistent' | 'no-response';
 
 /** Why a DID's verdict was lowered below what its edge ratio alone would have given. */
-export type SignalVerdictCapReason = 'response-baseline-changes' | 'one-sided-bipolar' | 'extra-transitions';
+export type SignalVerdictCapReason =
+  | 'response-baseline-changes'
+  | 'one-sided-bipolar'
+  | 'extra-transitions'
+  /** P4m (item 11): the DID answered the WHOLE script with one identical response — it did not answer the driver. */
+  | 'never-moved';
 
 /** Which sides of rest an analog DID actually visited during the press windows. */
 export type SignalBipolarSides = 'both' | 'positive' | 'negative' | 'none';
@@ -126,6 +131,30 @@ export interface SignalCandidateScore {
   bipolarSides?: SignalBipolarSides | null;
   /** P4l-FIX2: why the verdict is lower than the edge ratio alone would give; `null` when nothing capped it. */
   verdictCapReason?: SignalVerdictCapReason | null;
+  /**
+   * P4m (contracts.md item 11, binding): this verdict rests on SPARSE but
+   * consistent evidence — every press and every release window held at least
+   * one sample, but some held fewer than `minSamplesPerWindow`. The screen
+   * and the export say "found (sparse)", so the user can tell "seen 3x in
+   * every window" from "seen once in every window, every time".
+   */
+  sparse?: boolean;
+  /**
+   * P4m (item 11 / field test 5): the DID's two levels differ in exactly ONE
+   * bit (DME 0x4007: `0x9001` at rest, `0x9000` while the accelerator is
+   * pressed) — a FLAG inside a word, not an analog reading, so the
+   * `analog-monotone` direction rule does not apply to it. The bit's index
+   * (0 = LSB), or `null` when the series is not a two-level single-bit flag.
+   */
+  flagBit?: number | null;
+  /**
+   * P4m (item 11): edges counted by WINDOW AGREEMENT — a press window that
+   * holds an actuated sample, a release window that holds a rest sample —
+   * rather than by observed transitions. This is what a one-sample-per-window
+   * series can still prove; {@link SignalCandidateScore.matchedEdges} stays
+   * the transition-based count.
+   */
+  windowMatchedEdges?: number;
 }
 
 export interface SignalScoringOptions {
@@ -194,6 +223,22 @@ function spreadP90P10(values: readonly number[]): number {
   return percentileOfSorted(sorted, 0.9) - percentileOfSorted(sorted, 0.1);
 }
 
+/**
+ * P4m (item 11): the index of the ONE bit that separates a two-level series,
+ * or `null` when the series has any other number of levels or its two levels
+ * differ in more than one bit. Values are unsigned 32-bit at most
+ * ({@link decodeUnsigned}'s own range), so `>>> 0` keeps the XOR unsigned.
+ */
+function singleBitFlag(values: readonly number[]): number | null {
+  const distinct = new Set(values);
+  if (distinct.size !== 2) return null;
+  const [a, b] = [...distinct] as [number, number];
+  if (!Number.isInteger(a) || !Number.isInteger(b) || a < 0 || b < 0 || a > 0xffffffff || b > 0xffffffff) return null;
+  const xor = (a ^ b) >>> 0;
+  if (xor === 0 || ((xor & (xor - 1)) >>> 0) !== 0) return null;
+  return Math.round(Math.log2(xor));
+}
+
 /** The most frequent value, ties broken by first appearance (deterministic). */
 function modeOf(values: readonly number[]): number | null {
   if (values.length === 0) return null;
@@ -236,6 +281,12 @@ interface SeriesScore {
   verdict: SignalVerdict;
   /** The extra transitions alone lowered this series' verdict. */
   cappedByExtraTransitions: boolean;
+  /** P4m (item 11): edges proved by WINDOW AGREEMENT rather than by observed transitions. */
+  windowMatchedEdges: number;
+  /** P4m (item 11): the single bit that separates this series' two levels, or `null` when it is not a two-level flag. */
+  flagBit: number | null;
+  /** P4m (item 11): everything the sparse-but-consistent rule can decide from THIS series alone (window coverage is a per-DID fact, applied by the caller). */
+  sparseConsistent: boolean;
 }
 
 type ScoringThresholds = Required<Omit<SignalScoringOptions, 'minSamplesPerWindow'>>;
@@ -253,8 +304,17 @@ function scoreSeries(
   byteOffset: number | null,
   options: ScoringThresholds,
 ): SeriesScore {
-  const boolean = shape === 'boolean-edge';
   const baselineValues = points.filter((p) => p.step?.kind === 'baseline').map((p) => p.value);
+  // P4m (item 11, field test 5): a series that only ever takes TWO values
+  // differing in exactly ONE bit is a FLAG inside a word (DME 0x4007:
+  // 0x9001 at rest, 0x9000 while the accelerator is pressed), not an analog
+  // reading. Two consequences, both narrow: the analog noise floor must not
+  // swallow its 1-LSB step, and the `analog-monotone` direction rule does
+  // not apply to it (a flag that CLEARS when actuated is just as much an
+  // answer as one that sets). Anything that moves by more than one bit
+  // (e.g. 0x0150 -> 0x0000) keeps the analog rules in full.
+  const flagBit = singleBitFlag(points.map((p) => p.value));
+  const boolean = shape === 'boolean-edge' || flagBit !== null;
   const restValue = boolean ? modeOf(baselineValues) : meanOf(baselineValues);
   const noiseFloor = boolean
     ? 0
@@ -313,8 +373,10 @@ function scoreSeries(
         (t.step.kind === 'press' || t.step.kind === 'hold') &&
         // `analog-monotone` only ever counts an excursion in the POSITIVE
         // direction (a brake pressure that falls when pressed is not a brake
-        // pressure).
-        (shape !== 'analog-monotone' || t.value > (restValue as number)),
+        // pressure) -- unless the series is a single-bit FLAG, which has no
+        // magnitude and therefore no direction to be wrong about (P4m: DME
+        // 0x4007 CLEARS bit 0 while the accelerator is pressed).
+        (shape !== 'analog-monotone' || flagBit !== null || t.value > (restValue as number)),
     );
     if (pressUp.length === 0) continue;
     matchedEdges += 1;
@@ -348,6 +410,34 @@ function scoreSeries(
     bipolarSides = positive && negative ? 'both' : positive ? 'positive' : negative ? 'negative' : 'none';
   }
 
+  // P4m (item 11, binding): "A DID whose every press window and every release
+  // window contains >= 1 sample, whose matched edges >= 80 % of expected,
+  // with 0 extra transitions and 0 baseline changes, is `found` (flagged
+  // `sparse`)". At one sample per window a TRANSITION is often unobservable
+  // (the sample before it belongs to the previous window), but AGREEMENT
+  // still is: the press window read the actuated level, the release window
+  // read the rest level. That is what the field's own 0x4002 run proves ten
+  // times over -- and what build 5 threw away as `insufficient`.
+  const directionOk = shape !== 'analog-monotone' || flagBit !== null || correlationSign === 1;
+  let windowMatchedEdges = 0;
+  for (const repetition of repetitions) {
+    const pressValues = pressValuesByRepetition.get(repetition) ?? [];
+    const releaseValues = releaseValuesByRepetition.get(repetition) ?? [];
+    const pressedSeen = pressValues.some(
+      (value) =>
+        active(value) &&
+        // Same direction discipline as the transition rule: a monotone target
+        // only ever counts an excursion AWAY FROM rest in the positive
+        // direction (a flag has no direction to speak of).
+        (shape !== 'analog-monotone' || flagBit !== null || value > (restValue as number)),
+    );
+    if (pressedSeen) windowMatchedEdges += 1;
+    // A release window is credited when it read the rest level at all -- the
+    // driver's foot comes off inside the window, so the first sample of it
+    // may still be actuated.
+    if (releaseValues.some((value) => !active(value))) windowMatchedEdges += 1;
+  }
+
   const verdictForEdges = (edges: number): SignalVerdict => {
     const ratio = expectedEdges > 0 ? edges / expectedEdges : 0;
     if (ratio >= options.foundEdgeRatio) return 'found';
@@ -355,12 +445,21 @@ function scoreSeries(
     return 'unrelated';
   };
 
-  const directionOk = shape !== 'analog-monotone' || correlationSign === 1;
   const disqualified = baselineChanges > 0 || !directionOk;
   const netEdges = Math.max(0, matchedEdges - extraTransitions);
   const verdict = disqualified ? 'unrelated' : verdictForEdges(netEdges);
   const cappedByExtraTransitions =
     !disqualified && extraTransitions > 0 && verdictForEdges(matchedEdges) !== verdict;
+
+  // Everything item 11's rule can decide from THIS series: the DID-level
+  // window coverage (every press/release window actually sampled) is added by
+  // the caller, which is the only place that knows the whole response.
+  const sparseConsistent =
+    !disqualified &&
+    extraTransitions === 0 &&
+    baselineChanges === 0 &&
+    expectedEdges > 0 &&
+    windowMatchedEdges / expectedEdges >= options.foundEdgeRatio;
 
   return {
     matchedEdges,
@@ -373,6 +472,9 @@ function scoreSeries(
     byteOffset,
     verdict,
     cappedByExtraTransitions,
+    windowMatchedEdges,
+    flagBit,
+    sparseConsistent,
   };
 }
 
@@ -441,10 +543,56 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
     // nothing during the press but two samples during the hold is
     // undersampled, not "sufficient".
     let windowsBelowMinimum = 0;
+    // P4m (item 11/12): the coverage facts the new sufficiency rule is stated
+    // in -- "some window has 0 samples", "< 2 samples per window on average",
+    // and "every press window and every release window contains >= 1 sample".
+    let windowCount = 0;
+    let emptyWindows = 0;
+    let inWindowSamples = 0;
+    let baselineCovered = false;
+    let pressCovered = false;
+    let everyActionWindowCovered = true;
     for (const step of timeline.steps) {
       if (step.durationMs <= 0) continue;
-      if ((group.countByStep.get(step.index) ?? 0) < minSamplesPerWindow) windowsBelowMinimum += 1;
+      const count = group.countByStep.get(step.index) ?? 0;
+      windowCount += 1;
+      inWindowSamples += count;
+      if (count < minSamplesPerWindow) windowsBelowMinimum += 1;
+      if (count === 0) emptyWindows += 1;
+      if (step.kind === 'baseline') {
+        if (count > 0) baselineCovered = true;
+      } else {
+        if (count === 0) everyActionWindowCovered = false;
+        if (count > 0 && (step.kind === 'press' || step.kind === 'hold')) pressCovered = true;
+      }
     }
+    const averagePerWindow = windowCount > 0 ? inWindowSamples / windowCount : 0;
+    const undersampled = emptyWindows > 0 || averagePerWindow < minSamplesPerWindow;
+    // A DID that answered the WHOLE script with one identical response did
+    // not answer the driver -- that is knowledge, not a sampling failure
+    // (field: 0x12 0x4659 = 0x27FF in all 17 reads of the accelerator run).
+    const neverMoved =
+      raws.length >= 2 && baselineCovered && pressCovered && raws.every((raw) => bytesToHex(raw) === bytesToHex(raws[0] as Uint8Array));
+
+    /**
+     * P4m (item 11, binding): "A DID whose every press window and every
+     * release window contains >= 1 sample, whose matched edges >= 80 % of
+     * expected, with 0 extra transitions and 0 baseline changes, is `found`
+     * (flagged `sparse`)" — the per-series half is {@link SeriesScore.sparseConsistent};
+     * the rest is this DID's own window coverage. Applied ONLY where the
+     * evidence really is sparse: a fully-sampled run keeps the strict
+     * ordered-transition rule, under which a DID that answered 3 of 5
+     * presses is `probable`, not `found`.
+     */
+    const sparseFoundFor = (series: SeriesScore): boolean =>
+      series.sparseConsistent &&
+      baselineCovered &&
+      everyActionWindowCovered &&
+      windowsBelowMinimum > 0 &&
+      // Sparseness is a reason to read thin evidence carefully, never a
+      // reason to drop a shape requirement: a bipolar target must still have
+      // been seen on BOTH sides of rest (P4l-FIX4 N2).
+      (input.shape !== 'analog-bipolar' || series.bipolarSides === 'both');
 
     // Whole-response restlessness, at raw-hex level: did ANYTHING in this
     // response move while the driver was holding still?
@@ -517,10 +665,15 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
     // The DID is reported by its STRONGEST offset (a block's one live brake
     // bit is what matters), ties broken by more matched edges, then fewer
     // baseline changes, then the lower offset -- fully deterministic.
+    // P4m: a series the sparse rule can carry ranks as `found` for the
+    // purpose of CHOOSING the offset -- otherwise a block's one sparse-but-
+    // consistent byte would lose the tie to a byte that merely scored more
+    // transitions.
+    const effectiveRank = (series: SeriesScore): number => VERDICT_ORDER[sparseFoundFor(series) ? 'found' : series.verdict];
     const best =
       [...seriesScores].sort(
         (a, b) =>
-          VERDICT_ORDER[a.verdict] - VERDICT_ORDER[b.verdict] ||
+          effectiveRank(a) - effectiveRank(b) ||
           b.matchedEdges - a.matchedEdges ||
           a.baselineChanges - b.baselineChanges ||
           (a.byteOffset ?? -1) - (b.byteOffset ?? -1),
@@ -589,6 +742,10 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
       verdict = 'unrelated';
       verdictCapReason = 'response-baseline-changes';
     }
+    if (neverMoved) {
+      verdict = 'unrelated';
+      verdictCapReason = 'never-moved';
+    }
     // P4l-FIX2 (finding 2) as corrected by P4l-FIX4 (N2): a bipolar target
     // must have been seen on BOTH sides of rest before it can be RANKED at
     // all. One-sided evidence is not a weaker steering angle -- a channel
@@ -603,12 +760,28 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
       verdictCapReason = 'one-sided-bipolar';
     }
 
-    const insufficient = windowsBelowMinimum > 0;
+    // P4m (contracts.md item 11, binding), in strict order:
+    //
+    //  1. A DISQUALIFYING fact (a restless baseline, or a response that never
+    //     moved at all) is decisive however sparse the sampling was -- we
+    //     know enough to reject the DID, and "insufficient" would be a less
+    //     honest answer, not a more careful one.
+    //  2. "Sparse-but-consistent = found": every press AND every release
+    //     window sampled at least once, >= 80 % window agreement, 0 extra
+    //     transitions, 0 baseline changes. THIS is what field test 5's own
+    //     data proves for DME 0x4002 and 0x4007, and what build 5 discarded.
+    //  3. Only then does the sufficiency gate speak: "`insufficient` only
+    //     when some window has 0 samples or the whole DID has < 2 samples per
+    //     window on average" (item 11) -- no longer "< 2 in ANY window".
+    const disqualified = restlessBaseline || neverMoved;
+    const sparseFound = !disqualified && sparseFoundFor(best);
+    const insufficient = !disqualified && !sparseFound && undersampled;
+    const finalVerdict: SignalVerdict = insufficient ? 'insufficient' : sparseFound ? 'found' : verdict;
     scores.push({
       ...base,
       min,
       max,
-      verdict: insufficient ? 'insufficient' : verdict,
+      verdict: finalVerdict,
       matchedEdges: best.matchedEdges,
       baselineChanges: best.baselineChanges,
       didBaselineChanges,
@@ -616,8 +789,13 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
       bipolarSides: best.bipolarSides,
       byteOffset: best.byteOffset,
       correlationSign: best.correlationSign,
+      windowMatchedEdges: best.windowMatchedEdges,
+      flagBit: best.flagBit,
+      // The flag is about the EVIDENCE, not the verdict: a `found` DID whose
+      // windows were thin says so on screen ("found (sparse)").
+      sparse: finalVerdict === 'found' && windowsBelowMinimum > 0,
       insufficientReason: insufficient ? 'undersampled' : null,
-      verdictCapReason: insufficient ? null : verdictCapReason,
+      verdictCapReason: insufficient || finalVerdict === 'found' ? null : verdictCapReason,
     });
   }
 

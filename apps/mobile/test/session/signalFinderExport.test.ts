@@ -111,9 +111,12 @@ function input(overrides: Partial<SignalFinderExportInput> = {}): SignalFinderEx
     measuredReqPerSec: 15.8,
     timeline: TIMELINE,
     passes: [
-      { ecu: 0x12, dids: [0x58b7], hypothesisDids: [0x58b7], cachedDids: [] },
-      { ecu: 0x29, dids: [0x500c, 0x500b], hypothesisDids: [0x500c, 0x500b], cachedDids: [] },
+      { ecu: 0x12, dids: [0x58b7], hypothesisDids: [0x58b7], changedDids: [], cachedDids: [] },
+      { ecu: 0x29, dids: [0x500c, 0x500b], hypothesisDids: [0x500c, 0x500b], changedDids: [], cachedDids: [] },
     ],
+    rounds: 1,
+    budget: 12,
+    notReadDids: [],
     scores: [score(), score({ did: 0x500b, length: 2, verdict: 'unrelated', matchedEdges: 2, min: 2, max: 6, restValueHex: '0002', lastRawHex: '0002' })],
     noResponseDids: [{ ecu: 0x12, did: 0x58b7 }],
     samples: [{ ecu: 0x29, did: 0x500c, tMs: 1_250, raw: Uint8Array.from([0x04]) }],
@@ -131,9 +134,13 @@ function snapshot(overrides: Partial<SignalFinderSnapshot> = {}): SignalFinderSn
     targetLabel: 'Brake switch',
     engineRequirement: 'off-ok',
     timeline: TIMELINE,
-    passes: [{ ecu: 0x29, dids: [0x500c], hypothesisDids: [0x500c], cachedDids: [] }],
-    passIndex: -1,
-    ecu: null,
+    passes: [{ ecu: 0x29, dids: [0x500c], hypothesisDids: [0x500c], changedDids: [], cachedDids: [] }],
+    round: 1,
+    budget: 12,
+    readDids: [{ ecu: 0x29, did: 0x500c }],
+    notReadDids: [],
+    notReadCount: 0,
+    ecus: [0x29],
     step: null,
     scores: [score()],
     noResponseDids: [],
@@ -156,10 +163,10 @@ beforeEach(() => {
 });
 
 describe('buildSignalFinderExportDocument', () => {
-  it('is schemaVersion 1 of trace-signal-finder and carries the whole session', () => {
+  it('is schemaVersion 2 of trace-signal-finder and carries the whole session, rounds included (P4m M3)', () => {
     const doc = buildSignalFinderExportDocument(input());
     expect(doc.schemaVersion).toBe(SIGNAL_FINDER_EXPORT_SCHEMA_VERSION);
-    expect(doc.schemaVersion).toBe(1);
+    expect(doc.schemaVersion).toBe(2);
     expect(doc.kind).toBe(SIGNAL_FINDER_EXPORT_KIND);
     expect(doc.kind).toBe('trace-signal-finder');
     expect(doc.session).toMatchObject({
@@ -167,7 +174,10 @@ describe('buildSignalFinderExportDocument', () => {
       profileId: 'toyota-supra-b58',
       targetId: 'brakeSwitch',
       engineRequirement: 'off-ok',
+      rounds: 1,
+      budget: 12,
     });
+    expect(doc.notRead).toEqual([]);
     expect(doc.metronome).toMatchObject({ repetitions: 5, expectedEdges: 10, settleMs: 500 });
     expect(doc.metronome.steps).toHaveLength(TIMELINE.steps.length);
   });
@@ -615,5 +625,64 @@ describe('shareVehicleProfileExport', () => {
     const result = await shareVehicleProfileExport(doc);
     expect(result).toMatchObject({ ok: true, shared: false });
     logSpy.mockRestore();
+  });
+});
+
+/**
+ * Ticket P4m M3 (binding, contracts.md items 10 and 12): the header states
+ * "Read N DIDs across E ECUs in R round(s)"; unread DIDs are reported as
+ * "not read" with a Next-round hint and NEVER listed under "No response"
+ * (build 5 reported 1372 never-polled DIDs as "No response (NRC or silence)");
+ * a sparse verdict says so.
+ */
+describe('buildSignalFinderSummaryMarkdown -- P4m M3 (rounds, not read, sparse)', () => {
+  it('says how many ROUNDS the driver actually performed, in both languages', () => {
+    const one = buildSignalFinderExportDocument(input({ rounds: 1 }));
+    expect(buildSignalFinderSummaryMarkdown(one, 'en')).toContain('3 DIDs across 2 ECUs in 1 round');
+    expect(buildSignalFinderSummaryMarkdown(one, 'ro')).toContain('3 DID-uri pe 2 ECU în 1 rundă');
+    const three = buildSignalFinderExportDocument(input({ rounds: 3 }));
+    expect(buildSignalFinderSummaryMarkdown(three, 'en')).toContain('in 3 rounds');
+    expect(buildSignalFinderSummaryMarkdown(three, 'ro')).toContain('în 3 runde');
+  });
+
+  it('reports unread DIDs as "Not read" with the Next round hint -- never under "No response"', () => {
+    const doc = buildSignalFinderExportDocument(
+      input({
+        notReadDids: Array.from({ length: 20 }, (_v, i) => ({ ecu: 0x12, did: 0x2000 + i })),
+        noResponseDids: [{ ecu: 0x12, did: 0x58b7 }],
+      }),
+    );
+    expect(doc.notRead).toHaveLength(20);
+    const en = buildSignalFinderSummaryMarkdown(doc, 'en');
+    expect(en).toContain('Not read: 20 (tap Next round)');
+    // The unread DIDs are NOT in the no-response section.
+    const noResponseLine = en.split('\n').find((line) => line.startsWith('**No response')) ?? '';
+    expect(noResponseLine).toContain('0x58B7');
+    expect(noResponseLine).not.toContain('0x2000');
+    expect(buildSignalFinderSummaryMarkdown(doc, 'ro')).toContain('Necitite: 20 (apasă Runda următoare)');
+  });
+
+  it('marks a sparse verdict as such and shows the window agreement it rests on', () => {
+    const doc = buildSignalFinderExportDocument(
+      input({
+        scores: [
+          score({
+            ecu: 0x12,
+            did: 0x4002,
+            verdict: 'found',
+            matchedEdges: 6,
+            expectedEdges: 10,
+            sparse: true,
+            windowMatchedEdges: 10,
+            restValueHex: '01',
+          }),
+        ],
+      }),
+    );
+    expect(doc.candidates[0]).toMatchObject({ sparse: true, windowMatchedEdges: 10 });
+    const en = buildSignalFinderSummaryMarkdown(doc, 'en');
+    expect(en).toContain('found (sparse)');
+    expect(en).toContain('10/10');
+    expect(buildSignalFinderSummaryMarkdown(doc, 'ro')).toContain('găsit (rar)');
   });
 });

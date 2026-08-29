@@ -1,46 +1,58 @@
 /**
- * Signal Finder controller (ticket P4l S2; contracts.md "Signal Finder
- * (Phase 4l, 2026-08-29)", items 2–4, binding).
+ * Signal Finder controller (ticket P4m M2; contracts.md "Signal Finder
+ * REVISION (2026-08-29, after field test 5)", items 9–12, binding).
  *
- * The user's own framing after field tests 1–4: "I want a tool that has
- * targets: find the brake → reads the channels we think carry the brake →
- * tells me to press the brake 5 times → shows the candidates that changed →
- * brake found; then the next missing signal."
+ * WHAT FIELD TEST 5 CHANGED. Build 5 (P4l) read at most 16 DIDs per ECU per
+ * PASS and ran ONE FULL METRONOME PER PASS: 91 passes on the user's Supra,
+ * hypotheses queued last, ~40 real pedal presses before he stopped. His
+ * verdict: "inhuman to press the brake that many times — the tests are
+ * robotic". Worse, every DID got 1–2 samples per window (`insufficient`
+ * everywhere) and the 1372 DIDs never polled at all were reported as "No
+ * response". The data he collected anyway contained the brake pedal (DME
+ * 0x4002) and the accelerator idle flag (DME 0x4007).
  *
- * What this module owns (and ONLY this):
- *   1. Resolving the DID list per ECU for a target — its hypotheses (data,
- *      `@circuit/core`'s `signalFinder/targets.ts`) plus cached responders of
- *      that ECU from previous sweep runs, filtered by the target's expected
- *      shape and capped at {@link MAX_DIDS_PER_PASS}.
- *   2. The transport LIFECYCLE per ECU pass — acquire the `'sweep'`
- *      reservation ONCE for the whole session, then, per ECU, open a FRESH
- *      transport via the injected `transportFactory`, run, close; release
- *      strictly after the last close, on every path. Identical discipline to
- *      `didSweepController.ts`, whose `createRawUdsChannel` is IMPORTED here
- *      rather than re-implemented (no second copy of the wire protocol).
- *   3. Pacing the driver through the metronome and recording what came back.
- *      The polling itself is ONE `runDidObservation` call per ECU pass — the
- *      whole metronome window, exactly as the sweep controller does for its
- *      own phases; this module never re-implements round-robin, keep-alive,
- *      pacing or the error budget.
+ * SO THIS MODULE NOW OWNS, and only this:
+ *   1. ONE HUMAN SCRIPT PER FIND (item 9). `find()` = one metronome, ~21 s.
+ *      A second script happens only when the user taps Next round
+ *      ({@link SignalFinderController.nextRound}) — never on its own.
+ *   2. THE DID BUDGET (item 10, `@circuit/core`'s `planFinderRun`): the DID
+ *      COUNT bends to the measured request rate, so every DID in the round
+ *      gets ≥ 3 samples per 3 s window. Priority: the target's hypotheses on
+ *      every ECU, then DIDs with prior CHANGE evidence (sweep observation
+ *      summaries, any rank other than static/insufficient), then plain cached
+ *      responders. What does not fit is "not read", with its count.
+ *   3. ONE TRANSPORT SESSION FOR EVERY ECU (item 10). HSFZ carries the target
+ *      address per frame, so one socket serves 0x12 and 0x29 alike: the round
+ *      opens one channel per ECU over the SAME transport
+ *      ({@link createMultiEcuUdsChannel}) and lets core's `runDidObservation`
+ *      round-robin across them, exactly as `didSweepController` does for a
+ *      single ECU. No second socket, no second reservation.
+ *   4. The transport LIFECYCLE per round — acquire the reservation, open a
+ *      FRESH transport, run, close, release, strictly in that order on every
+ *      path (identical discipline to `didSweepController.ts`, whose
+ *      `createRawUdsChannel` is IMPORTED here rather than re-implemented).
  *
  * What it deliberately does NOT own: the change rule and the verdicts (pure,
- * `@circuit/core`'s `signalFinder/scoring.ts`), and every vehicle constant
- * (data, the target catalog). No ECU address, DID or decode is written in
- * this file.
+ * `@circuit/core`'s `signalFinder/scoring.ts`), the budget arithmetic (pure,
+ * `signalFinder/plan.ts`), and every vehicle constant (data, the target
+ * catalog). No ECU address, DID or decode is written in this file.
  *
- * Both existing flows (the DID sweep and the batched/focused observation)
- * are untouched — this controller shares their reservation and their channel
+ * Both existing flows (the DID sweep and the batched/focused observation) are
+ * untouched — this controller shares their reservation and their channel
  * builder, and nothing else.
  */
 import {
   ASSUMED_GUIDED_REQ_PER_SEC,
+  FINDER_BUDGET_MAX,
   buildMetronomeTimeline,
+  computeFinderDidBudget,
   findSignalTarget,
   isAsciiLike,
   metronomeCountdownMs,
   metronomeStepAt,
   nextDiscoveryStep,
+  planFinderRun,
+  resolveSignalActionVerbs,
   resolveSignalTargetCatalog,
   runDidObservation,
   scoreSignalCandidates,
@@ -55,23 +67,24 @@ import {
   type ObdTransport,
   type SignalCandidateScore,
   type SignalEngineRequirement,
+  type SignalFinderPlanEntry,
   type SignalFinderSample,
+  type SignalFinderTargetRef,
+  type SignalLanguage,
   type SignalTargetCatalog,
   type SignalTargetDefinition,
   type SignalTargetId,
+  type SweepTransport,
 } from '@circuit/core';
 import { createRawUdsChannel } from './didSweepController';
 import { enetAdapterReservation as sharedEnetAdapterReservation, type EnetAdapterReservation, type EnetAdapterToken } from './enetAdapterReservation';
 import { hexToBytes, type DidSweepStore, type VehicleProfileBinding, type VehicleProfileBindingStore } from '../persistence/didSweepStore';
 import { noopSignalFinderHaptics, type SignalFinderHaptics } from './signalFinderHaptics';
 
-/** Item 2 (binding): "it polls at most 16 DIDs per ECU per pass". Same hard ceiling as the batched observation's `MAX_BATCH_SIZE`, for the same reason: a pass only works if every DID in it can be sampled enough times inside one window. */
-export const MAX_DIDS_PER_PASS = 16;
-
-/** Item 3 (binding): "Insufficient samples (< 2 per window)". */
+/** Item 3 (binding): "Insufficient samples (< 2 per window)" — the SCORER's gate. The budget targets 3 (see `planFinderRun`). */
 const MIN_SAMPLES_PER_WINDOW = 2;
 
-/** How often the on-screen prompt/countdown is recomputed while a pass is running. */
+/** How often the on-screen prompt/countdown is recomputed while a round is running. */
 const TICK_INTERVAL_MS = 100;
 
 /** Round-robin rounds per second handed to `runDidObservation`, clamped so a huge/tiny DID count can never ask for an absurd cadence. */
@@ -80,15 +93,19 @@ const MAX_TARGET_HZ = 20;
 
 const RESERVATION_BUSY_MESSAGE = 'The adapter is in use (telemetry, the DID probe or a sweep) -- stop it first.';
 
+/** Ranks a previous observation gives a DID that did NOT change (or could not be judged) — never treated as change evidence (item 10b). */
+const NON_CHANGE_RANKS: ReadonlySet<string> = new Set(['static', 'insufficient']);
+
 export type SignalFinderPhase = 'idle' | 'preparing' | 'reading' | 'scoring' | 'result' | 'error';
 
-/** One ECU's worth of work: which DIDs will be polled, and where each came from. */
+/** What was read on ONE ECU, cumulatively across the rounds run so far — the export's own per-ECU view. */
 export interface SignalFinderEcuPass {
   ecu: number;
-  /** This pass's OWN slice of the ECU's full poll list, capped at {@link MAX_DIDS_PER_PASS}. */
   dids: readonly number[];
   /** The subset that came from the target's own hypotheses (data). */
   hypothesisDids: readonly number[];
+  /** The subset that carried CHANGE evidence from an earlier observation (item 10b). */
+  changedDids: readonly number[];
   /** The subset that came from `did_sweep_responders` of earlier sweep runs on this ECU. */
   cachedDids: readonly number[];
 }
@@ -112,16 +129,24 @@ export interface SignalFinderSnapshot {
   engineRequirement: SignalEngineRequirement | null;
   /** The metronome this session is (or was) paced by; `null` before a find. */
   timeline: MetronomeTimeline | null;
+  /** How many scripts the driver has performed for this target: 1 after `find()`, +1 per `nextRound()`. */
+  round: number;
+  /** Item 10: how many DIDs one round may read at the measured rate. */
+  budget: number;
+  /** Every (ECU, DID) actually polled so far, in the order the rounds read them. */
+  readDids: readonly SignalFinderTargetRef[];
+  /** Item 12: eligible DIDs no round has reached — "not read", NEVER "no response". */
+  notReadDids: readonly SignalFinderTargetRef[];
+  notReadCount: number;
+  /** {@link readDids}, grouped per ECU (what the result header and the export count). */
   passes: readonly SignalFinderEcuPass[];
-  /** 0-based index into `passes` while reading; `-1` otherwise. */
-  passIndex: number;
-  /** The ECU currently being read, or `null`. */
-  ecu: number | null;
+  /** The ECUs the CURRENT round is polling (all of them in one session). */
+  ecus: readonly number[];
   step: SignalFinderStepSnapshot | null;
   /** Ranked verdicts, `found` first (see `scoreSignalCandidates`). */
   scores: readonly SignalCandidateScore[];
-  /** Item 2 (binding): "Reads must tolerate NRC (→ 'no response' for that DID)." */
-  noResponseDids: readonly { ecu: number; did: number }[];
+  /** Polled but silent/NRC — item 2: "Reads must tolerate NRC". Never contains a DID that was merely not read. */
+  noResponseDids: readonly SignalFinderTargetRef[];
   /** Item 4 (binding): the next concrete step with its duration — present whenever nothing was `found`. */
   nextStep: NextDiscoveryStep | null;
   /** Channels already written into the vehicle profile by {@link SignalFinderController.confirmBinding}. */
@@ -129,14 +154,14 @@ export interface SignalFinderSnapshot {
   /** Fresh per `find()` — the id carried into the export. */
   sessionId: string | null;
   startedAtUtc: string | null;
-  /** The request rate the durations/window sizes were derived from. */
+  /** The request rate the budget/durations were derived from. */
   measuredReqPerSec: number;
   /** Non-null exactly when something went wrong; never thrown across this API. */
   error: string | null;
 }
 
 export interface SignalFinderControllerDeps {
-  /** A FRESH transport per ECU pass — this factory is called by the controller, never connected/closed by the screen. */
+  /** A FRESH transport per ROUND — this factory is called by the controller, never connected/closed by the screen. */
   transportFactory: () => ObdTransport;
   testerAddress: number;
   clock: MonotonicClock;
@@ -146,30 +171,34 @@ export interface SignalFinderControllerDeps {
   profileId?: string;
   /** Test seam: overrides the catalog `profileId` would resolve to. Production never passes this. */
   catalog?: SignalTargetCatalog;
+  /** The app's language, read at the moment each round builds its prompts (M4). Default English. */
+  getLanguage?: () => SignalLanguage;
   /** Single-client adapter reservation — the SAME instance the sweep/probe/provider share. */
   reservation?: EnetAdapterReservation;
   pacing?: DidSweepPacing;
   requestTimeoutMs?: number;
   maxResponsePendingExtensions?: number;
-  /** Read-only here: the source of cached responders per ECU (item 2). Omitted → hypotheses only. */
+  /** Read-only here: the source of cached responders and prior change evidence (item 10b/c). Omitted → hypotheses only. */
   sweepStore?: DidSweepStore;
   /** Where "Confirm as <target>" writes. Omitted → `confirmBinding` is a no-op returning `null` (web preview). */
   bindingStore?: VehicleProfileBindingStore;
   haptics?: SignalFinderHaptics;
-  /** Default {@link MAX_DIDS_PER_PASS}; values above it are clamped, never accepted. */
-  maxDidsPerPass?: number;
-  /** The measured request rate to size windows/durations from. Default {@link ASSUMED_GUIDED_REQ_PER_SEC}. */
+  /** Caps the rate-derived budget (never raises it above {@link FINDER_BUDGET_MAX}). */
+  maxDidsPerRound?: number;
+  /** The measured request rate to size the budget from. Default {@link ASSUMED_GUIDED_REQ_PER_SEC}. */
   measuredReqPerSec?: number;
 }
 
 export interface SignalFinderController {
   subscribe(cb: (snapshot: SignalFinderSnapshot) => void): () => void;
   getSnapshot(): SignalFinderSnapshot;
-  /** Runs one full find for `targetId`. Resolves when the session has finished (or errored) — never rejects. */
+  /** Runs ONE script for `targetId` (round 1, a fresh session). Resolves when the round has finished (or errored) — never rejects. */
   find(targetId: SignalTargetId): Promise<void>;
+  /** Item 10: one MORE script, reading the next budget slice of what is still unread. No-op when nothing is left. Never rejects. */
+  nextRound(): Promise<void>;
   /** Ends the run early. Resolves only once the transport is closed and the reservation released. */
   stop(): Promise<void>;
-  /** Every sample this session collected, for the export. */
+  /** Every sample this session collected, across every round, for the export. */
   getSamples(): readonly SignalFinderSample[];
   /** Item 5 (binding): writes `score` into the persisted vehicle profile as `channel`'s binding. `null` when no binding store is wired. */
   confirmBinding(channel: SignalTargetId, score: SignalCandidateScore): Promise<VehicleProfileBinding | null>;
@@ -177,6 +206,56 @@ export interface SignalFinderController {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * Item 10 (binding): "All ECUs are polled in the SAME session (per-entry
+ * target address)". `createRawUdsChannel` is single-target by construction
+ * (it frames to one ECU and correlates that ECU's replies), so this opens ONE
+ * such channel per ECU over the SAME transport — every `onData` subscriber
+ * sees every chunk, and each channel keeps only its own ECU's frames — and
+ * dispatches by the DID in each request.
+ *
+ * The dispatch is unambiguous because `planFinderRun` guarantees each DID
+ * number appears at most once per round. `nextResponse` follows the channel
+ * the last request went out on: core's `resolveDid` is strictly
+ * send-then-correlate, one exchange at a time. Keep-alive goes to EVERY ECU
+ * of the round, so a slow ECU's diagnostic session cannot time out while the
+ * round is busy elsewhere.
+ */
+export function createMultiEcuUdsChannel(
+  transport: ObdTransport,
+  testerAddress: number,
+  routes: ReadonlyMap<number, number>,
+): SweepTransport {
+  const channels = new Map<number, SweepTransport>();
+  for (const ecu of new Set(routes.values())) channels.set(ecu, createRawUdsChannel(transport, testerAddress, ecu));
+  const all = [...channels.values()];
+  let last: SweepTransport | null = all[0] ?? null;
+
+  function channelFor(pdu: Uint8Array): SweepTransport | null {
+    if ((pdu[0] ?? 0) !== 0x22) return last;
+    const did = ((pdu[1] ?? 0) << 8) | (pdu[2] ?? 0);
+    const ecu = routes.get(did);
+    if (ecu === undefined) return last;
+    return channels.get(ecu) ?? last;
+  }
+
+  return {
+    async send(pdu: Uint8Array): Promise<void> {
+      const channel = channelFor(pdu);
+      if (channel === null) return;
+      last = channel;
+      await channel.send(pdu);
+    },
+    nextResponse(timeoutMs: number): Promise<Uint8Array | 'timeout'> {
+      if (last === null) return Promise.resolve('timeout');
+      return last.nextResponse(timeoutMs);
+    },
+    async keepAlive(pdu: Uint8Array): Promise<void> {
+      for (const channel of all) await channel.keepAlive(pdu);
+    },
+  };
 }
 
 /**
@@ -205,17 +284,54 @@ function partitionCachedResponders(records: readonly { did: number; rawHex: stri
   return { short, blocks };
 }
 
+/** The DIDs an earlier observation summary says CHANGED, in the order that summary ranked them. */
+function changedDidsFromSummaryJson(summaryJson: string): number[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(summaryJson);
+  } catch {
+    return []; // A corrupt blob is no evidence -- never a crash mid-find.
+  }
+  if (typeof parsed !== 'object' || parsed === null) return [];
+  const blob = parsed as { candidates?: unknown; blockCandidates?: unknown };
+  const dids: number[] = [];
+  for (const list of [blob.candidates, blob.blockCandidates]) {
+    if (!Array.isArray(list)) continue;
+    for (const entry of list) {
+      if (typeof entry !== 'object' || entry === null) continue;
+      const candidate = entry as { did?: unknown; rank?: unknown };
+      if (typeof candidate.did !== 'number') continue;
+      if (typeof candidate.rank === 'string' && NON_CHANGE_RANKS.has(candidate.rank)) continue;
+      dids.push(candidate.did);
+    }
+  }
+  return dids;
+}
+
+/** The three priority pools of item 10, already ECU-tagged. Computed once per `find()` and reused by every `nextRound()`. */
+interface FinderPools {
+  hypotheses: SignalFinderTargetRef[];
+  changed: SignalFinderTargetRef[];
+  cached: SignalFinderTargetRef[];
+}
+
 export function createSignalFinderController(deps: SignalFinderControllerDeps): SignalFinderController {
   const reservation = deps.reservation ?? sharedEnetAdapterReservation;
   const nowUtc = deps.nowUtc ?? ((): string => new Date().toISOString());
   const profileId = deps.profileId ?? 'generic';
   const catalog = deps.catalog ?? resolveSignalTargetCatalog(profileId);
   const haptics = deps.haptics ?? noopSignalFinderHaptics;
-  const maxDidsPerPass = clamp(Math.floor(deps.maxDidsPerPass ?? MAX_DIDS_PER_PASS), 1, MAX_DIDS_PER_PASS);
+  const getLanguage = deps.getLanguage ?? ((): SignalLanguage => 'en');
   const measuredReqPerSec =
     deps.measuredReqPerSec !== undefined && Number.isFinite(deps.measuredReqPerSec) && deps.measuredReqPerSec > 0
       ? deps.measuredReqPerSec
       : ASSUMED_GUIDED_REQ_PER_SEC;
+  const budget = Math.min(
+    computeFinderDidBudget(measuredReqPerSec),
+    deps.maxDidsPerRound !== undefined && Number.isFinite(deps.maxDidsPerRound) && deps.maxDidsPerRound > 0
+      ? Math.floor(deps.maxDidsPerRound)
+      : FINDER_BUDGET_MAX,
+  );
 
   const listeners = new Set<(snapshot: SignalFinderSnapshot) => void>();
   let snapshot: SignalFinderSnapshot = {
@@ -225,9 +341,13 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     targetLabel: null,
     engineRequirement: null,
     timeline: null,
+    round: 0,
+    budget,
+    readDids: [],
+    notReadDids: [],
+    notReadCount: 0,
     passes: [],
-    passIndex: -1,
-    ecu: null,
+    ecus: [],
     step: null,
     scores: [],
     noResponseDids: [],
@@ -245,6 +365,12 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
   let control: DidSweepControl = { paused: false, stopped: false };
   let activeTransport: ObdTransport | null = null;
   let tickTimer: ReturnType<typeof setInterval> | null = null;
+
+  /** Everything a `nextRound()` needs from the find that started it. */
+  let currentTarget: SignalTargetDefinition | null = null;
+  let currentPools: FinderPools = { hypotheses: [], changed: [], cached: [] };
+  let readEntries: SignalFinderPlanEntry[] = [];
+  let noResponse: SignalFinderTargetRef[] = [];
 
   function emit(patch: Partial<SignalFinderSnapshot>): void {
     snapshot = { ...snapshot, ...patch };
@@ -264,7 +390,7 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     }
   }
 
-  /** Drives the on-screen prompt/countdown (and the haptic) from the pass's own anchor. */
+  /** Drives the on-screen prompt/countdown (and the haptic) from the round's own anchor. */
   function startTicker(timeline: MetronomeTimeline, anchorMs: number): void {
     stopTicker();
     let lastStepIndex: number | null = null;
@@ -307,73 +433,99 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     }
   }
 
-  /** Item 2 (binding): the FULL DID list for ONE ECU — hypotheses first, then cached responders of that ECU, filtered by shape. Every eligible DID goes in here; capping to {@link MAX_DIDS_PER_PASS} happens in {@link partitionIntoPasses} below, across as many passes as it takes. */
-  async function collectEcuCandidates(
-    target: SignalTargetDefinition,
-    ecu: number,
-  ): Promise<{ hypothesisDids: number[]; cachedDids: number[] }> {
-    const hypothesisDids = target.hypotheses.filter((h) => h.ecu === ecu).map((h) => h.did);
-    const seen = new Set(hypothesisDids);
-    const cachedDids: number[] = [];
-    if (deps.sweepStore !== undefined) {
-      const runs = await deps.sweepStore.listRuns();
-      const records: { did: number; rawHex: string; length: number }[] = [];
-      const seenCached = new Set<number>();
-      for (const run of runs) {
-        if (run.targetAddress !== ecu) continue;
-        for (const responder of await deps.sweepStore.getResponders(run.runId)) {
-          if (seenCached.has(responder.did)) continue;
-          seenCached.add(responder.did);
-          records.push({ did: responder.did, rawHex: responder.rawHex, length: responder.length });
-        }
-      }
-      const { short, blocks } = partitionCachedResponders(records);
-      for (const did of [...short, ...blocks]) {
-        if (seen.has(did)) continue;
-        seen.add(did);
-        cachedDids.push(did);
-      }
-    }
-    return { hypothesisDids, cachedDids };
-  }
-
   /**
-   * P4l-FIX3 J1 (binding, after Codex P4l-REV1 M5/MEDIUM: "cached responders
-   * after the first 16 are silently discarded"): "it polls at most 16 DIDs
-   * per ECU per pass" — an ECU with MORE eligible DIDs than that gets SEVERAL
-   * consecutive passes instead of one truncated one, so every DID the target
-   * is eligible to read on that ECU is actually read. Hypotheses always lead
-   * the very first pass (never squeezed out by cached responders, same as
-   * before); each pass keeps only the hypothesis/cached DIDs that landed in
-   * ITS OWN slice, so `SignalFinderExportPass`'s existing per-pass provenance
-   * split stays accurate.
+   * Item 10's three pools, for the WHOLE find (every ECU at once — this is no
+   * longer a per-ECU pass list). Hypotheses are ordered by ECU then DID so a
+   * round is reproducible; change evidence keeps the order the observation
+   * itself ranked it in; cached responders keep the sweep's own order (short
+   * responses before blocks).
    */
-  function partitionIntoPasses(ecu: number, hypothesisDids: number[], cachedDids: number[]): SignalFinderEcuPass[] {
-    const all = [...hypothesisDids, ...cachedDids];
-    const passes: SignalFinderEcuPass[] = [];
-    for (let start = 0; start < all.length; start += maxDidsPerPass) {
-      const dids = all.slice(start, start + maxDidsPerPass);
-      passes.push({
-        ecu,
-        dids,
-        hypothesisDids: dids.filter((did) => hypothesisDids.includes(did)),
-        cachedDids: dids.filter((did) => cachedDids.includes(did)),
-      });
+  async function collectPools(target: SignalTargetDefinition): Promise<FinderPools> {
+    const hypotheses: SignalFinderTargetRef[] = [];
+    for (const ecu of targetHypothesisEcus(target)) {
+      for (const hypothesis of target.hypotheses.filter((h) => h.ecu === ecu)) {
+        hypotheses.push({ ecu, did: hypothesis.did });
+      }
     }
-    return passes;
+    const changed: SignalFinderTargetRef[] = [];
+    const cached: SignalFinderTargetRef[] = [];
+    const store = deps.sweepStore;
+    if (store !== undefined) {
+      const runs = await store.listRuns();
+      const ecus = [...new Set(runs.map((run) => run.targetAddress).filter((address): address is number => address !== null))].sort(
+        (a, b) => a - b,
+      );
+      for (const ecu of ecus) {
+        const ecuRuns = runs.filter((run) => run.targetAddress === ecu);
+        // (b) prior CHANGE evidence, from the observation summaries of this
+        // ECU's runs -- "any rank other than static" (item 10b).
+        const changedSeen = new Set<number>();
+        for (const run of ecuRuns) {
+          for (const summary of await store.getObservationSummaries(run.runId)) {
+            for (const did of changedDidsFromSummaryJson(summary.summaryJson)) {
+              if (changedSeen.has(did)) continue;
+              changedSeen.add(did);
+              changed.push({ ecu, did });
+            }
+          }
+        }
+        // (c) every other cached responder of this ECU, shape-filtered.
+        const records: { did: number; rawHex: string; length: number }[] = [];
+        const seenCached = new Set<number>();
+        for (const run of ecuRuns) {
+          for (const responder of await store.getResponders(run.runId)) {
+            if (seenCached.has(responder.did)) continue;
+            seenCached.add(responder.did);
+            records.push({ did: responder.did, rawHex: responder.rawHex, length: responder.length });
+          }
+        }
+        const { short, blocks } = partitionCachedResponders(records);
+        for (const did of [...short, ...blocks]) cached.push({ ecu, did });
+      }
+    }
+    return { hypotheses, changed, cached };
   }
 
-  /** Runs the whole metronome once against ONE ECU on a FRESH transport. */
-  async function runPass(myGeneration: number, pass: SignalFinderEcuPass, timeline: MetronomeTimeline): Promise<void> {
+  /** {@link readEntries}, grouped per ECU — what the result header and the export count. */
+  function passesFromReadEntries(entries: readonly SignalFinderPlanEntry[]): SignalFinderEcuPass[] {
+    const byEcu = new Map<number, SignalFinderEcuPass>();
+    for (const entry of entries) {
+      let pass = byEcu.get(entry.ecu);
+      if (pass === undefined) {
+        pass = { ecu: entry.ecu, dids: [], hypothesisDids: [], changedDids: [], cachedDids: [] };
+        byEcu.set(entry.ecu, pass);
+      }
+      (pass.dids as number[]).push(entry.did);
+      if (entry.source === 'hypothesis') (pass.hypothesisDids as number[]).push(entry.did);
+      else if (entry.source === 'changed') (pass.changedDids as number[]).push(entry.did);
+      else (pass.cachedDids as number[]).push(entry.did);
+    }
+    return [...byEcu.values()].sort((a, b) => a.ecu - b.ecu);
+  }
+
+  /** Rescores EVERY sample of the session (rounds read disjoint DIDs, so one pass over all of them is the whole picture). */
+  function rescore(target: SignalTargetDefinition, timeline: MetronomeTimeline): SignalCandidateScore[] {
+    return scoreSignalCandidates({
+      samples,
+      timeline,
+      shape: target.expectedShape,
+      options: { minSamplesPerWindow: MIN_SAMPLES_PER_WINDOW },
+    });
+  }
+
+  /** Runs ONE metronome against every ECU of `plan` on ONE fresh transport. */
+  async function runRound(myGeneration: number, plan: readonly SignalFinderPlanEntry[], timeline: MetronomeTimeline): Promise<void> {
+    const routes = new Map<number, number>();
+    for (const entry of plan) routes.set(entry.did, entry.ecu);
     const transport = deps.transportFactory();
     activeTransport = transport;
     try {
       await transport.connect();
       if (myGeneration !== generation || control.stopped) return;
-      const channel = createRawUdsChannel(transport, deps.testerAddress, pass.ecu);
-      const targetHz = clamp(measuredReqPerSec / Math.max(1, pass.dids.length), MIN_TARGET_HZ, MAX_TARGET_HZ);
+      const channel = createMultiEcuUdsChannel(transport, deps.testerAddress, routes);
+      const targetHz = clamp(measuredReqPerSec / Math.max(1, plan.length), MIN_TARGET_HZ, MAX_TARGET_HZ);
       const result = await runDidObservation({
-        responders: pass.dids,
+        responders: plan.map((entry) => entry.did),
         transport: channel,
         clock: deps.clock,
         durationMs: timeline.pollDurationMs,
@@ -387,11 +539,14 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         },
       });
       stopTicker();
-      // `series[].samples[].tMs` is already relative to THIS pass's own start
-      // -- the same origin the metronome timeline uses.
+      // `series[].samples[].tMs` is already relative to THIS round's own start
+      // -- the same origin the metronome timeline uses, and the same one every
+      // other round uses, so rounds are directly comparable.
       for (const series of result.series) {
+        const ecu = routes.get(series.did);
+        if (ecu === undefined) continue;
         for (const sample of series.samples) {
-          samples.push({ ecu: pass.ecu, did: series.did, tMs: sample.tMs, raw: sample.raw });
+          samples.push({ ecu, did: series.did, tMs: sample.tMs, raw: sample.raw });
         }
       }
     } finally {
@@ -400,58 +555,42 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     }
   }
 
-  async function doFind(myGeneration: number, target: SignalTargetDefinition): Promise<void> {
+  /** One round: plan → reserve → read → score. `roundNumber` is 1 for `find()`, +1 per `nextRound()`. */
+  async function doRound(myGeneration: number, target: SignalTargetDefinition, roundNumber: number): Promise<void> {
     let token: EnetAdapterToken | null = null;
     try {
+      const timeline = buildMetronomeTimeline(target.actionScript, { verbs: resolveSignalActionVerbs(target, getLanguage()) });
       emit({
         phase: 'preparing',
         targetId: target.id,
         targetLabel: target.label,
         engineRequirement: target.engineRequirement,
-        passes: [],
-        passIndex: -1,
-        ecu: null,
+        round: roundNumber,
         step: null,
-        scores: [],
-        noResponseDids: [],
         nextStep: null,
         error: null,
-        sessionId: `signal-finder-${deps.clock.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        startedAtUtc: nowUtc(),
-        timeline: null,
+        timeline,
       });
-      samples = [];
 
-      // Every ECU worth reading: the target's own hypothesis ECUs plus any
-      // ECU earlier sweeps found responders on (an unprofiled car has no
-      // hypotheses at all, so the cache is the only source there).
-      const ecus = new Set<number>(targetHypothesisEcus(target));
-      if (deps.sweepStore !== undefined) {
-        for (const run of await deps.sweepStore.listRuns()) {
-          if (run.targetAddress !== null) ecus.add(run.targetAddress);
-        }
-      }
-      const passes: SignalFinderEcuPass[] = [];
-      for (const ecu of [...ecus].sort((a, b) => a - b)) {
-        const { hypothesisDids, cachedDids } = await collectEcuCandidates(target, ecu);
-        passes.push(...partitionIntoPasses(ecu, hypothesisDids, cachedDids));
-      }
-
-      const widestPass = passes.reduce((max, pass) => Math.max(max, pass.dids.length), 1);
-      const timeline = buildMetronomeTimeline(target.actionScript, {
-        verbs: target.verbs,
-        samplesPerSecPerDid: measuredReqPerSec / widestPass,
-        minSamplesPerWindow: MIN_SAMPLES_PER_WINDOW,
+      const plan = planFinderRun(measuredReqPerSec, currentPools.hypotheses, currentPools.changed, currentPools.cached, {
+        budget,
+        exclude: readEntries,
       });
-      emit({ passes, timeline });
+      emit({
+        ecus: [...new Set(plan.dids.map((entry) => entry.ecu))].sort((a, b) => a - b),
+        notReadDids: plan.notRead.map((entry) => ({ ecu: entry.ecu, did: entry.did })),
+        notReadCount: plan.notRead.length,
+      });
 
-      if (passes.length === 0) {
+      if (plan.dids.length === 0) {
         // Item 4 (binding): never "no brake on this car" -- say what was read
-        // (nothing) and what the next concrete step is.
+        // and what the next concrete step is.
         emit({
           phase: 'result',
+          // No script was performed, so this round does not count as one --
+          // "in R round(s)" must never overstate what the driver did.
+          round: Math.max(0, roundNumber - 1),
           nextStep: nextDiscoveryStep(target, measuredReqPerSec),
-          scores: [],
           step: null,
         });
         return;
@@ -471,47 +610,41 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
       }
 
       emit({ phase: 'reading' });
-      for (let index = 0; index < passes.length; index += 1) {
-        if (myGeneration !== generation || control.stopped) break;
-        const pass = passes[index] as SignalFinderEcuPass;
-        emit({ passIndex: index, ecu: pass.ecu });
-        await runPass(myGeneration, pass, timeline);
-      }
-
+      await runRound(myGeneration, plan.dids, timeline);
       if (myGeneration !== generation) return;
-      emit({ phase: 'scoring', step: null, ecu: null, passIndex: -1 });
-      const scores = scoreSignalCandidates({
-        samples,
-        timeline,
-        shape: target.expectedShape,
-        options: { minSamplesPerWindow: MIN_SAMPLES_PER_WINDOW },
-      });
+
+      emit({ phase: 'scoring', step: null });
+      readEntries = [...readEntries, ...plan.dids];
       const answered = new Set(samples.map((sample) => `${sample.ecu}:${sample.did}`));
-      const noResponseDids: { ecu: number; did: number }[] = [];
-      for (const pass of passes) {
-        for (const did of pass.dids) {
-          if (!answered.has(`${pass.ecu}:${did}`)) noResponseDids.push({ ecu: pass.ecu, did });
-        }
-      }
+      noResponse = readEntries
+        .filter((entry) => !answered.has(`${entry.ecu}:${entry.did}`))
+        .map((entry) => ({ ecu: entry.ecu, did: entry.did }));
+      const scores = rescore(target, timeline);
       const found = scores.some((score) => score.verdict === 'found');
       emit({
         phase: 'result',
         scores,
-        noResponseDids,
+        readDids: readEntries.map((entry) => ({ ecu: entry.ecu, did: entry.did })),
+        passes: passesFromReadEntries(readEntries),
+        noResponseDids: noResponse,
         // Item 4 (binding). NOT excluding the ECUs this session read: reading
-        // 16 hypothesis/cached DIDs on an ECU is not the same as SWEEPING its
-        // remaining range, and the unswept remainder is exactly the step the
-        // user needs told about next.
+        // a handful of hypothesis/cached DIDs on an ECU is not the same as
+        // SWEEPING its remaining range, and the unswept remainder is exactly
+        // the step the user needs told about next.
         nextStep: found ? null : nextDiscoveryStep(target, measuredReqPerSec),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (myGeneration === generation) emit({ phase: 'error', error: message, step: null, ecu: null, passIndex: -1 });
+      if (myGeneration === generation) emit({ phase: 'error', error: message, step: null });
     } finally {
       stopTicker();
       await teardownTransport();
       if (token !== null) reservation.release(token);
     }
+  }
+
+  function busy(): boolean {
+    return snapshot.phase === 'preparing' || snapshot.phase === 'reading' || snapshot.phase === 'scoring';
   }
 
   return {
@@ -526,7 +659,7 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     },
 
     async find(targetId): Promise<void> {
-      if (snapshot.phase === 'preparing' || snapshot.phase === 'reading' || snapshot.phase === 'scoring') return;
+      if (busy()) return;
       const target = findSignalTarget(catalog, targetId);
       if (target === null) {
         emit({ phase: 'error', error: `No target definition for "${targetId}" in profile "${catalog.profileId}".` });
@@ -535,7 +668,45 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
       generation += 1;
       const myGeneration = generation;
       control = { paused: false, stopped: false };
-      const run = doFind(myGeneration, target);
+      samples = [];
+      readEntries = [];
+      noResponse = [];
+      currentTarget = target;
+      emit({
+        phase: 'preparing',
+        targetId: target.id,
+        targetLabel: target.label,
+        engineRequirement: target.engineRequirement,
+        round: 0,
+        readDids: [],
+        notReadDids: [],
+        notReadCount: 0,
+        passes: [],
+        ecus: [],
+        step: null,
+        scores: [],
+        noResponseDids: [],
+        nextStep: null,
+        error: null,
+        sessionId: `signal-finder-${deps.clock.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        startedAtUtc: nowUtc(),
+        timeline: null,
+      });
+      currentPools = await collectPools(target);
+      if (myGeneration !== generation) return;
+      const run = doRound(myGeneration, target, 1);
+      activeRun = run;
+      await run;
+      if (activeRun === run) activeRun = null;
+    },
+
+    async nextRound(): Promise<void> {
+      const target = currentTarget;
+      if (busy() || target === null || snapshot.notReadCount === 0) return;
+      generation += 1;
+      const myGeneration = generation;
+      control = { paused: false, stopped: false };
+      const run = doRound(myGeneration, target, snapshot.round + 1);
       activeRun = run;
       await run;
       if (activeRun === run) activeRun = null;
@@ -572,12 +743,15 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         evidenceJson: JSON.stringify({
           sessionId: snapshot.sessionId,
           verdict: score.verdict,
+          sparse: score.sparse ?? false,
           matchedEdges: score.matchedEdges,
+          windowMatchedEdges: score.windowMatchedEdges ?? null,
           expectedEdges: score.expectedEdges,
           baselineChanges: score.baselineChanges,
           responseBaselineChanges: score.responseBaselineChanges,
           sampleCount: score.sampleCount,
           byteOffset: score.byteOffset,
+          flagBit: score.flagBit ?? null,
           correlationSign: score.correlationSign,
           restValueHex: score.restValueHex,
           min: score.min,

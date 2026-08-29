@@ -233,15 +233,31 @@ describe('scoreSignalCandidates -- sample gate and ordering', () => {
     expect(score!.windowsBelowMinimum).toBe(0);
   });
 
-  it('fewer than 2 samples in any window is INSUFFICIENT and never ranked', () => {
+  // P4m (item 11): thin sampling alone is no longer `insufficient` -- this
+  // DID answered 8 times with the identical 0x04, which is knowledge (it did
+  // not answer the driver), so the honest verdict is `unrelated`.
+  it('a DID that answered the whole script with ONE identical value is UNRELATED, however thin the sampling', () => {
     const samples: SignalFinderSample[] = [];
     for (let tMs = 1_250; tMs < timeline.pollDurationMs; tMs += 3_000) {
       samples.push({ ecu: ECU_29, did: 0x5555, tMs, raw: hexToBytes('04') });
     }
     const [score] = scoreSignalCandidates({ samples, timeline, shape: 'boolean-edge' });
-    expect(score).toMatchObject({ verdict: 'insufficient' });
+    expect(score).toMatchObject({ verdict: 'unrelated', verdictCapReason: 'never-moved' });
     expect(score!.windowsBelowMinimum).toBeGreaterThan(0);
-    expect(score!.insufficientReason).toBe('undersampled');
+    expect(score!.insufficientReason).toBeNull();
+  });
+
+  it('a window with ZERO samples is INSUFFICIENT -- nothing was observed there to judge (item 11)', () => {
+    // Two samples in the baseline and two in the first press window, then
+    // silence: every later window is empty, so no verdict is honest.
+    const samples: SignalFinderSample[] = [
+      { ecu: ECU_29, did: 0x5556, tMs: 1_000, raw: hexToBytes('04') },
+      { ecu: ECU_29, did: 0x5556, tMs: 2_000, raw: hexToBytes('04') },
+      { ecu: ECU_29, did: 0x5556, tMs: 3_000, raw: hexToBytes('05') },
+      { ecu: ECU_29, did: 0x5556, tMs: 4_000, raw: hexToBytes('05') },
+    ];
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'boolean-edge' });
+    expect(score).toMatchObject({ verdict: 'insufficient', insufficientReason: 'undersampled' });
   });
 
   it('a DID whose responses disagree on length is INSUFFICIENT, never split into two candidates', () => {
@@ -635,5 +651,111 @@ describe('scoreSignalCandidates -- P4l-FIX4 review findings', () => {
     );
     const [score] = scoreSignalCandidates({ samples: swing, timeline, shape: 'analog-bipolar' });
     expect(score).toMatchObject({ verdict: 'found', bipolarSides: 'both', verdictCapReason: null });
+  });
+});
+
+/**
+ * Ticket P4m / contracts.md "Signal Finder REVISION (2026-08-29, after field
+ * test 5)" item 11 (binding):
+ *
+ *   "Sparse-but-consistent = found. A DID whose every press window and every
+ *    release window contains >= 1 sample, whose matched edges >= 80 % of
+ *    expected, with 0 extra transitions and 0 baseline changes, is `found`
+ *    (flagged `sparse`); `insufficient` only when some window has 0 samples
+ *    or the whole DID has < 2 samples per window on average."
+ *
+ * The field replay of the real exports lives in `fieldFixtures.test.ts`;
+ * these pin the RULE itself on synthetic series.
+ */
+describe('scoreSignalCandidates -- P4m item 11 (sparse but consistent)', () => {
+  const timeline = buildMetronomeTimeline(SCRIPT);
+
+  it('ONE sample per window, every window agreeing, is FOUND and flagged sparse', () => {
+    const samples = layOnTimeline(
+      timeline,
+      ECU_12,
+      0x4002,
+      cycles(['01'], [
+        [['19'], ['01']],
+        [['19'], ['01']],
+        [['19'], ['01']],
+        [['19'], ['01']],
+        [['19'], ['01']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'boolean-edge' });
+    expect(score).toMatchObject({ verdict: 'found', sparse: true, insufficientReason: null });
+    expect(score!.windowMatchedEdges).toBe(10);
+    expect(score!.windowsBelowMinimum).toBeGreaterThan(0);
+  });
+
+  it('a sparse series with an EMPTY press window is insufficient -- nothing was observed there', () => {
+    const samples = layOnTimeline(
+      timeline,
+      ECU_12,
+      0x4002,
+      cycles(['01'], [
+        [[], ['01']],
+        [['19'], ['01']],
+        [['19'], ['01']],
+        [['19'], ['01']],
+        [['19'], ['01']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'boolean-edge' });
+    expect(score).toMatchObject({ verdict: 'insufficient', insufficientReason: 'undersampled', sparse: false });
+  });
+
+  it('a sparse series that toggles on its OWN schedule is not rescued -- extra transitions block the rule', () => {
+    const samples = layOnTimeline(
+      timeline,
+      ECU_12,
+      0x4003,
+      cycles(['01'], [
+        [['19'], ['19']],
+        [['01'], ['19']],
+        [['19'], ['01']],
+        [['01'], ['19']],
+        [['19'], ['01']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'boolean-edge' });
+    expect(score!.verdict).not.toBe('found');
+    expect(score!.extraTransitions ?? 0).toBeGreaterThan(0);
+  });
+
+  it('a single-bit FLAG inside an analog target is scored as a switch -- direction does not apply (0x9001 -> 0x9000)', () => {
+    const samples = layOnTimeline(
+      timeline,
+      ECU_12,
+      0x4007,
+      cycles(['9001'], [
+        [['9000'], ['9001']],
+        [['9000'], ['9001']],
+        [['9000'], ['9001']],
+        [['9000'], ['9001']],
+        [['9000'], ['9001']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'analog-monotone' });
+    expect(score).toMatchObject({ verdict: 'found', flagBit: 0, sparse: true, restValueHex: '9001' });
+  });
+
+  it('a TWO-BIT drop under an analog-monotone target is still the wrong direction, sparse or not', () => {
+    const samples = layOnTimeline(
+      timeline,
+      ECU_12,
+      0x58b7,
+      cycles(['0150'], [
+        [['0000'], ['0150']],
+        [['0000'], ['0150']],
+        [['0000'], ['0150']],
+        [['0000'], ['0150']],
+        [['0000'], ['0150']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'analog-monotone' });
+    expect(score!.flagBit).toBeNull();
+    expect(score!.verdict).not.toBe('found');
   });
 });

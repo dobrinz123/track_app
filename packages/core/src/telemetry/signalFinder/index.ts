@@ -11,3 +11,4 @@
 export * from './targets';
 export * from './metronome';
 export * from './scoring';
+export * from './plan';

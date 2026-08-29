@@ -55,6 +55,60 @@ const VERDICT_COLOR: Readonly<Record<SignalCandidateScore['verdict'], string>> =
   insufficient: colors.textMuted,
 };
 
+/**
+ * P4m M4 (binding): the RESULT strings the driver reads, in the app's own
+ * language. The metronome's own prompts are NOT here — those are target data
+ * (`@circuit/core`'s `resolveSignalActionVerbs`), resolved by the controller,
+ * so nothing about a pedal is ever written into this screen.
+ */
+interface ScreenStrings {
+  readSummary: (dids: number, ecus: number, rounds: number) => string;
+  engineOff: string;
+  engineRunning: string;
+  notRead: (count: number) => string;
+  nextRound: (dids: number, seconds: number) => string;
+  nothingAnswered: string;
+  noResponse: string;
+  sparseSuffix: string;
+  stop: string;
+  result: string;
+  find: string;
+  confirmAs: (target: string) => string;
+}
+
+const SCREEN_STRINGS: Readonly<Record<'en' | 'ro', ScreenStrings>> = {
+  en: {
+    readSummary: (dids, ecus, rounds) =>
+      `Read ${dids} DID${dids === 1 ? '' : 's'} across ${ecus} ECU${ecus === 1 ? '' : 's'} in ${rounds} round${rounds === 1 ? '' : 's'}`,
+    engineOff: 'engine off',
+    engineRunning: 'engine running',
+    notRead: (count) => `Not read: ${count}`,
+    nextRound: (dids, seconds) => `Next round (${dids} DIDs, ≈ ${seconds} s)`,
+    nothingAnswered: 'Nothing answered.',
+    noResponse: 'No response',
+    sparseSuffix: ' (sparse)',
+    stop: 'Stop',
+    result: 'Result',
+    find: 'Find',
+    confirmAs: (target) => `Confirm as ${target}`,
+  },
+  ro: {
+    readSummary: (dids, ecus, rounds) =>
+      `Citite ${dids} DID-uri pe ${ecus} ECU în ${rounds} rund${rounds === 1 ? 'ă' : 'e'}`,
+    engineOff: 'motor oprit',
+    engineRunning: 'motor pornit',
+    notRead: (count) => `Necitite: ${count}`,
+    nextRound: (dids, seconds) => `Runda următoare (${dids} DID-uri, ≈ ${seconds} s)`,
+    nothingAnswered: 'Nimic nu a răspuns.',
+    noResponse: 'Fără răspuns',
+    sparseSuffix: ' (rar)',
+    stop: 'Oprește',
+    result: 'Rezultat',
+    find: 'Caută',
+    confirmAs: (target) => `Confirmă ca ${target}`,
+  },
+};
+
 function didHex(did: number): string {
   return `0x${did.toString(16).toUpperCase().padStart(4, '0')}`;
 }
@@ -68,13 +122,19 @@ const CAP_REASON_LABEL: Readonly<Record<string, string>> = {
   'response-baseline-changes': 'restless baseline',
   'one-sided-bipolar': 'one-sided',
   'extra-transitions': 'extra transitions',
+  'never-moved': 'never moved',
 };
 
 function evidenceLine(score: SignalCandidateScore): string {
   const extraTransitions = score.extraTransitions ?? 0;
   const didBaselineChanges = score.didBaselineChanges ?? 0;
   const netEdges = Math.max(0, score.matchedEdges - extraTransitions);
-  let line = `${netEdges}/${score.expectedEdges} edges`;
+  // P4m item 11: a sparse verdict rests on window AGREEMENT, so that is the
+  // count shown for it (the transition count understates thin evidence).
+  let line =
+    score.sparse === true
+      ? `${score.windowMatchedEdges ?? netEdges}/${score.expectedEdges} edges`
+      : `${netEdges}/${score.expectedEdges} edges`;
   if (extraTransitions > 0) line += ` (${extraTransitions} extra)`;
   if (didBaselineChanges > 0) line += `, baseline moved ${didBaselineChanges}x`;
   if (score.verdictCapReason != null) line += `, capped: ${CAP_REASON_LABEL[score.verdictCapReason] ?? score.verdictCapReason}`;
@@ -127,6 +187,9 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
       },
       testerAddress: settingsRef.current.enetTesterAddress,
       clock: { now: () => Date.now() },
+      // M4 (binding): the metronome's prompts follow the app's language
+      // setting, read at the moment each round builds its timeline.
+      getLanguage: () => settingsRef.current.language,
       profileId: profileIdRef.current,
       catalog: resolveSignalTargetCatalog(profileIdRef.current),
       sweepStore: sweepStoreRef.current,
@@ -165,6 +228,10 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
   );
 
   const busy = snapshot !== null && (snapshot.phase === 'preparing' || snapshot.phase === 'reading' || snapshot.phase === 'scoring');
+  const strings = SCREEN_STRINGS[settings.language === 'ro' ? 'ro' : 'en'];
+  /** What one more script would cost the driver: how many DIDs it reads, and how long it takes. */
+  const nextRoundDidCount = snapshot === null ? 0 : Math.min(snapshot.budget, snapshot.notReadCount);
+  const nextRoundSeconds = snapshot?.timeline == null ? 0 : Math.round(snapshot.timeline.pollDurationMs / 1_000);
 
   /**
    * P4l-FIX3 J2 (binding, after Codex P4l-REV1 M7/MEDIUM: "the on-screen
@@ -189,6 +256,19 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
     setBanner(null);
     setSummary(null);
     await ensureController().find(target.id);
+    const doc = buildDocument();
+    if (doc !== null) setSummary(buildSignalFinderSummaryMarkdown(doc, settings.language));
+  }
+
+  /**
+   * P4m item 10 (binding): "each round is one more full script" — and only on
+   * this explicit tap. The controller reads the NEXT budget slice of what is
+   * still unread; nothing is ever re-read.
+   */
+  async function handleNextRound(): Promise<void> {
+    setBanner(null);
+    setSummary(null);
+    await ensureController().nextRound();
     const doc = buildDocument();
     if (doc !== null) setSummary(buildSignalFinderSummaryMarkdown(doc, settings.language));
   }
@@ -297,10 +377,12 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
               {snapshot.step.prompt}
             </Text>
             <Text style={styles.metronomeCountdown}>{(snapshot.step.countdownMs / 1000).toFixed(1)}s</Text>
+            {/* P4m M4: ONE script per find -- there is no "pass N/total" any
+                more, because there are no passes. The ECUs of this round are
+                all read inside this single script. */}
             <Text style={styles.caption}>
               Step {snapshot.step.index + 1}/{snapshot.step.total}
-              {snapshot.ecu !== null ? ` · ECU ${ecuHex(snapshot.ecu)}` : ''}
-              {snapshot.passes.length > 1 ? ` · pass ${snapshot.passIndex + 1}/${snapshot.passes.length}` : ''}
+              {snapshot.ecus.length > 0 ? ` · ${snapshot.ecus.map(ecuHex).join(', ')}` : ''}
             </Text>
           </View>
         ) : null}
@@ -323,7 +405,7 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
                 accessibilityRole="button"
                 accessibilityLabel={`Find ${target.label}`}
               >
-                <Text style={styles.buttonText}>Find</Text>
+                <Text style={styles.buttonText}>{strings.find}</Text>
               </Pressable>
             </View>
           ))}
@@ -331,7 +413,7 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
 
         {busy ? (
           <Pressable style={styles.secondaryButton} onPress={() => void controllerRef.current?.stop()} accessibilityRole="button">
-            <Text style={styles.secondaryButtonText}>Stop</Text>
+            <Text style={styles.secondaryButtonText}>{strings.stop}</Text>
           </Pressable>
         ) : null}
 
@@ -339,14 +421,19 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
 
         {snapshot !== null && snapshot.phase === 'result' ? (
           <View style={styles.section}>
-            <Text style={styles.sectionLabel}>Result</Text>
+            <Text style={styles.sectionLabel}>{strings.result}</Text>
+            {/* P4m M3/M4 (binding): "Read N DIDs across E ECUs in R round(s)"
+                -- what the DRIVER actually did, never a pass count. */}
             <Text style={styles.caption}>
-              Read {snapshot.passes.reduce((total, pass) => total + pass.dids.length, 0)} DIDs across{' '}
-              {snapshot.passes.length} ECU{snapshot.passes.length === 1 ? '' : 's'}
+              {strings.readSummary(
+                snapshot.passes.reduce((total, pass) => total + pass.dids.length, 0),
+                snapshot.passes.length,
+                snapshot.round,
+              )}
               {snapshot.passes.length > 0 ? ` (${snapshot.passes.map((pass) => ecuHex(pass.ecu)).join(', ')})` : ''} ·{' '}
-              {snapshot.engineRequirement === 'running' ? 'engine running' : 'engine off'}
+              {snapshot.engineRequirement === 'running' ? strings.engineRunning : strings.engineOff}
             </Text>
-            {snapshot.scores.length === 0 ? <Text style={styles.caption}>Nothing answered.</Text> : null}
+            {snapshot.scores.length === 0 ? <Text style={styles.caption}>{strings.nothingAnswered}</Text> : null}
             {snapshot.scores.slice(0, 20).map((score) => (
               <View key={`${score.ecu}-${score.did}-${score.byteOffset ?? 'n'}`} style={styles.row}>
                 <View style={styles.rowText}>
@@ -360,7 +447,11 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
                   </Text>
                 </View>
                 <View style={styles.verdictColumn}>
-                  <Text style={[styles.verdict, { color: VERDICT_COLOR[score.verdict] }]}>{score.verdict}</Text>
+                  {/* P4m item 11: sparse-but-consistent evidence says so. */}
+                  <Text style={[styles.verdict, { color: VERDICT_COLOR[score.verdict] }]}>
+                    {score.verdict}
+                    {score.sparse === true ? strings.sparseSuffix : ''}
+                  </Text>
                   {score.verdict === 'found' || score.verdict === 'probable' ? (
                     <Pressable
                       style={styles.button}
@@ -368,7 +459,7 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
                       accessibilityRole="button"
                       accessibilityLabel={`Confirm ${didHex(score.did)} as ${snapshot.targetLabel ?? ''}`}
                     >
-                      <Text style={styles.buttonText}>Confirm as {snapshot.targetLabel}</Text>
+                      <Text style={styles.buttonText}>{strings.confirmAs(snapshot.targetLabel ?? '')}</Text>
                     </Pressable>
                   ) : null}
                 </View>
@@ -377,8 +468,27 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
 
             {snapshot.noResponseDids.length > 0 ? (
               <Text style={styles.caption}>
-                No response: {snapshot.noResponseDids.map((entry) => `${didHex(entry.did)} (${ecuHex(entry.ecu)})`).join(', ')}
+                {strings.noResponse}:{' '}
+                {snapshot.noResponseDids.map((entry) => `${didHex(entry.did)} (${ecuHex(entry.ecu)})`).join(', ')}
               </Text>
+            ) : null}
+
+            {/* P4m items 10/12 (binding): what was NOT read is stated with its
+                count and a button for one more script -- never silently
+                dropped, and never mixed into "No response". */}
+            {snapshot.notReadCount > 0 ? (
+              <View style={styles.shareRow}>
+                <Text style={styles.caption}>{strings.notRead(snapshot.notReadCount)}</Text>
+                <Pressable
+                  style={[styles.button, busy ? styles.buttonDisabled : null]}
+                  disabled={busy}
+                  onPress={() => void handleNextRound()}
+                  accessibilityRole="button"
+                  accessibilityLabel={strings.nextRound(nextRoundDidCount, nextRoundSeconds)}
+                >
+                  <Text style={styles.buttonText}>{strings.nextRound(nextRoundDidCount, nextRoundSeconds)}</Text>
+                </Pressable>
+              </View>
             ) : null}
 
             {snapshot.nextStep !== null ? (

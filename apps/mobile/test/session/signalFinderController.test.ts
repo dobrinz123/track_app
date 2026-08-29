@@ -6,12 +6,19 @@ import { createInMemoryDidSweepStore, createInMemoryVehicleProfileBindingStore }
 import { MultiEcuFakeTransport, TESTER_ADDRESS, bytes, flush, type DidAnswer } from '../support/signalFinderHarness';
 
 /**
- * Ticket P4l S2 / contracts.md "Signal Finder (Phase 4l)" item 2 (binding):
- * "the finder iterates target addresses itself (0x12, 0x29, ...) using the
- * existing ENET transport/reservation; it polls at most 16 DIDs per ECU per
- * pass (rate-derived, like the batched flow) and ALSO includes cached
- * responders of that ECU from previous sweep runs stored in SQLite
- * (`did_sweep_responders`), filtered by the target's expected shape".
+ * Ticket P4m M2 / contracts.md "Signal Finder REVISION (2026-08-29, after
+ * field test 5)" items 9–12 (binding):
+ *
+ *   "One metronome per FIND ... Budget, not passes ... All ECUs are polled in
+ *    the SAME session (per-entry target address). Whatever does not fit is
+ *    listed as 'not read (N) — Next round' with the button; each round is one
+ *    more full script ... DIDs never polled are 'not read', never 'no
+ *    response'."
+ *
+ * What build 5 did instead (field test 5): 91 passes, ONE FULL 24 s METRONOME
+ * EACH, hypotheses queued last, 1372 never-read DIDs reported as "No response".
+ * The user did the press script ~40 times and the DIDs that actually carried
+ * the brake were never reached.
  */
 
 /** A deliberately short script so a whole metronome run fits in a few fake-timer seconds. */
@@ -37,7 +44,10 @@ const TEST_CATALOG: SignalTargetCatalog = {
       engineRequirement: 'off-ok',
       expectedShape: 'boolean-edge',
       actionScript: TEST_SCRIPT,
-      verbs: { baseline: 'Hold still', press: 'PRESS the brake', hold: 'HOLD', release: 'RELEASE the brake' },
+      verbs: {
+        en: { baseline: 'Hold still', press: 'PRESS the brake', hold: 'HOLD', release: 'RELEASE the brake' },
+        ro: { baseline: 'Stai liniștit', press: 'APASĂ frâna', hold: 'ȚINE', release: 'ELIBEREAZĂ frâna' },
+      },
       hypotheses: [
         { ecu: 0x29, did: 0x500c, length: 1, decode: 'bit0', status: 'field-observed', provenance: 'test fixture from field test 4' },
         { ecu: 0x12, did: 0x58b7, length: 1, decode: 'u8', status: 'hypothesis', provenance: 'test fixture' },
@@ -50,7 +60,10 @@ const TEST_CATALOG: SignalTargetCatalog = {
       engineRequirement: 'off-ok',
       expectedShape: 'analog-bipolar',
       actionScript: TEST_SCRIPT,
-      verbs: { baseline: 'Hold still', press: 'TURN', hold: 'HOLD', release: 'CENTRE' },
+      verbs: {
+        en: { baseline: 'Hold still', press: 'TURN', hold: 'HOLD', release: 'CENTRE' },
+        ro: { baseline: 'Stai liniștit', press: 'ROTEȘTE', hold: 'ȚINE', release: 'CENTRU' },
+      },
       hypotheses: [],
       discoveryRanges: [{ ecu: 0x30, fromDid: 0x4000, toDid: 0x4fff, note: 'EPS candidate' }],
     },
@@ -90,19 +103,23 @@ function makeController(
   return { controller, transports, reservation: reservation as ReturnType<typeof createReservation> };
 }
 
-/** Runs the whole find, driving fake timers until it settles. */
-async function runFind(harness: Harness, targetId: 'brakeSwitch' | 'steeringAngle' = 'brakeSwitch'): Promise<void> {
-  const done = harness.controller.find(targetId);
-  // P4l-FIX3 J1: a target whose ECU needs several ≤16-DID passes (instead of
-  // one truncated one) runs the whole metronome once per pass, sequentially
-  // -- 400 iterations gives up to 80s of virtual time, comfortably covering
-  // several passes' worth of a short test script rather than just one or two.
-  for (let i = 0; i < 400; i += 1) {
-    await vi.advanceTimersByTimeAsync(200);
-    if (harness.controller.getSnapshot().phase === 'result' || harness.controller.getSnapshot().phase === 'error') break;
+/** Drives fake timers until the controller settles. */
+async function drive(harness: Harness, run: Promise<void>): Promise<void> {
+  for (let i = 0; i < 200; i += 1) {
+    await vi.advanceTimersByTimeAsync(100);
+    const phase = harness.controller.getSnapshot().phase;
+    if (phase === 'result' || phase === 'error' || phase === 'idle') break;
   }
-  await done;
+  await run;
   await flush();
+}
+
+async function runFind(harness: Harness, targetId: 'brakeSwitch' | 'steeringAngle' = 'brakeSwitch'): Promise<void> {
+  await drive(harness, harness.controller.find(targetId));
+}
+
+async function runNextRound(harness: Harness): Promise<void> {
+  await drive(harness, harness.controller.nextRound());
 }
 
 beforeEach(() => {
@@ -114,8 +131,8 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe('createSignalFinderController -- one session across ECUs', () => {
-  it('iterates the target s ECUs in ascending order, one fresh transport per pass, and finds the brake', async () => {
+describe('createSignalFinderController -- ONE metronome, ONE session, every ECU (items 9-10)', () => {
+  it('runs exactly ONE script on ONE transport and polls both ECUs inside it', async () => {
     const harness = makeController((ecu, did, tMs) => {
       if (ecu === 0x29 && did === 0x500c) return bytes(pressedAt(tMs) ? '05' : '04');
       if (ecu === 0x12 && did === 0x58b7) return bytes('00');
@@ -125,205 +142,156 @@ describe('createSignalFinderController -- one session across ECUs', () => {
 
     const snapshot = harness.controller.getSnapshot();
     expect(snapshot.phase).toBe('result');
-    expect(snapshot.passes.map((p) => p.ecu)).toEqual([0x12, 0x29]);
-    // H1/H2 discipline (didSweepController): a FRESH transport per pass, each
-    // one closed.
-    expect(harness.transports).toHaveLength(2);
-    for (const transport of harness.transports) {
-      expect(transport.connectCalls).toBe(1);
-      expect(transport.closeCalls).toBe(1);
-    }
+    expect(snapshot.round).toBe(1);
+    // ONE transport, opened once and closed once -- not one per ECU.
+    expect(harness.transports).toHaveLength(1);
+    expect(harness.transports[0]!.connectCalls).toBe(1);
+    expect(harness.transports[0]!.closeCalls).toBe(1);
+    // Both ECUs were addressed inside that one session (per-entry target address).
+    const addressed = new Set(harness.transports[0]!.requests.map((r) => r.ecu));
+    expect([...addressed].sort((a, b) => a - b)).toEqual([0x12, 0x29]);
 
     const found = snapshot.scores.filter((s) => s.verdict === 'found');
     expect(found.map((s) => [s.ecu, s.did])).toEqual([[0x29, 0x500c]]);
-    expect(found[0]).toMatchObject({ matchedEdges: TIMELINE.expectedEdges, baselineChanges: 0 });
-    // The static DME DID answered every read and simply never moved.
-    expect(snapshot.scores.find((s) => s.did === 0x58b7)?.verdict).toBe('unrelated');
     expect(snapshot.error).toBeNull();
   });
 
-  it('adds cached responders of that ECU from previous sweep runs, filtered by the target s shape', async () => {
-    const sweepStore = createInMemoryDidSweepStore();
-    await sweepStore.createRun({
-      runId: 'run-29',
-      adapterType: 'enet',
-      targetAddress: 0x29,
-      rangeFrom: 0x5000,
-      rangeTo: 0x58f2,
-      lastDid: 0x58f2,
-      startedAtUtc: '2026-08-29T17:32:56.879Z',
-      updatedAtUtc: '2026-08-29T17:35:38.263Z',
-      status: 'stopped',
-      visitedCount: 2_291,
-      timeoutCount: 0,
-      unmatchedCount: 0,
-      errorCount: 0,
-      nrcCounts: {},
+  it('paces the driver through the script exactly ONCE -- the build 5 defect was one full metronome per pass', async () => {
+    const taps: string[] = [];
+    const harness = makeController(() => bytes('00'), { haptics: { step: (kind) => taps.push(kind) } });
+    const kinds: string[] = [];
+    harness.controller.subscribe((s) => {
+      const kind = s.step?.kind;
+      if (kind !== undefined && kinds[kinds.length - 1] !== kind) kinds.push(kind);
     });
-    await sweepStore.upsertResponders(
-      'run-29',
-      [
-        { did: 0x500b, raw: bytes('0002'), rttMs: 12 }, // 2 bytes -- a plausible switch/analog.
-        { did: 0x5003, raw: bytes('07'), rttMs: 12 },
-        // A 21-byte block joins the pool (scored per byte offset); the ASCII
-        // identification string never does.
-        { did: 0x5002, raw: bytes('0000019A840101010058070500001B1A480A28FFFF'), rttMs: 12 },
-        { did: 0x5056, raw: bytes('3252424652303230300000'), rttMs: 12 },
-      ],
-      '2026-08-29T17:33:00.000Z',
-    );
-
-    const harness = makeController((_ecu, _did, tMs) => bytes(pressedAt(tMs) ? '05' : '04'), { sweepStore });
     await runFind(harness);
-
-    const pass29 = harness.controller.getSnapshot().passes.find((p) => p.ecu === 0x29);
-    expect(pass29).toBeDefined();
-    // Hypotheses first, then the cached responders that survived the filter.
-    expect(pass29!.dids).toEqual([0x500c, 0x5003, 0x500b, 0x5002]);
-    expect(pass29!.hypothesisDids).toEqual([0x500c]);
-    expect(pass29!.cachedDids).toEqual([0x5003, 0x500b, 0x5002]);
-    expect(pass29!.dids).not.toContain(0x5056);
+    expect(kinds).toEqual(['baseline', 'press', 'release', 'press', 'release']);
+    expect(taps).toHaveLength(5);
   });
 
-  it('never polls more than 16 DIDs in a single pass -- but partitions an ECU with more eligible DIDs into several CONSECUTIVE passes, so every one is still read (P4l-FIX3 J1, after Codex P4l-REV1 M5)', async () => {
+  it('reads the hypotheses of EVERY ECU first, within the rate-derived budget', async () => {
     const sweepStore = createInMemoryDidSweepStore();
-    await sweepStore.createRun({
-      runId: 'run-29',
-      adapterType: 'enet',
-      targetAddress: 0x29,
-      rangeFrom: 0x5000,
-      rangeTo: 0x5fff,
-      lastDid: 0x5fff,
-      startedAtUtc: '2026-08-29T17:32:56.879Z',
-      updatedAtUtc: '2026-08-29T17:35:38.263Z',
-      status: 'complete',
-      visitedCount: 4_096,
-      timeoutCount: 0,
-      unmatchedCount: 0,
-      errorCount: 0,
-      nrcCounts: {},
-    });
-    // 39 cached responders + the ECU's own 1 hypothesis (0x500c) = 40 eligible
-    // DIDs -- the ticket's own example ("40 eligible DIDs -> 3 passes, all 40
-    // read").
+    await seedRun(sweepStore, 'run-29', 0x29);
     await sweepStore.upsertResponders(
       'run-29',
-      Array.from({ length: 39 }, (_v, i) => ({ did: 0x5100 + i, raw: bytes('00'), rttMs: 10 })),
+      Array.from({ length: 30 }, (_v, i) => ({ did: 0x5100 + i, raw: bytes('00'), rttMs: 10 })),
       '2026-08-29T17:33:00.000Z',
     );
-
-    const harness = makeController(() => bytes('00'), { sweepStore });
+    const harness = makeController(() => bytes('00'), { sweepStore, measuredReqPerSec: 15 });
     await runFind(harness);
     const snapshot = harness.controller.getSnapshot();
 
-    const passes29 = snapshot.passes.filter((p) => p.ecu === 0x29);
-    // 3 passes: ceil(40 / 16) -- every one of them capped at 16, none empty.
-    expect(passes29).toHaveLength(3);
-    expect(passes29.map((p) => p.dids.length)).toEqual([16, 16, 8]);
-    for (const pass of passes29) expect(pass.dids.length).toBeLessThanOrEqual(16);
-    expect(passes29[0]!.dids[0]).toBe(0x500c); // the hypothesis leads the very first pass.
-
-    // ALL 40 were actually read -- no DID silently dropped by the cap.
-    const allDidsRead = passes29.flatMap((p) => p.dids);
-    expect(allDidsRead).toHaveLength(40);
-    expect(new Set(allDidsRead).size).toBe(40); // no duplicate across passes.
-    const answeredEcu29 = new Set(harness.controller.getSamples().filter((s) => s.ecu === 0x29).map((s) => s.did));
-    expect(answeredEcu29.size).toBe(40);
-
-    // The snapshot exposes pass index/total (across every ECU pass, this
-    // ECU's 3 included) so the screen can say "pass N/total" -- `passes`
-    // itself is the flattened list `passIndex` counts through while reading.
-    expect(snapshot.passes.length).toBeGreaterThanOrEqual(3);
+    expect(snapshot.budget).toBe(12);
+    expect(snapshot.readDids).toHaveLength(12);
+    // Both hypotheses lead, whatever ECU they are on.
+    expect(snapshot.readDids.slice(0, 2)).toEqual([
+      { ecu: 0x12, did: 0x58b7 },
+      { ecu: 0x29, did: 0x500c },
+    ]);
+    // Item 12 (honesty): the rest is NOT READ, and is never reported as "no response".
+    expect(snapshot.notReadCount).toBe(20);
+    expect(snapshot.notReadDids).toHaveLength(20);
+    for (const entry of snapshot.notReadDids) {
+      expect(snapshot.noResponseDids).not.toContainEqual(entry);
+    }
   });
 
-  it('drives passIndex through every one of an ECU s several passes while reading (screen "pass N/total")', async () => {
+  it('nextRound() reads the NEXT slice -- only on an explicit call, one more script, nothing re-read', async () => {
     const sweepStore = createInMemoryDidSweepStore();
-    await sweepStore.createRun({
-      runId: 'run-29',
-      adapterType: 'enet',
-      targetAddress: 0x29,
-      rangeFrom: 0x5000,
-      rangeTo: 0x5fff,
-      lastDid: 0x5fff,
-      startedAtUtc: '2026-08-29T17:32:56.879Z',
-      updatedAtUtc: '2026-08-29T17:35:38.263Z',
-      status: 'complete',
-      visitedCount: 4_096,
-      timeoutCount: 0,
-      unmatchedCount: 0,
-      errorCount: 0,
-      nrcCounts: {},
-    });
+    await seedRun(sweepStore, 'run-29', 0x29);
     await sweepStore.upsertResponders(
       'run-29',
-      Array.from({ length: 39 }, (_v, i) => ({ did: 0x5100 + i, raw: bytes('00'), rttMs: 10 })),
+      Array.from({ length: 30 }, (_v, i) => ({ did: 0x5100 + i, raw: bytes('00'), rttMs: 10 })),
       '2026-08-29T17:33:00.000Z',
     );
-    const harness = makeController(() => bytes('00'), { sweepStore });
-    const seenPassIndexes: number[] = [];
-    harness.controller.subscribe((s) => {
-      if (s.phase === 'reading' && (seenPassIndexes.length === 0 || seenPassIndexes[seenPassIndexes.length - 1] !== s.passIndex)) {
-        seenPassIndexes.push(s.passIndex);
-      }
-    });
+    const harness = makeController(() => bytes('00'), { sweepStore, measuredReqPerSec: 15 });
     await runFind(harness);
-    // 4 total passes (3 for 0x29, 1 for 0x12) -- every index visited in
-    // order (a transient -1 precedes index 0: `phase` flips to `'reading'`
-    // a tick before the first pass's own `passIndex` emit).
-    expect(seenPassIndexes).toEqual([-1, 0, 1, 2, 3]);
+    const first = harness.controller.getSnapshot();
+    expect(first.round).toBe(1);
+    expect(harness.transports).toHaveLength(1);
+
+    await runNextRound(harness);
+    const second = harness.controller.getSnapshot();
+    expect(second.round).toBe(2);
+    expect(harness.transports).toHaveLength(2); // one fresh session per round.
+    expect(second.readDids).toHaveLength(24);
+    expect(second.notReadCount).toBe(8);
+    // No DID was read twice.
+    const keys = second.readDids.map((entry) => `${entry.ecu}:${entry.did}`);
+    expect(new Set(keys).size).toBe(keys.length);
+    // The result now says "24 DIDs across 2 ECUs in 2 rounds".
+    expect(second.passes.map((p) => p.ecu).sort((a, b) => a - b)).toEqual([0x12, 0x29]);
+    expect(second.passes.reduce((total, pass) => total + pass.dids.length, 0)).toBe(24);
   });
 
-  it('tolerates NRC -- the DID is reported as "no response", the run still completes', async () => {
+  it('prioritises cached DIDs that CHANGED in an earlier observation over plain responders', async () => {
+    const sweepStore = createInMemoryDidSweepStore();
+    await seedRun(sweepStore, 'run-29', 0x29);
+    await sweepStore.upsertResponders(
+      'run-29',
+      [
+        { did: 0x5001, raw: bytes('00'), rttMs: 10 },
+        { did: 0x5002, raw: bytes('00'), rttMs: 10 },
+        { did: 0x5003, raw: bytes('00'), rttMs: 10 },
+        { did: 0x5004, raw: bytes('00'), rttMs: 10 },
+      ],
+      '2026-08-29T17:33:00.000Z',
+    );
+    await sweepStore.saveObservationSummary(
+      'run-29',
+      'obs-1',
+      JSON.stringify({
+        candidates: [
+          { did: 0x5004, rank: 'brakeCandidate' },
+          { did: 0x5002, rank: 'static' },
+          { did: 0x5001, rank: 'insufficient' },
+          { did: 0x5003, rank: 'changedInSeveral' },
+        ],
+        blockCandidates: [],
+      }),
+      '2026-08-29T17:34:00.000Z',
+    );
+
+    const harness = makeController(() => bytes('00'), { sweepStore, measuredReqPerSec: 15, maxDidsPerRound: 4 });
+    await runFind(harness);
+    const read = harness.controller.getSnapshot().readDids;
+    // Hypotheses (both ECUs) first, then the two DIDs with prior CHANGE
+    // evidence, in the order the summary ranked them.
+    expect(read).toEqual([
+      { ecu: 0x12, did: 0x58b7 },
+      { ecu: 0x29, did: 0x500c },
+      { ecu: 0x29, did: 0x5004 },
+      { ecu: 0x29, did: 0x5003 },
+    ]);
+  });
+
+  it('tolerates NRC -- that DID is "no response", and never appears as "not read"', async () => {
     const harness = makeController((ecu, did, tMs) => {
       if (ecu === 0x29 && did === 0x500c) return bytes(pressedAt(tMs) ? '05' : '04');
       return 'nrc';
     });
     await runFind(harness);
     const snapshot = harness.controller.getSnapshot();
-    expect(snapshot.phase).toBe('result');
     expect(snapshot.noResponseDids).toEqual([{ ecu: 0x12, did: 0x58b7 }]);
+    expect(snapshot.notReadDids).toEqual([]);
     expect(snapshot.scores.some((s) => s.did === 0x58b7)).toBe(false);
+  });
+
+  it('renders the metronome prompts in the app s language (M4)', async () => {
+    const prompts: string[] = [];
+    const harness = makeController(() => bytes('00'), { getLanguage: () => 'ro' });
+    harness.controller.subscribe((s) => {
+      const prompt = s.step?.prompt;
+      if (prompt !== undefined && prompts[prompts.length - 1] !== prompt) prompts.push(prompt);
+    });
+    await runFind(harness);
+    expect(prompts).toContain('APASĂ frâna');
+    expect(prompts).not.toContain('PRESS the brake');
   });
 });
 
-describe('createSignalFinderController -- metronome, haptics and lifecycle', () => {
-  it('walks the driver through baseline -> press -> release with a countdown, and taps once per step', async () => {
-    const taps: string[] = [];
-    const harness = makeController(() => bytes('00'), {
-      haptics: { step: (kind) => taps.push(kind) },
-    });
-    const kinds: string[] = [];
-    harness.controller.subscribe((s) => {
-      const kind = s.step?.kind;
-      if (kind !== undefined && kinds[kinds.length - 1] !== kind) kinds.push(kind);
-    });
-
-    const done = harness.controller.find('brakeSwitch');
-    await vi.advanceTimersByTimeAsync(50);
-    expect(harness.controller.getSnapshot().phase).toBe('reading');
-    expect(harness.controller.getSnapshot().step?.kind).toBe('baseline');
-    expect(harness.controller.getSnapshot().step?.prompt).toBe('Hold still');
-    const countdownAtStart = harness.controller.getSnapshot().step!.countdownMs;
-    await vi.advanceTimersByTimeAsync(400);
-    expect(harness.controller.getSnapshot().step!.countdownMs).toBeLessThan(countdownAtStart);
-
-    for (let i = 0; i < 200; i += 1) {
-      await vi.advanceTimersByTimeAsync(200);
-      if (harness.controller.getSnapshot().phase === 'result') break;
-    }
-    await done;
-
-    // Each ECU pass runs the WHOLE metronome (the driver presses again for
-    // the next ECU) -- 2 passes x baseline/press/release/press/release.
-    expect(kinds).toEqual([
-      'baseline', 'press', 'release', 'press', 'release',
-      'baseline', 'press', 'release', 'press', 'release',
-    ]);
-    // One haptic per step, per ECU pass (2 passes x 5 steps).
-    expect(taps).toHaveLength(10);
-  });
-
-  it('holds the adapter reservation for the whole session and releases it afterwards', async () => {
+describe('createSignalFinderController -- lifecycle (unchanged discipline)', () => {
+  it('holds the adapter reservation for the whole round and releases it afterwards', async () => {
     const reservation = createReservation();
     const harness = makeController(() => bytes('00'), { reservation });
     const holders: (string | null)[] = [];
@@ -376,11 +344,11 @@ describe('createSignalFinderController -- metronome, haptics and lifecycle', () 
     expect(harness.controller.getSnapshot().phase).not.toBe('reading');
   });
 
-  it('a target with no hypotheses reads nothing and names the next concrete step instead', async () => {
+  it('a target with no hypotheses and no cache reads nothing and names the next concrete step instead', async () => {
     const harness = makeController(() => bytes('00'));
     await runFind(harness, 'steeringAngle');
     const snapshot = harness.controller.getSnapshot();
-    expect(snapshot.passes).toEqual([]);
+    expect(snapshot.readDids).toEqual([]);
     expect(harness.transports).toHaveLength(0);
     expect(snapshot.phase).toBe('result');
     expect(snapshot.nextStep).toMatchObject({ ecu: 0x30, fromDid: 0x4000, toDid: 0x4fff });
@@ -393,6 +361,15 @@ describe('createSignalFinderController -- metronome, haptics and lifecycle', () 
     const snapshot = harness.controller.getSnapshot();
     expect(snapshot.scores.every((s) => s.verdict !== 'found')).toBe(true);
     expect(snapshot.nextStep).toMatchObject({ ecu: 0x29, fromDid: 0x58f3, toDid: 0x6fff });
+  });
+
+  it('nextRound() is a no-op when nothing is left unread', async () => {
+    const harness = makeController(() => bytes('00'));
+    await runFind(harness);
+    expect(harness.controller.getSnapshot().notReadCount).toBe(0);
+    await runNextRound(harness);
+    expect(harness.controller.getSnapshot().round).toBe(1);
+    expect(harness.transports).toHaveLength(1);
   });
 });
 
@@ -418,7 +395,7 @@ describe('confirmBinding', () => {
     const stored = await bindingStore.getBinding('test-profile', 'brakeSwitch');
     expect(stored).toMatchObject({ did: 0x500c, status: 'field-confirmed' });
     const evidence: unknown = JSON.parse(stored!.evidenceJson);
-    expect(evidence).toMatchObject({ matchedEdges: TIMELINE.expectedEdges, expectedEdges: TIMELINE.expectedEdges, baselineChanges: 0 });
+    expect(evidence).toMatchObject({ expectedEdges: TIMELINE.expectedEdges, baselineChanges: 0 });
     expect(harness.controller.getSnapshot().confirmedChannels).toContain('brakeSwitch');
   });
 
@@ -430,3 +407,25 @@ describe('confirmBinding', () => {
   });
 });
 
+async function seedRun(
+  store: ReturnType<typeof createInMemoryDidSweepStore>,
+  runId: string,
+  targetAddress: number,
+): Promise<void> {
+  await store.createRun({
+    runId,
+    adapterType: 'enet',
+    targetAddress,
+    rangeFrom: 0x5000,
+    rangeTo: 0x5fff,
+    lastDid: 0x5fff,
+    startedAtUtc: '2026-08-29T17:32:56.879Z',
+    updatedAtUtc: '2026-08-29T17:35:38.263Z',
+    status: 'complete',
+    visitedCount: 4_096,
+    timeoutCount: 0,
+    unmatchedCount: 0,
+    errorCount: 0,
+    nrcCounts: {},
+  });
+}

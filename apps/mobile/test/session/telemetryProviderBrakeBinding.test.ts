@@ -245,3 +245,37 @@ describe('P4l-FIX4 N4: a live response must match the confirmed binding length',
     expect(decodeBrakeBindingValue(block, Uint8Array.from([0, 0, 0, 1, 0, 0]))).toBeNull();
   });
 });
+
+/**
+ * Ticket P4m M5 (binding): field test 5 found the brake on the DME itself —
+ * 0x12 DID 0x4002, `0x01` at rest and `0x19` while the pedal is pressed. The
+ * boolean decode is already generic ("anything off the rest level reads
+ * pressed"), and this pins that it holds for a rest/active pair that is
+ * neither 0/1 nor a single bit.
+ */
+describe('the DME brake binding of field test 5 (0x12 0x4002, 0x01 rest / 0x19 active)', () => {
+  const dmeBinding = binding({
+    ecu: 0x12,
+    did: 0x4002,
+    length: 1,
+    decode: 'boolean: 0x01 at rest -> 0x19 while the brake pedal is pressed',
+    evidenceJson: JSON.stringify({ restValueHex: '01', min: 1, max: 25, byteOffset: null }),
+  });
+
+  it('resolves to a DID request on the DME s own address', () => {
+    const resolved = resolveBrakeBindingFromProfile([dmeBinding]);
+    expect(resolved).toMatchObject({ channel: 'brakeSwitch', ecu: 0x12, requestHex: '4002', decodeKind: 'boolean-0-100', length: 1 });
+    expect(resolved!.restValueHex).toBe('01');
+  });
+
+  it('reads 0 at 0x01 and 100 at 0x19 -- the rest level is what defines "pressed", not a bit', () => {
+    const resolved = resolveBrakeBindingFromProfile([dmeBinding]) as ResolvedBrakeBinding;
+    expect(decodeBrakeBindingValue(resolved, Uint8Array.from([0x01]))).toBe(0);
+    expect(decodeBrakeBindingValue(resolved, Uint8Array.from([0x19]))).toBe(100);
+    // Any other level is off-rest too -- honest for a switch whose ECU
+    // reports several pressed codes.
+    expect(decodeBrakeBindingValue(resolved, Uint8Array.from([0x11]))).toBe(100);
+    // A response of the wrong length is no reading at all (P4l-FIX4 N4).
+    expect(decodeBrakeBindingValue(resolved, Uint8Array.from([0x00, 0x01]))).toBeNull();
+  });
+});

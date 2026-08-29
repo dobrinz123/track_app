@@ -8,6 +8,7 @@ import {
   nextDiscoveryStep,
   resolveSignalTargetCatalog,
   targetHypothesisEcus,
+  resolveSignalActionVerbs,
 } from '../../../src/telemetry/signalFinder';
 
 /**
@@ -78,7 +79,9 @@ describe('signal target catalog (data)', () => {
 
   it('targetHypothesisEcus lists each ECU once, in ascending address order', () => {
     const catalog = resolveSignalTargetCatalog('toyota-supra-b58');
-    expect(targetHypothesisEcus(findSignalTarget(catalog, 'brakeSwitch')!)).toEqual([0x29]);
+    // P4m M5: the brake now has a DME (0x12) hypothesis too -- field test 5's
+    // own 0x4002 -- alongside the 0x29 one from test 4.
+    expect(targetHypothesisEcus(findSignalTarget(catalog, 'brakeSwitch')!)).toEqual([0x12, 0x29]);
     expect(targetHypothesisEcus(findSignalTarget(catalog, 'brakePressure')!)).toEqual([0x12]);
     expect(targetHypothesisEcus(GENERIC_SIGNAL_TARGET_CATALOG.targets[0]!)).toEqual([]);
   });
@@ -111,5 +114,52 @@ describe('next concrete step (honesty, item 4)', () => {
     expect(first.ecu).not.toBeNull();
     const second = nextDiscoveryStep(target, 15.8, [first.ecu as number]);
     expect(second === null || second.ecu !== first.ecu).toBe(true);
+  });
+});
+
+/**
+ * Ticket P4m M5 (binding): the two channels field test 5 actually observed on
+ * the DME, with their provenance, and the 0x29 pair kept as secondary.
+ */
+describe('Supra catalog after field test 5 (P4m M5)', () => {
+  const catalog = resolveSignalTargetCatalog('toyota-supra-b58');
+
+  it('the brake leads with the DME 0x4002 boolean (0x01 rest -> 0x19 pressed), keeping 0x29 0x500C/0x500B behind it', () => {
+    const brake = findSignalTarget(catalog, 'brakeSwitch')!;
+    expect(brake.hypotheses.map((h) => [h.ecu, h.did])).toEqual([
+      [0x12, 0x4002],
+      [0x29, 0x500c],
+      [0x29, 0x500b],
+    ]);
+    const dme = brake.hypotheses[0]!;
+    expect(dme).toMatchObject({ length: 1, status: 'field-observed' });
+    expect(dme.decode).toContain('0x01');
+    expect(dme.decode).toContain('0x19');
+    expect(dme.provenance).toMatch(/field test 5/i);
+    expect(dme.provenance).toContain('2026-08-29-brakeSwitch.json');
+  });
+
+  it('the accelerator leads with the DME 0x4007 idle flag (bit0), and 0x4659 is downgraded to weak (engine-running only)', () => {
+    const accel = findSignalTarget(catalog, 'accelPedal')!;
+    expect(accel.hypotheses.map((h) => [h.ecu, h.did])).toEqual([
+      [0x12, 0x4007],
+      [0x12, 0x4659],
+    ]);
+    expect(accel.hypotheses[0]).toMatchObject({ length: 2, status: 'field-observed' });
+    expect(accel.hypotheses[0]!.decode).toMatch(/bit0/i);
+    expect(accel.hypotheses[0]!.provenance).toContain('2026-08-29-accelPedal.json');
+    expect(accel.hypotheses[1]).toMatchObject({ did: 0x4659, status: 'weak' });
+  });
+
+  it('every target still carries both languages for every metronome step', () => {
+    for (const target of [...catalog.targets, ...GENERIC_SIGNAL_TARGET_CATALOG.targets]) {
+      for (const language of ['en', 'ro'] as const) {
+        const verbs = resolveSignalActionVerbs(target, language);
+        for (const step of ['baseline', 'press', 'hold', 'release'] as const) {
+          expect(verbs[step].length).toBeGreaterThan(1);
+        }
+      }
+      expect(resolveSignalActionVerbs(target, 'ro')).not.toEqual(resolveSignalActionVerbs(target, 'en'));
+    }
   });
 });

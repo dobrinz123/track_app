@@ -36,7 +36,8 @@ import type { SignalFinderEcuPass, SignalFinderSnapshot } from './signalFinderCo
  * so the screen can offer {@link shareSignalFinderJson} as a second button.
  */
 
-export const SIGNAL_FINDER_EXPORT_SCHEMA_VERSION = 1;
+/** P4m M3 (binding): schema 2 adds `session.rounds` and the top-level `notRead` list (items 10 and 12). */
+export const SIGNAL_FINDER_EXPORT_SCHEMA_VERSION = 2;
 export const SIGNAL_FINDER_EXPORT_KIND = 'trace-signal-finder';
 
 /** RO/EN, per contracts.md item 8. Ticket P4l-FIX1 F2 (binding): the screen now passes the app's `language` setting (`settingsStore.ts`'s `AppLanguage`, the same two values), defaulted from the device locale -- it no longer hard-codes `'en'`. */
@@ -53,8 +54,14 @@ export interface SignalFinderExportInput {
   measuredReqPerSec: number;
   timeline: MetronomeTimeline | null;
   passes: readonly SignalFinderEcuPass[];
+  /** P4m (item 9/10): how many metronome scripts the driver actually performed for this target. */
+  rounds: number;
+  /** P4m (item 10): the DID budget one round reads at the measured rate. */
+  budget: number;
   scores: readonly SignalCandidateScore[];
   noResponseDids: readonly { ecu: number; did: number }[];
+  /** P4m (item 12): eligible DIDs no round reached — reported as "not read", NEVER as "no response". */
+  notReadDids: readonly { ecu: number; did: number }[];
   samples: readonly SignalFinderSample[];
   confirmedBindings: readonly VehicleProfileBinding[];
   nextStep: NextDiscoveryStep | null;
@@ -64,6 +71,8 @@ export interface SignalFinderExportPass {
   ecuHex: string;
   didHex: string[];
   hypothesisDidHex: string[];
+  /** P4m (item 10b): read because an earlier observation saw them CHANGE. */
+  changedDidHex: string[];
   cachedDidHex: string[];
 }
 
@@ -100,6 +109,12 @@ export interface SignalFinderExportCandidate {
   bipolarSides: SignalBipolarSides | null;
   /** P4l-FIX2's own field: why the verdict is lower than the edge ratio alone would give. `null` when nothing capped it. */
   verdictCapReason: SignalVerdictCapReason | null;
+  /** P4m (item 11): the verdict rests on sparse but consistent evidence (`found (sparse)`). */
+  sparse: boolean;
+  /** P4m (item 11): edges proved by window agreement rather than by observed transitions. */
+  windowMatchedEdges: number;
+  /** P4m (item 11): the single bit that separates the two levels (DME 0x4007 = bit 0), or `null`. */
+  flagBit: number | null;
 }
 
 export interface SignalFinderExportDocument {
@@ -114,6 +129,9 @@ export interface SignalFinderExportDocument {
     engineRequirement: SignalEngineRequirement;
     startedAtUtc: string | null;
     measuredReqPerSec: number;
+    /** P4m (schema 2): metronome scripts actually performed, and the per-round DID budget. */
+    rounds: number;
+    budget: number;
   };
   metronome: {
     totalMs: number;
@@ -125,8 +143,10 @@ export interface SignalFinderExportDocument {
   };
   passes: SignalFinderExportPass[];
   candidates: SignalFinderExportCandidate[];
-  /** Item 2 (binding): DIDs that answered NRC or never answered — reported, never silently absent. */
+  /** Item 2 (binding): DIDs that were POLLED and answered NRC or nothing — reported, never silently absent. */
   noResponse: Array<{ ecuHex: string; didHex: string }>;
+  /** P4m (item 12, schema 2): eligible DIDs no round reached. Build 5 reported these 1372 DIDs as "No response" — an honesty bug. */
+  notRead: Array<{ ecuHex: string; didHex: string }>;
   samples: Array<{ ecuHex: string; didHex: string; tMs: number; rawHex: string }>;
   confirmedBindings: Array<{
     channel: string;
@@ -182,8 +202,11 @@ export function signalFinderExportInputFromSnapshot(
     measuredReqPerSec: snap.measuredReqPerSec,
     timeline: snap.timeline,
     passes: snap.passes,
+    rounds: snap.round,
+    budget: snap.budget,
     scores: snap.scores,
     noResponseDids: snap.noResponseDids,
+    notReadDids: snap.notReadDids,
     samples,
     confirmedBindings,
     nextStep: snap.nextStep,
@@ -205,6 +228,8 @@ export function buildSignalFinderExportDocument(input: SignalFinderExportInput):
       engineRequirement: input.engineRequirement,
       startedAtUtc: input.startedAtUtc,
       measuredReqPerSec: input.measuredReqPerSec,
+      rounds: input.rounds,
+      budget: input.budget,
     },
     metronome: {
       totalMs: timeline?.totalMs ?? 0,
@@ -225,6 +250,7 @@ export function buildSignalFinderExportDocument(input: SignalFinderExportInput):
       ecuHex: ecuHex(pass.ecu),
       didHex: pass.dids.map(didHex),
       hypothesisDidHex: pass.hypothesisDids.map(didHex),
+      changedDidHex: pass.changedDids.map(didHex),
       cachedDidHex: pass.cachedDids.map(didHex),
     })),
     candidates: input.scores.map((score) => ({
@@ -255,8 +281,12 @@ export function buildSignalFinderExportDocument(input: SignalFinderExportInput):
       sampleCount: score.sampleCount,
       windowsBelowMinimum: score.windowsBelowMinimum,
       insufficientReason: score.insufficientReason,
+      sparse: score.sparse ?? false,
+      windowMatchedEdges: score.windowMatchedEdges ?? 0,
+      flagBit: score.flagBit ?? null,
     })),
     noResponse: input.noResponseDids.map((entry) => ({ ecuHex: ecuHex(entry.ecu), didHex: didHex(entry.did) })),
+    notRead: input.notReadDids.map((entry) => ({ ecuHex: ecuHex(entry.ecu), didHex: didHex(entry.did) })),
     samples: input.samples.map((sample) => ({
       ecuHex: ecuHex(sample.ecu),
       didHex: didHex(sample.did),
@@ -304,6 +334,12 @@ interface SummaryStrings {
   session: string;
   read: string;
   didsAcross: (dids: number, ecus: number) => string;
+  /** P4m M3: " in 2 rounds" — how many scripts the driver actually performed. */
+  inRounds: (rounds: number) => string;
+  /** P4m M3/item 12: "Not read: 20 (tap Next round)" — never listed under "No response". */
+  notRead: (count: number) => string;
+  /** P4m item 11: the "(sparse)" qualifier on a found verdict. */
+  sparseSuffix: string;
   tableHeader: string;
   verdicts: Record<SignalCandidateScore['verdict'], string>;
   noResponse: string;
@@ -332,6 +368,9 @@ const EN: SummaryStrings = {
   session: 'Session',
   read: 'Read',
   didsAcross: (dids, ecus) => `${dids} DIDs across ${ecus} ECU${ecus === 1 ? '' : 's'}`,
+  inRounds: (rounds) => ` in ${rounds} round${rounds === 1 ? '' : 's'}`,
+  notRead: (count) => `Not read: ${count} (tap Next round)`,
+  sparseSuffix: ' (sparse)',
   tableHeader: '| DID | ECU | verdict | edges | baseline | raw |',
   verdicts: { found: 'found', probable: 'probable', unrelated: 'unrelated', insufficient: 'insufficient' },
   noResponse: 'No response (NRC or silence)',
@@ -349,6 +388,7 @@ const EN: SummaryStrings = {
     'response-baseline-changes': 'restless baseline',
     'one-sided-bipolar': 'one-sided',
     'extra-transitions': 'extra transitions',
+    'never-moved': 'never moved',
   },
 };
 
@@ -361,6 +401,9 @@ const RO: SummaryStrings = {
   session: 'Sesiune',
   read: 'Citite',
   didsAcross: (dids, ecus) => `${dids} DID-uri pe ${ecus} ECU`,
+  inRounds: (rounds) => ` în ${rounds} rund${rounds === 1 ? 'ă' : 'e'}`,
+  notRead: (count) => `Necitite: ${count} (apasă Runda următoare)`,
+  sparseSuffix: ' (rar)',
   tableHeader: '| DID | ECU | verdict | fronturi | repaus | brut |',
   verdicts: { found: 'găsit', probable: 'probabil', unrelated: 'fără legătură', insufficient: 'insuficient' },
   noResponse: 'Fără răspuns (NRC sau tăcere)',
@@ -378,6 +421,7 @@ const RO: SummaryStrings = {
     'response-baseline-changes': 'repaus neliniștit',
     'one-sided-bipolar': 'unilateral',
     'extra-transitions': 'tranziții în plus',
+    'never-moved': 'nu s-a schimbat deloc',
   },
 };
 
@@ -440,7 +484,12 @@ function enforceTotalBudget(lines: readonly string[]): string {
  * old plain `matchedEdges/expectedEdges` cell.
  */
 function evidenceCell(candidate: SignalFinderExportCandidate, s: SummaryStrings): string {
-  let cell = `${candidate.netEdges}/${candidate.expectedEdges}`;
+  // P4m (item 11): a `sparse` verdict rests on WINDOW AGREEMENT, not on
+  // observed transitions (at one sample per window a transition is often
+  // unobservable), so that is the number this row must show.
+  let cell = candidate.sparse
+    ? `${candidate.windowMatchedEdges}/${candidate.expectedEdges}`
+    : `${candidate.netEdges}/${candidate.expectedEdges}`;
   if (candidate.extraTransitions > 0) cell += ` (${s.extraSuffix(candidate.extraTransitions)})`;
   if (candidate.didBaselineChanges > 0) cell += `, ${s.baselineMoved(candidate.didBaselineChanges)}`;
   if (candidate.verdictCapReason !== null) cell += `, ${s.cappedLabel(s.capReasons[candidate.verdictCapReason])}`;
@@ -463,9 +512,14 @@ export function buildSignalFinderSummaryMarkdown(
   lines.push(`**${found.length > 0 ? s.found : s.nothingFound}** — ${engine}`);
   lines.push('');
   lines.push(`- ${s.session}: \`${doc.session.sessionId ?? '-'}\` (${doc.session.startedAtUtc ?? '-'})`);
+  // P4m M3 (binding): "Read N DIDs across E ECUs in R round(s)" — the header
+  // states what the DRIVER actually did, and (item 12) what is still unread.
   lines.push(
-    `- ${s.read}: ${s.didsAcross(didCount, doc.passes.length)} — ${doc.passes.map((p) => p.ecuHex).join(', ') || '-'}`,
+    `- ${s.read}: ${s.didsAcross(didCount, doc.passes.length)}${s.inRounds(doc.session.rounds)} — ${
+      doc.passes.map((p) => p.ecuHex).join(', ') || '-'
+    }`,
   );
+  if (doc.notRead.length > 0) lines.push(`- ${s.notRead(doc.notRead.length)}`);
   lines.push('');
   lines.push(s.tableHeader);
   lines.push('| --- | --- | --- | --- | --- | --- |');
@@ -476,7 +530,9 @@ export function buildSignalFinderSummaryMarkdown(
   for (const candidate of tabulated) {
     const offset = candidate.byteOffset === null ? '' : ` b${candidate.byteOffset}`;
     lines.push(
-      `| ${candidate.didHex}${offset} | ${candidate.ecuHex} | ${s.verdicts[candidate.verdict]} | ${evidenceCell(candidate, s)} | ${candidate.baselineChanges} | ${candidate.restValueHex ?? '-'} → ${candidate.min ?? '-'}..${candidate.max ?? '-'} |`,
+      `| ${candidate.didHex}${offset} | ${candidate.ecuHex} | ${s.verdicts[candidate.verdict]}${
+        candidate.sparse ? s.sparseSuffix : ''
+      } | ${evidenceCell(candidate, s)} | ${candidate.baselineChanges} | ${candidate.restValueHex ?? '-'} → ${candidate.min ?? '-'}..${candidate.max ?? '-'} |`,
     );
   }
   lines.push('');

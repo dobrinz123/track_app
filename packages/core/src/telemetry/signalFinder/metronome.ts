@@ -65,18 +65,8 @@ export interface MetronomeTimeline {
 }
 
 export interface BuildMetronomeTimelineOptions {
-  /** Prompts, from the target (data). Defaults to neutral PRESS/HOLD/RELEASE wording. */
+  /** Prompts, from the target (data), already resolved to the app's language (`resolveSignalActionVerbs`). Defaults to neutral PRESS/HOLD/RELEASE wording. */
   verbs?: SignalActionVerbs;
-  /**
-   * The MEASURED per-DID sample rate this run will achieve (requests/sec
-   * divided by the number of DIDs in the pass). When given, press/hold/
-   * release/baseline windows are widened so each still collects
-   * `minSamplesPerWindow` samples — the run takes longer instead of scoring
-   * `insufficient` after the driver has already done the work.
-   */
-  samplesPerSecPerDid?: number;
-  /** Default 2 (item 3: "Insufficient samples (< 2 per window)"). */
-  minSamplesPerWindow?: number;
 }
 
 const DEFAULT_VERBS: SignalActionVerbs = {
@@ -89,15 +79,15 @@ const DEFAULT_VERBS: SignalActionVerbs = {
 /** Item 3 (binding): "Insufficient samples (< 2 per window)". */
 export const DEFAULT_MIN_SAMPLES_PER_WINDOW = 2;
 
+/**
+ * P4m (contracts.md item 9, binding): "`repetitions` (default 3, max 5)".
+ * A hard ceiling, in the one place that builds a script's timeline — no
+ * catalog entry and no caller can ask a human for a sixth press.
+ */
+export const MAX_METRONOME_REPETITIONS = 5;
+
 function sanitizeMs(value: number): number {
   return Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
-}
-
-/** The window duration that still fits `minSamples` samples at `samplesPerSecPerDid`; `base` when no rate is known or the base already suffices. */
-function widenedMs(base: number, samplesPerSecPerDid: number | undefined, minSamples: number): number {
-  if (base <= 0) return base;
-  if (samplesPerSecPerDid === undefined || !Number.isFinite(samplesPerSecPerDid) || samplesPerSecPerDid <= 0) return base;
-  return Math.max(base, Math.ceil((minSamples / samplesPerSecPerDid) * 1_000));
 }
 
 /**
@@ -109,14 +99,20 @@ export function buildMetronomeTimeline(
   options: BuildMetronomeTimelineOptions = {},
 ): MetronomeTimeline {
   const verbs = options.verbs ?? DEFAULT_VERBS;
-  const minSamples = options.minSamplesPerWindow ?? DEFAULT_MIN_SAMPLES_PER_WINDOW;
   const settleMs = sanitizeMs(script.settleMs);
-  const repetitions = Number.isFinite(script.repetitions) && script.repetitions > 0 ? Math.floor(script.repetitions) : 1;
+  const repetitions = Math.min(
+    MAX_METRONOME_REPETITIONS,
+    Number.isFinite(script.repetitions) && script.repetitions > 0 ? Math.floor(script.repetitions) : 1,
+  );
 
-  const baselineMs = widenedMs(sanitizeMs(script.baselineMs), options.samplesPerSecPerDid, minSamples);
-  const pressMs = widenedMs(sanitizeMs(script.pressMs), options.samplesPerSecPerDid, minSamples);
-  const holdMs = widenedMs(sanitizeMs(script.holdMs), options.samplesPerSecPerDid, minSamples);
-  const releaseMs = widenedMs(sanitizeMs(script.releaseMs), options.samplesPerSecPerDid, minSamples);
+  // P4m (item 9): the windows are the SCRIPT's own, always. Build 5 widened
+  // them from the measured rate (a 2 s press became 2.13 s, the run 24 s) so
+  // that ever more DIDs could share one pass; item 10 inverts that trade --
+  // the DID BUDGET bends to the rate, and the human's script never does.
+  const baselineMs = sanitizeMs(script.baselineMs);
+  const pressMs = sanitizeMs(script.pressMs);
+  const holdMs = sanitizeMs(script.holdMs);
+  const releaseMs = sanitizeMs(script.releaseMs);
 
   const steps: MetronomeStep[] = [];
   let cursorMs = 0;

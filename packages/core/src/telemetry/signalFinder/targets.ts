@@ -66,6 +66,9 @@ export interface SignalActionScript {
   settleMs: number;
 }
 
+/** The two languages the app's own setting offers (`settingsStore.ts`'s `AppLanguage`). */
+export type SignalLanguage = 'en' | 'ro';
+
 /** The words the screen shows for each metronome step — per target, so nothing generic ever hard-codes "brake". */
 export interface SignalActionVerbs {
   baseline: string;
@@ -73,6 +76,14 @@ export interface SignalActionVerbs {
   hold: string;
   release: string;
 }
+
+/**
+ * P4m M4 (binding): the driver reads the prompt while looking at the pedal,
+ * so it must be in HIS language — the metronome's words are data, per target,
+ * in every supported language ({@link resolveSignalActionVerbs}). Nothing
+ * about the run itself differs between languages.
+ */
+export type SignalActionVerbSet = Readonly<Record<SignalLanguage, SignalActionVerbs>>;
 
 /** Status vocabulary is IDENTICAL to `data/vehicle-profiles/*.json`'s own `status` field, so a hypothesis can be copied in either direction without translation. */
 export type SignalHypothesisStatus = 'hypothesis' | 'weak' | 'field-observed' | 'field-confirmed';
@@ -105,7 +116,8 @@ export interface SignalTargetDefinition {
   engineRequirement: SignalEngineRequirement;
   expectedShape: SignalExpectedShape;
   actionScript: SignalActionScript;
-  verbs: SignalActionVerbs;
+  /** Per language (P4m M4) — the screen resolves them with resolveSignalActionVerbs. */
+  verbs: SignalActionVerbSet;
   /** Hypothesis DIDs per ECU, with provenance. ALWAYS `[]` in the generic catalog. */
   hypotheses: readonly SignalTargetHypothesis[];
   /** Used ONLY to answer "what's the next step?" — never polled during a find. */
@@ -123,19 +135,29 @@ export interface SignalTargetCatalog {
 // Generic (unknown car) — hypothesis-free by construction.
 // ---------------------------------------------------------------------------
 
-/** item 3: "brake = 5 × {press 2 s, release 2 s}". */
+/**
+ * P4m (contracts.md item 9, binding, after field test 5 — the user: "inhuman
+ * to press that many times"): "A Find = exactly one human-paced script:
+ * baseline 3 s, then `repetitions` (default 3, max 5) × {press 3 s,
+ * release 3 s} ≈ 21 s."
+ *
+ * The 3 s windows are what make the DID budget (`plan.ts`) meaningful — three
+ * samples per DID per window at the field-measured ~15 req/s — and 3
+ * repetitions is what a human will actually do properly. The COUNT of DIDs
+ * bends to the adapter's rate now; the driver's script never does.
+ */
 const PEDAL_SCRIPT: SignalActionScript = {
-  repetitions: 5,
+  repetitions: 3,
   baselineMs: 3_000,
-  pressMs: 2_000,
+  pressMs: 3_000,
   holdMs: 0,
-  releaseMs: 2_000,
+  releaseMs: 3_000,
   settleMs: 500,
 };
 
-/** Steering swings both ways, and a wheel takes longer to move than a pedal. */
+/** Same one-script rule; a wheel simply needs a longer settle than a pedal (a hand moves later than a foot, and the EPS reports later still). */
 const STEERING_SCRIPT: SignalActionScript = {
-  repetitions: 4,
+  repetitions: 3,
   baselineMs: 3_000,
   pressMs: 3_000,
   holdMs: 0,
@@ -172,7 +194,7 @@ function genericTarget(
   engineRequirement: SignalEngineRequirement,
   expectedShape: SignalExpectedShape,
   actionScript: SignalActionScript,
-  verbs: SignalActionVerbs,
+  verbs: SignalActionVerbSet,
 ): SignalTargetDefinition {
   return {
     id,
@@ -186,39 +208,79 @@ function genericTarget(
   };
 }
 
-const BRAKE_VERBS: SignalActionVerbs = {
-  baseline: 'Hold still — foot OFF the brake',
-  press: 'PRESS the brake',
-  hold: 'HOLD it',
-  release: 'RELEASE the brake',
+const BRAKE_VERBS: SignalActionVerbSet = {
+  en: {
+    baseline: 'Hold still — foot OFF the brake',
+    press: 'PRESS the brake',
+    hold: 'HOLD it',
+    release: 'RELEASE the brake',
+  },
+  ro: {
+    baseline: 'Stai liniștit — piciorul LUAT de pe frână',
+    press: 'APASĂ frâna',
+    hold: 'ȚINE apăsat',
+    release: 'ELIBEREAZĂ frâna',
+  },
 };
 
-const STEERING_VERBS: SignalActionVerbs = {
-  baseline: 'Hold still — wheel centred',
-  press: 'TURN the wheel (left, then right)',
-  hold: 'HOLD',
-  release: 'RETURN to centre',
+const STEERING_VERBS: SignalActionVerbSet = {
+  en: {
+    baseline: 'Hold still — wheel centred',
+    press: 'TURN the wheel (left, then right)',
+    hold: 'HOLD',
+    release: 'RETURN to centre',
+  },
+  ro: {
+    baseline: 'Stai liniștit — volanul pe centru',
+    press: 'ROTEȘTE volanul (stânga, apoi dreapta)',
+    hold: 'ȚINE',
+    release: 'ÎNAPOI pe centru',
+  },
 };
 
-const THROTTLE_VERBS: SignalActionVerbs = {
-  baseline: 'Hold still — foot OFF the throttle',
-  press: 'PRESS the throttle',
-  hold: 'HOLD it',
-  release: 'RELEASE the throttle',
+const THROTTLE_VERBS: SignalActionVerbSet = {
+  en: {
+    baseline: 'Hold still — foot OFF the throttle',
+    press: 'PRESS the throttle',
+    hold: 'HOLD it',
+    release: 'RELEASE the throttle',
+  },
+  ro: {
+    baseline: 'Stai liniștit — piciorul LUAT de pe accelerație',
+    press: 'APASĂ accelerația',
+    hold: 'ȚINE apăsat',
+    release: 'ELIBEREAZĂ accelerația',
+  },
 };
 
-const LONG_G_VERBS: SignalActionVerbs = {
-  baseline: 'Hold still — car stationary',
-  press: 'ACCELERATE, then brake',
-  hold: 'HOLD',
-  release: 'COAST — let it settle',
+const LONG_G_VERBS: SignalActionVerbSet = {
+  en: {
+    baseline: 'Hold still — car stationary',
+    press: 'ACCELERATE, then brake',
+    hold: 'HOLD',
+    release: 'COAST — let it settle',
+  },
+  ro: {
+    baseline: 'Stai liniștit — mașina oprită',
+    press: 'ACCELEREAZĂ, apoi frânează',
+    hold: 'ȚINE',
+    release: 'RULEAZĂ liber — lasă să se stabilizeze',
+  },
 };
 
-const LAT_G_VERBS: SignalActionVerbs = {
-  baseline: 'Hold still — straight ahead',
-  press: 'TURN (a steady circle)',
-  hold: 'HOLD the turn',
-  release: 'STRAIGHTEN up',
+const LAT_G_VERBS: SignalActionVerbSet = {
+  en: {
+    baseline: 'Hold still — straight ahead',
+    press: 'TURN (a steady circle)',
+    hold: 'HOLD the turn',
+    release: 'STRAIGHTEN up',
+  },
+  ro: {
+    baseline: 'Stai liniștit — drept înainte',
+    press: 'VIREAZĂ (un cerc constant)',
+    hold: 'ȚINE virajul',
+    release: 'ÎNDREAPTĂ volanul',
+  },
 };
 
 export const GENERIC_SIGNAL_TARGET_CATALOG: SignalTargetCatalog = {
@@ -253,6 +315,22 @@ const SUPRA_B58_CATALOG: SignalTargetCatalog = {
       actionScript: PEDAL_SCRIPT,
       verbs: BRAKE_VERBS,
       hypotheses: [
+        {
+          // FIELD TEST 5 (2026-08-29, engine off / ignition on): the DME's own
+          // brake pedal. Read 22 times across the run, 0x01 in every baseline
+          // and release window, 0x19 in EVERY press window, 0 baseline
+          // changes, 0 extra transitions — and flat 0x01 through the whole
+          // accelerator run of the same evening. First because it is on the
+          // DME (0x12), the ECU everything else is already read from: no
+          // second address is needed to get a brake signal at all.
+          ecu: 0x12,
+          did: 0x4002,
+          length: 1,
+          decode: 'boolean: 0x01 at rest → 0x19 while the brake pedal is pressed',
+          status: 'field-observed',
+          provenance:
+            'field test 5 2026-08-29 (Signal Finder, engine off, ignition on): data/field/signal-finder/2026-08-29-brakeSwitch.json — 0x01→0x19 in all 5 press windows, 0x01 in all release windows; flat 0x01 in 2026-08-29-accelPedal.json',
+        },
         {
           ecu: 0x29,
           did: 0x500c,
@@ -348,12 +426,28 @@ const SUPRA_B58_CATALOG: SignalTargetCatalog = {
       verbs: THROTTLE_VERBS,
       hypotheses: [
         {
+          // FIELD TEST 5: a FLAG, not a pedal position — bit 0 of a 2-byte
+          // word clears while the accelerator is pressed (0x9001 → 0x9000) in
+          // 3 of 5 press windows and returns to 0x9001 in every release
+          // window, with 0 baseline changes; flat 0x9001 through the brake run.
+          // It says "off idle", which is exactly what a coaching timeline
+          // needs when no analog pedal channel answers with the engine off.
+          ecu: 0x12,
+          did: 0x4007,
+          length: 2,
+          decode: 'bit0 of a 2-byte word: 0x9001 at idle → 0x9000 while the accelerator is pressed (0 = off idle)',
+          status: 'field-observed',
+          provenance:
+            'field test 5 2026-08-29 (Signal Finder, engine off, ignition on): data/field/signal-finder/2026-08-29-accelPedal.json — 0x9001→0x9000 in the press windows, back in every release window; flat 0x9001 in 2026-08-29-brakeSwitch.json',
+        },
+        {
           ecu: 0x12,
           did: 0x4659,
           length: 2,
           decode: 'u16 0–4095 (12-bit)',
-          status: 'field-observed',
-          provenance: 'guided observation 2026-08-29: 0 → 4095 only in the throttle phase',
+          status: 'weak',
+          provenance:
+            'guided observation 2026-08-29 (test 3, ENGINE RUNNING): 0 → 4095 only in the throttle phase. Field test 5 (engine off) read a constant 0x27FF in all 17 samples — the 0→4095 swing was engine-running throttle, so this is not testable with the engine off.',
         },
       ],
       discoveryRanges: [{ ecu: 0x12, fromDid: 0x6000, toDid: 0x6fff, note: 'DME range beyond test 4' }],
@@ -412,6 +506,20 @@ export function resolveSignalTargetCatalog(profileId: string | null | undefined)
 
 export function findSignalTarget(catalog: SignalTargetCatalog, id: SignalTargetId): SignalTargetDefinition | null {
   return catalog.targets.find((target) => target.id === id) ?? null;
+}
+
+/**
+ * P4m M4 (binding): the metronome's prompts in the app's own language, from
+ * the TARGET (data) — never a UI constant, and never a hard-coded pedal name.
+ * An unknown/absent language falls back to English rather than to a blank
+ * prompt: a driver mid-run must always be told what to do.
+ */
+export function resolveSignalActionVerbs(
+  target: SignalTargetDefinition,
+  language: SignalLanguage | null | undefined,
+): SignalActionVerbs {
+  if (language === 'ro') return target.verbs.ro;
+  return target.verbs.en;
 }
 
 /** Every ECU address this target has a hypothesis on, each once, ascending — the pass order the finder iterates. */

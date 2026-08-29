@@ -6,6 +6,7 @@ import {
   metronomeStepForSample,
   resolveSignalTargetCatalog,
   findSignalTarget,
+  resolveSignalActionVerbs,
   type SignalActionScript,
 } from '../../../src/telemetry/signalFinder';
 
@@ -70,14 +71,27 @@ describe('buildMetronomeTimeline', () => {
     expect(timeline.pollDurationMs).toBe(22_500);
   });
 
-  it('scales press/release windows up so the measured per-DID sample rate still fills each window', () => {
-    // 0.5 samples/s per DID (32 DIDs at ~16 req/s) cannot put 2 samples in a
-    // 2 s window -- the window grows instead of the run silently reporting
-    // `insufficient`.
-    const scaled = buildMetronomeTimeline(SCRIPT, { samplesPerSecPerDid: 0.5, minSamplesPerWindow: 2 });
-    expect(scaled.steps[1]!.endMs - scaled.steps[1]!.startMs).toBeGreaterThanOrEqual(4_000);
-    const unscaled = buildMetronomeTimeline(SCRIPT, { samplesPerSecPerDid: 4, minSamplesPerWindow: 2 });
-    expect(unscaled.steps[1]!.endMs - unscaled.steps[1]!.startMs).toBe(2_000);
+  // P4m (item 9/10, binding): the window-widening this test used to pin is
+  // GONE -- the script the human performs is fixed, and the DID BUDGET
+  // (`plan.ts`) is what bends to the measured rate instead.
+  it('keeps the script s OWN window lengths whatever the adapter s rate is', () => {
+    expect(buildMetronomeTimeline(SCRIPT).steps[1]!.durationMs).toBe(2_000);
+    expect(buildMetronomeTimeline({ ...SCRIPT, pressMs: 3_000 }).steps[1]!.durationMs).toBe(3_000);
+  });
+
+  it('never asks a human for more than 5 repetitions (item 9: "default 3, max 5")', () => {
+    expect(buildMetronomeTimeline({ ...SCRIPT, repetitions: 9 }).repetitions).toBe(5);
+    expect(buildMetronomeTimeline({ ...SCRIPT, repetitions: 3 }).repetitions).toBe(3);
+    expect(buildMetronomeTimeline({ ...SCRIPT, repetitions: 3 }).expectedEdges).toBe(6);
+  });
+
+  it('the catalog s own pedal script is one 21 s run: baseline 3 s + 3 x (press 3 s, release 3 s)', () => {
+    const catalog = resolveSignalTargetCatalog('toyota-supra-b58');
+    const brake = findSignalTarget(catalog, 'brakeSwitch')!;
+    const timeline = buildMetronomeTimeline(brake.actionScript);
+    expect(brake.actionScript).toMatchObject({ repetitions: 3, baselineMs: 3_000, pressMs: 3_000, releaseMs: 3_000 });
+    expect(timeline.totalMs).toBe(21_000);
+    expect(timeline.expectedEdges).toBe(6);
   });
 
   it('metronomeStepAt returns the step the CLOCK is in, metronomeStepForSample the step a sample is EVIDENCE for', () => {
@@ -99,12 +113,17 @@ describe('buildMetronomeTimeline', () => {
     expect(metronomeCountdownMs(timeline.steps[1]!, 9_999)).toBe(0);
   });
 
-  it('renders prompts from the TARGET s own verbs (data), never a hard-coded pedal name', () => {
+  it('renders prompts from the TARGET s own verbs (data), never a hard-coded pedal name -- in the app s language (P4m M4)', () => {
     const catalog = resolveSignalTargetCatalog('toyota-supra-b58');
     const brake = findSignalTarget(catalog, 'brakeSwitch');
     expect(brake).not.toBeNull();
-    const timeline = buildMetronomeTimeline(brake!.actionScript, { verbs: brake!.verbs });
-    expect(timeline.steps[1]!.prompt).toBe(brake!.verbs.press);
-    expect(timeline.steps[0]!.prompt).toBe(brake!.verbs.baseline);
+    const en = buildMetronomeTimeline(brake!.actionScript, { verbs: resolveSignalActionVerbs(brake!, 'en') });
+    expect(en.steps[1]!.prompt).toBe('PRESS the brake');
+    expect(en.steps[0]!.prompt).toBe(brake!.verbs.en.baseline);
+    const ro = buildMetronomeTimeline(brake!.actionScript, { verbs: resolveSignalActionVerbs(brake!, 'ro') });
+    expect(ro.steps[1]!.prompt).toBe('APASĂ frâna');
+    expect(ro.steps[2]!.prompt).toBe('ELIBEREAZĂ frâna');
+    // An unknown language falls back to English -- never a blank prompt.
+    expect(resolveSignalActionVerbs(brake!, null).press).toBe('PRESS the brake');
   });
 });
