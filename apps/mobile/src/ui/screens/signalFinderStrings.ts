@@ -58,8 +58,16 @@ export interface SignalFinderScreenStrings {
   nothingAnswered: string;
   noResponse: string;
   notRead: (count: number) => string;
-  /** X2: "not read (3) — ECU 0x29 silent". */
+  /** X2: "not read (3) — ECU 0x29 silent". Only when the probe found the ECU WHOLLY silent. */
   notReadSilent: (count: number, ecus: string) => string;
+  /** P4m-FIX3 Z4: individual DIDs that answered neither the probe nor their one retry, on ECUs that ARE alive. */
+  notReadSilentDids: (count: number) => string;
+  /** P4m-FIX3 Z5: the pre-script probe, with its progress and the bound it cannot exceed. */
+  probing: (probed: number, total: number, seconds: number) => string;
+  /** P4m-FIX3 Z6: the adapter never confirmed its shutdown; the next find waits for it. */
+  warningTeardownPending: string;
+  /** P4m-FIX3 Z6: a find refused because that shutdown is still pending — the `'adapter-teardown-pending'` code. */
+  errorTeardownPending: string;
   nextRound: (dids: number, seconds: number) => string;
   sparseSuffix: string;
   verdicts: Record<SignalCandidateScore['verdict'], string>;
@@ -90,10 +98,16 @@ export interface SignalFinderScreenStrings {
   errorAdapterBusy: string;
   /** P4m-FIX2 Y7: the catalog has no such target — the `'no-target'` code. */
   errorNoTarget: string;
-  /** P4m-FIX2 Y7: any other runtime failure. A localized line PLUS the raw message in parentheses — the driver reads his own language, the developer still gets the real text. */
-  errorUnknown: (raw: string) => string;
-  /** P4m-FIX2 Y7: a share that reported its own error string (also raw, also parenthesised). */
-  bannerShareFailed: (raw: string) => string;
+  /**
+   * P4m-FIX2 Y7 + P4m-FIX3 Z7 (Codex P4m-REV3 finding 9): any other runtime
+   * failure. Build 8 interpolated the RAW message into this line, so Romanian
+   * mode still ended in English: "Căutarea nu a putut fi finalizată (socket
+   * hang up)". The raw text now lives in the EXPORT's own diagnostics section
+   * and nowhere else; this line says where to look.
+   */
+  errorUnknown: string;
+  /** P4m-FIX2 Y7 + P4m-FIX3 Z7: a share that failed. The platform's own (raw) error goes to the export, never into this banner. */
+  bannerShareFailed: string;
 }
 
 const EN: SignalFinderScreenStrings = {
@@ -127,6 +141,10 @@ const EN: SignalFinderScreenStrings = {
   noResponse: 'No response',
   notRead: (count) => `Not read: ${count}`,
   notReadSilent: (count, ecus) => `Not read: ${count} — ECU ${ecus} silent`,
+  notReadSilentDids: (count) => `Not read: ${count} — no answer to the probe or its one retry`,
+  probing: (probed, total, seconds) => `Probing the ECUs… ${probed}/${total} (up to ${seconds} s)`,
+  warningTeardownPending: 'The adapter has not confirmed the shutdown — the next find waits for it.',
+  errorTeardownPending: 'The adapter is still shutting down — try again in a moment.',
   nextRound: (dids, seconds) => `Next round (${dids} DIDs, ≈ ${seconds} s)`,
   sparseSuffix: ' (sparse)',
   verdicts: { found: 'found', probable: 'probable', unrelated: 'unrelated', insufficient: 'insufficient' },
@@ -164,8 +182,8 @@ const EN: SignalFinderScreenStrings = {
   bannerProfileShared: 'Vehicle profile shared.',
   errorAdapterBusy: 'The adapter is in use (telemetry, the DID probe or a sweep) — stop that first.',
   errorNoTarget: 'This target is not defined for the selected vehicle profile.',
-  errorUnknown: (raw) => `The find could not be completed (${raw})`,
-  bannerShareFailed: (raw) => `Sharing failed (${raw})`,
+  errorUnknown: 'The find could not be completed. The details are in the shared JSON.',
+  bannerShareFailed: 'Sharing failed. The details are in the shared JSON.',
 };
 
 const RO: SignalFinderScreenStrings = {
@@ -199,6 +217,10 @@ const RO: SignalFinderScreenStrings = {
   noResponse: 'Fără răspuns',
   notRead: (count) => `Necitite: ${count}`,
   notReadSilent: (count, ecus) => `Necitite: ${count} — ECU ${ecus} nu răspunde`,
+  notReadSilentDids: (count) => `Necitite: ${count} — fără răspuns la sondaj sau la reîncercare`,
+  probing: (probed, total, seconds) => `Sondez ECU-urile… ${probed}/${total} (până la ${seconds} s)`,
+  warningTeardownPending: 'Adaptorul nu a confirmat închiderea — următoarea căutare o așteaptă.',
+  errorTeardownPending: 'Adaptorul încă se închide — încearcă din nou într-o clipă.',
   nextRound: (dids, seconds) => `Runda următoare (${dids} DID-uri, ≈ ${seconds} s)`,
   sparseSuffix: ' (rar)',
   verdicts: { found: 'găsit', probable: 'probabil', unrelated: 'fără legătură', insufficient: 'insuficient' },
@@ -236,8 +258,8 @@ const RO: SignalFinderScreenStrings = {
   bannerProfileShared: 'Profilul vehiculului a fost partajat.',
   errorAdapterBusy: 'Adaptorul este folosit (telemetrie, sonda DID sau o scanare) — oprește-l întâi.',
   errorNoTarget: 'Această țintă nu este definită pentru profilul de vehicul selectat.',
-  errorUnknown: (raw) => `Căutarea nu a putut fi finalizată (${raw})`,
-  bannerShareFailed: (raw) => `Partajarea a eșuat (${raw})`,
+  errorUnknown: 'Căutarea nu a putut fi finalizată. Detaliile sunt în JSON-ul partajat.',
+  bannerShareFailed: 'Partajarea a eșuat. Detaliile sunt în JSON-ul partajat.',
 };
 
 export const SIGNAL_FINDER_SCREEN_STRINGS: Readonly<Record<SignalFinderUiLanguage, SignalFinderScreenStrings>> = {
@@ -252,16 +274,23 @@ export function resolveSignalFinderScreenStrings(language: string | null | undef
 
 /**
  * P4m-FIX2 Y7 (binding, Codex P4m-REV2 finding 9): the controller's error CODE
- * rendered in the driver's own language. The raw `error` text stays what it
- * always was — an English/underlying message the export and the logs keep —
- * and an unrecognised failure gets the generic localized line WITH that raw
- * text in parentheses, so nothing is hidden from whoever has to debug it.
+ * rendered in the driver's own language.
+ *
+ * P4m-FIX3 Z7 (Codex P4m-REV3 finding 9, PARTIAL): the raw text no longer
+ * reaches this string at all. Build 8 appended it in parentheses, which meant a
+ * Romanian driver still read `socket hang up` — the untranslated half being, as
+ * ever, the half that says what actually happened. The raw message travels in
+ * the EXPORT's `diagnostics` section instead (`signalFinderExport.ts`), where
+ * whoever debugs it can read it and the driver never has to.
  *
  * A plain function of its two arguments (no React, no controller): the screen
  * calls it, and `signalFinderStrings.test.ts` pins it directly.
  */
 export function signalFinderErrorMessage(
-  snapshot: { errorCode: 'adapter-busy' | 'no-target' | 'run-failed' | null; error: string | null },
+  snapshot: {
+    errorCode: 'adapter-busy' | 'no-target' | 'run-failed' | 'adapter-teardown-pending' | null;
+    error: string | null;
+  },
   strings: SignalFinderScreenStrings,
 ): string | null {
   if (snapshot.errorCode === null && snapshot.error === null) return null;
@@ -270,7 +299,9 @@ export function signalFinderErrorMessage(
       return strings.errorAdapterBusy;
     case 'no-target':
       return strings.errorNoTarget;
+    case 'adapter-teardown-pending':
+      return strings.errorTeardownPending;
     default:
-      return strings.errorUnknown(snapshot.error ?? '');
+      return strings.errorUnknown;
   }
 }

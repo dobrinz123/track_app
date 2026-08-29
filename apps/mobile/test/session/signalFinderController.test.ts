@@ -369,7 +369,9 @@ describe('createSignalFinderController -- lifecycle (unchanged discipline)', () 
     await done;
     expect(reservation.holder()).toBeNull();
     expect(harness.transports[0]!.closeCalls).toBe(1);
-    expect(harness.controller.getSnapshot().phase).not.toBe('reading');
+    // P4m-FIX3 Z5 renamed `reading` to `running` (and split `probing` off it):
+    // whatever the stop left behind, it is not a round still in flight.
+    expect(['probing', 'running']).not.toContain(harness.controller.getSnapshot().phase);
   });
 
   it('a target with no hypotheses and no cache reads nothing and names the next concrete step instead', async () => {
@@ -698,12 +700,13 @@ describe('createSignalFinderController -- P4m-FIX2 (Y2 silent DIDs, Y5 stop duri
     expect(reservation.holder()).toBeNull();
   });
 
-  it('Y6: a close() that never resolves is bounded -- stop() returns and the reservation is released', async () => {
+  it('Y6/Z6: a close() that never resolves gets the hard abort at the first bound, and the release waits for the second', async () => {
     const reservation = createReservation();
     let destroyed = 0;
     const harness = makeController(() => bytes('00'), {
       reservation,
       closeTimeoutMs: 200,
+      teardownTimeoutMs: 500,
       transportFactory: () => {
         const transport = new MultiEcuFakeTransport({ answer: () => bytes('00') });
         transport.close = (): Promise<void> => new Promise(() => {}); // never resolves.
@@ -722,5 +725,144 @@ describe('createSignalFinderController -- P4m-FIX2 (Y2 silent DIDs, Y5 stop duri
     await find;
     expect(reservation.holder()).toBeNull();
     expect(destroyed).toBe(1);
+    // Z6: this double's `destroy()` does not make its `close()` settle either,
+    // so the release is the bounded one -- and it SAYS so.
+    expect(harness.controller.getSnapshot().adapterTeardownPending).toBe(true);
+  });
+});
+
+/**
+ * Ticket P4m-FIX3 (the LEAD's E2E rate defect + Codex P4m-REV3 findings 10,
+ * 11, 12).
+ *
+ *  Z1 (LEAD, HIGH) The budget and every duration estimate rest on the rate of
+ *      the RETAINED entries, never on a figure the dropped entries' timeouts
+ *      dominate.
+ *  Z4 (M10) A silent hypothesis gets exactly ONE explicit retry, BEFORE the
+ *      script; still silent, it is excluded and reported as silent.
+ *  Z5 (M11) The probe is a visible phase with `probed/total` progress.
+ *  Z6 (M12) The reservation is released only after the close settled — or, at
+ *      the hard bound, with the pending flag set and the next find refused.
+ */
+describe('createSignalFinderController -- P4m-FIX3 (retained rate, one hypothesis retry, visible probe, bounded teardown)', () => {
+  it('Z1: the rate the budget rests on is the ANSWERING entries own, not the probe figure the silent ECU dominates', async () => {
+    const harness = makeController(
+      // 0x29 is wholly silent (2 x 300 ms of the probe's own wall time); the
+      // DME answers instantly.
+      (ecu) => (ecu === 0x29 ? null : bytes('00')),
+      { measuredReqPerSec: 15 },
+    );
+    await runFind(harness);
+    const snapshot = harness.controller.getSnapshot();
+    expect(snapshot.rateSource).toBe('measured');
+    // The field reading was "rate 1.8/s measured" from one instant answer plus
+    // two silent entries -- and from it a 4-DID floor budget.
+    expect(snapshot.diagnosticReqPerSec).not.toBeNull();
+    expect(snapshot.measuredReqPerSec).toBeGreaterThan(snapshot.diagnosticReqPerSec!);
+    expect(snapshot.budget).toBe(12);
+    // ... and the next-step estimate is scaled by that same retained rate.
+    expect(snapshot.nextStep!.estimatedMinutes).toBeLessThan(snapshot.nextStep!.didCount / 12 / 60);
+  });
+
+  it('Z4: a silent hypothesis is retried EXACTLY once, before the script, and then excluded as silent', async () => {
+    const sweepStore = createInMemoryDidSweepStore();
+    await seedRun(sweepStore, 'run-29', 0x29);
+    await sweepStore.upsertResponders('run-29', [{ did: 0x5100, raw: bytes('00'), rttMs: 10 }], '2026-08-29T17:33:00.000Z');
+    const harness = makeController(
+      // 0x29 is ALIVE (0x5100 answers), but its hypothesis 0x500c never does.
+      (_ecu, did) => (did === 0x500c ? null : bytes('00')),
+      { sweepStore, measuredReqPerSec: 15 },
+    );
+    await runFind(harness);
+    const snapshot = harness.controller.getSnapshot();
+    const asked = harness.transports[0]!.requests.filter((r) => r.ecu === 0x29 && r.did === 0x500c).length;
+    // The probe's one attempt, plus the one explicit retry. Build 8 kept it in
+    // the round instead: 3 misses plus one more in every evidence window.
+    expect(asked).toBe(2);
+    expect(snapshot.silentDids).toContainEqual({ ecu: 0x29, did: 0x500c });
+    expect(snapshot.readDids).not.toContainEqual({ ecu: 0x29, did: 0x500c });
+    expect(snapshot.noResponseDids).not.toContainEqual({ ecu: 0x29, did: 0x500c });
+    expect(snapshot.silentEcus).not.toContain(0x29); // the ECU itself is alive.
+  });
+
+  it('Z4: a hypothesis that answers its ONE retry is kept in the round', async () => {
+    const sweepStore = createInMemoryDidSweepStore();
+    await seedRun(sweepStore, 'run-29', 0x29);
+    await sweepStore.upsertResponders('run-29', [{ did: 0x5100, raw: bytes('00'), rttMs: 10 }], '2026-08-29T17:33:00.000Z');
+    let dropped = 0;
+    const harness = makeController(
+      (_ecu, did) => {
+        // One dropped frame during the 300 ms probe is not proof of anything.
+        if (did === 0x500c && dropped === 0) {
+          dropped += 1;
+          return null;
+        }
+        return bytes('00');
+      },
+      { sweepStore, measuredReqPerSec: 15 },
+    );
+    await runFind(harness);
+    const snapshot = harness.controller.getSnapshot();
+    expect(snapshot.silentDids).not.toContainEqual({ ecu: 0x29, did: 0x500c });
+    expect(snapshot.readDids).toContainEqual({ ecu: 0x29, did: 0x500c });
+  });
+
+  it('Z5: the probe is its own PHASE, with probed/total progress, before the first metronome prompt', async () => {
+    const phases: string[] = [];
+    const progress: Array<{ probed: number; total: number; phase: string }> = [];
+    let phaseAtFirstPrompt: string | null = null;
+    const harness = makeController(() => bytes('00'));
+    harness.controller.subscribe((snapshot) => {
+      if (phases[phases.length - 1] !== snapshot.phase) phases.push(snapshot.phase);
+      if (snapshot.probeProgress !== null) {
+        progress.push({ ...snapshot.probeProgress, phase: snapshot.phase });
+      }
+      if (snapshot.step !== null && phaseAtFirstPrompt === null) phaseAtFirstPrompt = snapshot.phase;
+    });
+    await runFind(harness);
+    expect(phases).toEqual(['idle', 'preparing', 'probing', 'running', 'scoring', 'result']);
+    // Every progress line was shown DURING the probe, and it counted up to the
+    // planned entry count -- the driver is no longer staring at a still screen.
+    expect(progress.length).toBeGreaterThan(1);
+    for (const line of progress) expect(line.phase).toBe('probing');
+    expect(progress[progress.length - 1]!.probed).toBe(progress[0]!.total);
+    // The bound the screen states: entries x the per-DID timeout.
+    expect(progress[0]!.total).toBe(2);
+    // The metronome only ever prompts in the RUNNING phase, never during the probe.
+    expect(phaseAtFirstPrompt).toBe('running');
+    expect(harness.controller.getSnapshot().probeProgress).toBeNull();
+  });
+
+  it('Z6: a close() that never settles and cannot be aborted releases at the hard bound, flags it, and refuses the next find', async () => {
+    const reservation = createReservation();
+    const harness = makeController(() => bytes('00'), {
+      reservation,
+      closeTimeoutMs: 200,
+      teardownTimeoutMs: 500,
+      transportFactory: () => {
+        const transport = new MultiEcuFakeTransport({ answer: () => bytes('00') });
+        // No `destroy`, no `abort` -- the contract does not promise either.
+        transport.close = (): Promise<void> => new Promise(() => {});
+        return transport;
+      },
+    });
+    const find = harness.controller.find('brakeSwitch');
+    await vi.advanceTimersByTimeAsync(300);
+    const stopped = harness.controller.stop();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await stopped;
+    await find;
+    // Released -- but honestly: the adapter never confirmed the shutdown.
+    expect(reservation.holder()).toBeNull();
+    expect(harness.controller.getSnapshot().adapterTeardownPending).toBe(true);
+
+    // ... and a second find is refused with a CODE the screen can localize,
+    // rather than opening a socket the old one may still own.
+    const transportsBefore = harness.transports.length;
+    await runFind(harness);
+    const snapshot = harness.controller.getSnapshot();
+    expect(snapshot.phase).toBe('error');
+    expect(snapshot.errorCode).toBe('adapter-teardown-pending');
+    expect(harness.transports).toHaveLength(transportsBefore);
   });
 });

@@ -98,6 +98,9 @@ const TICK_INTERVAL_MS = 100;
 
 const RESERVATION_BUSY_MESSAGE = 'The adapter is in use (telemetry, the DID probe or a sweep) -- stop it first.';
 
+/** P4m-FIX3 Z6: the raw (diagnostics) text behind the `adapter-teardown-pending` code. */
+const ADAPTER_TEARDOWN_PENDING_MESSAGE = 'The previous transport close() has not settled yet -- the adapter is not free.';
+
 /**
  * P4m-FIX2 Y6 (Codex P4m-REV2 finding 16): a `close()` that never resolves used
  * to block BOTH `stop()` and the reservation release, because it was awaited
@@ -108,17 +111,49 @@ const RESERVATION_BUSY_MESSAGE = 'The adapter is in use (telemetry, the DID prob
 const DEFAULT_CLOSE_TIMEOUT_MS = 2_000;
 
 /**
+ * P4m-FIX3 Z6 (Codex P4m-REV3 finding 12, MEDIUM): "the timeout fallback merely
+ * checks optional, non-contractual `destroy`/`abort` methods and resolves even
+ * when neither exists or they throw; the reservation release then occurs while
+ * the original `close()` can remain pending".
+ *
+ * `ObdTransport` promises `close()` and nothing else, so a hard abort cannot be
+ * REQUIRED — but the reservation must not be handed to the next client while a
+ * socket the last one owns may still be alive either. So: release only after
+ * the close SETTLED; if it has not settled by {@link DEFAULT_CLOSE_TIMEOUT_MS},
+ * try whatever abort the transport happens to offer and keep waiting to this
+ * hard bound; if it STILL has not settled, release with
+ * {@link SignalFinderSnapshot.adapterTeardownPending} set and refuse the next
+ * find until that close finally settles (the controller stays subscribed to it).
+ */
+const DEFAULT_TEARDOWN_TIMEOUT_MS = 5_000;
+
+/**
  * P4m-FIX2 Y7 (Codex P4m-REV2 finding 9): WHY a find failed, as a code the
  * screen can translate. {@link SignalFinderSnapshot.error} keeps the raw
- * English/underlying text for developers and the export; the driver reads the
- * localized line the code selects.
+ * English/underlying text for the EXPORT's diagnostics (P4m-FIX3 Z7); the
+ * driver reads the localized line the code selects, and nothing else.
  */
-export type SignalFinderErrorCode = 'adapter-busy' | 'no-target' | 'run-failed';
+export type SignalFinderErrorCode = 'adapter-busy' | 'no-target' | 'run-failed' | 'adapter-teardown-pending';
 
 /** Ranks a previous observation gives a DID that did NOT change (or could not be judged) — never treated as change evidence (item 10b). */
 const NON_CHANGE_RANKS: ReadonlySet<string> = new Set(['static', 'insufficient']);
 
-export type SignalFinderPhase = 'idle' | 'preparing' | 'reading' | 'scoring' | 'result' | 'error';
+/**
+ * P4m-FIX3 Z5 (Codex P4m-REV3 finding 11, MEDIUM): `probing` is its own phase.
+ * The complete-pass probe costs up to `entries × 300 ms` before the metronome
+ * says anything, and build 8 spent those seconds on a screen that looked
+ * frozen; `reading` became `running` in the same move, so the two are never
+ * confused with each other.
+ */
+export type SignalFinderPhase = 'idle' | 'preparing' | 'probing' | 'running' | 'scoring' | 'result' | 'error';
+
+/** P4m-FIX3 Z5: how far the pre-script probe has got, and the bound it cannot exceed. */
+export interface SignalFinderProbeProgress {
+  probed: number;
+  total: number;
+  /** `total × requestTimeoutMs` — the worst case the screen states ("up to 4 s"). */
+  boundMs: number;
+}
 
 /** What was read on ONE ECU, cumulatively across the rounds run so far — the export's own per-ECU view. */
 export interface SignalFinderEcuPass {
@@ -190,7 +225,22 @@ export interface SignalFinderSnapshot {
    * on an adapter nobody timed.
    */
   rateSource: FinderRateSource;
-  /** Non-null exactly when something went wrong; never thrown across this API. The RAW text — the screen renders {@link errorCode}'s localized line instead. */
+  /**
+   * P4m-FIX3 Z1 — DIAGNOSTICS ONLY: the probe's OVERALL rate, the timeouts of
+   * the entries it then dropped included. `null` before any probe. The budget
+   * and every estimate use {@link measuredReqPerSec} (the retained entries'
+   * own rate); this figure exists so the export can show what the probe as a
+   * whole cost, which is what the LEAD's field run was accidentally sized from.
+   */
+  diagnosticReqPerSec: number | null;
+  /** P4m-FIX3 Z5: non-null exactly while the pre-script probe is running. */
+  probeProgress: SignalFinderProbeProgress | null;
+  /**
+   * P4m-FIX3 Z6: the last transport's `close()` had not settled when its
+   * reservation had to be released. A find is refused while this is true.
+   */
+  adapterTeardownPending: boolean;
+  /** Non-null exactly when something went wrong; never thrown across this API. The RAW text — for the EXPORT's diagnostics only; the screen renders {@link errorCode}'s localized line. */
   error: string | null;
   /** P4m-FIX2 Y7: what KIND of failure {@link error} is, so the screen can say it in the driver's own language. */
   errorCode: SignalFinderErrorCode | null;
@@ -224,6 +274,8 @@ export interface SignalFinderControllerDeps {
   measuredReqPerSec?: number;
   /** P4m-FIX2 Y6: how long a `close()` may take before the transport is aborted. Default {@link DEFAULT_CLOSE_TIMEOUT_MS} (2 s). */
   closeTimeoutMs?: number;
+  /** P4m-FIX3 Z6: how long the teardown waits IN TOTAL before releasing with `adapterTeardownPending`. Default {@link DEFAULT_TEARDOWN_TIMEOUT_MS} (5 s). */
+  teardownTimeoutMs?: number;
 }
 
 export interface SignalFinderController {
@@ -351,6 +403,11 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
       : FINDER_BUDGET_MAX;
   /** The budget for a rate — recomputed per round from what the probe actually measured. */
   const budgetFor = (reqPerSec: number): number => Math.min(computeFinderDidBudget(reqPerSec), maxDidsPerRound);
+  /** P4m-FIX1 X2: the per-DID request budget — and, times the entry count, the bound Z5's probe line states. */
+  const requestTimeoutMs =
+    deps.requestTimeoutMs !== undefined && Number.isFinite(deps.requestTimeoutMs) && deps.requestTimeoutMs > 0
+      ? deps.requestTimeoutMs
+      : FINDER_REQUEST_TIMEOUT_MS;
 
   const listeners = new Set<(snapshot: SignalFinderSnapshot) => void>();
   let snapshot: SignalFinderSnapshot = {
@@ -378,6 +435,9 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     startedAtUtc: null,
     measuredReqPerSec: assumedReqPerSec,
     rateSource: 'assumed',
+    diagnosticReqPerSec: null,
+    probeProgress: null,
+    adapterTeardownPending: false,
     error: null,
     errorCode: null,
   };
@@ -388,6 +448,8 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
   let control: DidSweepControl = { paused: false, stopped: false };
   let activeTransport: ObdTransport | null = null;
   let tickTimer: ReturnType<typeof setInterval> | null = null;
+  /** P4m-FIX3 Z6: a `close()` the teardown gave up WAITING for but not tracking. Non-null → no new find. */
+  let pendingClose: Promise<void> | null = null;
 
   /** Everything a `nextRound()` needs from the find that started it. */
   let currentTarget: SignalTargetDefinition | null = null;
@@ -444,17 +506,41 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     tickTimer = setInterval(tick, TICK_INTERVAL_MS);
   }
 
+  /** Resolves after `ms`, and can be cancelled so no timer is left running. */
+  function delay(ms: number): { promise: Promise<void>; cancel: () => void } {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const promise = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, Math.max(0, ms));
+    });
+    return {
+      promise,
+      cancel: () => {
+        if (timer !== null) clearTimeout(timer);
+      },
+    };
+  }
+
   /**
    * P4m-FIX2 Y6 (Codex P4m-REV2 finding 16, MEDIUM): "normal success, connect
    * failure, runner error and stop all call `close()`, but an indefinitely
    * pending `close()` blocks BOTH `stop()` and the reservation release because
    * it is awaited without a bound".
    *
-   * So the close is raced against {@link DEFAULT_CLOSE_TIMEOUT_MS}, and on the
-   * timeout the transport is aborted/destroyed if it offers that (the ENet TCP
-   * transport destroys its socket inside `close()`; a hung implementation that
-   * exposes `destroy()`/`abort()` gets one). Either way this resolves, and the
-   * caller's nested `finally` releases the reservation.
+   * P4m-FIX3 Z6 (Codex P4m-REV3 finding 12, MEDIUM): "the timeout fallback
+   * merely checks optional, non-contractual `destroy`/`abort` methods and
+   * resolves even when neither exists or they throw; reservation release then
+   * occurs while the original `close()` can remain pending". So the ORDER is
+   * now explicit, and honest at every step:
+   *
+   *  1. wait for `close()` to SETTLE — that is the normal path, and the
+   *     reservation is released only after it;
+   *  2. at {@link DEFAULT_CLOSE_TIMEOUT_MS}, try whatever hard abort the
+   *     transport happens to expose (the ENet TCP transport destroys its socket
+   *     inside `close()`; `ObdTransport` promises nothing more) and keep
+   *     waiting for the close;
+   *  3. at {@link DEFAULT_TEARDOWN_TIMEOUT_MS} give up WAITING, not TRACKING:
+   *     {@link pendingClose} stays subscribed to that close, the snapshot says
+   *     `adapterTeardownPending`, and a new find is refused until it settles.
    */
   async function teardownTransport(): Promise<void> {
     const transport = activeTransport;
@@ -464,34 +550,48 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
       deps.closeTimeoutMs !== undefined && Number.isFinite(deps.closeTimeoutMs) && deps.closeTimeoutMs > 0
         ? deps.closeTimeoutMs
         : DEFAULT_CLOSE_TIMEOUT_MS;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const bounded = new Promise<void>((resolve) => {
-      timer = setTimeout(() => {
-        const abortable = transport as ObdTransport & { destroy?: () => void; abort?: () => void };
-        try {
-          if (typeof abortable.destroy === 'function') abortable.destroy();
-          else if (typeof abortable.abort === 'function') abortable.abort();
-        } catch {
-          // The fallback is best effort: a transport that cannot even be
-          // destroyed must still not hold the reservation hostage.
-        }
-        resolve();
-      }, closeTimeoutMs);
-    });
+    const teardownTimeoutMs =
+      deps.teardownTimeoutMs !== undefined && Number.isFinite(deps.teardownTimeoutMs) && deps.teardownTimeoutMs > 0
+        ? Math.max(deps.teardownTimeoutMs, closeTimeoutMs)
+        : Math.max(DEFAULT_TEARDOWN_TIMEOUT_MS, closeTimeoutMs);
+
+    let settled = false;
+    const closed = (async (): Promise<void> => {
+      try {
+        await transport.close();
+      } catch {
+        // A transport that fails to close is as gone as one that closed.
+      }
+      settled = true;
+    })();
+
+    const soft = delay(closeTimeoutMs);
+    await Promise.race([closed, soft.promise]);
+    soft.cancel();
+    if (settled) return;
+
+    // (2) Best effort, and only best effort: neither method is contractual.
+    const abortable = transport as ObdTransport & { destroy?: () => void; abort?: () => void };
     try {
-      await Promise.race([
-        (async (): Promise<void> => {
-          try {
-            await transport.close();
-          } catch {
-            // A transport that fails to close is already gone as far as we care.
-          }
-        })(),
-        bounded,
-      ]);
-    } finally {
-      if (timer !== null) clearTimeout(timer);
+      if (typeof abortable.destroy === 'function') abortable.destroy();
+      else if (typeof abortable.abort === 'function') abortable.abort();
+    } catch {
+      // A transport that cannot even be destroyed must still not hold the
+      // reservation hostage -- step (3) is what covers that.
     }
+    const hard = delay(teardownTimeoutMs - closeTimeoutMs);
+    await Promise.race([closed, hard.promise]);
+    hard.cancel();
+    if (settled) return;
+
+    // (3) Released, tracked, and SAID.
+    pendingClose = closed;
+    emit({ adapterTeardownPending: true });
+    void closed.then(() => {
+      if (pendingClose !== closed) return;
+      pendingClose = null;
+      emit({ adapterTeardownPending: false });
+    });
   }
 
   /**
@@ -618,14 +718,27 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     });
   }
 
-  function emitPlan(plan: FinderRunPlan, unattempted: readonly SignalFinderTargetRef[] = []): void {
+  /**
+   * P4m-FIX3 Z4: `silentEcus` is the list of ECUs the PROBE found wholly
+   * silent, not "every ECU that has a silent DID on it". Build 8 derived it
+   * from `plan.silent`, so one individually silent DID — which is now the
+   * normal fate of a hypothesis that missed its retry — made the screen and the
+   * export say "ECU 0x29 silent" about an ECU that had answered on every other
+   * DID. Item 12's honesty rule applies to reasons as much as to counts.
+   */
+  function emitPlan(
+    plan: FinderRunPlan,
+    unattempted: readonly SignalFinderTargetRef[] = [],
+    probeSilentEcus: readonly number[] = [],
+  ): void {
+    const inPlan = new Set(plan.silent.map((entry) => entry.ecu));
     emit({
       budget: plan.budget,
       ecus: [...new Set(plan.dids.map((entry) => entry.ecu))].sort((a, b) => a - b),
       notReadDids: [...plan.notRead.map(refOf), ...unattempted.map(refOf)],
       notReadCount: plan.notRead.length + unattempted.length,
       silentDids: plan.silent.map(refOf),
-      silentEcus: [...new Set(plan.silent.map((entry) => entry.ecu))].sort((a, b) => a - b),
+      silentEcus: [...new Set(probeSilentEcus)].filter((ecu) => inPlan.has(ecu)).sort((a, b) => a - b),
     });
   }
 
@@ -699,13 +812,17 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         return;
       }
 
-      emit({ phase: 'reading' });
-      const requestTimeoutMs =
-        deps.requestTimeoutMs !== undefined && Number.isFinite(deps.requestTimeoutMs) && deps.requestTimeoutMs > 0
-          ? deps.requestTimeoutMs
-          : FINDER_REQUEST_TIMEOUT_MS;
+      // Z5: the probe is a phase of its own, and it counts out loud.
+      const probeProgress = {
+        probed: 0,
+        total: provisional.dids.length,
+        boundMs: provisional.dids.length * requestTimeoutMs,
+      };
+      emit({ phase: 'probing', probeProgress });
 
       let plan = provisional;
+      /** Z4: the ECUs the probe found WHOLLY silent — the only ones a "ECU N silent" line may name. */
+      let probeSilentEcus: readonly number[] = [];
       let attempted: readonly SignalFinderTargetRef[] = [];
       let scriptStarted = false;
 
@@ -730,21 +847,65 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
           requestTimeoutMs,
           maxPasses: 1,
           completePass: true,
+          // Z5: `probed/total`, so the up-to-`entries × 300 ms` wait before the
+          // metronome is something the driver can watch instead of guess at.
+          onProgress: (probed, total) => {
+            if (myGeneration !== generation) return;
+            emit({ probeProgress: { probed, total, boundMs: total * requestTimeoutMs } });
+          },
         });
         const summary = summarizeFinderProbe(probe, provisional.dids, assumedReqPerSec);
-        emit({ measuredReqPerSec: summary.reqPerSec, rateSource: summary.rateSource });
         if (myGeneration !== generation || control.stopped) return;
 
-        // X2 + Y2: re-plan at the measured rate (which now INCLUDES the probe's
-        // own timeout cost), without the silent ECUs and without the individual
-        // DIDs that missed -- the budget they were consuming is refilled from
-        // the next pool.
-        plan = planRound(summary.reqPerSec, summary.silentEcus, summary.silentDids);
-        emitPlan(plan);
+        /**
+         * Z4 (Codex P4m-REV3 finding 10): the ONE retry a silent HYPOTHESIS is
+         * worth — a single dropped frame inside a 300 ms probe attempt proves
+         * nothing — is a single explicit request made HERE, before the driver
+         * starts pressing anything. Build 8 instead kept the hypothesis in the
+         * round, where the runner spent three misses on it and one more in
+         * every evidence window, out of the script's own 21 seconds.
+         */
+        const hypothesisKeys = new Set(currentPools.hypotheses.map(keyOf));
+        const silentHypotheses = summary.silentDids.filter((entry) => hypothesisKeys.has(keyOf(entry)));
+        let silentDids: readonly SignalFinderTargetRef[] = summary.silentDids;
+        if (silentHypotheses.length > 0) {
+          const retry = await runFinderRound({
+            entries: silentHypotheses,
+            channels,
+            clock: deps.clock,
+            control,
+            durationMs: FINDER_PROBE_DURATION_MS,
+            requestTimeoutMs,
+            maxPasses: 1,
+            completePass: true,
+          });
+          const recovered = new Set(retry.answered.map(keyOf));
+          silentDids = summary.silentDids.filter((entry) => !recovered.has(keyOf(entry)));
+          if (myGeneration !== generation || control.stopped) return;
+        }
+
+        // Z1 (the LEAD's E2E defect): the budget and every estimate are sized
+        // from the RETAINED entries' own rate; the probe's overall figure, the
+        // timeouts of everything just dropped included, is kept as diagnostics.
+        emit({
+          measuredReqPerSec: summary.reqPerSec,
+          rateSource: summary.rateSource,
+          diagnosticReqPerSec: summary.timeoutInclusiveReqPerSec,
+          probeProgress: null,
+        });
+
+        // X2 + Y2 + Z4: re-plan at that rate, without the silent ECUs and
+        // without the individual DIDs that missed (a hypothesis included, once
+        // its one retry has missed too) -- the budget they were consuming is
+        // refilled from the next pool.
+        plan = planRound(summary.reqPerSec, summary.silentEcus, silentDids);
+        probeSilentEcus = summary.silentEcus;
+        emitPlan(plan, [], probeSilentEcus);
         if (plan.dids.length > 0) {
           for (const ecu of new Set(plan.dids.map((entry) => entry.ecu))) {
             if (!channels.has(ecu)) channels.set(ecu, createRawUdsChannel(transport, deps.testerAddress, ecu));
           }
+          emit({ phase: 'running' }); // Z5: the script -- and only now -- is what the metronome paces.
           const result = await runFinderRound({
             entries: plan.dids,
             channels,
@@ -791,7 +952,7 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
       const attemptedEntries = plan.dids.filter((entry) => attemptedKeys.has(keyOf(entry)));
       const unattempted = plan.dids.filter((entry) => !attemptedKeys.has(keyOf(entry)));
       readEntries = [...readEntries, ...attemptedEntries];
-      emitPlan(plan, unattempted);
+      emitPlan(plan, unattempted, probeSilentEcus);
 
       const answered = new Set(samples.map((sample) => `${sample.ecu}:${sample.did}`));
       noResponse = readEntries.filter((entry) => !answered.has(keyOf(entry))).map(refOf);
@@ -817,6 +978,9 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
       if (myGeneration === generation) emit({ phase: 'error', error: message, errorCode: 'run-failed', step: null });
     } finally {
       stopTicker();
+      // Z5: whatever ended the round (a stop mid-probe included), the probe's
+      // own progress line is over.
+      if (myGeneration === generation && snapshot.probeProgress !== null) emit({ probeProgress: null });
       // Y6: the release lives in a NESTED finally, so even a teardown that
       // somehow still throws or hangs past its own bound cannot leave the
       // adapter reserved for a session that has ended.
@@ -829,7 +993,24 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
   }
 
   function busy(): boolean {
-    return snapshot.phase === 'preparing' || snapshot.phase === 'reading' || snapshot.phase === 'scoring';
+    return (
+      snapshot.phase === 'preparing' ||
+      snapshot.phase === 'probing' ||
+      snapshot.phase === 'running' ||
+      snapshot.phase === 'scoring'
+    );
+  }
+
+  /**
+   * P4m-FIX3 Z6: a find is refused while the LAST transport's `close()` is
+   * still unsettled — opening a second socket to an adapter that may still hold
+   * the first is exactly what the reservation exists to prevent, and the
+   * reservation itself was already released (bounded) to keep `stop()` honest.
+   */
+  function teardownPending(): boolean {
+    if (pendingClose === null) return false;
+    emit({ phase: 'error', error: ADAPTER_TEARDOWN_PENDING_MESSAGE, errorCode: 'adapter-teardown-pending', step: null });
+    return true;
   }
 
   return {
@@ -844,7 +1025,7 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     },
 
     async find(targetId): Promise<void> {
-      if (busy()) return;
+      if (busy() || teardownPending()) return;
       const target = findSignalTarget(catalog, targetId);
       if (target === null) {
         emit({
@@ -884,6 +1065,11 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         // own probe reports, and never inherits the last find's reading.
         measuredReqPerSec: assumedReqPerSec,
         rateSource: 'assumed',
+        // Z1/Z5: a fresh find has probed nothing yet. (`adapterTeardownPending`
+        // is deliberately NOT reset here -- it belongs to the teardown that set
+        // it, and only that close settling may clear it.)
+        diagnosticReqPerSec: null,
+        probeProgress: null,
         budget: budgetFor(assumedReqPerSec),
         sessionId: `signal-finder-${deps.clock.now()}-${Math.random().toString(36).slice(2, 8)}`,
         startedAtUtc: nowUtc(),
@@ -927,6 +1113,7 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     async nextRound(): Promise<void> {
       const target = currentTarget;
       if (busy() || target === null || snapshot.notReadCount === 0) return;
+      if (teardownPending()) return; // Z6: one more script is one more socket.
       generation += 1;
       const myGeneration = generation;
       control = { paused: false, stopped: false };

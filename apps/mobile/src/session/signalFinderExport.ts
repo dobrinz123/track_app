@@ -48,8 +48,15 @@ import type { SignalFinderEcuPass, SignalFinderSnapshot } from './signalFinderCo
  * the top-level `silent` list (DIDs skipped because their ECU answered
  * nothing). Both are honesty fields: a reader of an old export cannot tell an
  * assumed rate from a measured one, which is the defect they close.
+ *
+ * P4m-FIX3 (Z1/Z7): schema 4 adds the top-level `diagnostics` section — the
+ * RAW failure text (which no longer appears in ANY user-facing string, in
+ * either language), the probe's timeout-inclusive rate (what the whole probe
+ * achieved, as opposed to `session.measuredReqPerSec`, which is the rate of the
+ * entries the round KEPT and therefore what the budget and every minute
+ * estimate rest on), and whether the adapter confirmed its own shutdown.
  */
-export const SIGNAL_FINDER_EXPORT_SCHEMA_VERSION = 3;
+export const SIGNAL_FINDER_EXPORT_SCHEMA_VERSION = 4;
 export const SIGNAL_FINDER_EXPORT_KIND = 'trace-signal-finder';
 
 /** RO/EN, per contracts.md item 8. Ticket P4l-FIX1 F2 (binding): the screen now passes the app's `language` setting (`settingsStore.ts`'s `AppLanguage`, the same two values), defaulted from the device locale -- it no longer hard-codes `'en'`. */
@@ -83,6 +90,23 @@ export interface SignalFinderExportInput {
   samples: readonly SignalFinderSample[];
   confirmedBindings: readonly VehicleProfileBinding[];
   nextStep: NextDiscoveryStep | null;
+  /** P4m-FIX3 Z1/Z7 (schema 4): everything the DRIVER is deliberately not shown. */
+  diagnostics: SignalFinderExportDiagnostics;
+}
+
+/**
+ * P4m-FIX3 Z7 (Codex P4m-REV3 finding 9): the one place a raw, untranslated
+ * message may appear. The screen renders a localized line for the error CODE
+ * and nothing else, so this section is what a developer (or the user forwarding
+ * the JSON) needs in order to see the real failure.
+ */
+export interface SignalFinderExportDiagnostics {
+  /** The controller's raw `error` text — English/underlying, never rendered in the UI. */
+  rawError: string | null;
+  /** P4m-FIX3 Z1: what the PROBE as a whole achieved, the timeouts of the entries it then dropped included. */
+  timeoutInclusiveReqPerSec: number | null;
+  /** P4m-FIX3 Z6: the previous transport's `close()` had not settled when its reservation was released. */
+  adapterTeardownPending: boolean;
 }
 
 export interface SignalFinderExportPass {
@@ -180,6 +204,8 @@ export interface SignalFinderExportDocument {
     updatedAtUtc: string;
   }>;
   nextStep: (NextDiscoveryStep & { ecuHex: string | null; fromDidHex: string; toDidHex: string }) | null;
+  /** P4m-FIX3 Z1/Z7 (schema 4): the raw error text and the probe's own overall rate — never shown on screen. */
+  diagnostics: SignalFinderExportDiagnostics;
 }
 
 function didHex(did: number): string {
@@ -235,6 +261,12 @@ export function signalFinderExportInputFromSnapshot(
     samples,
     confirmedBindings,
     nextStep: snap.nextStep,
+    // Z7: the RAW error leaves the app here and only here.
+    diagnostics: {
+      rawError: snap.error,
+      timeoutInclusiveReqPerSec: snap.diagnosticReqPerSec,
+      adapterTeardownPending: snap.adapterTeardownPending,
+    },
   };
 }
 
@@ -341,6 +373,11 @@ export function buildSignalFinderExportDocument(input: SignalFinderExportInput):
             fromDidHex: didHex(input.nextStep.fromDid),
             toDidHex: didHex(input.nextStep.toDid),
           },
+    diagnostics: {
+      rawError: input.diagnostics.rawError,
+      timeoutInclusiveReqPerSec: input.diagnostics.timeoutInclusiveReqPerSec,
+      adapterTeardownPending: input.diagnostics.adapterTeardownPending,
+    },
   };
 }
 
@@ -392,6 +429,8 @@ interface SummaryStrings {
   rateAssumed: (reqPerSec: number) => string;
   /** P4m-FIX1 X2: "Not read: 4 — ECU 0x29 silent". */
   silent: (count: number, ecus: string) => string;
+  /** P4m-FIX3 Z4: the same list when the ECU itself is ALIVE — only the DID never answered (its probe attempt AND its one retry). */
+  silentDids: (count: number) => string;
   /** P4m-FIX1 X8: the list-truncation marker — an RO summary used to end its lists in English. */
   moreItems: (count: number) => string;
   /** P4m-FIX1 X8: the free-text truncation marker. */
@@ -428,6 +467,7 @@ const EN: SummaryStrings = {
   rateMeasured: (reqPerSec) => `${reqPerSec.toFixed(1)} req/s measured`,
   rateAssumed: (reqPerSec) => `rate assumed ${reqPerSec.toFixed(1)} req/s — probe failed`,
   silent: (count, ecus) => `Not read: ${count} — ECU ${ecus} silent`,
+  silentDids: (count) => `Not read: ${count} — no answer to the probe or its one retry`,
   moreItems: (count) => `(+${count} more)`,
   moreChars: (count) => `(+${count} more chars)`,
   truncated: '_(+ more, truncated to stay within the summary budget)_',
@@ -467,6 +507,7 @@ const RO: SummaryStrings = {
   rateMeasured: (reqPerSec) => `${reqPerSec.toFixed(1)} cereri/s măsurate`,
   rateAssumed: (reqPerSec) => `rată presupusă ${reqPerSec.toFixed(1)} cereri/s — sondarea nu a răspuns`,
   silent: (count, ecus) => `Necitite: ${count} — ECU ${ecus} nu răspunde`,
+  silentDids: (count) => `Necitite: ${count} — fără răspuns la sondaj sau la reîncercare`,
   moreItems: (count) => `(+încă ${count})`,
   moreChars: (count) => `(+încă ${count} caractere)`,
   truncated: '_(+ restul, tăiat ca rezumatul să rămână de o pagină)_',
@@ -590,7 +631,15 @@ export function buildSignalFinderSummaryMarkdown(
   // P4m-FIX1 X2: a silent ECU gets its own line WITH the reason -- never mixed
   // into "not read (tap Next round)" (no round can fix a silent ECU), never
   // into "no response" (those DIDs were actually asked).
-  if (doc.silent.dids.length > 0) lines.push(`- ${s.silent(doc.silent.dids.length, doc.silent.ecus.join(', '))}`);
+  // P4m-FIX3 Z4: name an ECU as silent ONLY when the probe found it wholly
+  // silent. A hypothesis that missed its one retry on an otherwise answering
+  // ECU is a silent DID, and saying "ECU 0x12 silent" about the DME that
+  // answered everything else is the same class of dishonesty as item 12's.
+  if (doc.silent.dids.length > 0) {
+    lines.push(
+      `- ${doc.silent.ecus.length > 0 ? s.silent(doc.silent.dids.length, doc.silent.ecus.join(', ')) : s.silentDids(doc.silent.dids.length)}`,
+    );
+  }
   // P4m-FIX1 X1: the rate the budget rested on, and whether it was measured.
   lines.push(
     `- ${

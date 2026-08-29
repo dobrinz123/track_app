@@ -119,10 +119,23 @@ export interface RunFinderRoundInput {
    * P4m-FIX2 Y8: pace the round so ONE pass over `entries` takes at least
    * `entries.length / targetReqPerSec` seconds. Omitted → no pacing (what the
    * probe wants: it is measuring the adapter, not obeying a plan).
+   *
+   * P4m-FIX3 Z3 (Codex P4m-REV3 finding 9, HIGH) made that a PER-PASS rule
+   * rather than a per-entry schedule — see {@link runFinderRound}.
    */
   targetReqPerSec?: number;
   /** Invoked SYNCHRONOUSLY with the round's own anchor, before the first send — the metronome's `tMs = 0`. */
   onStarted?: (startedAtMs: number) => void;
+  /**
+   * P4m-FIX3 Z5 (Codex P4m-REV3 finding 11, MEDIUM): called after every
+   * ATTEMPTED entry with `(completedThisPass, total)` — `total` being
+   * `entries.length`, the count restarting at every pass so it can never run
+   * past `total` (the probe is ONE pass, so its line simply counts up to it).
+   * The probe is a serial pass that can cost `entries × requestTimeoutMs`, and
+   * the driver was left staring at a screen that said nothing for those
+   * seconds; this is the `n/N` the screen shows meanwhile.
+   */
+  onProgress?: (completed: number, total: number) => void;
 }
 
 export interface FinderRoundResult {
@@ -297,14 +310,24 @@ export async function runFinderRound(input: RunFinderRoundInput): Promise<Finder
   const completePass = input.completePass === true;
   /**
    * Y8: one pass over `entries` must take at least `entries / targetReqPerSec`
-   * seconds, i.e. each entry gets its own slot of `1000 / targetReqPerSec` ms.
-   * Without it an in-memory/loopback channel that answers inside one tick turns
-   * the round into a hot loop (the LEAD's own E2E observation), over-polling the
-   * adapter far past the rate the budget was sized from.
+   * seconds. Without it an in-memory/loopback channel that answers inside one
+   * tick turns the round into a hot loop (the LEAD's own E2E observation),
+   * over-polling the adapter far past the rate the budget was sized from.
+   *
+   * P4m-FIX3 Z3 (Codex P4m-REV3 finding 9, HIGH): the budget is PER PASS, and
+   * so is the pacing. Build 8 gave each ENTRY a slot of `1000 / rate` ms and
+   * advanced the schedule with `max(nextSlot, now) + interval`, so every slow
+   * exchange pushed the schedule permanently forward: a pass paid
+   * `Σ max(exchange, interval)` instead of `max(Σ exchange, Σ interval)`, and
+   * the six live entries behind two 300 ms timeouts lost a whole sample per
+   * window. Now a pass runs at whatever speed the adapter allows and only the
+   * REMAINDER of `entries × 1000 / rate` is slept off at the end of it — a
+   * timeout inside the pass is absorbed by that remainder instead of being
+   * added to it, and nothing is ever carried into the next pass.
    */
-  const paceIntervalMs =
+  const passIntervalMs =
     Number.isFinite(input.targetReqPerSec) && (input.targetReqPerSec ?? 0) > 0
-      ? 1_000 / (input.targetReqPerSec as number)
+      ? (input.entries.length * 1_000) / (input.targetReqPerSec as number)
       : 0;
 
   const startedAtMs = input.clock.now();
@@ -316,8 +339,13 @@ export async function runFinderRound(input: RunFinderRoundInput): Promise<Finder
   const attemptedKeys = new Set<string>();
   const answered: SignalFinderTargetRef[] = [];
   const answeredKeys = new Set<string>();
-  /** Y3: per key, the consecutive misses and (when cooling down) the evidence window it was backed off in. */
-  const state = new Map<string, { misses: number; backedOffInWindow: number | null }>();
+  /**
+   * Y3 + P4m-FIX3 Z2: per key, the evidence window the counter belongs to and
+   * the misses counted INSIDE that window. One flag, no cooldown bookkeeping:
+   * an entry is cooling exactly while `misses >= missesBeforeBackoff` in the
+   * CURRENT window, and a new window starts it from zero again.
+   */
+  const state = new Map<string, { window: number; misses: number }>();
   const backedOff: SignalFinderTargetRef[] = [];
   const backedOffKeys = new Set<string>();
   const responding = new Set<number>();
@@ -325,13 +353,17 @@ export async function runFinderRound(input: RunFinderRoundInput): Promise<Finder
   let answeredCount = 0;
   let answeredElapsedMs = 0;
   let nextKeepAliveAtMs = startedAtMs + keepAliveIntervalMs;
-  let nextSlotAtMs = startedAtMs;
 
-  const stateOf = (key: string): { misses: number; backedOffInWindow: number | null } => {
+  const stateOf = (key: string, currentWindow: number): { window: number; misses: number } => {
     let entryState = state.get(key);
     if (entryState === undefined) {
-      entryState = { misses: 0, backedOffInWindow: null };
+      entryState = { window: currentWindow, misses: 0 };
       state.set(key, entryState);
+    }
+    // Z2: a new evidence window is a clean slate for this entry.
+    if (entryState.window !== currentWindow) {
+      entryState.window = currentWindow;
+      entryState.misses = 0;
     }
     return entryState;
   };
@@ -346,6 +378,9 @@ export async function runFinderRound(input: RunFinderRoundInput): Promise<Finder
   outer: while (!done()) {
     if (input.maxPasses !== undefined && pass >= input.maxPasses) break;
     pass += 1;
+    const passStartedAtMs = input.clock.now();
+    /** Z5: progress is counted WITHIN a pass, so it can never run past `total`. */
+    let completedThisPass = 0;
     let polledThisPass = 0;
     /** Y3: entries skipped only because they are cooling down — they come back next window. */
     let coolingThisPass = 0;
@@ -359,19 +394,20 @@ export async function runFinderRound(input: RunFinderRoundInput): Promise<Finder
        * Y3 (Codex P4m-REV2 finding 13): the back-off is a bounded COOLDOWN,
        * not removal for the rest of the round. Build 7's three transient
        * misses emptied every later 3 s window of that DID, so a DID that
-       * recovered still scored `insufficient`. A cooled-down entry is retried
-       * ONCE at the start of every following window: it answers and resumes
-       * full sampling, or it misses once and cools down again.
+       * recovered still scored `insufficient`.
+       *
+       * P4m-FIX3 Z2 (Codex P4m-REV3 finding 8, HIGH) fixed what build 8 made
+       * of that: it granted the new window a SINGLE retry (misses reset to
+       * `threshold - 1`), so the first miss in a window immediately re-cooled
+       * the entry for the rest of it and a DID recovering moments later was
+       * never sampled again. Every window now hands back the FULL allowance:
+       * three misses inside THIS window cool the entry until the next one.
        */
-      const entryState = stateOf(key);
       const currentWindow = windowAt(input.clock.now());
-      if (entryState.backedOffInWindow !== null) {
-        if (entryState.backedOffInWindow === currentWindow) {
-          coolingThisPass += 1;
-          continue;
-        }
-        entryState.backedOffInWindow = null;
-        entryState.misses = missesBeforeBackoff - 1; // one retry; a second miss re-cools it.
+      const entryState = stateOf(key, currentWindow);
+      if (entryState.misses >= missesBeforeBackoff) {
+        coolingThisPass += 1;
+        continue;
       }
 
       if (input.clock.now() >= nextKeepAliveAtMs) {
@@ -383,16 +419,6 @@ export async function runFinderRound(input: RunFinderRoundInput): Promise<Finder
         }
       }
       if (done()) break outer;
-
-      // Y8: wait for this entry's own slot before asking. Cheap when the
-      // adapter is the bottleneck (the slot has long since passed), decisive
-      // on a simulator that answers instantly.
-      if (paceIntervalMs > 0) {
-        const waitForSlotMs = nextSlotAtMs - input.clock.now();
-        if (waitForSlotMs > 0) await waitMs(waitForSlotMs);
-        if (done()) break outer;
-        nextSlotAtMs = Math.max(nextSlotAtMs, input.clock.now()) + paceIntervalMs;
-      }
 
       polledThisPass += 1;
       const sentAtMs = input.clock.now();
@@ -411,18 +437,17 @@ export async function runFinderRound(input: RunFinderRoundInput): Promise<Finder
         }
       }
 
+      completedThisPass += 1;
+      input.onProgress?.(completedThisPass, input.entries.length); // Z5: the probe's own n/N.
+
       if (outcome.kind === 'miss') {
         entryState.misses += 1;
-        if (entryState.misses >= missesBeforeBackoff) {
-          entryState.backedOffInWindow = windowAt(input.clock.now());
-          if (!backedOffKeys.has(key)) {
-            backedOffKeys.add(key);
-            backedOff.push({ ecu: entry.ecu, did: entry.did });
-          }
+        if (entryState.misses >= missesBeforeBackoff && !backedOffKeys.has(key)) {
+          backedOffKeys.add(key);
+          backedOff.push({ ecu: entry.ecu, did: entry.did });
         }
       } else {
         entryState.misses = 0;
-        entryState.backedOffInWindow = null;
         responding.add(entry.ecu);
         if (!answeredKeys.has(key)) {
           answeredKeys.add(key);
@@ -441,14 +466,23 @@ export async function runFinderRound(input: RunFinderRoundInput): Promise<Finder
     }
 
     if (polledThisPass === 0) {
-      // Y3: "every entry is cooling down" is TEMPORARY -- each of them is
-      // retried at the start of the next evidence window, so the round sleeps
-      // to that boundary instead of ending. Only a pass with nothing cooling
+      // Y3: "every entry is cooling down" is TEMPORARY -- each of them gets its
+      // full allowance back at the next evidence window, so the round sleeps to
+      // that boundary instead of ending. Only a pass with nothing cooling
       // (every entry unrouted) is genuinely finished.
       if (coolingThisPass === 0) break;
       const boundaryMs = startedAtMs + (windowAt(input.clock.now()) + 1) * windowMs;
       await waitMs(Math.min(boundaryMs - input.clock.now(), Math.max(0, endAtMs - input.clock.now())));
       if (input.clock.now() < boundaryMs) break; // the round's own duration ran out first.
+      continue;
+    }
+
+    // Z3: pace the PASS, not the entry. Whatever the pass did not spend on
+    // exchanges is slept off here; a pass that already took longer than its
+    // interval starts the next one immediately, carrying no debt forward.
+    if (passIntervalMs > 0) {
+      const remainingMs = passIntervalMs - (input.clock.now() - passStartedAtMs);
+      if (remainingMs > 0) await waitMs(remainingMs);
     }
   }
 
@@ -470,11 +504,21 @@ export async function runFinderRound(input: RunFinderRoundInput): Promise<Finder
 export type FinderRateSource = 'measured' | 'assumed';
 
 export interface FinderProbeSummary {
-  /** The measured request rate, or `null` when the probe could not measure one (nothing answered). */
+  /**
+   * The measured request rate of the RETAINED entries (P4m-FIX3 Z1): answers
+   * over the wall time those answering exchanges took. `null` when the probe
+   * could not measure one (nothing answered).
+   */
   measuredReqPerSec: number | null;
   rateSource: FinderRateSource;
   /** What the caller should use: the measured rate, else the assumed fallback it passed in. */
   reqPerSec: number;
+  /**
+   * P4m-FIX3 Z1 — DIAGNOSTICS ONLY: every confirmed send over the probe's own
+   * wall time, the timeouts of the entries the round is about to DROP
+   * included. Never sizes a budget and never scales an estimate.
+   */
+  timeoutInclusiveReqPerSec: number | null;
   /** ECUs that answered at least once during the probe, ascending. */
   liveEcus: number[];
   /**
@@ -511,14 +555,22 @@ const MIN_PROBE_EXCHANGES = 1;
  * export/snapshot say `measuredReqPerSec` only when measured, else
  * `rateSource: 'assumed'` with the value".
  *
- * P4m-FIX2 Y2 (Codex P4m-REV2 finding 12, HIGH) settled where the rate comes
- * from. P4m-FIX1 divided by the ANSWERING exchanges only, on the argument that
- * a silent ECU is about to be dropped anyway. That was wrong in the case the
- * finding names: one answering DID plus many silent ones on the SAME ECU kept
- * every DID, so the round paid `misses x timeout` per pass against a rate that
- * had never counted a single timeout. The rate is now what the probe ACTUALLY
- * ACHIEVED — confirmed sends over its own wall time, misses included — which
- * errs slow (a smaller budget, more samples each), the safe direction.
+ * P4m-FIX2 Y2 (Codex P4m-REV2 finding 12, HIGH) made the rate timeout-
+ * INCLUSIVE, because one answering DID plus many silent ones on the same ECU
+ * kept every DID and the round then paid `misses x timeout` per pass against a
+ * rate that had never counted a single timeout.
+ *
+ * P4m-FIX3 Z1 (the LEAD's own E2E run, HIGH) put that back the other way,
+ * because Y2 removed the premise: the silent entries are now DROPPED (silent
+ * ECUs by X2, individual silent DIDs by Y2, silent hypotheses by Z4's explicit
+ * retry), so the entries the round RETAINS are exactly the ones that answered.
+ * Charging them for timeouts nobody will pay again is what produced the field
+ * reading "rate 1.8/s measured" from one instant answer plus two dropped silent
+ * entries — and from it a 4-DID floor budget and a "≈ 56 min" next step for a
+ * sweep the same adapter does in ~7. So the rate is the RETAINED entries' own:
+ * answers over the wall time those answers took. The timeout-inclusive figure
+ * survives as {@link FinderProbeSummary.timeoutInclusiveReqPerSec},
+ * diagnostics only.
  *
  * P4m-FIX2 Y1 (finding 11) settled the liveness verdict: a planned ECU is
  * `silent` only when EVERY one of its planned entries was actually ATTEMPTED
@@ -541,13 +593,15 @@ export function summarizeFinderProbe(
   }
 
   const measurable = result.answeredCount >= MIN_PROBE_EXCHANGES && result.requestCount > 0;
-  // The clock's own resolution floors the measurement at 1 ms per request
+  // The clock's own resolution floors the measurement at 1 ms per exchange
   // (a simulated/loopback transport answers inside one tick): the honest
   // reading of that is "at least 1000 req/s", which the budget clamp then
   // bounds — not "unmeasurable".
   const measuredReqPerSec = measurable
-    ? (result.requestCount * 1_000) / Math.max(result.elapsedMs, result.requestCount)
+    ? (result.answeredCount * 1_000) / Math.max(result.answeredElapsedMs, result.answeredCount)
     : null;
+  const timeoutInclusiveReqPerSec =
+    result.requestCount > 0 ? (result.requestCount * 1_000) / Math.max(result.elapsedMs, result.requestCount) : null;
 
   // Individually silent DIDs: attempted, never answered, on an ECU that is
   // otherwise alive (a wholly silent ECU is reported at ECU granularity below,
@@ -560,6 +614,7 @@ export function summarizeFinderProbe(
     measuredReqPerSec,
     rateSource: measuredReqPerSec === null ? 'assumed' : 'measured',
     reqPerSec: measuredReqPerSec ?? assumedReqPerSec,
+    timeoutInclusiveReqPerSec,
     liveEcus: planned.filter((ecu) => live.has(ecu)),
     silentEcus: planned.filter((ecu) => !live.has(ecu) && fullyAttempted.has(ecu)),
     unprobedEcus: planned.filter((ecu) => !live.has(ecu) && !fullyAttempted.has(ecu)),

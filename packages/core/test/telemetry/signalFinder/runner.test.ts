@@ -331,7 +331,11 @@ describe('runFinderRound -- P4m-FIX2 probe completeness, honest rate, bounded co
     expect(summary.unprobedEcus).toEqual([0x29]);
   });
 
-  it('Y2: the measured rate INCLUDES the timeout cost of the misses, and the missed DIDs are named', async () => {
+  // P4m-FIX3 Z1 supersedes half of this one: the timeout cost of the entries
+  // the round DROPS now lands in `timeoutInclusiveReqPerSec` (diagnostics)
+  // instead of in the figure the budget is sized from. The DIDs it names are
+  // unchanged, and they are still what makes dropping them possible.
+  it('Y2/Z1: the timeout cost of the misses is measured (as diagnostics), and the missed DIDs are named', async () => {
     const { channels } = harness((_ecu, did) => (did === 0x4002 ? Uint8Array.from([0x01]) : 'silent'), [0x12]);
     const entries = [
       { ecu: 0x12, did: 0x4002 },
@@ -351,9 +355,10 @@ describe('runFinderRound -- P4m-FIX2 probe completeness, honest rate, bounded co
     });
     const summary = summarizeFinderProbe(result, entries, 15.8);
     expect(summary.rateSource).toBe('measured');
-    // 4 attempts over ~120 ms of wall time is ~33 req/s -- the answered-only
-    // denominator would have reported four figures.
-    expect(summary.measuredReqPerSec).toBeLessThan(100);
+    // 4 attempts over ~120 ms of wall time is ~33 req/s -- what the probe as a
+    // whole achieved, three quarters of it paid for entries about to be dropped.
+    expect(summary.timeoutInclusiveReqPerSec).not.toBeNull();
+    expect(summary.timeoutInclusiveReqPerSec!).toBeLessThan(100);
     expect(summary.silentDids).toEqual([
       { ecu: 0x12, did: 0x4003 },
       { ecu: 0x12, did: 0x4004 },
@@ -433,5 +438,165 @@ describe('runFinderRound -- P4m-FIX2 probe completeness, honest rate, bounded co
     const perSecond = (log.requests.length * 1_000) / Math.max(1, result.elapsedMs);
     expect(perSecond).toBeLessThanOrEqual(targetHz * 1.2);
     expect(log.requests.length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * Ticket P4m-FIX3 (LEAD E2E defect + Codex P4m-REV3 findings 8, 9, 11).
+ *
+ *  Z1 (LEAD, HIGH) The rate a budget/estimate rests on is the RETAINED
+ *      entries' own rate (answers / the wall time those answers took). The
+ *      timeout-inclusive figure survives as DIAGNOSTICS only.
+ *  Z2 (H8) Every new evidence window restores the FULL miss allowance.
+ *  Z3 (H9) Pacing is per PASS, never a schedule that drifts per entry.
+ *  Z5 (M11) The probe reports its progress, entry by entry.
+ */
+describe('runFinderRound / summarizeFinderProbe -- P4m-FIX3 (retained rate, per-window allowance, pass pacing, progress)', () => {
+  /**
+   * A channel whose exchanges COST something: `send` resolves after
+   * `latencyMs`, and only `liveDid` is answered. The default `makeChannel`
+   * answers inside one tick, which is exactly the case a rate measurement
+   * cannot be taken from.
+   */
+  function latentChannel(liveDid: number, latencyMs: number, log: number[]): SweepTransport {
+    const queue: Uint8Array[] = [];
+    return {
+      send(pdu: Uint8Array): Promise<void> {
+        const did = ((pdu[1] ?? 0) << 8) | (pdu[2] ?? 0);
+        log.push(did);
+        return new Promise((resolve) =>
+          setTimeout(() => {
+            if (did === liveDid) queue.push(Uint8Array.from([0x62, (did >> 8) & 0xff, did & 0xff, 0x01]));
+            resolve();
+          }, latencyMs),
+        );
+      },
+      nextResponse(timeoutMs: number): Promise<Uint8Array | 'timeout'> {
+        const queued = queue.shift();
+        if (queued !== undefined) return Promise.resolve(queued);
+        return new Promise((resolve) => setTimeout(() => resolve('timeout'), Math.max(0, timeoutMs)));
+      },
+      async keepAlive(): Promise<void> {},
+    };
+  }
+
+  it('Z1: the budget rate is the RETAINED entries own rate -- the timeouts of DROPPED entries only reach diagnostics', async () => {
+    // The LEAD's own E2E case, scaled: ONE entry that answers at ~15/s plus two
+    // that stay silent and are dropped from the round.
+    const log: number[] = [];
+    const channels = new Map<number, SweepTransport>([[0x12, latentChannel(0x4002, 66, log)]]);
+    const entries = [
+      { ecu: 0x12, did: 0x4002 },
+      { ecu: 0x12, did: 0x4003 },
+      { ecu: 0x12, did: 0x4004 },
+    ];
+    const result = await runFinderRound({
+      entries,
+      channels,
+      clock: CLOCK,
+      control: { paused: false, stopped: false },
+      durationMs: 10,
+      requestTimeoutMs: 300,
+      maxPasses: 1,
+      completePass: true,
+    });
+    const summary = summarizeFinderProbe(result, entries, 15.8);
+    expect(log).toHaveLength(3);
+    // The answering entry's own rate: ~1 answer per 66 ms.
+    expect(summary.reqPerSec).toBeGreaterThan(8);
+    expect(summary.reqPerSec).toBeLessThan(30);
+    // ... while the probe's overall (timeout-inclusive) figure is dominated by
+    // the two entries that are about to be dropped -- kept, but as diagnostics.
+    expect(summary.timeoutInclusiveReqPerSec).not.toBeNull();
+    expect(summary.timeoutInclusiveReqPerSec!).toBeLessThan(summary.reqPerSec / 2);
+    // The next-step estimate the driver reads: 6413 DIDs at the RETAINED rate
+    // is minutes, not the ~56 min the timeout-inclusive figure produced.
+    expect(6_413 / summary.reqPerSec / 60).toBeLessThan(15);
+    expect(6_413 / summary.timeoutInclusiveReqPerSec! / 60).toBeGreaterThan(20);
+  });
+
+  it('Z2: a new evidence window restores the FULL miss allowance -- one miss no longer costs the whole window', async () => {
+    let silent = true;
+    // Silent through window 1 AND the first attempt of window 2.
+    setTimeout(() => {
+      silent = false;
+    }, 330);
+    const { channels } = harness(() => (silent ? 'silent' : Uint8Array.from([0x07])), [0x12]);
+    const result = await runFinderRound({
+      entries: [{ ecu: 0x12, did: 0x4002 }],
+      channels,
+      clock: CLOCK,
+      control: { paused: false, stopped: false },
+      durationMs: 900,
+      requestTimeoutMs: 20,
+      windowMs: 300,
+      missesBeforeBackoff: 3,
+    });
+    // Build 8 reset the counter to `threshold - 1`, so the ONE retry a new
+    // window granted was spent on that first miss and the DID stayed cooled
+    // for the rest of the window -- an empty window, and `insufficient`.
+    const window2 = result.samples.filter((s) => s.tMs >= 300 && s.tMs < 600);
+    expect(window2.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('Z3: pacing is per PASS -- a timeout inside the pass is ABSORBED by it, never added to the live entries wait', async () => {
+    /**
+     * The finding: `max(nextSlotAtMs, now) + interval` per ENTRY shifts the
+     * whole schedule forward after every slow exchange, so a pass costs
+     * `Σ max(exchange, interval)` instead of `max(Σ exchange, Σ interval)` and
+     * the live entries behind a timeout lose a sample per window. Measured
+     * against the SAME round with nothing silent in it: the two must stay
+     * within one sample of each other, and both must keep the ≥ 3 per window
+     * the budget promises.
+     */
+    const liveDids = [0x4101, 0x4102, 0x4103, 0x4104, 0x4105, 0x4106, 0x4107];
+    const windowMs = 1_300;
+    const run = async (silentDid: number | null): Promise<number[]> => {
+      const { channels } = harness((_ecu, did) => (did === silentDid ? 'silent' : Uint8Array.from([0x01])), [0x12]);
+      const result = await runFinderRound({
+        // The silent entry FIRST -- the worst case for a drifting schedule.
+        entries: [0x4001, ...liveDids].map((did) => ({ ecu: 0x12, did })),
+        channels,
+        clock: CLOCK,
+        control: { paused: false, stopped: false },
+        durationMs: windowMs,
+        requestTimeoutMs: 150,
+        windowMs,
+        // 8 entries at 29 req/s = one pass every ~276 ms; the 150 ms timeout
+        // fits INSIDE that, so it must not cost the live entries anything.
+        targetReqPerSec: 29,
+      });
+      return liveDids.map((did) => result.samples.filter((s) => s.did === did && s.tMs < windowMs).length);
+    };
+
+    const mixed = await run(0x4001);
+    const allLive = await run(null);
+    expect(Math.min(...mixed), `mixed run sampled ${JSON.stringify(mixed)}`).toBeGreaterThanOrEqual(3);
+    expect(Math.min(...mixed)).toBeGreaterThanOrEqual(Math.max(...allLive) - 1);
+  });
+
+  it('Z5: the round reports its progress after every attempted entry (the probe s own n/N)', async () => {
+    const { channels } = harness(() => Uint8Array.from([0x01]), [0x12]);
+    const progress: Array<[number, number]> = [];
+    await runFinderRound({
+      entries: [
+        { ecu: 0x12, did: 0x4002 },
+        { ecu: 0x12, did: 0x4003 },
+        { ecu: 0x12, did: 0x4004 },
+      ],
+      channels,
+      clock: CLOCK,
+      control: { paused: false, stopped: false },
+      durationMs: 2_000,
+      requestTimeoutMs: REQUEST_TIMEOUT_MS,
+      maxPasses: 1,
+      completePass: true,
+      onProgress: (completed, total) => progress.push([completed, total]),
+    });
+    expect(progress).toEqual([
+      [1, 3],
+      [2, 3],
+      [3, 3],
+    ]);
   });
 });

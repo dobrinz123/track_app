@@ -73,9 +73,16 @@ export interface PlanFinderRunOptions extends FinderBudgetOptions {
    * many silent DIDs ... can retain every DID; 11 retained DIDs can then
    * consume `11 × 3 × 300 ms = 9.9 s`" — of a ~21 s script the driver is
    * physically performing. They go to {@link FinderRunPlan.silent} with that
-   * reason, EXCEPT a hypothesis: the target's own hypotheses are the whole
-   * point of the find and are worth one retry inside the script (a single
-   * dropped frame during a 300 ms probe attempt is not proof of anything).
+   * reason.
+   *
+   * P4m-FIX3 Z4 (Codex P4m-REV3 finding 10, MEDIUM): NO exception, not even a
+   * hypothesis. Build 8 kept a silent hypothesis here "for one retry inside the
+   * script", and the runner turned that into three misses plus one more attempt
+   * in every evidence window — the driver's own script paying for a DID nothing
+   * had ever answered from. The one retry a hypothesis deserves is an EXPLICIT
+   * single request the caller makes after the probe and before the script
+   * (`signalFinderController.ts`), and whatever is still listed here when the
+   * plan is built is silent, whatever its source.
    */
   silentDids?: readonly SignalFinderTargetRef[];
 }
@@ -174,10 +181,11 @@ export function planFinderRun(
   const silentEcus = new Set(options.silentEcus ?? []);
   const silentDids = new Set((options.silentDids ?? []).map(key));
   for (const entry of ordered) {
-    // Y2: a silent ECU drops everything on it (X2, hypotheses included -- the
-    // ECU is not on this bus); a silent individual DID drops unless it is a
-    // hypothesis, which gets its one retry.
-    if (silentEcus.has(entry.ecu) || (silentDids.has(key(entry)) && entry.source !== 'hypothesis')) {
+    // Y2 + Z4: a silent ECU drops everything on it (X2, hypotheses included --
+    // the ECU is not on this bus), and so does an individually silent DID. The
+    // hypothesis exception build 8 made here is gone: its one retry happens
+    // BEFORE the plan is built, not inside the driver's script.
+    if (silentEcus.has(entry.ecu) || silentDids.has(key(entry))) {
       silent.push(entry);
     } else if (dids.length < budget) {
       dids.push(entry);

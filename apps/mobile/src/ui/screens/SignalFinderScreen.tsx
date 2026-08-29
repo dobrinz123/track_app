@@ -177,7 +177,12 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
     [],
   );
 
-  const busy = snapshot !== null && (snapshot.phase === 'preparing' || snapshot.phase === 'reading' || snapshot.phase === 'scoring');
+  const busy =
+    snapshot !== null &&
+    (snapshot.phase === 'preparing' ||
+      snapshot.phase === 'probing' ||
+      snapshot.phase === 'running' ||
+      snapshot.phase === 'scoring');
   const strings = resolveSignalFinderScreenStrings(settings.language);
   /**
    * X9 (binding, Codex P4m-REV1 finding 10): how many DIDs a find for each
@@ -284,7 +289,7 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
             : strings.bannerJsonShared
           : result.error === undefined
             ? strings.bannerSharingUnavailable
-            : strings.bannerShareFailed(result.error),
+            : strings.bannerShareFailed,
       );
     } finally {
       setSharing(false);
@@ -308,7 +313,7 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
           ? strings.bannerProfileShared
           : result.error === undefined
             ? strings.bannerSharingUnavailable
-            : strings.bannerShareFailed(result.error),
+            : strings.bannerShareFailed,
       );
     } finally {
       setSharing(false);
@@ -367,6 +372,26 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
         </View>
 
         {banner !== null ? <Text style={styles.banner}>{banner}</Text> : null}
+
+        {/* P4m-FIX3 Z6: the adapter never confirmed its own shutdown -- the next
+            find waits for it, and the driver is told rather than left wondering
+            why Find does nothing. */}
+        {snapshot?.adapterTeardownPending === true ? (
+          <Text style={styles.banner}>{strings.warningTeardownPending}</Text>
+        ) : null}
+
+        {/* P4m-FIX3 Z5: the pre-script probe counts itself out, with the bound
+            it cannot exceed (entries x the per-DID timeout) -- build 8 spent
+            those seconds on a screen that looked frozen. */}
+        {snapshot?.probeProgress != null ? (
+          <Text style={styles.caption}>
+            {strings.probing(
+              snapshot.probeProgress.probed,
+              snapshot.probeProgress.total,
+              Math.max(1, Math.ceil(snapshot.probeProgress.boundMs / 1_000)),
+            )}
+          </Text>
+        ) : null}
 
         {/* Metronome -- the whole point of the screen while a find is running. */}
         {snapshot !== null && snapshot.step !== null ? (
@@ -491,9 +516,14 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
                 dropped, and never mixed into "No response". */}
             {/* X2 (binding): a silent ECU's DIDs are listed with THAT reason,
                 never as "no response" and never as work a Next round could do. */}
+            {/* P4m-FIX3 Z4: an ECU is called silent only when the probe found it
+                WHOLLY silent; a DID that answered neither the probe nor its one
+                retry on a live ECU gets its own, truthful line. */}
             {snapshot.silentDids.length > 0 ? (
               <Text style={styles.caption}>
-                {strings.notReadSilent(snapshot.silentDids.length, snapshot.silentEcus.map(ecuHex).join(', '))}
+                {snapshot.silentEcus.length > 0
+                  ? strings.notReadSilent(snapshot.silentDids.length, snapshot.silentEcus.map(ecuHex).join(', '))
+                  : strings.notReadSilentDids(snapshot.silentDids.length)}
               </Text>
             ) : null}
 

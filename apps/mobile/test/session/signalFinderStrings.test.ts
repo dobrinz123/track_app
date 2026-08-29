@@ -130,15 +130,12 @@ describe('P4m-FIX2 Y7 -- profile labels and runtime errors are localized too', (
     for (const table of [SIGNAL_FINDER_SCREEN_STRINGS.en, SIGNAL_FINDER_SCREEN_STRINGS.ro]) {
       expect(typeof table.errorAdapterBusy).toBe('string');
       expect(typeof table.errorNoTarget).toBe('string');
-      expect(typeof table.errorUnknown).toBe('function');
-      expect(typeof table.bannerShareFailed).toBe('function');
+      expect(typeof table.errorTeardownPending).toBe('string');
+      // P4m-FIX3 Z7: plain strings, not templates -- there is no raw text left
+      // to interpolate into them.
+      expect(typeof table.errorUnknown).toBe('string');
+      expect(typeof table.bannerShareFailed).toBe('string');
     }
-    // An unknown failure is a localized line PLUS the raw message in parentheses:
-    // the driver reads Romanian, the developer still gets the real text.
-    const ro = SIGNAL_FINDER_SCREEN_STRINGS.ro.errorUnknown('ECONNRESET');
-    expect(ro).toContain('ECONNRESET');
-    expect(ro).not.toBe('ECONNRESET');
-    expect(ro).not.toBe(SIGNAL_FINDER_SCREEN_STRINGS.en.errorUnknown('ECONNRESET'));
   });
 
   it('maps a controller error CODE to the table, never the raw English message', () => {
@@ -148,10 +145,43 @@ describe('P4m-FIX2 Y7 -- profile labels and runtime errors are localized too', (
     expect(signalFinderErrorMessage({ errorCode: 'no-target', error: 'No target definition' }, SIGNAL_FINDER_SCREEN_STRINGS.ro)).toBe(
       SIGNAL_FINDER_SCREEN_STRINGS.ro.errorNoTarget,
     );
+    expect(
+      signalFinderErrorMessage(
+        { errorCode: 'adapter-teardown-pending', error: 'close() has not settled' },
+        SIGNAL_FINDER_SCREEN_STRINGS.ro,
+      ),
+    ).toBe(SIGNAL_FINDER_SCREEN_STRINGS.ro.errorTeardownPending);
     expect(signalFinderErrorMessage({ errorCode: 'run-failed', error: 'refused (test double)' }, SIGNAL_FINDER_SCREEN_STRINGS.ro)).toBe(
-      SIGNAL_FINDER_SCREEN_STRINGS.ro.errorUnknown('refused (test double)'),
+      SIGNAL_FINDER_SCREEN_STRINGS.ro.errorUnknown,
     );
     expect(signalFinderErrorMessage({ errorCode: null, error: null }, SIGNAL_FINDER_SCREEN_STRINGS.ro)).toBeNull();
+  });
+
+  /**
+   * Ticket P4m-FIX3 Z7 (Codex P4m-REV3 finding 9, PARTIAL): "Romanian runtime
+   * and share messages still interpolate raw, potentially English errors". A
+   * localized line with `(socket hang up)` glued to the end of it is still an
+   * English message where the driver needs a Romanian one; the raw text belongs
+   * in the export's diagnostics section, which is where it now goes.
+   */
+  it('Z7: the RO banner for a thrown ENGLISH error carries no word of that error', () => {
+    const raw = 'refused by peer: socket hang up while reading response';
+    const ro = signalFinderErrorMessage({ errorCode: 'run-failed', error: raw }, SIGNAL_FINDER_SCREEN_STRINGS.ro);
+    expect(ro).not.toBeNull();
+    for (const word of raw.split(/[^A-Za-z]+/).filter((w) => w.length >= 3)) {
+      expect(ro!.toLowerCase(), `the RO banner leaks "${word}" from the raw error`).not.toContain(word.toLowerCase());
+    }
+    // ... and the same holds for a failed share.
+    expect(SIGNAL_FINDER_SCREEN_STRINGS.ro.bannerShareFailed.toLowerCase()).not.toContain('sharing');
+  });
+
+  it('Z5/Z6: the probe line and the teardown warning exist in both languages, with their own wording', () => {
+    const en = SIGNAL_FINDER_SCREEN_STRINGS.en;
+    const ro = SIGNAL_FINDER_SCREEN_STRINGS.ro;
+    expect(en.probing(3, 12, 4)).toBe('Probing the ECUs… 3/12 (up to 4 s)');
+    expect(ro.probing(3, 12, 4)).toBe('Sondez ECU-urile… 3/12 (până la 4 s)');
+    expect(ro.warningTeardownPending).not.toBe(en.warningTeardownPending);
+    expect(ro.notReadSilentDids(2)).not.toBe(en.notReadSilentDids(2));
   });
 
   it('the vehicle-profile catalogs carry a Romanian label, resolved by language', () => {

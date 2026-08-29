@@ -125,6 +125,7 @@ function input(overrides: Partial<SignalFinderExportInput> = {}): SignalFinderEx
     samples: [{ ecu: 0x29, did: 0x500c, tMs: 1_250, raw: Uint8Array.from([0x04]) }],
     confirmedBindings: [],
     nextStep: null,
+    diagnostics: { rawError: null, timeoutInclusiveReqPerSec: null, adapterTeardownPending: false },
     ...overrides,
   };
 }
@@ -155,6 +156,9 @@ function snapshot(overrides: Partial<SignalFinderSnapshot> = {}): SignalFinderSn
     startedAtUtc: '2026-08-29T18:10:00.000Z',
     measuredReqPerSec: 15.8,
     rateSource: 'measured',
+    diagnosticReqPerSec: null,
+    probeProgress: null,
+    adapterTeardownPending: false,
     error: null,
     errorCode: null,
     ...overrides,
@@ -170,10 +174,10 @@ beforeEach(() => {
 });
 
 describe('buildSignalFinderExportDocument', () => {
-  it('is schemaVersion 3 of trace-signal-finder and carries the whole session, rounds included (P4m M3, P4m-FIX1 X1/X2)', () => {
+  it('is schemaVersion 4 of trace-signal-finder and carries the whole session, rounds included (P4m M3, P4m-FIX1 X1/X2, P4m-FIX3 Z7)', () => {
     const doc = buildSignalFinderExportDocument(input());
     expect(doc.schemaVersion).toBe(SIGNAL_FINDER_EXPORT_SCHEMA_VERSION);
-    expect(doc.schemaVersion).toBe(3);
+    expect(doc.schemaVersion).toBe(4);
     expect(doc.kind).toBe(SIGNAL_FINDER_EXPORT_KIND);
     expect(doc.kind).toBe('trace-signal-finder');
     expect(doc.session).toMatchObject({
@@ -736,5 +740,58 @@ describe('P4m-FIX2 Y7 -- the RO summary carries no English', () => {
     for (const english of ['Brake switch', 'more', 'Not read', 'No response', 'found']) {
       expect(ro, `RO summary still contains "${english}"`).not.toContain(english);
     }
+  });
+});
+
+/**
+ * Ticket P4m-FIX3 Z7 (Codex P4m-REV3 finding 9, PARTIAL) + Z1: the RAW failure
+ * text and the probe's timeout-inclusive rate leave the app through the
+ * export's `diagnostics` section — and through nothing else.
+ */
+describe('P4m-FIX3 Z1/Z7 -- the export diagnostics section', () => {
+  it('carries the raw error, the probe s own overall rate and the teardown flag (schema 4)', () => {
+    const doc = buildSignalFinderExportDocument(
+      input({
+        measuredReqPerSec: 15.2,
+        diagnostics: { rawError: 'socket hang up', timeoutInclusiveReqPerSec: 1.8, adapterTeardownPending: true },
+      }),
+    );
+    expect(doc.schemaVersion).toBe(4);
+    expect(doc.diagnostics).toEqual({
+      rawError: 'socket hang up',
+      timeoutInclusiveReqPerSec: 1.8,
+      adapterTeardownPending: true,
+    });
+    // The budget/estimate rate and the probe's overall rate are DIFFERENT
+    // numbers, and the export keeps them apart (the LEAD's E2E defect).
+    expect(doc.session.measuredReqPerSec).toBe(15.2);
+  });
+
+  it('the snapshot bridge is what puts the raw error there -- the driver never reads it', () => {
+    const doc = buildSignalFinderExportDocument(
+      signalFinderExportInputFromSnapshot(
+        snapshot({ phase: 'error', error: 'refused (test double)', errorCode: 'run-failed', diagnosticReqPerSec: 2.4 }),
+        [],
+        [],
+        '2026-08-29T18:12:03.000Z',
+      )!,
+    );
+    expect(doc.diagnostics.rawError).toBe('refused (test double)');
+    expect(doc.diagnostics.timeoutInclusiveReqPerSec).toBe(2.4);
+  });
+
+  it('Z4: the summary says "no answer to the probe or its one retry" when no ECU was wholly silent', () => {
+    const en = buildSignalFinderSummaryMarkdown(
+      buildSignalFinderExportDocument(input({ silentDids: [{ ecu: 0x12, did: 0x4002 }], silentEcus: [] })),
+      'en',
+    );
+    // Never "ECU  silent" about an ECU that answered everything else.
+    expect(en).toContain('no answer to the probe or its one retry');
+    expect(en).not.toMatch(/ECU\s+silent/);
+    const ro = buildSignalFinderSummaryMarkdown(
+      buildSignalFinderExportDocument(input({ silentDids: [{ ecu: 0x12, did: 0x4002 }], silentEcus: [] })),
+      'ro',
+    );
+    expect(ro).toContain('fără răspuns la sondaj sau la reîncercare');
   });
 });
