@@ -67,6 +67,19 @@ export interface DidPhaseSample {
    * the candidate set, a DID never moves between batches mid-run).
    */
   batchIndex?: number;
+  /**
+   * Ticket P4j-FIX2 V3/V4 (binding, after Codex P4j-REV2 NEW MEDIUM #1/#2):
+   * which observation run (`didSweepController.ts`'s own `currentObservationId`,
+   * a fresh id per `startGuidedObservation`/`startBatchedObservation`/
+   * `startFocusedObservation` call) this sample belongs to -- `undefined` for
+   * a caller that never tags it (this module's own ranking functions group
+   * purely by `did`/`phase` and never read this field; it exists solely so
+   * the export can reconcile live vs. persisted samples PER OBSERVATION
+   * (never "pick the longer source" across the whole run) and keep each
+   * observation's own series/`batchIndex` separate rather than merging two
+   * independent runs on the same DID into one).
+   */
+  observationId?: string;
 }
 
 /**
@@ -74,8 +87,19 @@ export interface DidPhaseSample {
  * EXACTLY ONE active phase is labelled by THAT phase specifically -- never a
  * merged "brakeOrSteeringCandidate" that throws away which phase actually
  * moved it. `rankOf` below picks the ONE active phase that changed.
+ *
+ * Ticket P4j-FIX2 V1 (binding, after Codex P4j-REV2 HIGH #1 PARTIAL: "a DID
+ * gets five baseline/brake/steering samples, changes only under brake, then
+ * fails throttle three times -- it is reported insufficient but still ranks
+ * as brakeCandidate"): a DID with `insufficient` evidence in ANY phase
+ * (baseline included) is ranked `insufficient` -- EXCLUDED from every other
+ * rank, listed separately with its failing phases, never `brakeCandidate`/
+ * `steeringCandidate`/`throttleCandidate`/`changedInSeveral` on the strength
+ * of the phases it DID have enough evidence for. Under the legacy naive
+ * distinctness rule (`useMarginRule: false`, the default) no phase is ever
+ * `insufficient`, so this rank never arises there.
  */
-export type DidCandidateRank = 'brakeCandidate' | 'steeringCandidate' | 'throttleCandidate' | 'changedInSeveral' | 'static';
+export type DidCandidateRank = 'brakeCandidate' | 'steeringCandidate' | 'throttleCandidate' | 'changedInSeveral' | 'static' | 'insufficient';
 
 /**
  * Ticket P4j-FIX1 H2 (binding, after Codex P4j-REV1 HIGH #2): a phase's own
@@ -159,6 +183,9 @@ const RANK_ORDER: Readonly<Record<DidCandidateRank, number>> = {
   throttleCandidate: 0,
   changedInSeveral: 1,
   static: 2,
+  // Ticket P4j-FIX2 V1 (binding): sorted LAST -- excluded from ranking, never
+  // mixed in among genuine candidates or even the cleanly-ruled-out static set.
+  insufficient: 3,
 };
 
 /**
@@ -444,6 +471,13 @@ export function computeDidCandidateSummaries(
       max = max === null ? decoded : Math.max(max, decoded);
     }
 
+    // Ticket P4j-FIX2 V1 (binding): `insufficient` in ANY phase (baseline
+    // included) excludes this DID from every other rank -- it is NEVER
+    // reported as a candidate on the strength of the phases it happened to
+    // have enough evidence for. Under the legacy naive rule no phase is ever
+    // `insufficient`, so this never overrides `rankOf`'s own result there.
+    const anyPhaseInsufficient = Object.values(phaseEvidence).some((evidence) => evidence === 'insufficient');
+
     summaries.push({
       did,
       lastRawHex: entry.allHexes[entry.allHexes.length - 1] ?? '',
@@ -454,7 +488,7 @@ export function computeDidCandidateSummaries(
       changedInPhase,
       phaseEvidence,
       lengthConsistent: entry.lengthConsistent,
-      rank: rankOf(changedInPhase),
+      rank: anyPhaseInsufficient ? 'insufficient' : rankOf(changedInPhase),
     });
   }
 
@@ -575,6 +609,10 @@ export function computeDidBlockCandidateSummaries(
     } else {
       rank = 'static';
     }
+    // Ticket P4j-FIX2 V1 (binding): same exclusion as the numeric summaries --
+    // `insufficient` in ANY phase overrides whatever `rank` the phases WITH
+    // enough evidence would otherwise have earned.
+    if (Object.values(phaseEvidence).some((evidence) => evidence === 'insufficient')) rank = 'insufficient';
 
     summaries.push({ did, length, sampleCount: entry.sampleCount, changedOffsetsByPhase, phaseEvidence, rank });
   }

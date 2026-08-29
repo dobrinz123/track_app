@@ -97,7 +97,10 @@ describe('computeDidCandidateSummaries — P4j-FIX1 H2 change rule (binding)', (
     expect(summary?.phaseEvidence.baseline).toBe('insufficient');
     expect(summary?.phaseEvidence.brake).toBe('insufficient');
     expect(summary?.changedInPhase.brake).toBe(false);
-    expect(summary?.rank).toBe('static');
+    // Ticket P4j-FIX2 V1 (binding, after Codex P4j-REV2 HIGH #1 PARTIAL):
+    // `insufficient` in ANY phase now excludes the WHOLE DID from ranking --
+    // never `static` (which used to read as "measured, and found unchanging").
+    expect(summary?.rank).toBe('insufficient');
   });
 
   it('3-byte and 4-byte values decode numerically (u24/u32) instead of falling back to byte distinctness', () => {
@@ -137,7 +140,10 @@ describe('computeDidCandidateSummaries — P4j-FIX1 H2 change rule (binding)', (
     const [summary] = computeDidCandidateSummaries(samples, MARGIN);
     expect(summary?.lengthConsistent).toBe(false);
     expect(summary?.phaseEvidence.brake).toBe('insufficient');
-    expect(summary?.rank).toBe('static');
+    // Ticket P4j-FIX2 V1 (binding): a length-inconsistent DID has NO usable
+    // evidence in any phase (baseline itself is `insufficient` too) -- ranked
+    // `insufficient`, never `static`.
+    expect(summary?.rank).toBe('insufficient');
   });
 
   it('legacy callers (no `useMarginRule`) keep the pre-ticket naive distinctness AND never see `insufficient`', () => {

@@ -46,8 +46,8 @@ import {
   type DidSweepExportDocument,
 } from '../../src/session/didSweepExport';
 import { createInMemoryDidSweepStore, type DidSweepResponderRecord, type DidSweepRunRecord } from '../../src/persistence/didSweepStore';
-import { createDidSweepController } from '../../src/session/didSweepController';
-import { DEFAULT_ENET_DID_SCENARIO, SimulatedEnetTransport } from '@circuit/core';
+import { createDidSweepController, type DidSweepController } from '../../src/session/didSweepController';
+import { DEFAULT_ENET_DID_SCENARIO, SimulatedEnetTransport, type DidPhaseSample } from '@circuit/core';
 
 async function flush(times = 30): Promise<void> {
   for (let i = 0; i < times; i += 1) await Promise.resolve();
@@ -678,5 +678,133 @@ describe('P4j-FIX1 H3 — the export reads the observation series from the STORE
     expect(doc!.observationSeries).toEqual([]);
     expect(doc!.candidates).toEqual([]);
     expect(doc!.blockCandidates).toEqual([]);
+  });
+});
+
+/**
+ * Ticket P4j-FIX2 V3/V4 (binding, after Codex P4j-REV2 NEW MEDIUM #1/#2).
+ * Kept in THIS file (vitest collection quirk, per the ticket) rather than
+ * `didSweepController.test.ts`.
+ *
+ * A minimal `Pick<DidSweepController, 'getSnapshot' | 'getGuidedSamples'>`
+ * double -- `buildDidSweepExportForRun` only ever calls these two methods, so
+ * this is exactly what it sees from a REAL controller mid-observation,
+ * without needing to orchestrate a genuine persistence-lag timing race
+ * (fragile and non-deterministic) just to get "live ahead of its own last
+ * checkpoint". A real controller's `getSnapshot()` (even its INITIAL, never-
+ * started snapshot) is a fully valid `DidSweepSnapshot` -- reused verbatim
+ * here, with only `observationId` overridden, so this stays honest to the
+ * REAL shape rather than a hand-rolled partial cast.
+ */
+describe('P4j-FIX2 V3/V4 — export reconciles live/persisted samples PER OBSERVATION, never "pick the longer source" (binding)', () => {
+  function phaseSample(did: number, tMs: number, rawByte: number, observationId: string, batchIndex?: number): DidPhaseSample {
+    return batchIndex === undefined
+      ? { did, phase: 'baseline', tMs, raw: Uint8Array.from([rawByte]), observationId }
+      : { did, phase: 'baseline', tMs, raw: Uint8Array.from([rawByte]), observationId, batchIndex };
+  }
+
+  async function fakeControllerAt(store: ReturnType<typeof createInMemoryDidSweepStore>, observationId: string | null, liveSamples: DidPhaseSample[]): Promise<Pick<DidSweepController, 'getSnapshot' | 'getGuidedSamples'>> {
+    // A throwaway REAL controller, never run -- its `getSnapshot()` is the
+    // genuine `INITIAL_SNAPSHOT` shape (every field present, correctly
+    // typed), reused verbatim with only `observationId` overridden.
+    const real = createDidSweepController({
+      transportFactory: () => new SimulatedEnetTransport({ monotonicNow: () => Date.now(), scenario: DEFAULT_ENET_DID_SCENARIO, testerAddress: 0xf4, targetAddress: 0x12 }),
+      testerAddress: 0xf4,
+      targetAddress: 0x12,
+      clock: { now: () => Date.now() },
+      store,
+    });
+    const baseSnapshot = real.getSnapshot();
+    return {
+      getSnapshot: () => ({ ...baseSnapshot, observationId }),
+      getGuidedSamples: () => liveSamples,
+    };
+  }
+
+  it('V3: reconciles by (observationId, seq) -- A persisted 320 (modelled smaller: 3), B live 10 (modelled: 3) / only 8 (modelled: 2) reached B\'s own checkpoint -> export has A + B\'s live count, NEVER the whole-run "pick the longer source"', async () => {
+    const store = createInMemoryDidSweepStore();
+    await store.createRun(run({ runId: 'run-v3' }));
+
+    // Observation A: fully persisted, 3 samples (stands in for the ticket's "320").
+    const obsA = 'obs-a';
+    await store.appendObservationSamples('run-v3', obsA, [
+      { did: 0x1002, phase: 'baseline', tMs: 0, raw: Uint8Array.from([1]) },
+      { did: 0x1002, phase: 'baseline', tMs: 100, raw: Uint8Array.from([2]) },
+      { did: 0x1002, phase: 'baseline', tMs: 200, raw: Uint8Array.from([3]) },
+    ]);
+
+    // Observation B: only its first 2 samples reached the store's own
+    // checkpoint (stands in for the ticket's "8 of 10"); B is the CURRENT
+    // (live) observation, with 3 live samples -- ONE fresher than storage.
+    const obsB = 'obs-b';
+    await store.appendObservationSamples('run-v3', obsB, [
+      { did: 0x2003, phase: 'baseline', tMs: 0, raw: Uint8Array.from([10]) },
+      { did: 0x2003, phase: 'baseline', tMs: 100, raw: Uint8Array.from([11]) },
+    ]);
+    const liveB: DidPhaseSample[] = [
+      phaseSample(0x2003, 0, 0x0a, obsB), // matches the persisted seq-0 row.
+      phaseSample(0x2003, 100, 0x0b, obsB), // matches the persisted seq-1 row.
+      phaseSample(0x2003, 200, 0x0c, obsB), // NOT yet checkpointed -- live only.
+    ];
+
+    const controller = await fakeControllerAt(store, obsB, liveB);
+    const doc = await buildDidSweepExportForRun(controller, store, 'run-v3', '2026-08-29T11:00:00.000Z');
+    expect(doc).not.toBeNull();
+
+    const totalSamples = doc!.observationSeries.reduce((sum, s) => sum + s.samples.length, 0);
+    // A's 3 (untouched) + B's 3 (live, the MORE complete side) -- the
+    // pre-fix code would have compared cumulative persisted (3 + 2 = 5)
+    // against live-for-B-only (3) and picked storage wholesale, LOSING B's
+    // one freshest not-yet-checkpointed sample (total would read 5, not 6).
+    expect(totalSamples).toBe(6);
+    const bSeries = doc!.observationSeries.find((s) => s.didHex === '0x2003');
+    expect(bSeries?.samples).toEqual([
+      { tMs: 0, rawHex: '0A' },
+      { tMs: 100, rawHex: '0B' },
+      { tMs: 200, rawHex: '0C' }, // the freshest live-only sample -- lost by the pre-fix "pick the longer source" logic.
+    ]);
+  });
+
+  /**
+   * V4: persisted observation groups stay SEPARATE in export -- a DID
+   * sampled in TWO observations (one batched, one not) produces TWO series,
+   * each with its OWN `batchIndex`, never merged into one that reports only
+   * the first observation's `batchIndex`.
+   */
+  it('V4: the SAME DID sampled in two separate observations exports as TWO series, each with its own batchIndex -- never merged', async () => {
+    const store = createInMemoryDidSweepStore();
+    await store.createRun(run({ runId: 'run-v4' }));
+
+    const did = 0x1234;
+    // Observation A (batched): persisted with batchIndex 0.
+    await store.appendObservationSamples('run-v4', 'obs-a', [
+      { did, phase: 'baseline', tMs: 0, raw: Uint8Array.from([1]), batchIndex: 0 },
+      { did, phase: 'baseline', tMs: 100, raw: Uint8Array.from([2]), batchIndex: 0 },
+    ]);
+    // Observation B (focused, never batched): persisted with batchIndex null.
+    await store.appendObservationSamples('run-v4', 'obs-b', [
+      { did, phase: 'baseline', tMs: 0, raw: Uint8Array.from([9]) },
+      { did, phase: 'baseline', tMs: 100, raw: Uint8Array.from([8]) },
+    ]);
+
+    const controller = await fakeControllerAt(store, null, []); // nothing live -- both observations are fully settled/persisted.
+    const doc = await buildDidSweepExportForRun(controller, store, 'run-v4', '2026-08-29T11:00:00.000Z');
+    expect(doc).not.toBeNull();
+
+    const didSeries = doc!.observationSeries.filter((s) => s.didHex === '0x1234');
+    // TWO series, not one merged one.
+    expect(didSeries).toHaveLength(2);
+    const withBatch = didSeries.find((s) => s.batchIndex === 0);
+    const withoutBatch = didSeries.find((s) => s.batchIndex === null);
+    expect(withBatch?.samples).toEqual([
+      { tMs: 0, rawHex: '01' },
+      { tMs: 100, rawHex: '02' },
+    ]);
+    expect(withoutBatch?.samples).toEqual([
+      { tMs: 0, rawHex: '09' },
+      { tMs: 100, rawHex: '08' },
+    ]);
+    expect(withBatch?.observationId).toBe('obs-a');
+    expect(withoutBatch?.observationId).toBe('obs-b');
   });
 });

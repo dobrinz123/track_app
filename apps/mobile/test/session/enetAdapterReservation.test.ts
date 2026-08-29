@@ -168,6 +168,85 @@ describe('enetAdapterReservation (P4e-FIX3 H2 / P4e-FIX4 token model, binding: s
     expect(reservation.holder()).toBeNull();
   });
 
+  /**
+   * Ticket P4j-FIX2 V2 (binding, after Codex P4j-REV2 MEDIUM #2 "the screen's
+   * unmount cleanup still fire-and-forgets stop()"): `whenFree()` is the
+   * reservation-level primitive `didSweepController.ts`'s `start()`/
+   * `resumePersistedRun()` await on a refused first `tryAcquire`, so a
+   * REMOUNTED screen's fresh controller no longer transiently reports
+   * "adapter in use" while a PRIOR instance's close-then-release is still in
+   * flight -- "acquire after stop() resolves only after release."
+   */
+  describe('whenFree() (P4j-FIX2 V2, binding)', () => {
+    it('resolves immediately when the reservation is already free', async () => {
+      const reservation = createEnetAdapterReservation();
+      let resolved = false;
+      void reservation.whenFree().then(() => {
+        resolved = true;
+      });
+      await Promise.resolve();
+      expect(resolved).toBe(true);
+    });
+
+    it('does NOT resolve while the reservation is still held -- only AFTER release() actually runs', async () => {
+      const reservation = createEnetAdapterReservation();
+      const token = reservation.tryAcquire('sweep');
+      expect(token).not.toBeNull();
+
+      let resolved = false;
+      void reservation.whenFree().then(() => {
+        resolved = true;
+      });
+      // Flush several microtask turns -- still held, so still NOT resolved
+      // (the exact defect this proves is fixed: a caller must never see this
+      // settle before the real release happens).
+      for (let i = 0; i < 10; i += 1) await Promise.resolve();
+      expect(resolved).toBe(false);
+
+      reservation.release(token!);
+      await Promise.resolve();
+      expect(resolved).toBe(true);
+    });
+
+    it('resolves EVERY outstanding waiter on the same release, and a fresh whenFree() after that release resolves immediately', async () => {
+      const reservation = createEnetAdapterReservation();
+      const token = reservation.tryAcquire('provider');
+      expect(token).not.toBeNull();
+
+      const seen: number[] = [];
+      void reservation.whenFree().then(() => seen.push(1));
+      void reservation.whenFree().then(() => seen.push(2));
+      await Promise.resolve();
+      expect(seen).toEqual([]);
+
+      reservation.release(token!);
+      await Promise.resolve();
+      expect(seen.sort()).toEqual([1, 2]);
+
+      let resolvedAfter = false;
+      void reservation.whenFree().then(() => {
+        resolvedAfter = true;
+      });
+      await Promise.resolve();
+      expect(resolvedAfter).toBe(true);
+    });
+
+    it('a whenFree() waiter registered while held still resolves even if a DIFFERENT owner immediately reacquires after the release (the waiter only reports that ITS wait ended, never a false "still free")', async () => {
+      const reservation = createEnetAdapterReservation();
+      const token = reservation.tryAcquire('provider');
+      let resolved = false;
+      void reservation.whenFree().then(() => {
+        resolved = true;
+      });
+
+      reservation.release(token!);
+      reservation.tryAcquire('probe'); // immediately reacquired by someone else.
+      await Promise.resolve();
+      expect(resolved).toBe(true); // the WAIT ended -- a caller must re-check tryAcquire itself, exactly what start()/resumePersistedRun() do.
+      expect(reservation.holder()).toBe('probe');
+    });
+  });
+
   it('createEnetAdapterReservation() returns a FRESH, independent instance each call (no shared state across instances)', () => {
     const a = createEnetAdapterReservation();
     const b = createEnetAdapterReservation();

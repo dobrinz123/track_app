@@ -109,13 +109,27 @@ export interface DidSweepExportPhaseSeries {
   didHex: string;
   phase: DidObservationPhaseId;
   /**
+   * Ticket P4j-FIX2 V4 (binding, after Codex P4j-REV2 NEW MEDIUM #2:
+   * "persisted observation groups are collapsed in export"): which
+   * observation run (`didSweepController.ts`'s own `currentObservationId`)
+   * this series belongs to -- `null` only for a sample that somehow arrived
+   * without one (should not happen in practice; every guided/batched/focused
+   * observation tags its samples). A DID sampled in TWO separate observations
+   * (e.g. a batched run, then later a focused re-run) now produces TWO
+   * separate series -- one per `observationId`, each with its OWN
+   * `batchIndex` -- rather than one series that mixes two independent phase
+   * timelines and reports only the first observation's `batchIndex`.
+   */
+  observationId: string | null;
+  /**
    * Ticket P4j (binding, batched guided observation): "export includes
    * `batchIndex`" -- the 0-based batch (`planObservationBatches`' own
    * `index`) this DID's samples were collected in, or `null` for a guided run
    * that never batched its candidates (the legacy single-pass
    * `startGuidedObservation()`, or a focused-shortlist run). Constant across
    * every sample in `samples` below (a DID never moves between batches
-   * mid-run).
+   * mid-run) -- and, since P4j-FIX2 V4, across one `observationId` (never
+   * mixed with a DIFFERENT observation's own `batchIndex`).
    */
   batchIndex: number | null;
   samples: DidSweepExportPhaseSample[];
@@ -206,13 +220,20 @@ export function buildDidSweepExportDocument(input: {
   const observationSamples = input.observationSamples ?? [];
   const seriesByKey = new Map<string, DidSweepExportPhaseSeries>();
   for (const sample of observationSamples) {
-    const key = `${sample.did}:${sample.phase}`;
+    // Ticket P4j-FIX2 V4 (binding, after Codex P4j-REV2 NEW MEDIUM #2): keyed
+    // by observationId TOO -- a DID sampled in two separate observations
+    // (e.g. batched, then later a focused re-run) is never merged into one
+    // series that mixes two independent phase timelines and reports only
+    // the FIRST observation's `batchIndex`.
+    const observationId = sample.observationId ?? null;
+    const key = `${observationId ?? ''}:${sample.did}:${sample.phase}`;
     let series = seriesByKey.get(key);
     if (series === undefined) {
       // Ticket P4j (binding): "export includes batchIndex" -- constant per
-      // (did, phase) series (a DID never moves between batches mid-run), so
-      // it is set once, from the FIRST sample seen for this key.
-      series = { didHex: didHex(sample.did), phase: sample.phase, batchIndex: sample.batchIndex ?? null, samples: [] };
+      // (observationId, did, phase) series (a DID never moves between
+      // batches mid-run, nor between observations), so it is set once, from
+      // the FIRST sample seen for this key.
+      series = { didHex: didHex(sample.did), phase: sample.phase, observationId, batchIndex: sample.batchIndex ?? null, samples: [] };
       seriesByKey.set(key, series);
     }
     series.samples.push({ tMs: sample.tMs, rawHex: bytesToHex(sample.raw) });
@@ -317,19 +338,43 @@ export async function buildDidSweepExportForRun(
   // read `controller.getGuidedSamples()` alone, so a kill/reopen (or simply
   // starting a second observation, which reset the in-memory array) shared a
   // run whose `observationSeries`, candidates, block offsets and `batchIndex`
-  // were all empty. Live memory is still preferred when it HAS something --
-  // it is strictly fresher than the last checkpoint mid-run.
+  // were all empty.
+  //
+  // Ticket P4j-FIX2 V3 (binding, after Codex P4j-REV2 NEW MEDIUM #1: "live/
+  // store export precedence loses current in-memory samples during a later
+  // observation"): reconciled by `(observationId, seq)` -- a UNION, never
+  // "pick the longer source" by comparing a per-observation live count
+  // against the CUMULATIVE persisted count across every observation of this
+  // run (the pre-fix defect: observation A's 320 persisted rows made the
+  // whole-run persisted total outweigh observation B's 10 live samples, so
+  // storage was chosen wholesale and B's 2 freshest not-yet-checkpointed
+  // samples were silently dropped). Every OTHER (earlier) observation's
+  // persisted rows are kept as-is; the CURRENT observation's own rows are
+  // overlaid/extended by whatever is live -- live is always AT LEAST as
+  // complete as its own last checkpoint (`persistedSampleIndex` only ever
+  // lags `guidedSamples.length`, never leads it), so this can only ADD
+  // samples for the current observation, never lose any.
   const persistedSamples = await store.getObservationSamples(runId).catch(() => []);
   const liveSamples = controller.getGuidedSamples();
-  const observationSamples: readonly DidPhaseSample[] =
-    liveSamples.length >= persistedSamples.length
-      ? liveSamples
-      : persistedSamples.map((row) => {
-          const phase = row.phase as DidObservationPhaseId;
-          return row.batchIndex === null
-            ? { did: row.did, phase, tMs: row.tMs, raw: hexToBytes(row.rawHex) }
-            : { did: row.did, phase, tMs: row.tMs, raw: hexToBytes(row.rawHex), batchIndex: row.batchIndex };
-        });
+  const currentObservationId = snapshot.observationId;
+  const mergedSamplesByKey = new Map<string, DidPhaseSample>();
+  for (const row of persistedSamples) {
+    const phase = row.phase as DidObservationPhaseId;
+    mergedSamplesByKey.set(`${row.observationId}:${row.seq}`, {
+      did: row.did,
+      phase,
+      tMs: row.tMs,
+      raw: hexToBytes(row.rawHex),
+      batchIndex: row.batchIndex ?? undefined,
+      observationId: row.observationId,
+    });
+  }
+  if (currentObservationId !== null) {
+    liveSamples.forEach((sample, seq) => {
+      mergedSamplesByKey.set(`${currentObservationId}:${seq}`, { ...sample, observationId: currentObservationId });
+    });
+  }
+  const observationSamples: readonly DidPhaseSample[] = [...mergedSamplesByKey.values()];
 
   const persistedSummary = await readLatestObservationSummary(store, runId);
   const useLiveSummary = snapshot.candidateSummaries.length > 0 || snapshot.blockCandidateSummaries.length > 0;

@@ -77,6 +77,40 @@ export interface EnetAdapterReservation {
   holder(): EnetAdapterOwner | null;
   /** Subscribes to holder changes; replays the current holder synchronously on subscribe (same "replay on subscribe" convention as `telemetryProvider.ts`'s own `onStateChange`). */
   subscribe(cb: (holder: EnetAdapterOwner | null) => void): () => void;
+  /**
+   * Ticket P4j-FIX2 V2 (binding, after Codex P4j-REV2 MEDIUM #2: "the screen's
+   * unmount cleanup still fire-and-forgets `stop()`"): resolves once the
+   * reservation becomes free -- IMMEDIATELY (already-resolved) if it already
+   * is, otherwise the next time `release()` actually runs. A React effect
+   * cleanup cannot itself be `async`, so `DidSweepScreen.tsx`'s unmount kicks
+   * `controller.stop()`'s close-then-release off fire-and-forget; a
+   * REMOUNTED screen's own next `tryAcquire('sweep')` (`start()`/
+   * `resumePersistedRun()`) used to see a transient "adapter in use" while
+   * the OLD instance's socket close was still in flight. Those call sites
+   * await this (only on a first refused `tryAcquire`, never unconditionally)
+   * before retrying -- the reacquire then fails ONLY when someone ELSE
+   * (never merely a still-draining prior holder) truly holds the claim.
+   */
+  whenFree(): Promise<void>;
+  /**
+   * Ticket P4j-FIX2 V2 (binding): the CURRENT holder marks itself as "a
+   * close-then-release is now in flight for my own token" -- purely
+   * advisory bookkeeping (never blocks/affects `tryAcquire`/`release`
+   * themselves) so a caller refused by `tryAcquire` can tell "worth a short
+   * wait" apart from "held by a live, unrelated owner that never signaled
+   * it's releasing" (see `isReleasePending`). A no-op, silently ignored, if
+   * `token` is not the CURRENT holder's token (stale/foreign).
+   */
+  markReleasing(token: EnetAdapterToken): void;
+  /**
+   * True exactly when the CURRENT holder has called `markReleasing` with
+   * its own (still current) token and the reservation has not yet been
+   * released. `false` once free (or before anyone ever marked it) -- a
+   * caller uses this to decide whether awaiting `whenFree()` (bounded by
+   * its own short race) is worth attempting instead of reporting "busy"
+   * immediately.
+   */
+  isReleasePending(): boolean;
 }
 
 /**
@@ -93,6 +127,10 @@ export interface EnetAdapterReservation {
 export function createEnetAdapterReservation(): EnetAdapterReservation {
   let held: HeldReservation | null = null;
   const listeners = new Set<(holder: EnetAdapterOwner | null) => void>();
+  /** P4j-FIX2 V2 (binding): resolvers for every outstanding `whenFree()` call -- drained (and cleared) the instant `release()` actually clears `held`, so a caller awaiting a pending release is never left hanging past that point. */
+  let freeWaiters: Array<() => void> = [];
+  /** P4j-FIX2 V2 (binding): the token `markReleasing` was last called with, while it is STILL the current holder's token -- see `isReleasePending`'s own doc comment. */
+  let releasingToken: EnetAdapterToken | null = null;
 
   /**
    * P4e-FIX5 HIGH fix (binding, Codex P4e-REV5): a subscriber callback must
@@ -124,6 +162,7 @@ export function createEnetAdapterReservation(): EnetAdapterReservation {
       if (held !== null) return null; // ANYONE holding it (including this same owner) blocks a new acquire.
       const token: EnetAdapterToken = Symbol(owner);
       held = { owner, token };
+      releasingToken = null; // a fresh holder never inherits a PRIOR holder's "releasing" flag.
       // State is already committed above -- `notify()` can never throw
       // (see its own doc comment), so this call can never prevent the
       // token below from being returned to the caller that just acquired.
@@ -133,6 +172,17 @@ export function createEnetAdapterReservation(): EnetAdapterReservation {
     release(token: EnetAdapterToken): void {
       if (held === null || held.token !== token) return; // stale/foreign token -- never touches a newer holder's claim.
       held = null;
+      releasingToken = null;
+      // P4j-FIX2 V2 (binding): every `whenFree()` waiter is resolved the
+      // instant `held` is ACTUALLY cleared -- before `notify()`, so a
+      // re-entrant subscriber that itself calls `tryAcquire` synchronously
+      // still sees waiters already released (order never matters for a
+      // promise resolution observed on a later microtask either way, but
+      // this keeps the "freed" signal as close to the state change as
+      // possible).
+      const waiters = freeWaiters;
+      freeWaiters = [];
+      for (const resolve of waiters) resolve();
       // Same guarantee as `tryAcquire` above: `held` is already cleared, and
       // `notify()` can never throw, so a caller's own cleanup AFTER this
       // call (e.g. `telemetryProvider.ts`'s `resolveStopping()`) always runs.
@@ -140,6 +190,16 @@ export function createEnetAdapterReservation(): EnetAdapterReservation {
     },
     holder(): EnetAdapterOwner | null {
       return held?.owner ?? null;
+    },
+    whenFree(): Promise<void> {
+      if (held === null) return Promise.resolve();
+      return new Promise((resolve) => freeWaiters.push(resolve));
+    },
+    markReleasing(token: EnetAdapterToken): void {
+      if (held !== null && held.token === token) releasingToken = token;
+    },
+    isReleasePending(): boolean {
+      return held !== null && releasingToken === held.token;
     },
     subscribe(cb: (holder: EnetAdapterOwner | null) => void): () => void {
       listeners.add(cb);

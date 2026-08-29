@@ -129,9 +129,12 @@ describe('P4j-FIX1 H1 — the sample guarantee is by COUNT, not duration (bindin
     for (const phase of ['baseline', 'brake', 'steering', 'throttle'] as const) {
       expect(samplesPerPhase(controller.getGuidedSamples(), live, phase)).toBeGreaterThanOrEqual(5);
     }
-    // Excluded from ranking: never reported as a brake/steering/throttle candidate.
+    // Excluded from ranking: never reported as a brake/steering/throttle
+    // candidate. Ticket P4j-FIX2 V1 (binding): a DID insufficient in ANY
+    // phase now ranks `insufficient` itself, never `static` (which used to
+    // read as "measured, and found unchanging").
     const quietSummary = snapshot.candidateSummaries.find((c) => c.did === quiet);
-    expect(quietSummary === undefined || quietSummary.rank === 'static').toBe(true);
+    expect(quietSummary === undefined || quietSummary.rank === 'insufficient').toBe(true);
   }, 40_000);
 
   it('a DID answering only NRC in every phase is reported as no-response, and the run still completes', async () => {
@@ -532,6 +535,8 @@ describe('P4j-FIX1 — keep-alive and an all-NRC batch (binding: whitelist + "ne
     const snapshot = controller.getSnapshot();
     expect(snapshot.phase).toBe('observationComplete');
     expect(snapshot.observationInsufficientDids).toEqual([a, b]);
-    expect(snapshot.candidateSummaries.every((c) => c.rank === 'static')).toBe(true);
+    // Ticket P4j-FIX2 V1 (binding): "ranks nothing" now means `insufficient`,
+    // never `static` -- both DIDs are excluded from ranking outright.
+    expect(snapshot.candidateSummaries.every((c) => c.rank === 'insufficient')).toBe(true);
   }, 60_000);
 });

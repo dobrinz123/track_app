@@ -421,7 +421,21 @@ export interface DidSweepControllerDeps {
 export interface DidSweepController {
   subscribe(cb: (s: DidSweepSnapshot) => void): () => void;
   getSnapshot(): DidSweepSnapshot;
-  /** Refused (no generation bump, no acquire attempt even) unless idle/complete -- see this module's own doc comment (H1). Acquires the reservation, THEN opens a fresh transport. */
+  /**
+   * Refused (no generation bump, no acquire attempt even) unless idle/complete
+   * -- see this module's own doc comment (H1). Acquires the reservation, THEN
+   * opens a fresh transport.
+   *
+   * P4j-FIX2 V2 (binding, after Codex P4j-REV2 MEDIUM #2): a refused first
+   * `tryAcquire` reports "adapter in use" IMMEDIATELY, same as ever -- UNLESS
+   * the CURRENT holder has itself `markReleasing`'d (its own `stop()`'s
+   * close-then-release is already in flight -- exactly a just-superseded
+   * controller instance's unmount teardown), in which case this instead
+   * awaits `enetAdapterReservation`'s `whenFree()` (bounded by a short race,
+   * never indefinitely) and retries once before falling back to the busy
+   * report. A caller that never held a pending-release holder sees BYTE-
+   * IDENTICAL synchronous behaviour to before this fix.
+   */
   start(range?: { from?: number; to?: number; priorityRanges?: readonly DidSweepRange[] }): void;
   /**
    * Stops calling `next()` at the next DID boundary -- phase becomes 'paused'
@@ -665,6 +679,8 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
   let teardownInFlight: Promise<void> | null = null;
   /** REV3 (binding): "close() settles (or its 200ms race elapses)" -- mirrors discovery's own close-race pattern (P4f-REV1) so a hanging real-world close can never block `stop()`/release indefinitely. */
   const TEARDOWN_RACE_MS = 200;
+  /** P4j-FIX2 V2 (binding): the bound on `start()`/`resumePersistedRun()`'s wait for a PENDING release (see `isReleasePending()`) -- comfortably above `TEARDOWN_RACE_MS` so a normal close+release finishes well within it, but never indefinite even if a `markReleasing` call was somehow never followed by a real `release()`. */
+  const RESERVATION_WAIT_RACE_MS = 300;
 
   // -------------------------------------------------------------------
   // Persistence (binding, P4i: results persistence, export & candidate
@@ -1685,7 +1701,12 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
           1,
         );
         const before = new Map(pending.map((did) => [did, phaseSampleCounts.get(phaseCountKey(did, phase.id)) ?? 0]));
-        const result = await runSingleGuidedSlice(myGeneration, channel, phase, pending, sliceMs, batchIndex);
+        // V5 (binding): how far into this WHOLE phase (not this slice) we
+        // are right now -- added to every sample this slice collects so
+        // exported timestamps stay monotone across every slice, not just
+        // within one.
+        const phaseElapsedAtSliceStartMs = deps.clock.now() - phaseStartedAtMs;
+        const result = await runSingleGuidedSlice(myGeneration, channel, phase, pending, sliceMs, batchIndex, phaseElapsedAtSliceStartMs);
         if (myGeneration !== generation) break;
 
         for (const did of pending) {
@@ -1729,7 +1750,19 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
     return { nextResponderIndex: nextResponderIndex < 0 ? 0 : nextResponderIndex };
   }
 
-  /** One round SLICE of a count-guaranteed phase: a single `runDidObservation` call over `pending`, tagging and counting every positive sample. */
+  /**
+   * One round SLICE of a count-guaranteed phase: a single `runDidObservation`
+   * call over `pending`, tagging and counting every positive sample.
+   *
+   * Ticket P4j-FIX2 V5 (binding, after Codex P4j-REV2 NEW MEDIUM #3): EVERY
+   * slice invokes a FRESH `runDidObservation`, whose own `tMs` starts back at
+   * (near) zero -- storing that raw value made a count-guaranteed phase's
+   * exported timestamps look like `20, 18, 25, 21, 19 ms` across five slices
+   * instead of increasing across the phase. `phaseElapsedAtSliceStartMs` (the
+   * caller's own `clock.now() - phaseStartedAtMs` at the moment THIS slice
+   * begins) is added to every sample's `tMs` so timestamps stay monotone
+   * across the WHOLE phase, not just within one slice.
+   */
   async function runSingleGuidedSlice(
     myGeneration: number,
     channel: SweepTransport,
@@ -1737,7 +1770,9 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
     pending: readonly number[],
     sliceMs: number,
     batchIndex: number | undefined,
+    phaseElapsedAtSliceStartMs: number,
   ): Promise<GuidedPhaseRunResult> {
+    const observationId = currentObservationId ?? undefined;
     const result = await runDidObservation({
       responders: pending,
       transport: channel,
@@ -1752,10 +1787,11 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       },
       onSample: (did, raw, tMs) => {
         if (myGeneration !== generation) return;
+        const phaseRelativeTMs = tMs + phaseElapsedAtSliceStartMs;
         guidedSamples.push(
           batchIndex === undefined
-            ? { did, phase: phase.id, tMs, raw }
-            : { did, phase: phase.id, tMs, raw, batchIndex },
+            ? { did, phase: phase.id, tMs: phaseRelativeTMs, raw, observationId }
+            : { did, phase: phase.id, tMs: phaseRelativeTMs, raw, batchIndex, observationId },
         );
         const key = phaseCountKey(did, phase.id);
         phaseSampleCounts.set(key, (phaseSampleCounts.get(key) ?? 0) + 1);
@@ -1818,10 +1854,11 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
         },
         onSample: (did, raw, tMs) => {
           if (myGeneration !== generation) return;
+          const observationId = currentObservationId ?? undefined;
           guidedSamples.push(
             options.batchIndex === undefined
-              ? { did, phase: phase.id, tMs, raw }
-              : { did, phase: phase.id, tMs, raw, batchIndex: options.batchIndex },
+              ? { did, phase: phase.id, tMs, raw, observationId }
+              : { did, phase: phase.id, tMs, raw, batchIndex: options.batchIndex, observationId },
           );
           const advanced = tMs > highestElapsedMs;
           if (advanced) highestElapsedMs = tMs;
@@ -2118,6 +2155,79 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
     return phase === 'idle' || phase === 'sweepComplete' || phase === 'stopped' || phase === 'observationComplete';
   }
 
+  /**
+   * The rest of `start()`'s work once a token is actually in hand -- plan
+   * creation through opening the transport. Split out (P4j-FIX2 V2, binding)
+   * so BOTH the immediate-acquire path and the retry-after-pending-release
+   * path (see `start()`'s own doc comment) share this ONE body rather than
+   * two hand-copied ones.
+   */
+  function proceedStart(acquired: EnetAdapterToken, range: { from?: number; to?: number; priorityRanges?: readonly DidSweepRange[] }): void {
+    let freshPlan: DidSweepPlan;
+    try {
+      freshPlan = createDidSweepPlan(range);
+    } catch (error) {
+      reservation.release(acquired);
+      emit({ ...INITIAL_SNAPSHOT, error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    generation += 1; // ONLY bumped after both the acquire and the plan succeeded.
+    const myGeneration = generation;
+    token = acquired;
+    plan = freshPlan;
+    accumulator = createDidSweepAccumulator();
+    control = { paused: false, stopped: false };
+    requestsIssued = 0;
+    startedAtMs = deps.clock.now();
+    observationResponderDids = [];
+    // Persistence (binding, P4i): a FRESH run row per `start()` -- never
+    // per resume/pause/observation, matching "every sweep run is
+    // persisted incrementally" (ONE run per Start tap, resumed rather than
+    // re-created by `resumePersistedRun`).
+    lastPersistedResponderIndex = 0;
+    // X2/Y2 fix (P4i-FIX3/FIX4, binding): a PRIOR run's still-pending retry
+    // slice(s) (index ranges into ITS OWN, now-replaced
+    // `accumulator.responders`) must never survive into a fresh run --
+    // those indices are meaningless against a brand-new accumulator.
+    pendingRetrySlices = [];
+    // Y1 fix (P4i-FIX4, binding): a PRIOR run's outstanding tracked-flush
+    // count must never leak into a fresh run either.
+    pendingFlushCount = 0;
+    lastFlushAtMs = deps.clock.now();
+    if (deps.store !== undefined) {
+      currentRunId = generateRunId();
+      const runId = currentRunId;
+      const store = deps.store;
+      void store
+        .createRun({
+          runId,
+          adapterType: 'enet',
+          targetAddress: deps.targetAddress,
+          rangeFrom: freshPlan.from,
+          rangeTo: freshPlan.to,
+          lastDid: null,
+          startedAtUtc: nowIso(),
+          updatedAtUtc: nowIso(),
+          status: 'running',
+          visitedCount: 0,
+          timeoutCount: 0,
+          unmatchedCount: 0,
+          errorCount: 0,
+          nrcCounts: {},
+        })
+        .then(() => store.enforceRetention(RETENTION_RUNS))
+        .catch(() => undefined); // best-effort -- a failed write never affects the live sweep (mirrors maybeFlushPersistence's own discipline).
+    } else {
+      currentRunId = null;
+    }
+    // R2 fix (P4i-FIX2, binding): "guidedSamples cleared on every fresh
+    // sweep start / resume, keyed by runId" -- a fresh `start()` never
+    // inherits a PRIOR run's guided observation series.
+    resetGuidedSamples();
+    emit({ ...INITIAL_SNAPSHOT, error: null, phase: 'sweeping' });
+    void openTransportAndSweep(myGeneration);
+  }
+
   return {
     subscribe(cb): () => void {
       listeners.add(cb);
@@ -2136,73 +2246,31 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       // ACTIVE run (which keys its own "am I superseded?" checks off it).
       if (!canStart(snapshot.phase)) return;
       const acquired = reservation.tryAcquire('sweep');
-      if (acquired === null) {
+      if (acquired !== null) {
+        proceedStart(acquired, range);
+        return;
+      }
+      // P4j-FIX2 V2 (binding, after Codex P4j-REV2 MEDIUM #2): ONLY worth a
+      // wait when the CURRENT holder itself signalled a release is already
+      // in flight (a just-superseded controller instance's `stop()`, kicked
+      // off fire-and-forget by an unmount cleanup that cannot await it) --
+      // a live, unrelated owner (e.g. the telemetry provider actually
+      // polling) still reports "adapter in use" IMMEDIATELY, byte-identical
+      // to before this fix.
+      if (!reservation.isReleasePending()) {
         emit({ ...INITIAL_SNAPSHOT, error: RESERVATION_BUSY_MESSAGE });
         return;
       }
-      let freshPlan: DidSweepPlan;
-      try {
-        freshPlan = createDidSweepPlan(range);
-      } catch (error) {
-        reservation.release(acquired);
-        emit({ ...INITIAL_SNAPSHOT, error: error instanceof Error ? error.message : String(error) });
-        return;
-      }
-      generation += 1; // ONLY bumped after both the acquire and the plan succeeded.
-      const myGeneration = generation;
-      token = acquired;
-      plan = freshPlan;
-      accumulator = createDidSweepAccumulator();
-      control = { paused: false, stopped: false };
-      requestsIssued = 0;
-      startedAtMs = deps.clock.now();
-      observationResponderDids = [];
-      // Persistence (binding, P4i): a FRESH run row per `start()` -- never
-      // per resume/pause/observation, matching "every sweep run is
-      // persisted incrementally" (ONE run per Start tap, resumed rather than
-      // re-created by `resumePersistedRun`).
-      lastPersistedResponderIndex = 0;
-      // X2/Y2 fix (P4i-FIX3/FIX4, binding): a PRIOR run's still-pending retry
-      // slice(s) (index ranges into ITS OWN, now-replaced
-      // `accumulator.responders`) must never survive into a fresh run --
-      // those indices are meaningless against a brand-new accumulator.
-      pendingRetrySlices = [];
-      // Y1 fix (P4i-FIX4, binding): a PRIOR run's outstanding tracked-flush
-      // count must never leak into a fresh run either.
-      pendingFlushCount = 0;
-      lastFlushAtMs = deps.clock.now();
-      if (deps.store !== undefined) {
-        currentRunId = generateRunId();
-        const runId = currentRunId;
-        const store = deps.store;
-        void store
-          .createRun({
-            runId,
-            adapterType: 'enet',
-            targetAddress: deps.targetAddress,
-            rangeFrom: freshPlan.from,
-            rangeTo: freshPlan.to,
-            lastDid: null,
-            startedAtUtc: nowIso(),
-            updatedAtUtc: nowIso(),
-            status: 'running',
-            visitedCount: 0,
-            timeoutCount: 0,
-            unmatchedCount: 0,
-            errorCount: 0,
-            nrcCounts: {},
-          })
-          .then(() => store.enforceRetention(RETENTION_RUNS))
-          .catch(() => undefined); // best-effort -- a failed write never affects the live sweep (mirrors maybeFlushPersistence's own discipline).
-      } else {
-        currentRunId = null;
-      }
-      // R2 fix (P4i-FIX2, binding): "guidedSamples cleared on every fresh
-      // sweep start / resume, keyed by runId" -- a fresh `start()` never
-      // inherits a PRIOR run's guided observation series.
-      resetGuidedSamples();
-      emit({ ...INITIAL_SNAPSHOT, error: null, phase: 'sweeping' });
-      void openTransportAndSweep(myGeneration);
+      void (async (): Promise<void> => {
+        await Promise.race([reservation.whenFree().catch(() => undefined), waitMs(RESERVATION_WAIT_RACE_MS)]);
+        if (!canStart(snapshot.phase)) return; // superseded while waiting (e.g. a later start()/resumePersistedRun() already proceeded).
+        const retryAcquired = reservation.tryAcquire('sweep');
+        if (retryAcquired === null) {
+          emit({ ...INITIAL_SNAPSHOT, error: RESERVATION_BUSY_MESSAGE });
+          return;
+        }
+        proceedStart(retryAcquired, range);
+      })();
     },
 
     pause(): Promise<void> {
@@ -2306,6 +2374,15 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       // socket has closed AND the reservation has been released, so an
       // immediate navigation to telemetry can no longer transiently see
       // "adapter in use".
+      // P4j-FIX2 V2 (binding, after Codex P4j-REV2 MEDIUM #2): marked
+      // SYNCHRONOUSLY, before the async teardown below ever awaits anything --
+      // a caller (e.g. a remounted screen's fresh controller's `start()`) that
+      // races in on this SAME tick or shortly after already sees
+      // `isReleasePending()` true, so it knows a short wait is worth trying
+      // instead of reporting "adapter in use" for a claim that is, in fact,
+      // already on its way out.
+      const tokenBeingReleased = token;
+      if (tokenBeingReleased !== null) reservation.markReleasing(tokenBeingReleased);
       const teardownPromise = (async (): Promise<void> => {
         try {
           await teardownActiveTransport();
@@ -2547,7 +2624,17 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       if (run === null) return;
       const responderRecords = await deps.store.getResponders(runId).catch(() => []);
 
-      const acquired = reservation.tryAcquire('sweep');
+      let acquired = reservation.tryAcquire('sweep');
+      if (acquired === null && reservation.isReleasePending()) {
+        // P4j-FIX2 V2 (binding): same reacquire-after-pending-release retry
+        // as `start()` -- see its own doc comment. Gated (never unconditional)
+        // and bounded, so a genuinely busy reservation (a live, unrelated
+        // owner that never signalled it's releasing) still reports "adapter
+        // in use" promptly rather than hanging.
+        await Promise.race([reservation.whenFree().catch(() => undefined), waitMs(RESERVATION_WAIT_RACE_MS)]);
+        if (!canStart(snapshot.phase)) return; // superseded while waiting.
+        acquired = reservation.tryAcquire('sweep');
+      }
       if (acquired === null) {
         emit({ ...INITIAL_SNAPSHOT, error: RESERVATION_BUSY_MESSAGE });
         return;

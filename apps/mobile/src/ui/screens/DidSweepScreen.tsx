@@ -128,6 +128,10 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   // "responders collapsed with count + expand".
   const [respondersExpanded, setRespondersExpanded] = React.useState(false);
   const [staticExpanded, setStaticExpanded] = React.useState(false);
+  // Ticket P4j-FIX2 V1 (binding): the collapsed "insufficient" section --
+  // same convention as `staticExpanded` above.
+  const [insufficientExpanded, setInsufficientExpanded] = React.useState(false);
+  const [insufficientBlockExpanded, setInsufficientBlockExpanded] = React.useState(false);
   // Ticket P4j (binding): "FOCUSED observation: the user can tick candidates
   // (or type DIDs) -> one long guided cycle on the shortlist only." Ticked
   // candidates (DID -> selected) plus a free-text typed-DID field; either
@@ -262,6 +266,13 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
       // X1 fix (P4i-FIX3, binding): `stop()` can now REJECT on a failed
       // terminal flush -- caught here (never an unhandled rejection); there
       // is no screen left to show a banner on after unmount anyway.
+      // P4j-FIX2 V2 (binding, after Codex P4j-REV2 MEDIUM #2): this fire-and-
+      // forget is still never AWAITED here, but a remounted screen's fresh
+      // controller no longer transiently sees "adapter in use" as a result --
+      // `start()`/`resumePersistedRun()` (`didSweepController.ts`) now await
+      // `enetAdapterReservation`'s `whenFree()` on a refused first acquire and
+      // retry once, so this instance's still-in-flight close+release (kicked
+      // off right here) is waited out at the RESERVATION level instead.
       void controllerRef.current?.stop().catch(() => undefined);
     },
     [],
@@ -486,13 +497,20 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   const resumableRun = selectResumableRun(resumableRuns);
   const guidedPhaseSpec = snapshot?.guidedPhase == null ? null : DID_OBSERVATION_PHASES.find((p) => p.id === snapshot.guidedPhase) ?? null;
   const rankedCandidates = snapshot?.candidateSummaries ?? [];
-  const activeCandidates = rankedCandidates.filter((c) => c.rank !== 'static');
+  // Ticket P4j-FIX2 V1 (binding, after Codex P4j-REV2 HIGH #1 PARTIAL): a DID
+  // ranked `insufficient` (evidence missing in at least one phase) is EXCLUDED
+  // from the ranked/active list -- never shown as a candidate (the pre-fix
+  // defect: it could still read "changed (several)" here). It gets its own
+  // collapsed section below, listed separately with its failing phases.
+  const activeCandidates = rankedCandidates.filter((c) => c.rank !== 'static' && c.rank !== 'insufficient');
   const staticCandidates = rankedCandidates.filter((c) => c.rank === 'static');
+  const insufficientCandidates = rankedCandidates.filter((c) => c.rank === 'insufficient');
   // Ticket P4j (binding): mid-size block candidates, shown alongside the
   // numeric ones -- static blocks are just as uninteresting as static
   // numeric candidates, so they are collapsed the same way.
   const blockCandidates = snapshot?.blockCandidateSummaries ?? [];
-  const activeBlockCandidates = blockCandidates.filter((b) => b.rank !== 'static');
+  const activeBlockCandidates = blockCandidates.filter((b) => b.rank !== 'static' && b.rank !== 'insufficient');
+  const insufficientBlockCandidates = blockCandidates.filter((b) => b.rank === 'insufficient');
   // Ticket P4j (binding): "make sure the sweep screen shows the active
   // target" -- e.g. "Target 0x12". Formatted the same way the export's own
   // `run.targetAddress` is (a 2-hex-digit byte), never a hard-coded ECU name
@@ -948,6 +966,38 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
                   : null}
               </>
             )}
+            {/* Ticket P4j-FIX2 V1 (binding): DIDs excluded from ranking for
+                want of samples in at least one phase -- listed SEPARATELY
+                from both the active candidates above and the static set,
+                each with its own failing phase(s), never merged into either. */}
+            {insufficientCandidates.length === 0 ? null : (
+              <>
+                <Pressable
+                  style={styles.collapseHeaderRow}
+                  onPress={() => setInsufficientExpanded((v) => !v)}
+                  accessibilityRole="button"
+                  accessibilityLabel={insufficientExpanded ? 'Collapse insufficient-evidence candidates' : `Expand ${insufficientCandidates.length} insufficient-evidence candidates`}
+                >
+                  <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                    Insufficient evidence ({insufficientCandidates.length})
+                  </Text>
+                  <Text style={styles.buttonSecondaryText} maxFontSizeMultiplier={1.3}>
+                    {insufficientExpanded ? 'Hide' : 'Show'}
+                  </Text>
+                </Pressable>
+                {insufficientExpanded
+                  ? insufficientCandidates.map((candidate) => (
+                      <Text key={candidate.did} style={styles.responderRaw} maxFontSizeMultiplier={1.3}>
+                        {formatHexDid(candidate.did)} — not enough samples in{' '}
+                        {(['baseline', 'brake', 'steering', 'throttle'] as const)
+                          .filter((p) => candidate.phaseEvidence[p] === 'insufficient')
+                          .map((p) => p.toUpperCase())
+                          .join(', ')}
+                      </Text>
+                    ))
+                  : null}
+              </>
+            )}
           </View>
         )}
 
@@ -1009,6 +1059,38 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
                 </View>
               );
             })}
+          </View>
+        )}
+
+        {/* Ticket P4j-FIX2 V1 (binding): same "excluded from ranking, listed
+            separately with the failing phases" treatment for mid-size block
+            candidates. */}
+        {insufficientBlockCandidates.length === 0 ? null : (
+          <View style={styles.card}>
+            <Pressable
+              style={styles.collapseHeaderRow}
+              onPress={() => setInsufficientBlockExpanded((v) => !v)}
+              accessibilityRole="button"
+              accessibilityLabel={insufficientBlockExpanded ? 'Collapse insufficient-evidence block candidates' : `Expand ${insufficientBlockCandidates.length} insufficient-evidence block candidates`}
+            >
+              <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                Insufficient evidence, block ({insufficientBlockCandidates.length})
+              </Text>
+              <Text style={styles.buttonSecondaryText} maxFontSizeMultiplier={1.3}>
+                {insufficientBlockExpanded ? 'Hide' : 'Show'}
+              </Text>
+            </Pressable>
+            {insufficientBlockExpanded
+              ? insufficientBlockCandidates.map((block) => (
+                  <Text key={block.did} style={styles.responderRaw} maxFontSizeMultiplier={1.3}>
+                    {formatHexDid(block.did)} · {block.length} bytes — not enough samples in{' '}
+                    {(['baseline', 'brake', 'steering', 'throttle'] as const)
+                      .filter((p) => block.phaseEvidence[p] === 'insufficient')
+                      .map((p) => p.toUpperCase())
+                      .join(', ')}
+                  </Text>
+                ))
+              : null}
           </View>
         )}
 

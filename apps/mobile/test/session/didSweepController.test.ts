@@ -425,6 +425,56 @@ describe('didSweepController: H1/H2 lifecycle -- the controller owns the transpo
     expect(reservation.holder()).toBeNull();
   });
 
+  /**
+   * Ticket P4j-FIX2 V2 (binding, after Codex P4j-REV2 MEDIUM #2: "the
+   * screen's unmount cleanup still fire-and-forgets stop()"): a REMOUNTED
+   * screen's fresh controller instance shares the SAME reservation as the
+   * just-unmounted one -- its `start()` must not transiently see "adapter in
+   * use" merely because the prior instance's close-then-release (kicked off
+   * by an unmount cleanup that cannot itself be awaited) has not settled yet.
+   * "acquire after stop() resolves only after release."
+   */
+  it('a SECOND controller sharing the reservation succeeds once the FIRST\'s never-awaited stop() actually releases -- never a transient "adapter in use"', async () => {
+    const reservation = createEnetAdapterReservation();
+    const controllerA = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(new Map()),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      reservation,
+    });
+
+    controllerA.start({ from: 0x0000, to: 0xffff }); // huge range -- still running.
+    await flush(5);
+    expect(reservation.holder()).toBe('sweep');
+
+    // The exact unmount scenario: stop() is invoked but its promise is NEVER
+    // awaited (a React effect cleanup cannot itself be async).
+    void controllerA.stop();
+
+    // A remounted screen's brand-new controller instance, same reservation,
+    // taps Start again on the VERY SAME tick -- before controllerA's
+    // close-then-release has had a chance to run past its first microtask.
+    const controllerB = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(new Map()),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      reservation,
+    });
+    controllerB.start({ from: 0x0001, to: 0x0001 });
+
+    await vi.runAllTimersAsync();
+    await flush();
+
+    expect(controllerB.getSnapshot().error).toBeNull();
+    // A tiny (single, unscripted) range times out and completes almost
+    // immediately once genuinely started -- reaching 'sweepComplete' (never
+    // stuck at 'idle' with the busy error) IS the proof it actually acquired
+    // and ran, not merely that the reservation ended up free by the end.
+    expect(controllerB.getSnapshot().phase).toBe('sweepComplete');
+  });
+
   it('a SECOND start() (after sweepComplete) opens a genuinely NEW transport instance', async () => {
     const instances: FakeSweepTransport[] = [];
     const controller = createDidSweepController({
@@ -3275,4 +3325,48 @@ describe('didSweepController: startFocusedObservation (ticket P4j, binding)', ()
     await vi.runAllTimersAsync();
     await flush();
   });
+
+  /**
+   * Ticket P4j-FIX2 V5 (binding, after Codex P4j-REV2 NEW MEDIUM #3: "count-
+   * guaranteed slices reset exported phase timestamps"): every slice invokes
+   * a FRESH `runDidObservation` (its own `tMs` restarting near zero each
+   * time) -- a DID slow enough to get exactly ONE positive sample per ~1s
+   * slice needed 5 slices to reach `minSamplesPerPhase: 5`, and the pre-fix
+   * exported timestamps looked like a REPEATED ~700ms instead of increasing
+   * across the phase. `phaseElapsedAtSliceStartMs` fixes this by carrying the
+   * phase's own cumulative elapsed time into each slice's samples.
+   */
+  it('V5 (binding): count-guaranteed phase slice timestamps stay MONOTONE across 5 slices, never reset to the same value each slice', async () => {
+    const did = 0x9001;
+    // delayMs (700ms) comfortably inside one ~1000ms slice (PHASE_SLICE_BASE_MS)
+    // but too slow for a second full round-trip to land within it -- exactly
+    // one positive sample per slice, 5 slices needed for minSamplesPerPhase: 5.
+    const responses = Array.from({ length: 60 }, (_, i) => positivePdu(did, [i % 256]));
+    const script = new Map<number, ScriptEntry>([[did, { responses, mode: 'oneFramePerSend', delayMs: 700 }]]);
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+    controller.start({ from: did, to: did });
+    await vi.runAllTimersAsync();
+    await flush();
+
+    controller.startFocusedObservation([did], { minSamplesPerPhase: 5 });
+    for (let i = 0; i < 200 && controller.getSnapshot().phase === 'observing'; i += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flush();
+    }
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+
+    const baselineTMs = controller.getGuidedSamples().filter((s) => s.phase === 'baseline').map((s) => s.tMs);
+    expect(baselineTMs).toHaveLength(5);
+    // STRICTLY increasing, roughly one slice-length (~1000ms) apart -- never
+    // the pre-fix repeated ~700ms every slice.
+    for (let i = 1; i < baselineTMs.length; i += 1) {
+      expect(baselineTMs[i]).toBeGreaterThan(baselineTMs[i - 1]!);
+    }
+    expect(baselineTMs).toEqual([700, 1700, 2700, 3700, 4700]);
+  }, 30_000);
 });

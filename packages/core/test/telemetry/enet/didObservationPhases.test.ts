@@ -316,6 +316,21 @@ describe('computeDidCandidateSummaries -- margin-based ranking (ticket P4j, bind
       sample(0x4522, 'brake', 200, [0x01, 0x27]), // 295
       sample(0x4522, 'brake', 300, [0x01, 0x2c]), // 300
       sample(0x4522, 'brake', 400, [0x01, 0x2e]), // 302
+      // steering/throttle: 5 sufficient, unchanged samples each -- P4j-FIX2 V1
+      // (binding): a phase with ZERO samples is `insufficient`, which now
+      // excludes the WHOLE DID from ranking; this test is about the brake
+      // phase's own margin rule, so steering/throttle are filled in as clean
+      // controls (matching the ticket's other margin-rule tests).
+      sample(0x4522, 'steering', 0, [0x01, 0x2c]),
+      sample(0x4522, 'steering', 100, [0x01, 0x2c]),
+      sample(0x4522, 'steering', 200, [0x01, 0x2c]),
+      sample(0x4522, 'steering', 300, [0x01, 0x2c]),
+      sample(0x4522, 'steering', 400, [0x01, 0x2c]),
+      sample(0x4522, 'throttle', 0, [0x01, 0x2c]),
+      sample(0x4522, 'throttle', 100, [0x01, 0x2c]),
+      sample(0x4522, 'throttle', 200, [0x01, 0x2c]),
+      sample(0x4522, 'throttle', 300, [0x01, 0x2c]),
+      sample(0x4522, 'throttle', 400, [0x01, 0x2c]),
     ];
     const [summary] = computeDidCandidateSummaries(samples, { useMarginRule: true, minSamplesPerPhase: 5 });
     expect(summary?.changedInPhase.brake).toBe(false);
@@ -334,6 +349,19 @@ describe('computeDidCandidateSummaries -- margin-based ranking (ticket P4j, bind
       sample(0x4600, 'brake', 200, [50]),
       sample(0x4600, 'brake', 300, [180]),
       sample(0x4600, 'brake', 400, [20]),
+      // steering/throttle: 5 sufficient, unchanged samples each (P4j-FIX2 V1 --
+      // a zero-sample phase is `insufficient`, which now excludes the whole
+      // DID from ranking).
+      sample(0x4600, 'steering', 0, [10]),
+      sample(0x4600, 'steering', 100, [10]),
+      sample(0x4600, 'steering', 200, [10]),
+      sample(0x4600, 'steering', 300, [10]),
+      sample(0x4600, 'steering', 400, [10]),
+      sample(0x4600, 'throttle', 0, [10]),
+      sample(0x4600, 'throttle', 100, [10]),
+      sample(0x4600, 'throttle', 200, [10]),
+      sample(0x4600, 'throttle', 300, [10]),
+      sample(0x4600, 'throttle', 400, [10]),
     ];
     const [summary] = computeDidCandidateSummaries(samples, { useMarginRule: true, minSamplesPerPhase: 5 });
     expect(summary?.changedInPhase.brake).toBe(true);
@@ -354,7 +382,48 @@ describe('computeDidCandidateSummaries -- margin-based ranking (ticket P4j, bind
     const [summary] = computeDidCandidateSummaries(samples, { useMarginRule: true, minSamplesPerPhase: 5 });
     expect(summary?.phaseEvidence.brake).toBe('insufficient');
     expect(summary?.changedInPhase.brake).toBe(false);
-    expect(summary?.rank).toBe('static');
+    // Ticket P4j-FIX2 V1 (binding, after Codex P4j-REV2 HIGH #1 PARTIAL):
+    // `insufficient` in ANY phase now excludes the WHOLE DID from ranking --
+    // never `static` (which used to read as "measured, and found unchanging").
+    expect(summary?.rank).toBe('insufficient');
+  });
+
+  /**
+   * Ticket P4j-FIX2 V1 (binding, after Codex P4j-REV2 HIGH #1 PARTIAL): "a DID
+   * gets five baseline/brake/steering samples, changes only under brake, then
+   * fails throttle three times. It is reported insufficient but still ranks
+   * as brakeCandidate, contrary to the stated exclusion policy." The ticket's
+   * own literal test: 5/5/5 samples (baseline/brake/steering, brake changed)
+   * then throttle short of the guarantee (3 misses -- modelled here as only 2
+   * of the required 5 samples) -> `insufficient`, NEVER `brakeCandidate`.
+   */
+  it('5/5/5 samples (brake changed) then throttle short of the guarantee (3 misses) -> `insufficient`, NOT `brakeCandidate` (V1)', () => {
+    const samples: DidPhaseSample[] = [
+      sample(0x4a00, 'baseline', 0, [10]),
+      sample(0x4a00, 'baseline', 100, [10]),
+      sample(0x4a00, 'baseline', 200, [10]),
+      sample(0x4a00, 'baseline', 300, [10]),
+      sample(0x4a00, 'baseline', 400, [10]),
+      // brake: genuinely changed -- would rank `brakeCandidate` on its own.
+      sample(0x4a00, 'brake', 0, [10]),
+      sample(0x4a00, 'brake', 100, [200]),
+      sample(0x4a00, 'brake', 200, [50]),
+      sample(0x4a00, 'brake', 300, [180]),
+      sample(0x4a00, 'brake', 400, [20]),
+      // steering: sufficient, unchanged.
+      sample(0x4a00, 'steering', 0, [10]),
+      sample(0x4a00, 'steering', 100, [10]),
+      sample(0x4a00, 'steering', 200, [10]),
+      sample(0x4a00, 'steering', 300, [10]),
+      sample(0x4a00, 'steering', 400, [10]),
+      // throttle: only 2 samples -- fell 3 misses short of the 5-sample guarantee.
+      sample(0x4a00, 'throttle', 0, [10]),
+      sample(0x4a00, 'throttle', 100, [10]),
+    ];
+    const [summary] = computeDidCandidateSummaries(samples, { useMarginRule: true, minSamplesPerPhase: 5 });
+    expect(summary?.phaseEvidence.throttle).toBe('insufficient');
+    expect(summary?.changedInPhase.brake).toBe(true); // brake's OWN evidence is still a genuine change...
+    expect(summary?.rank).toBe('insufficient'); // ...but the DID is excluded from ranking regardless, never `brakeCandidate`.
   });
 
   it('a phase that does not decode cleanly (mixed lengths) falls back to naive distinctness rather than reporting "unchanged"', () => {
@@ -363,6 +432,11 @@ describe('computeDidCandidateSummaries -- margin-based ranking (ticket P4j, bind
       sample(0x4800, 'baseline', 100, [1, 2, 3]),
       sample(0x4800, 'brake', 0, [1, 2, 3]),
       sample(0x4800, 'brake', 100, [9, 9, 9]),
+      // steering/throttle: 1 sufficient (minSamplesPerPhase: 1), unchanged
+      // sample each (P4j-FIX2 V1 -- a zero-sample phase is `insufficient`,
+      // which now excludes the whole DID from ranking).
+      sample(0x4800, 'steering', 0, [1, 2, 3]),
+      sample(0x4800, 'throttle', 0, [1, 2, 3]),
     ];
     const [summary] = computeDidCandidateSummaries(samples, { useMarginRule: true, minSamplesPerPhase: 1 });
     expect(summary?.changedInPhase.brake).toBe(true); // naive fallback: the 3-byte hex actually differs.
@@ -381,6 +455,19 @@ describe('computeDidCandidateSummaries -- margin-based ranking (ticket P4j, bind
       sample(0x4900, 'brake', 200, [50]),
       sample(0x4900, 'brake', 300, [50]),
       sample(0x4900, 'brake', 400, [55]), // range 5 -- exceeds the default marginRawUnits (3) even though 2x baseline range (0) is 0.
+      // steering/throttle: 5 sufficient, unchanged samples each (P4j-FIX2 V1 --
+      // a zero-sample phase is `insufficient`, which now excludes the whole
+      // DID from ranking).
+      sample(0x4900, 'steering', 0, [50]),
+      sample(0x4900, 'steering', 100, [50]),
+      sample(0x4900, 'steering', 200, [50]),
+      sample(0x4900, 'steering', 300, [50]),
+      sample(0x4900, 'steering', 400, [50]),
+      sample(0x4900, 'throttle', 0, [50]),
+      sample(0x4900, 'throttle', 100, [50]),
+      sample(0x4900, 'throttle', 200, [50]),
+      sample(0x4900, 'throttle', 300, [50]),
+      sample(0x4900, 'throttle', 400, [50]),
     ];
     const [summary] = computeDidCandidateSummaries(samples, { useMarginRule: true, minSamplesPerPhase: 5 });
     expect(summary?.changedInPhase.brake).toBe(true);
@@ -491,7 +578,11 @@ describe('computeDidBlockCandidateSummaries (ticket P4j, binding: mid-size block
     ];
     const [summary] = computeDidBlockCandidateSummaries(samples, { minSamplesPerPhase: 5 });
     expect(summary?.changedOffsetsByPhase.brake).toEqual([]);
-    expect(summary?.rank).toBe('static');
+    // Ticket P4j-FIX2 V1 (binding): `insufficient` in ANY phase (baseline and
+    // brake both fall short of minSamplesPerPhase: 5 here, and steering/
+    // throttle have zero samples) now excludes the whole DID from ranking --
+    // never `static` (which used to read as "measured, and found unchanging").
+    expect(summary?.rank).toBe('insufficient');
   });
 
   it('an empty sample log returns an empty list', () => {
@@ -501,19 +592,57 @@ describe('computeDidBlockCandidateSummaries (ticket P4j, binding: mid-size block
   it('sorts single-phase candidates first, then changedInSeveral, then static -- ties broken by ascending DID', () => {
     const changed = [...block(0x00)];
     changed[0] = 0xff;
-    const staticDid: DidPhaseSample[] = [blockSample(0x4b00, 'baseline', 0, block(0x00)), blockSample(0x4b00, 'brake', 0, block(0x00))];
+    // P4j-FIX2 V1 (binding): every DID below also gets a steering/throttle
+    // sample (unchanged) -- a zero-sample phase is `insufficient`, which now
+    // excludes the whole DID from ranking, so this fixture stays a clean
+    // `brakeCandidate`/`static` comparison rather than tripping that.
+    const staticDid: DidPhaseSample[] = [
+      blockSample(0x4b00, 'baseline', 0, block(0x00)),
+      blockSample(0x4b00, 'brake', 0, block(0x00)),
+      blockSample(0x4b00, 'steering', 0, block(0x00)),
+      blockSample(0x4b00, 'throttle', 0, block(0x00)),
+    ];
     const brakeDidA: DidPhaseSample[] = [
       blockSample(0x4a20, 'baseline', 0, block(0x00)),
       blockSample(0x4a20, 'brake', 0, block(0x00)),
       blockSample(0x4a20, 'brake', 100, changed),
+      blockSample(0x4a20, 'steering', 0, block(0x00)),
+      blockSample(0x4a20, 'throttle', 0, block(0x00)),
     ];
     const brakeDidB: DidPhaseSample[] = [
       blockSample(0x4a10, 'baseline', 0, block(0x00)),
       blockSample(0x4a10, 'brake', 0, block(0x00)),
       blockSample(0x4a10, 'brake', 100, changed),
+      blockSample(0x4a10, 'steering', 0, block(0x00)),
+      blockSample(0x4a10, 'throttle', 0, block(0x00)),
     ];
     const summaries = computeDidBlockCandidateSummaries([...staticDid, ...brakeDidA, ...brakeDidB]);
     expect(summaries.map((s) => s.did)).toEqual([0x4a10, 0x4a20, 0x4b00]);
     expect(summaries.map((s) => s.rank)).toEqual(['brakeCandidate', 'brakeCandidate', 'static']);
+  });
+
+  /**
+   * Ticket P4j-FIX2 V1 (binding, after Codex P4j-REV2 HIGH #1 PARTIAL): the
+   * same exclusion applies to mid-size block candidates -- `insufficient` in
+   * ANY phase excludes the whole DID from ranking, never `brakeCandidate` on
+   * the strength of the phases it DID have enough evidence for.
+   */
+  it('a block with a genuine brake change but throttle short of the guarantee is ranked `insufficient`, NOT `brakeCandidate` (V1)', () => {
+    const brakeChanged = [...block(0x00)];
+    brakeChanged[4] = 0xff;
+    const samples: DidPhaseSample[] = [
+      blockSample(0x4c00, 'baseline', 0, block(0x00)),
+      blockSample(0x4c00, 'baseline', 100, block(0x00)),
+      blockSample(0x4c00, 'brake', 0, block(0x00)),
+      blockSample(0x4c00, 'brake', 100, brakeChanged),
+      blockSample(0x4c00, 'steering', 0, block(0x00)),
+      blockSample(0x4c00, 'steering', 100, block(0x00)),
+      // throttle: only 1 sample -- short of the minSamplesPerPhase: 2 guarantee.
+      blockSample(0x4c00, 'throttle', 0, block(0x00)),
+    ];
+    const [summary] = computeDidBlockCandidateSummaries(samples, { minSamplesPerPhase: 2 });
+    expect(summary?.phaseEvidence.throttle).toBe('insufficient');
+    expect(summary?.changedOffsetsByPhase.brake).toEqual([4]); // brake's OWN evidence is still a genuine change...
+    expect(summary?.rank).toBe('insufficient'); // ...but excluded from ranking regardless.
   });
 });
