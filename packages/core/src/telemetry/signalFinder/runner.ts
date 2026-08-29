@@ -87,9 +87,24 @@ export const FINDER_BACKOFF_WINDOW_MS = 3_000;
  * obeys — see {@link finderProbeBoundMs}.
  */
 export const FINDER_MAX_RESPONSE_PENDING_EXTENSIONS = 2;
+/**
+ * The slack a response wait is guarded by ON TOP of its own window: the
+ * channel promises to resolve at `remainingMs`, and {@link guarded} gives it
+ * this much more before deciding the channel itself is stuck.
+ *
+ * P4m-REV5 M3 (partial) exported it for the same reason as
+ * {@link FINDER_MAX_RESPONSE_PENDING_EXTENSIONS}: a bound that omits it is not
+ * an upper bound.
+ */
+export const FINDER_RESPONSE_GUARD_SLACK_MS = 50;
 /** Bounded stray/unmatched replies tolerated inside one exchange's own window. */
 const MAX_UNMATCHED_REPLIES = 3;
-const DEFAULT_KEEPALIVE_INTERVAL_MS = 2_000;
+/**
+ * How often each channel is kept alive inside a round. P4m-REV5 M3 (partial)
+ * exported it so a caller can state a bound that includes those sends
+ * ({@link finderProbeBoundMs}'s third argument).
+ */
+export const FINDER_KEEPALIVE_INTERVAL_MS = 2_000;
 
 export interface RunFinderRoundInput {
   /** COMPOSITE entries, in the order one pass polls them (`planFinderRun`'s own order). */
@@ -192,11 +207,17 @@ function keyOf(ref: SignalFinderTargetRef): string {
  * loop obeys, and the screen states what it returns:
  * `entries × requestTimeout × (2 + extensions)`.
  */
-export function finderProbeBoundMs(entryCount: number, requestTimeoutMs: number = FINDER_REQUEST_TIMEOUT_MS): number {
+export function finderProbeBoundMs(
+  entryCount: number,
+  requestTimeoutMs: number = FINDER_REQUEST_TIMEOUT_MS,
+  keepAliveSends = 0,
+): number {
   const entries = Number.isFinite(entryCount) && entryCount > 0 ? Math.floor(entryCount) : 0;
   const timeoutMs =
     Number.isFinite(requestTimeoutMs) && requestTimeoutMs > 0 ? requestTimeoutMs : FINDER_REQUEST_TIMEOUT_MS;
-  return entries * timeoutMs * (2 + FINDER_MAX_RESPONSE_PENDING_EXTENSIONS);
+  const keepAlives = Number.isFinite(keepAliveSends) && keepAliveSends > 0 ? Math.floor(keepAliveSends) : 0;
+  const perExchangeMs = timeoutMs * (2 + FINDER_MAX_RESPONSE_PENDING_EXTENSIONS) + FINDER_RESPONSE_GUARD_SLACK_MS;
+  return entries * perExchangeMs + keepAlives * timeoutMs;
 }
 
 /**
@@ -241,7 +262,12 @@ export function mergeFinderRounds(first: FinderRoundResult, second: FinderRoundR
   }
   return {
     startedAtMs: first.startedAtMs,
-    elapsedMs: first.elapsedMs + second.elapsedMs,
+    /**
+     * P4m-REV5 L7: the SPAN from the first round's anchor, not the sum of two
+     * elapsed times — a gap between the rounds would otherwise leave a re-based
+     * sample sitting past the round's own `elapsedMs`.
+     */
+    elapsedMs: Math.max(first.elapsedMs, offsetMs + second.elapsedMs),
     samples: [
       ...first.samples,
       ...second.samples.map((sample) => ({ ...sample, tMs: Math.max(0, sample.tMs + offsetMs) })),
@@ -325,7 +351,7 @@ async function exchange(
   let deadlineMs = clock.now() + requestTimeoutMs;
   for (;;) {
     const remainingMs = Math.max(0, deadlineMs - clock.now());
-    const call = await guarded(() => channel.nextResponse(remainingMs), remainingMs + 50);
+    const call = await guarded(() => channel.nextResponse(remainingMs), remainingMs + FINDER_RESPONSE_GUARD_SLACK_MS);
     if (!call.ok || call.value === 'timeout') return { kind: 'miss', sent: true };
 
     let parsed;
@@ -386,7 +412,7 @@ export async function runFinderRound(input: RunFinderRoundInput): Promise<Finder
   const keepAliveIntervalMs =
     Number.isFinite(input.keepAliveIntervalMs) && (input.keepAliveIntervalMs ?? 0) > 0
       ? (input.keepAliveIntervalMs as number)
-      : DEFAULT_KEEPALIVE_INTERVAL_MS;
+      : FINDER_KEEPALIVE_INTERVAL_MS;
 
   const windowMs =
     Number.isFinite(input.windowMs) && (input.windowMs ?? 0) > 0 ? (input.windowMs as number) : FINDER_BACKOFF_WINDOW_MS;

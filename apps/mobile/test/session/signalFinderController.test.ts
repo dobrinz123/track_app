@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  DEFAULT_ENET_DID_SCENARIO,
+  FINDER_KEEPALIVE_INTERVAL_MS,
   FINDER_REQUEST_TIMEOUT_MS,
+  SimulatedEnetTransport,
   buildMetronomeTimeline,
   finderProbeBoundMs,
   type SignalActionScript,
@@ -958,10 +961,55 @@ describe('createSignalFinderController -- P4m-FIX4 (retry inside the measurement
     expect(first.total).toBe(2);
     expect(last.total).toBe(4);
     expect(last.probed).toBe(4); // it reaches N/N instead of freezing at 2/2.
-    // The stated bound is entries x (send + response + 0x78 budget), not entries x 300 ms.
-    expect(first.boundMs).toBe(finderProbeBoundMs(2, FINDER_REQUEST_TIMEOUT_MS));
-    expect(last.boundMs).toBe(finderProbeBoundMs(4, FINDER_REQUEST_TIMEOUT_MS));
+    // The stated bound is entries x (send + response + 0x78 budget + guard
+    // slack) PLUS the keep-alive sends the round may pay for on both channels
+    // (P4m-REV5 M3) -- not the old entries x 300 ms.
+    const bound = (entries: number): number => {
+      const exchangesMs = finderProbeBoundMs(entries, FINDER_REQUEST_TIMEOUT_MS);
+      const keepAliveSends = 2 * Math.ceil(exchangesMs / FINDER_KEEPALIVE_INTERVAL_MS); // two ECUs.
+      return finderProbeBoundMs(entries, FINDER_REQUEST_TIMEOUT_MS, keepAliveSends);
+    };
+    expect(first.boundMs).toBe(bound(2));
+    expect(last.boundMs).toBe(bound(4));
     expect(last.boundMs).toBeGreaterThan(4 * FINDER_REQUEST_TIMEOUT_MS);
+  });
+
+  it('P4m-REV5 M6: a refusal issued OVER a result restores that result when the close settles', async () => {
+    // Codex P4m-REV5 (MEDIUM): clearing the refusal forced 'idle', so the
+    // finished round's verdicts vanished from the screen because the driver
+    // had tapped Find once too early.
+    let settleClose = (): void => {};
+    const harness = makeController(() => bytes('00'), {
+      closeTimeoutMs: 200,
+      teardownTimeoutMs: 500,
+      transportFactory: () => {
+        const transport = new MultiEcuFakeTransport({ answer: () => bytes('00') });
+        transport.close = (): Promise<void> =>
+          new Promise((resolve) => {
+            settleClose = (): void => resolve();
+          });
+        return transport;
+      },
+    });
+    await runFind(harness);
+    const result = harness.controller.getSnapshot();
+    expect(result.phase).toBe('result');
+    expect(result.adapterTeardownPending).toBe(true);
+    expect(result.scores.length).toBeGreaterThan(0);
+
+    // One tap too early: the refusal displaces the result the driver was reading.
+    await runFind(harness);
+    expect(harness.controller.getSnapshot().phase).toBe('error');
+
+    settleClose();
+    await vi.advanceTimersByTimeAsync(10);
+    await flush();
+    const restored = harness.controller.getSnapshot();
+    expect(restored.phase).toBe('result'); // not 'idle' -- the result was never lost.
+    expect(restored.error).toBeNull();
+    expect(restored.errorCode).toBeNull();
+    expect(restored.scores).toEqual(result.scores);
+    expect(restored.readDids).toEqual(result.readDids);
   });
 
   it('W5: when the late close finally settles, the pending flag AND its error are cleared', async () => {
@@ -998,5 +1046,79 @@ describe('createSignalFinderController -- P4m-FIX4 (retry inside the measurement
     expect(snapshot.adapterTeardownPending).toBe(false);
     expect(snapshot.error).toBeNull();
     expect(snapshot.errorCode).toBeNull();
+  });
+});
+
+/**
+ * LEAD web E2E regression on the P4m-FIX4 tree (2026-08-30): with the DEV
+ * SIMULATOR (`SimulatedEnetTransport`, target 0x12, `DEFAULT_ENET_DID_SCENARIO`)
+ * "Find Brake switch" showed "Probing the ECUs... 1/3" and stayed there for
+ * over a minute -- no metronome, no result, no error. The P4m-FIX3 tree ran the
+ * same flow to a result in about a second.
+ *
+ * The fakes above cannot see it: this exercises the REAL simulated transport
+ * and the REAL `createRawUdsChannel`, whose one behaviour the fakes do not
+ * model -- the simulator answers as its OWN target address whatever address the
+ * request carried, so every 0x29 request is answered by "0x12".
+ */
+describe('createSignalFinderController -- the dev simulator must reach the script (LEAD E2E regression)', () => {
+  const SIM_CATALOG: SignalTargetCatalog = {
+    profileId: 'sim-profile',
+    label: 'Simulated vehicle',
+    targets: [
+      {
+        ...TEST_CATALOG.targets[0]!,
+        hypotheses: [
+          { ecu: 0x12, did: 0x4002, length: 1, decode: 'bit0', status: 'hypothesis', provenance: 'E2E fixture' },
+          { ecu: 0x29, did: 0x500c, length: 1, decode: 'bit0', status: 'hypothesis', provenance: 'E2E fixture' },
+          { ecu: 0x29, did: 0x500b, length: 1, decode: 'bit0', status: 'hypothesis', provenance: 'E2E fixture' },
+        ],
+      },
+    ],
+  };
+
+  it('reaches the metronome within seconds instead of freezing on the probe line', async () => {
+    const transports: SimulatedEnetTransport[] = [];
+    const controller = createSignalFinderController({
+      transportFactory: () => {
+        const transport = new SimulatedEnetTransport({
+          monotonicNow: () => Date.now(),
+          scenario: DEFAULT_ENET_DID_SCENARIO,
+          testerAddress: TESTER_ADDRESS,
+          targetAddress: 0x12,
+        });
+        transports.push(transport);
+        return transport;
+      },
+      testerAddress: TESTER_ADDRESS,
+      clock: { now: () => Date.now() },
+      nowUtc: () => new Date(Date.now()).toISOString(),
+      catalog: SIM_CATALOG,
+      reservation: createReservation(),
+    });
+    const phases: string[] = [];
+    controller.subscribe((snapshot) => {
+      if (phases[phases.length - 1] !== snapshot.phase) phases.push(snapshot.phase);
+    });
+
+    const find = controller.find('brakeSwitch');
+    // Three planned entries at a 300 ms per-DID timeout: the probe and its one
+    // retry cannot honestly cost more than ~1.5 s, so 3 s is generous.
+    for (let i = 0; i < 60 && !phases.includes('running'); i += 1) await vi.advanceTimersByTimeAsync(50);
+    expect(
+      phases,
+      `phases: ${phases.join(' -> ')}; probe line: ${JSON.stringify(controller.getSnapshot().probeProgress)}`,
+    ).toContain('running');
+
+    for (let i = 0; i < 400 && controller.getSnapshot().phase !== 'result'; i += 1) {
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    await find;
+    expect(controller.getSnapshot().phase).toBe('result');
+    // The simulator answers as 0x12 whatever was addressed, so 0x29 is silent
+    // and its two hypotheses are dropped -- exactly what the E2E expected.
+    expect(controller.getSnapshot().silentEcus).toEqual([0x29]);
+    // ONE transport for the whole find -- the probe, its retry and the script.
+    expect(transports).toHaveLength(1);
   });
 });

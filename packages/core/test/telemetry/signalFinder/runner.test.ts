@@ -3,6 +3,7 @@ import {
   FINDER_MAX_RESPONSE_PENDING_EXTENSIONS,
   FINDER_MISSES_BEFORE_BACKOFF,
   FINDER_REQUEST_TIMEOUT_MS,
+  FINDER_RESPONSE_GUARD_SLACK_MS,
   finderProbeBoundMs,
   mergeFinderRounds,
   runFinderRound,
@@ -616,15 +617,49 @@ describe('runFinderRound / summarizeFinderProbe -- P4m-FIX3 (retained rate, per-
  *      budget — {@link finderProbeBoundMs}, from the runner's own constants.
  */
 describe('P4m-FIX4 -- finderProbeBoundMs (W3) and mergeFinderRounds (W1/W2)', () => {
-  it('W3: the bound is entries x (send + response + 0x78 extensions), from the runner s own constants', () => {
+  it('W3: the bound is entries x (send + response + 0x78 extensions + guard slack), from the runner s own constants', () => {
     expect(FINDER_MAX_RESPONSE_PENDING_EXTENSIONS).toBe(2);
-    // One exchange: the send's own timeout, the response window, and one more
-    // window per allowed 0x78 extension.
-    expect(finderProbeBoundMs(1, 300)).toBe(300 * (2 + FINDER_MAX_RESPONSE_PENDING_EXTENSIONS));
-    expect(finderProbeBoundMs(12, 300)).toBe(12 * 1_200);
+    expect(FINDER_RESPONSE_GUARD_SLACK_MS).toBe(50);
+    // One exchange: the send's own timeout, the response window, one more
+    // window per allowed 0x78 extension, and the guard's own slack.
+    const perExchange = 300 * (2 + FINDER_MAX_RESPONSE_PENDING_EXTENSIONS) + FINDER_RESPONSE_GUARD_SLACK_MS;
+    expect(finderProbeBoundMs(1, 300)).toBe(perExchange);
+    expect(finderProbeBoundMs(12, 300)).toBe(12 * perExchange);
     // Defaults to the runner's own per-DID timeout.
-    expect(finderProbeBoundMs(4)).toBe(4 * FINDER_REQUEST_TIMEOUT_MS * (2 + FINDER_MAX_RESPONSE_PENDING_EXTENSIONS));
+    expect(finderProbeBoundMs(4)).toBe(
+      4 * (FINDER_REQUEST_TIMEOUT_MS * (2 + FINDER_MAX_RESPONSE_PENDING_EXTENSIONS) + FINDER_RESPONSE_GUARD_SLACK_MS),
+    );
     expect(finderProbeBoundMs(0, 300)).toBe(0);
+  });
+
+  it('P4m-REV5 L7: the merged elapsed time covers the re-based samples, whatever the gap between the rounds', () => {
+    // Handcrafted rounds (no I/O): the retry starts 900 ms after the probe and
+    // runs 300 ms, so the merged round spans 1200 ms -- a plain SUM of the two
+    // elapsed times (200 + 300) would sit below its own last sample.
+    const round = (startedAtMs: number, elapsedMs: number, sampleTMs: number[]): FinderRoundResult => ({
+      startedAtMs,
+      elapsedMs,
+      samples: sampleTMs.map((tMs) => ({ ecu: 0x12, did: 0x4002, tMs, raw: Uint8Array.from([0x01]) })),
+      attempted: [{ ecu: 0x12, did: 0x4002 }],
+      answered: [{ ecu: 0x12, did: 0x4002 }],
+      requestCount: 1,
+      answeredCount: 1,
+      answeredElapsedMs: 20,
+      respondingEcus: [0x12],
+      backedOff: [],
+    });
+    const merged = mergeFinderRounds(round(1_000, 200, [150]), round(1_900, 300, [250]));
+    expect(merged.samples.map((sample) => sample.tMs)).toEqual([150, 1_150]);
+    expect(merged.elapsedMs).toBe(1_200);
+    expect(merged.elapsedMs).toBeGreaterThanOrEqual(Math.max(...merged.samples.map((sample) => sample.tMs)));
+  });
+
+  it('P4m-REV5 M3: the keep-alive sends a round costs are part of the bound', () => {
+    // Every planned keep-alive is one more guarded send at the per-DID budget
+    // (`runFinderRound` walks every channel), so a probe long enough to cross
+    // the keep-alive interval must state them too.
+    expect(finderProbeBoundMs(3, 300, 2)).toBe(finderProbeBoundMs(3, 300) + 2 * 300);
+    expect(finderProbeBoundMs(3, 300, 0)).toBe(finderProbeBoundMs(3, 300));
   });
 
   it('W3: a REAL worst-case exchange (slow send + two 0x78 extensions + silence) stays inside that bound', async () => {
@@ -696,6 +731,8 @@ describe('P4m-FIX4 -- finderProbeBoundMs (W3) and mergeFinderRounds (W1/W2)', ()
     expect(merged.respondingEcus).toEqual([0x12, 0x29]);
     // Samples keep ONE origin: the retry's are re-based onto the probe's anchor.
     expect(merged.samples.every((sample) => sample.tMs >= 0)).toBe(true);
+    // P4m-REV5 L7: the merged round's own elapsed time covers every sample in it.
+    expect(merged.elapsedMs).toBeGreaterThanOrEqual(Math.max(0, ...merged.samples.map((sample) => sample.tMs)));
 
     const summary = summarizeFinderProbe(merged, entries, 15.8);
     expect(summary.silentEcus).toEqual([]); // declared silent only AFTER the retry.

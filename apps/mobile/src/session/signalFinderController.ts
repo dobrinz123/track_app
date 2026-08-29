@@ -48,6 +48,7 @@
 import {
   ASSUMED_GUIDED_REQ_PER_SEC,
   FINDER_BUDGET_MAX,
+  FINDER_KEEPALIVE_INTERVAL_MS,
   FINDER_PROBE_DURATION_MS,
   FINDER_REQUEST_TIMEOUT_MS,
   buildMetronomeTimeline,
@@ -457,6 +458,13 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
   let tickTimer: ReturnType<typeof setInterval> | null = null;
   /** P4m-FIX3 Z6: a `close()` the teardown gave up WAITING for but not tracking. Non-null → no new find. */
   let pendingClose: Promise<void> | null = null;
+  /**
+   * P4m-REV5 M6: the phase a teardown REFUSAL displaced. Clearing the refusal
+   * used to force `'idle'`, so a driver who tapped Find one moment too early
+   * lost the finished round he was still reading. The refusal is a detour, and
+   * a detour ends where it started.
+   */
+  let phaseBeforeTeardownRefusal: SignalFinderPhase | null = null;
 
   /** Everything a `nextRound()` needs from the find that started it. */
   let currentTarget: SignalTargetDefinition | null = null;
@@ -607,10 +615,18 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
        * unless something else put it there.
        */
       const stale = snapshot.errorCode === 'adapter-teardown-pending';
+      const displaced = phaseBeforeTeardownRefusal;
+      phaseBeforeTeardownRefusal = null;
       emit({
         adapterTeardownPending: false,
         ...(stale
-          ? { error: null, errorCode: null, phase: snapshot.phase === 'error' ? ('idle' as const) : snapshot.phase }
+          ? {
+              error: null,
+              errorCode: null,
+              // M6: back to whatever the refusal interrupted (a finished
+              // result, most often), never a blanket 'idle'.
+              phase: snapshot.phase === 'error' ? (displaced ?? 'idle') : snapshot.phase,
+            }
           : {}),
       });
     });
@@ -840,10 +856,21 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
       // another on its response window and one more per allowed 0x78, so
       // `entries × 300 ms` was a quarter of the truth.
       const probeTotal = provisional.dids.length;
+      /**
+       * P4m-REV5 M3 (partial): the round also pays for a keep-alive on EVERY
+       * channel once per keep-alive interval, so the stated bound counts those
+       * sends too — one round of them per interval the exchanges can span.
+       */
+      const probeEcuCount = new Set(provisional.dids.map((entry) => entry.ecu)).size;
+      const boundFor = (total: number): number => {
+        const exchangesMs = finderProbeBoundMs(total, requestTimeoutMs);
+        const keepAliveRounds = Math.ceil(exchangesMs / FINDER_KEEPALIVE_INTERVAL_MS);
+        return finderProbeBoundMs(total, requestTimeoutMs, probeEcuCount * keepAliveRounds);
+      };
       const probeProgress = {
         probed: 0,
         total: probeTotal,
-        boundMs: finderProbeBoundMs(probeTotal, requestTimeoutMs),
+        boundMs: boundFor(probeTotal),
       };
       emit({ phase: 'probing', probeProgress });
 
@@ -878,7 +905,7 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
           // metronome is something the driver can watch instead of guess at.
           onProgress: (probed, total) => {
             if (myGeneration !== generation) return;
-            emit({ probeProgress: { probed, total, boundMs: finderProbeBoundMs(total, requestTimeoutMs) } });
+            emit({ probeProgress: { probed, total, boundMs: boundFor(total) } });
           },
         });
         if (myGeneration !== generation || control.stopped) return;
@@ -934,7 +961,7 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
                 probeProgress: {
                   probed: probeTotal + probed,
                   total: probeTotal + total,
-                  boundMs: finderProbeBoundMs(probeTotal + total, requestTimeoutMs),
+                  boundMs: boundFor(probeTotal + total),
                 },
               });
             },
@@ -1070,6 +1097,9 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
    */
   function teardownPending(): boolean {
     if (pendingClose === null) return false;
+    // M6: the FIRST refusal is the one that displaced something; a second tap
+    // must not overwrite the phase we owe the driver back.
+    if (snapshot.errorCode !== 'adapter-teardown-pending') phaseBeforeTeardownRefusal = snapshot.phase;
     emit({ phase: 'error', error: ADAPTER_TEARDOWN_PENDING_MESSAGE, errorCode: 'adapter-teardown-pending', step: null });
     return true;
   }

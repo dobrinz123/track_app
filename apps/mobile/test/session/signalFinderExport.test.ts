@@ -839,6 +839,27 @@ describe('P4m-FIX4 W4 -- the export redacts diagnostics.rawError', () => {
     expect(buildSignalFinderExportDocument(input()).diagnostics.rawError).toBeNull();
   });
 
+  it('P4m-REV5 L8: qualified identifiers and error class names survive; hosts and tokens do not', () => {
+    // Codex P4m-REV5 (LOW): the first pass redacted `transport.close` and
+    // `net.Socket` as if they were host names, which deletes exactly the part
+    // of the message a developer debugs from.
+    const doc = buildSignalFinderExportDocument(
+      input({
+        diagnostics: {
+          rawError: 'TypeError: transport.close is not a function (net.Socket at adapter.local:6801 id 9f1c3d7e5b0a42889f1c3d7e)',
+          timeoutInclusiveReqPerSec: null,
+          adapterTeardownPending: false,
+        },
+      }),
+    );
+    const redacted = doc.diagnostics.rawError!;
+    expect(redacted).toContain('TypeError: transport.close is not a function');
+    expect(redacted).toContain('net.Socket');
+    expect(redacted).not.toContain('adapter.local');
+    expect(redacted).not.toContain('6801');
+    expect(redacted).not.toContain('9f1c3d7e5b0a42889f1c3d7e');
+  });
+
   it('redacts an IPv6 address and a bare host:port too', () => {
     const doc = buildSignalFinderExportDocument(
       input({

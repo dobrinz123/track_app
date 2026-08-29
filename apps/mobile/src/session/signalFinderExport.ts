@@ -277,6 +277,14 @@ export function signalFinderExportInputFromSnapshot(
 /** What replaces anything that could identify a machine, a network or a secret. */
 export const DIAGNOSTICS_REDACTION = '‹redacted›';
 
+/**
+ * P4m-REV5 L8: the suffixes that make a dotted name an ADDRESS rather than a
+ * qualified identifier. Everything else with a dot in it (`transport.close`,
+ * `net.Socket`, `Error.captureStackTrace`) is the message's own subject and is
+ * kept — unless a port follows it, which no method name ever carries.
+ */
+const HOST_SUFFIXES = ['local', 'lan', 'home', 'internal', 'arpa', 'com', 'net', 'org', 'io', 'dev', 'app', 'co', 'ro', 'eu'];
+
 /** How much of the (already redacted) message survives — enough for the error's name and its first clause. */
 const DIAGNOSTICS_MAX_CHARS = 120;
 
@@ -289,9 +297,11 @@ const DIAGNOSTICS_MAX_CHARS = 120;
  * What survives is what a developer actually debugs from: the error's own
  * name/code and the first {@link DIAGNOSTICS_MAX_CHARS} characters of what it
  * said. What never leaves the phone: URLs, IPv4/IPv6 addresses, host:port
- * pairs, file paths, and anything long enough to be a token (hex or base64).
- * The patterns are deliberately eager — a redacted timestamp costs nothing,
- * a leaked address costs the user.
+ * pairs, file paths, and anything long enough to be a token (24+ characters of
+ * hex or base64). The patterns are eager about addresses — a redacted timestamp
+ * costs nothing, a leaked address costs the user — and deliberately narrow
+ * about dotted names (P4m-REV5 L8, {@link HOST_SUFFIXES}), because
+ * `transport.close` is the half of the message worth keeping.
  */
 export function redactDiagnosticError(raw: string | null): string | null {
   if (raw === null) return null;
@@ -301,9 +311,13 @@ export function redactDiagnosticError(raw: string | null): string | null {
     /(?:^|[\s"'(])[\\/][^\s"')]{2,}/g, // POSIX path
     /\b\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?\b/g, // IPv4, with or without a port
     /\b[0-9A-Fa-f]{0,4}(?::{1,2}[0-9A-Fa-f]{1,4}){2,7}\b/g, // IPv6, compressed forms included
-    /\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?::\d{1,5})?\b/g, // host name, with or without a port
+    // P4m-REV5 L8: a dotted name is an ADDRESS only when its last label is a
+    // TLD-like suffix, or when a port follows it. `transport.close` and
+    // `net.Socket` are the message's own subject, not somebody's host.
+    new RegExp(`\\b(?:[A-Za-z0-9-]+\\.)+(?:${HOST_SUFFIXES.join('|')})\\b(?::\\d{1,5})?`, 'gi'),
+    /\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}:\d{1,5}\b/g, // any dotted name that carries a port
     /\b[A-Za-z][A-Za-z0-9_-]+:\d{2,5}\b/g, // bare host:port
-    /\b[0-9A-Fa-f]{16,}\b/g, // hex token
+    /\b[0-9A-Fa-f]{24,}\b/g, // hex token
     /\b[A-Za-z0-9+/_-]{24,}={0,2}\b/g, // base64-ish token
   ];
   let text = raw;
