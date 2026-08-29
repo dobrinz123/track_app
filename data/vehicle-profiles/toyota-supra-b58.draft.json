@@ -1,29 +1,32 @@
 {
-  "$comment": "DRAFT vehicle profile — data only, never constants in generic code (contracts.md 'Vehicle-agnostic telemetry addendum'). Every channel carries provenance; status 'hypothesis' until field-confirmed with the guided observation.",
+  "$comment": "DRAFT vehicle profile — data only, never constants in generic code (contracts.md 'Vehicle-agnostic telemetry addendum'). Every channel carries provenance; status 'hypothesis' until field-confirmed with the guided observation. Field exports: data/field/sweeps/.",
   "profileId": "toyota-supra-b58",
   "make": "Toyota",
   "model": "GR Supra (A90/J29)",
   "engine": "BMW B58",
   "transport": "enet",
   "ecus": {
-    "dme": { "address": "0x12", "status": "field-confirmed", "notes": "answers mode-01 PIDs and 0x22 DIDs; sweeps 2026-08-29 in data/field/sweeps/" },
-    "unknown-0x29": { "address": "0x29", "status": "answers", "ident": "AG2RBFR0200 (DID 0x4000)", "notes": "public sources map 0x29 to DSC on BMW F/G (github packetpilot/bmw-f, beemuu ecus.rs, tempadrive blog); live DIDs not found in 0x4000–0x4FFF" }
+    "dme": { "address": "0x12", "status": "field-confirmed", "notes": "answers mode-01 PIDs and 0x22 DIDs; swept 0x1000–0x1FFF (17 responders), 0x4000–0x4FFF (533), 0x5000–0x5FFF (899, test 4 2026-08-29)" },
+    "unknown-0x29": { "address": "0x29", "status": "answers", "ident": "AG2RBFR0200 (DID 0x4000); '2RBFR0200' ASCII at 0x5056", "notes": "public sources map 0x29 to DSC on BMW F/G (github packetpilot/bmw-f, beemuu ecus.rs, tempadrive blog); swept 0x4000–0x4FFF (20 static responders) and 0x5000–0x58F2 (32 responders, test 4 — stopped early); 0x58F3–0x6FFF NOT swept yet" }
   },
   "channels": [
     { "channel": "accelPedalPct", "source": "obd01", "pid": "0x5A", "status": "field-confirmed", "provenance": "SAE J1979 relative pedal; field test 2/3 2026-08-27/29" },
     { "channel": "throttlePlatePct", "source": "obd01", "pid": "0x11", "status": "field-confirmed", "provenance": "field test 1 2026-08-27 (~14 % at idle)" },
-    { "channel": "brakeBoosterSensorV", "source": "did", "ecu": "0x12", "did": "0x4A1D", "length": 2, "decode": "u16 * 5 / 1024 V", "status": "hypothesis", "provenance": "https://thesecretingredient.neocities.org/bmw/dme/b58 ('Brake booster pressure sensor voltage', fetched 2026-08-29); field sweep: answers, 0x0000 at idle, NOT observed during the brake phase (dropped by the pre-pass)" },
-    { "channel": "brakeBoosterDiffHpa", "source": "did", "ecu": "0x12", "did": "0x5892", "length": 2, "decode": "i16 * 10 / 256 hPa", "status": "hypothesis", "provenance": "same page ('Difference between ambient pressure and brake booster pressure'); not yet swept (0x5000–0x5FFF)" },
-    { "channel": "brakePressureHpa", "source": "did", "ecu": "0x12", "did": "0x58B7", "length": 1, "decode": "u8 hPa (as listed; coarse — verify)", "status": "hypothesis", "provenance": "same page ('Current brake pressure'); not yet swept" },
+    { "channel": "brakeSwitch", "source": "did", "ecu": "0x29", "did": "0x500C", "length": 1, "decode": "bit0 (0x04 released → 0x05 pressed)", "status": "field-observed", "provenance": "test 4 2026-08-29 (engine off, ignition on, batched observation 5 samples/phase): 0x04 in baseline/throttle, 0x05 in 3/5 brake-phase samples + the first steering-phase sample (brake still held at the transition); 2026-08-29-test4-ecu29-0x5000-0x58F2.json. Needs one confirmation run (focused, ≥10 samples) before 'field-confirmed'" },
+    { "channel": "brakeStatusBits", "source": "did", "ecu": "0x29", "did": "0x500B", "length": 2, "decode": "bitfield; 0x0002 at rest, 0x0006 (bit2) seen once during the brake phase", "status": "weak", "provenance": "test 4 2026-08-29: single 0x0006 sample out of 5 in the brake phase, never elsewhere — plausible 'firm press' / brake-light bit; confirm with the focused run" },
+    { "channel": "brakeBoosterSensorV", "source": "did", "ecu": "0x12", "did": "0x4A1D", "length": 2, "decode": "u16 * 5 / 1024 V", "status": "hypothesis", "provenance": "https://thesecretingredient.neocities.org/bmw/dme/b58 ('Brake booster pressure sensor voltage', fetched 2026-08-29); field sweep: answers, 0x0000 at idle; NOT yet observed in a brake phase (test 4 focused shortlist was not run)" },
+    { "channel": "brakeBoosterDiffHpa", "source": "did", "ecu": "0x12", "did": "0x5892", "length": 2, "decode": "i16 * 10 / 256 hPa", "status": "hypothesis", "provenance": "same page ('Difference between ambient pressure and brake booster pressure'); test 4 sweep: answers 0x0000 (engine off); not observed in a brake phase" },
+    { "channel": "brakePressureHpa", "source": "did", "ecu": "0x12", "did": "0x58B7", "length": 1, "decode": "u8 hPa (as listed; coarse — verify)", "status": "hypothesis", "provenance": "same page ('Current brake pressure'); test 4 sweep: answers 0x00 (engine off); not observed in a brake phase" },
     { "channel": "longG", "source": "did", "ecu": "0x12", "did": "0x4811", "length": 1, "decode": "i8 * 0.217 m/s²", "status": "hypothesis", "provenance": "same page ('Vehicle longitudinal acceleration'); field sweep: answers 0x00 at rest" },
     { "channel": "latG", "source": "did", "ecu": "0x12", "did": "0x4812", "length": 2, "decode": "i16 / 640 m/s²", "status": "hypothesis", "provenance": "same page ('Vehicle lateral acceleration'); field sweep: answers 0xFF4A = −0.28 m/s² at rest (plausible)" },
     { "channel": "throttleLike", "source": "did", "ecu": "0x12", "did": "0x4659", "length": 2, "decode": "u16 0–4095 (12-bit)", "status": "field-observed", "provenance": "guided observation 2026-08-29: 0 → 4095 only in the throttle phase" },
-    { "channel": "steeringDeg", "source": "did", "ecu": "?", "did": "?", "status": "unknown", "provenance": "not in DME 0x12 (0x1000–0x1FFF, 0x4000–0x4FFF) nor in 0x29 0x4000–0x4FFF; candidates: 0x29 0x5000–0x6FFF, EPS 0x30, SZL 0x02/0x65 (public sources, unverified for G29/J29); PT-CAN 0x301 as last resort (needs CAN tap)" }
+    { "channel": "batteryVoltageMv", "source": "did", "ecu": "0x12", "did": "0x5468", "length": 2, "decode": "u16 mV (13636 → 13611 → 13587 while loads were applied)", "status": "hypothesis", "provenance": "test 4 2026-08-29: only DME DID in 0x5000–0x5FFF (7 batches / 112 DIDs observed) that moved; dips when brake lights / steering load — not a driver input" },
+    { "channel": "steeringDeg", "source": "did", "ecu": "?", "did": "?", "status": "unknown", "provenance": "not in DME 0x12 (0x1000–0x1FFF, 0x4000–0x4FFF, 0x5000–0x5FFF batches 0–6) nor in 0x29 0x4000–0x4FFF / 0x5000–0x58F2; DME 0x5422 (1 byte) had ONE 0x00 sample at the start of the steering phase (weak, likely transition); candidates: 0x29 0x58F3–0x6FFF, EPS 0x30, SZL 0x02/0x65 (public sources, unverified for G29/J29); PT-CAN 0x301 as last resort (needs CAN tap)" }
   ],
   "nextFocusedTest": {
     "engine": "off, ignition on",
-    "ecu": "0x12",
-    "shortlist": ["0x4A1D", "0x5892", "0x58B7", "0x4811", "0x4812", "0x4536", "0x4520", "0x4659"],
-    "sweep": "0x5000–0x5FFF (≈4.5 min) then focused observation on the shortlist (≈1–2 min)"
+    "protocol": "builds/ipa/TEST-5-PROTOCOL.md",
+    "dme": { "ecu": "0x12", "shortlist": ["0x4A1D", "0x5892", "0x58B7", "0x4811", "0x4812", "0x5468"] },
+    "ecu29": { "ecu": "0x29", "resumeSweep": "0x58F3–0x6FFF", "shortlist": ["0x500B", "0x500C", "0x5003", "0x5008", "0x5026", "0x5027", "0x5055"] }
   }
 }
