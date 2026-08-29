@@ -2,12 +2,15 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  findSignalTarget,
+  resolveSignalTargetCatalog,
   scoreSignalCandidates,
   type MetronomeStep,
   type MetronomeTimeline,
   type SignalCandidateScore,
   type SignalExpectedShape,
   type SignalFinderSample,
+  type SignalTargetId,
 } from '../../../src/telemetry/signalFinder';
 
 /**
@@ -93,18 +96,33 @@ function samplesFromExport(doc: ExportedSession): SignalFinderSample[] {
   }));
 }
 
-function scoreField(name: string, shape: SignalExpectedShape): Map<string, SignalCandidateScore> {
+/**
+ * P4m-FIX1 X6: the flag exception is DATA-DRIVEN now, so the replay feeds the
+ * scorer exactly what the controller feeds it in the field — the DIDs the
+ * Supra catalog itself declares to be boolean flags inside a word (DME
+ * 0x4007). Nothing here hard-codes an ECU/DID: it is read from the catalog.
+ */
+function declaredFlagDids(targetId: SignalTargetId): Array<{ ecu: number; did: number }> {
+  const catalog = resolveSignalTargetCatalog('toyota-supra-b58');
+  const target = findSignalTarget(catalog, targetId);
+  return (target?.hypotheses ?? [])
+    .filter((hypothesis) => hypothesis.expectedShape === 'boolean-edge')
+    .map((hypothesis) => ({ ecu: hypothesis.ecu, did: hypothesis.did }));
+}
+
+function scoreField(name: string, shape: SignalExpectedShape, targetId: SignalTargetId): Map<string, SignalCandidateScore> {
   const doc = loadExport(name);
   const scores = scoreSignalCandidates({
     samples: samplesFromExport(doc),
     timeline: timelineFromExport(doc),
     shape,
+    declaredFlagDids: declaredFlagDids(targetId),
   });
   return new Map(scores.map((score) => [`${score.ecu}:${score.did}`, score]));
 }
 
 describe('field test 5 replay -- brake run (2026-08-29-brakeSwitch.json)', () => {
-  const scores = scoreField('2026-08-29-brakeSwitch.json', 'boolean-edge');
+  const scores = scoreField('2026-08-29-brakeSwitch.json', 'boolean-edge', 'brakeSwitch');
 
   it('DME 0x12 DID 0x4002 (0x01 rest -> 0x19 pressed, every press window) is FOUND -- the brake pedal build 5 called insufficient', () => {
     const score = scores.get(`${0x12}:${0x4002}`);
@@ -141,7 +159,7 @@ describe('field test 5 replay -- brake run (2026-08-29-brakeSwitch.json)', () =>
 });
 
 describe('field test 5 replay -- accelerator run (2026-08-29-accelPedal.json)', () => {
-  const scores = scoreField('2026-08-29-accelPedal.json', 'analog-monotone');
+  const scores = scoreField('2026-08-29-accelPedal.json', 'analog-monotone', 'accelPedal');
 
   it('DME 0x12 DID 0x4007 (0x9001 -> 0x9000, bit0 clears while pressed) is FOUND -- a single-bit flag, so the monotone direction rule does not apply', () => {
     const score = scores.get(`${0x12}:${0x4007}`);
@@ -159,8 +177,19 @@ describe('field test 5 replay -- accelerator run (2026-08-29-accelPedal.json)', 
     expect(score!.max).toBe(0x9001);
   });
 
-  it('0x4659 answered 17 times with the identical 0x27FF -- UNRELATED (static), never "insufficient"', () => {
-    expect(scores.get(`${0x12}:${0x4659}`)).toMatchObject({ verdict: 'unrelated', restValueHex: '27FF' });
+  /**
+   * P4m-FIX1 X7 (Codex P4m-REV1 finding 8): 0x4659 answered 17 times with the
+   * identical 0x27FF -- but the run's FIRST press window holds none of those
+   * 17 reads. `never-moved -> unrelated` is a claim that the driver's action
+   * WAS observed on this DID, so it now needs the same complete
+   * action-window coverage the sparse `found` rule needs; without it the
+   * honest answer is `insufficient`. Either way it is not `found`, which is
+   * what contracts.md item 13 pins it for.
+   */
+  it('0x4659 (identical 0x27FF, but one press window was never sampled) is INSUFFICIENT -- never found, never ranked', () => {
+    const score = scores.get(`${0x12}:${0x4659}`);
+    expect(score).toMatchObject({ verdict: 'insufficient', insufficientReason: 'undersampled', restValueHex: '27FF' });
+    expect(score!.verdict).not.toBe('found');
   });
 
   it('0x4002 (the brake DID) is flat through the accelerator run -- unrelated', () => {

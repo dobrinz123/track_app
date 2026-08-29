@@ -9,6 +9,8 @@ import {
   resolveSignalTargetCatalog,
   targetHypothesisEcus,
   resolveSignalActionVerbs,
+  resolveSignalTargetLabel,
+  resolveDiscoveryRangeNote,
 } from '../../../src/telemetry/signalFinder';
 
 /**
@@ -149,6 +151,43 @@ describe('Supra catalog after field test 5 (P4m M5)', () => {
     expect(accel.hypotheses[0]!.decode).toMatch(/bit0/i);
     expect(accel.hypotheses[0]!.provenance).toContain('2026-08-29-accelPedal.json');
     expect(accel.hypotheses[1]).toMatchObject({ did: 0x4659, status: 'weak' });
+  });
+
+  /**
+   * P4m-FIX1 X6 (Codex P4m-REV1 finding 7): the flag exception under an
+   * ANALOG target is data-driven -- DME 0x4007 is a boolean flag inside a
+   * word, and it says so in the catalog rather than being inferred from the
+   * XOR shape of whatever samples arrived.
+   */
+  it('X6: 0x4007 declares itself a boolean-edge flag hypothesis, 0x4659 does not', () => {
+    const accel = findSignalTarget(catalog, 'accelPedal')!;
+    expect(accel.hypotheses[0]).toMatchObject({ did: 0x4007, expectedShape: 'boolean-edge' });
+    expect(accel.hypotheses[1]!.expectedShape).toBeUndefined();
+    expect(accel.expectedShape).toBe('analog-monotone'); // the TARGET is still an analog pedal.
+  });
+
+  /** P4m-FIX1 X8 (Codex finding 9): nothing the driver reads may be English-only, catalog data included. */
+  it('X8: every target label and every discovery-range note has an RO variant', () => {
+    for (const entry of [...SIGNAL_TARGET_CATALOGS]) {
+      for (const target of entry.targets) {
+        expect(resolveSignalTargetLabel(target, 'en')).toBe(target.label);
+        expect(resolveSignalTargetLabel(target, 'ro').length).toBeGreaterThan(1);
+        expect(resolveSignalTargetLabel(target, 'ro')).not.toBe(resolveSignalTargetLabel(target, 'en'));
+        for (const range of target.discoveryRanges) {
+          expect(resolveDiscoveryRangeNote(range, 'ro').length).toBeGreaterThan(1);
+          expect(resolveDiscoveryRangeNote(range, 'ro')).not.toBe(resolveDiscoveryRangeNote(range, 'en'));
+          expect(resolveDiscoveryRangeNote(range, 'en')).toBe(range.note);
+        }
+      }
+    }
+  });
+
+  it('X8: nextDiscoveryStep carries the note in the language it was asked for', () => {
+    const target = findSignalTarget(catalog, 'steeringAngle')!;
+    const en = nextDiscoveryStep(target, 15.8, [], 'en')!;
+    const ro = nextDiscoveryStep(target, 15.8, [], 'ro')!;
+    expect(ro.note).not.toBe(en.note);
+    expect(nextDiscoveryStep(target, 15.8)!.note).toBe(en.note); // default stays English.
   });
 
   it('every target still carries both languages for every metronome step', () => {

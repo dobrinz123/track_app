@@ -57,6 +57,15 @@ export interface PlanFinderRunOptions extends FinderBudgetOptions {
   exclude?: readonly SignalFinderTargetRef[];
   /** Overrides the rate-derived budget entirely (tests, and a caller that measured its own). */
   budget?: number;
+  /**
+   * P4m-FIX1 X2 (Codex P4m-REV1 finding 2, HIGH): ECUs the pre-run probe
+   * found ANSWER NOTHING. Their entries are moved to {@link FinderRunPlan.silent}
+   * — they never consume the round's budget (that is the starvation the
+   * finding is about: 300 ms × every silent DID, every pass, stolen from the
+   * ECU that is actually answering) and they are never called "no response"
+   * either, because the honest reason is known: the ECU is silent.
+   */
+  silentEcus?: readonly number[];
 }
 
 export interface FinderRunPlan {
@@ -66,6 +75,8 @@ export interface FinderRunPlan {
   dids: readonly SignalFinderPlanEntry[];
   /** Item 12 (honesty): eligible DIDs this round does NOT reach — "not read (N) — Next round", never "no response". */
   notRead: readonly SignalFinderPlanEntry[];
+  /** P4m-FIX1 X2: eligible DIDs skipped because their ECU answered nothing in the probe — "not read — ECU 0x29 silent". */
+  silent: readonly SignalFinderPlanEntry[];
 }
 
 /** Item 9's press/release window (ms) — what the budget guarantees samples inside. */
@@ -108,12 +119,13 @@ function key(ref: SignalFinderTargetRef): string {
  *
  *  1. **Each (ECU, DID) once**, at its highest priority — a hypothesis that is
  *     also a cached responder is read as a hypothesis, not twice.
- *  2. **Each DID NUMBER at most once per round.** The whole round runs on ONE
- *     transport session (item 10, "All ECUs are polled in the SAME session"),
- *     and a 0x62 response is correlated back to its request by its DID; the
- *     same DID number answered by two ECUs inside one round would merge two
- *     different channels into one series. The lower-priority one is deferred
- *     to the next round rather than dropped.
+ *  2. **Identity is COMPOSITE — (ECU, DID)** (P4m-FIX1 X4, Codex P4m-REV1
+ *     finding 4). Build 6 allowed each DID NUMBER only once per round, because
+ *     the round was polled through one DID-keyed series: the same DID on two
+ *     ECUs cost the driver a second script. `runFinderRound` polls one channel
+ *     PER ECU and keys everything by `(ecu, did)`, so both copies belong in the
+ *     same round — one press, both ECUs read.
+ *  3. A **silent ECU** (probe evidence, X2) is skipped without spending budget.
  */
 export function planFinderRun(
   measuredReqPerSec: number,
@@ -146,14 +158,16 @@ export function planFinderRun(
 
   const dids: SignalFinderPlanEntry[] = [];
   const notRead: SignalFinderPlanEntry[] = [];
-  const didNumbersThisRound = new Set<number>();
+  const silent: SignalFinderPlanEntry[] = [];
+  const silentEcus = new Set(options.silentEcus ?? []);
   for (const entry of ordered) {
-    if (dids.length < budget && !didNumbersThisRound.has(entry.did)) {
-      didNumbersThisRound.add(entry.did);
+    if (silentEcus.has(entry.ecu)) {
+      silent.push(entry);
+    } else if (dids.length < budget) {
       dids.push(entry);
     } else {
       notRead.push(entry);
     }
   }
-  return { budget, dids, notRead };
+  return { budget, dids, notRead, silent };
 }

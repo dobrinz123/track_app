@@ -70,9 +70,33 @@ const TEST_CATALOG: SignalTargetCatalog = {
   ],
 };
 
-/** True while `tMs` falls inside a press evidence window of the metronome. */
-function pressedAt(tMs: number): boolean {
-  return TIMELINE.steps.some((s) => s.kind === 'press' && tMs >= s.evidenceFromMs && tMs < s.evidenceToMs);
+/**
+ * A driver who obeys the metronome: the fake ECU's pedal follows the PROMPT
+ * currently on screen, not a wall clock.
+ *
+ * P4m-FIX1 X1 is why this is no longer clock-based: a find now runs a ~2 s
+ * PROBE before the script, so the transport's own "ms since my first request"
+ * origin is no longer the script's origin. Following the prompt is both
+ * closer to the real thing and immune to whatever happens before the script.
+ */
+interface PedalDouble {
+  pressed: boolean;
+}
+
+function followMetronome(harness: Harness, pedal: PedalDouble, lagMs = TEST_SCRIPT.settleMs): void {
+  let last: string | null = null;
+  harness.controller.subscribe((snapshot) => {
+    const kind = snapshot.step?.kind ?? null;
+    if (kind === last) return;
+    last = kind;
+    const pressed = kind === 'press' || kind === 'hold';
+    // A human reacts LATE -- by exactly the settle the metronome's evidence
+    // windows are shifted by (`metronome.ts`). A fake driver who reacted
+    // instantly would move the pedal inside the PREVIOUS window's evidence.
+    setTimeout(() => {
+      pedal.pressed = pressed;
+    }, lagMs);
+  });
 }
 
 interface Harness {
@@ -133,11 +157,13 @@ afterEach(() => {
 
 describe('createSignalFinderController -- ONE metronome, ONE session, every ECU (items 9-10)', () => {
   it('runs exactly ONE script on ONE transport and polls both ECUs inside it', async () => {
-    const harness = makeController((ecu, did, tMs) => {
-      if (ecu === 0x29 && did === 0x500c) return bytes(pressedAt(tMs) ? '05' : '04');
+    const pedal: PedalDouble = { pressed: false };
+    const harness = makeController((ecu, did) => {
+      if (ecu === 0x29 && did === 0x500c) return bytes(pedal.pressed ? '05' : '04');
       if (ecu === 0x12 && did === 0x58b7) return bytes('00');
       return 'nrc';
     });
+    followMetronome(harness, pedal);
     await runFind(harness);
 
     const snapshot = harness.controller.getSnapshot();
@@ -266,10 +292,12 @@ describe('createSignalFinderController -- ONE metronome, ONE session, every ECU 
   });
 
   it('tolerates NRC -- that DID is "no response", and never appears as "not read"', async () => {
-    const harness = makeController((ecu, did, tMs) => {
-      if (ecu === 0x29 && did === 0x500c) return bytes(pressedAt(tMs) ? '05' : '04');
+    const pedal: PedalDouble = { pressed: false };
+    const harness = makeController((ecu, did) => {
+      if (ecu === 0x29 && did === 0x500c) return bytes(pedal.pressed ? '05' : '04');
       return 'nrc';
     });
+    followMetronome(harness, pedal);
     await runFind(harness);
     const snapshot = harness.controller.getSnapshot();
     expect(snapshot.noResponseDids).toEqual([{ ecu: 0x12, did: 0x58b7 }]);
@@ -373,13 +401,142 @@ describe('createSignalFinderController -- lifecycle (unchanged discipline)', () 
   });
 });
 
+/**
+ * Ticket P4m-FIX1 (Codex P4m-REV1 findings 1, 2, 3, 5, 10):
+ *  X1 measure the rate before the script instead of assuming 15.8 req/s;
+ *  X2 a silent ECU is dropped, never allowed to eat the live ECU's samples;
+ *  X3 only ATTEMPTED (ecu,did) keys count as read;
+ *  X5 cached/changed pools belong to the TARGET's ECUs;
+ *  X9 a find with nothing to read is refused with a reason, not "run" with
+ *     zero scripts.
+ */
+describe('createSignalFinderController -- P4m-FIX1 honesty (X1, X2, X3, X5, X9)', () => {
+  it('X1: probes first and reports a MEASURED request rate', async () => {
+    const harness = makeController(() => bytes('00'));
+    await runFind(harness);
+    const snapshot = harness.controller.getSnapshot();
+    expect(snapshot.rateSource).toBe('measured');
+    expect(snapshot.measuredReqPerSec).toBeGreaterThan(0);
+  });
+
+  it('X1: when nothing answers the probe, the rate is reported as ASSUMED, never as measured', async () => {
+    const harness = makeController(() => null);
+    await runFind(harness);
+    const snapshot = harness.controller.getSnapshot();
+    expect(snapshot.rateSource).toBe('assumed');
+    expect(snapshot.silentEcus).toEqual([0x12, 0x29]);
+    // Every planned DID sits on a silent ECU, so no script was performed at all.
+    expect(snapshot.round).toBe(0);
+    expect(snapshot.readDids).toEqual([]);
+  });
+
+  it('X2: a SILENT ECU is named and dropped; the answering ECU keeps >= 3 samples in every window', async () => {
+    const sweepStore = createInMemoryDidSweepStore();
+    await seedRun(sweepStore, 'run-12', 0x12);
+    await sweepStore.upsertResponders(
+      'run-12',
+      Array.from({ length: 4 }, (_v, i) => ({ did: 0x4100 + i, raw: bytes('00'), rttMs: 10 })),
+      '2026-08-29T17:33:00.000Z',
+    );
+    const pedal: PedalDouble = { pressed: false };
+    const harness = makeController(
+      (ecu, did) => {
+        if (ecu === 0x29) return null; // the whole ECU is silent -- every request times out.
+        if (did === 0x58b7) return bytes(pedal.pressed ? '05' : '04');
+        return bytes('00');
+      },
+      { sweepStore, measuredReqPerSec: 15 },
+    );
+    followMetronome(harness, pedal);
+    await runFind(harness);
+    const snapshot = harness.controller.getSnapshot();
+    expect(snapshot.silentEcus).toEqual([0x29]);
+    expect(snapshot.silentDids).toContainEqual({ ecu: 0x29, did: 0x500c });
+    // A silent DID is NOT "no response" and NOT "not read (Next round)" -- it
+    // has its own stated reason.
+    expect(snapshot.noResponseDids).not.toContainEqual({ ecu: 0x29, did: 0x500c });
+    expect(snapshot.notReadDids).not.toContainEqual({ ecu: 0x29, did: 0x500c });
+    // The live ECU was sampled properly all the way through the script.
+    const samples = harness.controller.getSamples().filter((s) => s.ecu === 0x12 && s.did === 0x58b7);
+    const perWindow = TIMELINE.steps.map(
+      (step) => samples.filter((s) => s.tMs >= step.evidenceFromMs && s.tMs < step.evidenceToMs).length,
+    );
+    expect(Math.min(...perWindow)).toBeGreaterThanOrEqual(3);
+  });
+
+  it('X3: a stop mid-script leaves the DIDs it never asked for in notRead -- never in noResponse', async () => {
+    const sweepStore = createInMemoryDidSweepStore();
+    await seedRun(sweepStore, 'run-12', 0x12);
+    await sweepStore.upsertResponders(
+      'run-12',
+      Array.from({ length: 20 }, (_v, i) => ({ did: 0x4100 + i, raw: bytes('00'), rttMs: 10 })),
+      '2026-08-29T17:33:00.000Z',
+    );
+    let controllerRef: ReturnType<typeof createSignalFinderController> | null = null;
+    let requests = 0;
+    const harness = makeController(
+      () => {
+        requests += 1;
+        // The probe polls each planned DID once; stop a few requests into the
+        // SCRIPT that follows it.
+        if (requests === 15) void controllerRef?.stop();
+        return bytes('00');
+      },
+      { sweepStore, measuredReqPerSec: 15 },
+    );
+    controllerRef = harness.controller;
+    await runFind(harness);
+    const snapshot = harness.controller.getSnapshot();
+    expect(snapshot.readDids.length).toBeGreaterThan(0);
+    expect(snapshot.readDids.length).toBeLessThan(snapshot.budget);
+    for (const entry of snapshot.notReadDids) {
+      expect(snapshot.readDids).not.toContainEqual(entry);
+      expect(snapshot.noResponseDids).not.toContainEqual(entry);
+    }
+    // Nothing vanished: read + not read + silent still covers every eligible DID.
+    const total = snapshot.readDids.length + snapshot.notReadDids.length + snapshot.silentDids.length;
+    expect(total).toBe(22); // 2 hypotheses + 20 cached responders
+  });
+
+  it('X5: cached responders of an ECU the target has nothing to do with are never planned', async () => {
+    const sweepStore = createInMemoryDidSweepStore();
+    await seedRun(sweepStore, 'run-30', 0x30);
+    await sweepStore.upsertResponders(
+      'run-30',
+      Array.from({ length: 6 }, (_v, i) => ({ did: 0x4000 + i, raw: bytes('00'), rttMs: 10 })),
+      '2026-08-29T17:33:00.000Z',
+    );
+    const harness = makeController(() => bytes('00'), { sweepStore, measuredReqPerSec: 15 });
+    await runFind(harness); // brakeSwitch: hypothesis ECUs 0x12/0x29, discovery ECU 0x29 -- 0x30 is none of them.
+    const snapshot = harness.controller.getSnapshot();
+    for (const entry of [...snapshot.readDids, ...snapshot.notReadDids]) expect(entry.ecu).not.toBe(0x30);
+
+    // The steering target's own discovery range IS on 0x30, so the same cache
+    // is eligible there.
+    const steering = makeController(() => bytes('00'), { sweepStore, measuredReqPerSec: 15 });
+    await runFind(steering, 'steeringAngle');
+    expect(steering.controller.getSnapshot().readDids.some((entry) => entry.ecu === 0x30)).toBe(true);
+  });
+
+  it('X9: a target with nothing to read reports zero eligible DIDs, and Find performs no script', async () => {
+    const harness = makeController(() => bytes('00'));
+    expect(await harness.controller.eligibleDidCount('steeringAngle')).toBe(0);
+    expect(await harness.controller.eligibleDidCount('brakeSwitch')).toBe(2);
+    await runFind(harness, 'steeringAngle');
+    expect(harness.transports).toHaveLength(0);
+    expect(harness.controller.getSnapshot().round).toBe(0);
+  });
+});
+
 describe('confirmBinding', () => {
   it('writes the winning DID into the vehicle profile with its evidence', async () => {
     const bindingStore = createInMemoryVehicleProfileBindingStore();
-    const harness = makeController((ecu, did, tMs) => {
-      if (ecu === 0x29 && did === 0x500c) return bytes(pressedAt(tMs) ? '05' : '04');
+    const pedal: PedalDouble = { pressed: false };
+    const harness = makeController((ecu, did) => {
+      if (ecu === 0x29 && did === 0x500c) return bytes(pedal.pressed ? '05' : '04');
       return 'nrc';
     }, { bindingStore, profileId: 'test-profile' });
+    followMetronome(harness, pedal);
     await runFind(harness);
 
     const winner = harness.controller.getSnapshot().scores.find((s) => s.verdict === 'found')!;

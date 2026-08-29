@@ -111,16 +111,44 @@ describe('planFinderRun (item 10) -- one round, every ECU, hypotheses FIRST', ()
     expect(plan.notRead).toEqual([]);
   });
 
-  it('the SAME DID number on two ECUs is split across rounds -- one session correlates a response by its DID', () => {
-    // The whole round runs on ONE transport session (item 10, "All ECUs are
-    // polled in the SAME session"), where a 0x62 response carries its DID but
-    // the runner's own series key is that DID alone: reading 0x500C on 0x12
-    // and on 0x29 in the same round would merge two different channels.
+  it('X4 (P4m-FIX1 M4): the SAME DID number on two ECUs lands in the SAME round -- identity is (ecu, did)', () => {
+    // Build 6 deferred the second ECU's copy to another human script, because
+    // the round was correlated by DID NUMBER alone. `runFinderRound` polls one
+    // channel per ECU (composite identity), so the split has no reason to
+    // exist: the driver presses once, both ECUs are read.
     const plan = planFinderRun(15, [entry(0x12, 0x500c), entry(0x29, 0x500c)], [], []);
-    expect(pairs(plan.dids)).toEqual([[0x12, 0x500c]]);
-    expect(pairs(plan.notRead)).toEqual([[0x29, 0x500c]]);
-    const next = planFinderRun(15, [entry(0x12, 0x500c), entry(0x29, 0x500c)], [], [], { exclude: plan.dids });
-    expect(pairs(next.dids)).toEqual([[0x29, 0x500c]]);
+    expect(pairs(plan.dids)).toEqual([
+      [0x12, 0x500c],
+      [0x29, 0x500c],
+    ]);
+    expect(plan.notRead).toEqual([]);
+  });
+
+  it('X2 (P4m-FIX1 H2): a SILENT ECU s DIDs are dropped from the round and do not consume the budget', () => {
+    const cached = Array.from({ length: 6 }, (_v, i) => entry(0x12, 0x2000 + i));
+    const plan = planFinderRun(15, [entry(0x29, 0x500c), entry(0x29, 0x500b)], [], cached, {
+      budget: 4,
+      silentEcus: [0x29],
+    });
+    // The two 0x29 hypotheses are reported as silent, and the budget is
+    // refilled from the next pool rather than spent on an ECU that answers
+    // nothing.
+    expect(pairs(plan.silent)).toEqual([
+      [0x29, 0x500c],
+      [0x29, 0x500b],
+    ]);
+    expect(pairs(plan.dids)).toEqual([
+      [0x12, 0x2000],
+      [0x12, 0x2001],
+      [0x12, 0x2002],
+      [0x12, 0x2003],
+    ]);
+    // A silent entry is neither read nor "not read (Next round)" -- it has its
+    // own honest reason.
+    expect(pairs(plan.notRead)).toEqual([
+      [0x12, 0x2004],
+      [0x12, 0x2005],
+    ]);
   });
 
   it('a slow adapter plans a smaller round, and an empty pool plans nothing at all', () => {

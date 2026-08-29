@@ -24,9 +24,13 @@
  *   3. ONE TRANSPORT SESSION FOR EVERY ECU (item 10). HSFZ carries the target
  *      address per frame, so one socket serves 0x12 and 0x29 alike: the round
  *      opens one channel per ECU over the SAME transport
- *      ({@link createMultiEcuUdsChannel}) and lets core's `runDidObservation`
- *      round-robin across them, exactly as `didSweepController` does for a
- *      single ECU. No second socket, no second reservation.
+ *      ({@link createEcuChannels}) and lets `@circuit/core`'s
+ *      `runFinderRound` poll COMPOSITE (ecu, did) entries across them. No
+ *      second socket, no second reservation.
+ *   5. P4m-FIX1 (Codex P4m-REV1): a ~2 s PROBE before every script, so the
+ *      budget rests on a MEASURED rate and a silent ECU is dropped rather
+ *      than left to eat the live ECU's samples; and ONLY the DIDs a request
+ *      actually went out for are counted as read.
  *   4. The transport LIFECYCLE per round — acquire the reservation, open a
  *      FRESH transport, run, close, release, strictly in that order on every
  *      path (identical discipline to `didSweepController.ts`, whose
@@ -44,6 +48,8 @@
 import {
   ASSUMED_GUIDED_REQ_PER_SEC,
   FINDER_BUDGET_MAX,
+  FINDER_PROBE_DURATION_MS,
+  FINDER_REQUEST_TIMEOUT_MS,
   buildMetronomeTimeline,
   computeFinderDidBudget,
   findSignalTarget,
@@ -54,11 +60,14 @@ import {
   planFinderRun,
   resolveSignalActionVerbs,
   resolveSignalTargetCatalog,
-  runDidObservation,
+  runFinderRound,
   scoreSignalCandidates,
+  summarizeFinderProbe,
+  targetDeclaredFlagDids,
   targetHypothesisEcus,
   type DidSweepControl,
-  type DidSweepPacing,
+  type FinderRateSource,
+  type FinderRunPlan,
   type MetronomeStep,
   type MetronomeStepKind,
   type MetronomeTimeline,
@@ -86,10 +95,6 @@ const MIN_SAMPLES_PER_WINDOW = 2;
 
 /** How often the on-screen prompt/countdown is recomputed while a round is running. */
 const TICK_INTERVAL_MS = 100;
-
-/** Round-robin rounds per second handed to `runDidObservation`, clamped so a huge/tiny DID count can never ask for an absurd cadence. */
-const MIN_TARGET_HZ = 0.5;
-const MAX_TARGET_HZ = 20;
 
 const RESERVATION_BUSY_MESSAGE = 'The adapter is in use (telemetry, the DID probe or a sweep) -- stop it first.';
 
@@ -138,6 +143,10 @@ export interface SignalFinderSnapshot {
   /** Item 12: eligible DIDs no round has reached — "not read", NEVER "no response". */
   notReadDids: readonly SignalFinderTargetRef[];
   notReadCount: number;
+  /** P4m-FIX1 X2: eligible DIDs skipped because their ECU answered nothing in the probe. Never "no response", never "not read (Next round)". */
+  silentDids: readonly SignalFinderTargetRef[];
+  /** P4m-FIX1 X2: the ECUs those DIDs are on — "not read — ECU 0x29 silent". */
+  silentEcus: readonly number[];
   /** {@link readDids}, grouped per ECU (what the result header and the export count). */
   passes: readonly SignalFinderEcuPass[];
   /** The ECUs the CURRENT round is polling (all of them in one session). */
@@ -156,6 +165,14 @@ export interface SignalFinderSnapshot {
   startedAtUtc: string | null;
   /** The request rate the budget/durations were derived from. */
   measuredReqPerSec: number;
+  /**
+   * P4m-FIX1 X1 (Codex P4m-REV1 finding 1, HIGH): was that rate actually
+   * MEASURED (by this find's own probe), or is it the assumed fallback? Build
+   * 6 exported an assumed 15.8 req/s as if it had been measured, which is
+   * exactly the promise ("≥ 3 samples per 3 s window") the budget cannot keep
+   * on an adapter nobody timed.
+   */
+  rateSource: FinderRateSource;
   /** Non-null exactly when something went wrong; never thrown across this API. */
   error: string | null;
 }
@@ -175,9 +192,8 @@ export interface SignalFinderControllerDeps {
   getLanguage?: () => SignalLanguage;
   /** Single-client adapter reservation — the SAME instance the sweep/probe/provider share. */
   reservation?: EnetAdapterReservation;
-  pacing?: DidSweepPacing;
+  /** P4m-FIX1 X2: the per-DID request budget. Default {@link FINDER_REQUEST_TIMEOUT_MS} (300 ms — enetSession N5's own number). */
   requestTimeoutMs?: number;
-  maxResponsePendingExtensions?: number;
   /** Read-only here: the source of cached responders and prior change evidence (item 10b/c). Omitted → hypotheses only. */
   sweepStore?: DidSweepStore;
   /** Where "Confirm as <target>" writes. Omitted → `confirmBinding` is a no-op returning `null` (web preview). */
@@ -196,6 +212,13 @@ export interface SignalFinderController {
   find(targetId: SignalTargetId): Promise<void>;
   /** Item 10: one MORE script, reading the next budget slice of what is still unread. No-op when nothing is left. Never rejects. */
   nextRound(): Promise<void>;
+  /**
+   * P4m-FIX1 X9 (Codex P4m-REV1 finding 10): how many DIDs a find for
+   * `targetId` could read AT ALL (hypotheses + this target's ECUs' cached
+   * evidence). `0` means "one script per find" would be zero scripts — the
+   * screen disables Find and says why instead of running an empty round.
+   */
+  eligibleDidCount(targetId: SignalTargetId): Promise<number>;
   /** Ends the run early. Resolves only once the transport is closed and the reservation released. */
   stop(): Promise<void>;
   /** Every sample this session collected, across every round, for the export. */
@@ -204,58 +227,28 @@ export interface SignalFinderController {
   confirmBinding(channel: SignalTargetId, score: SignalCandidateScore): Promise<VehicleProfileBinding | null>;
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
-}
-
 /**
  * Item 10 (binding): "All ECUs are polled in the SAME session (per-entry
  * target address)". `createRawUdsChannel` is single-target by construction
- * (it frames to one ECU and correlates that ECU's replies), so this opens ONE
- * such channel per ECU over the SAME transport — every `onData` subscriber
- * sees every chunk, and each channel keeps only its own ECU's frames — and
- * dispatches by the DID in each request.
+ * (it frames to one ECU and correlates that ECU's replies by the HSFZ address
+ * swap), so a round opens ONE such channel per ECU over the SAME transport:
+ * every `onData` subscriber sees every chunk, and each channel keeps only its
+ * own ECU's frames.
  *
- * The dispatch is unambiguous because `planFinderRun` guarantees each DID
- * number appears at most once per round. `nextResponse` follows the channel
- * the last request went out on: core's `resolveDid` is strictly
- * send-then-correlate, one exchange at a time. Keep-alive goes to EVERY ECU
- * of the round, so a slow ECU's diagnostic session cannot time out while the
- * round is busy elsewhere.
+ * P4m-FIX1 X4 (Codex P4m-REV1 finding 4): build 6 merged those channels into
+ * one DID-keyed façade, which is why the same DID number on two ECUs had to
+ * be split across two human scripts. `runFinderRound` addresses the CHANNEL
+ * per entry instead, so the map below is the whole mechanism — no dispatch
+ * table, no DID-uniqueness requirement.
  */
-export function createMultiEcuUdsChannel(
+export function createEcuChannels(
   transport: ObdTransport,
   testerAddress: number,
-  routes: ReadonlyMap<number, number>,
-): SweepTransport {
+  ecus: Iterable<number>,
+): Map<number, SweepTransport> {
   const channels = new Map<number, SweepTransport>();
-  for (const ecu of new Set(routes.values())) channels.set(ecu, createRawUdsChannel(transport, testerAddress, ecu));
-  const all = [...channels.values()];
-  let last: SweepTransport | null = all[0] ?? null;
-
-  function channelFor(pdu: Uint8Array): SweepTransport | null {
-    if ((pdu[0] ?? 0) !== 0x22) return last;
-    const did = ((pdu[1] ?? 0) << 8) | (pdu[2] ?? 0);
-    const ecu = routes.get(did);
-    if (ecu === undefined) return last;
-    return channels.get(ecu) ?? last;
-  }
-
-  return {
-    async send(pdu: Uint8Array): Promise<void> {
-      const channel = channelFor(pdu);
-      if (channel === null) return;
-      last = channel;
-      await channel.send(pdu);
-    },
-    nextResponse(timeoutMs: number): Promise<Uint8Array | 'timeout'> {
-      if (last === null) return Promise.resolve('timeout');
-      return last.nextResponse(timeoutMs);
-    },
-    async keepAlive(pdu: Uint8Array): Promise<void> {
-      for (const channel of all) await channel.keepAlive(pdu);
-    },
-  };
+  for (const ecu of new Set(ecus)) channels.set(ecu, createRawUdsChannel(transport, testerAddress, ecu));
+  return channels;
 }
 
 /**
@@ -322,16 +315,21 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
   const catalog = deps.catalog ?? resolveSignalTargetCatalog(profileId);
   const haptics = deps.haptics ?? noopSignalFinderHaptics;
   const getLanguage = deps.getLanguage ?? ((): SignalLanguage => 'en');
-  const measuredReqPerSec =
+  /**
+   * P4m-FIX1 X1: the FALLBACK rate only — what a find reports when its own
+   * probe measured nothing. `deps.measuredReqPerSec` is a test seam and the
+   * app's prior estimate, never evidence about THIS adapter right now.
+   */
+  const assumedReqPerSec =
     deps.measuredReqPerSec !== undefined && Number.isFinite(deps.measuredReqPerSec) && deps.measuredReqPerSec > 0
       ? deps.measuredReqPerSec
       : ASSUMED_GUIDED_REQ_PER_SEC;
-  const budget = Math.min(
-    computeFinderDidBudget(measuredReqPerSec),
+  const maxDidsPerRound =
     deps.maxDidsPerRound !== undefined && Number.isFinite(deps.maxDidsPerRound) && deps.maxDidsPerRound > 0
       ? Math.floor(deps.maxDidsPerRound)
-      : FINDER_BUDGET_MAX,
-  );
+      : FINDER_BUDGET_MAX;
+  /** The budget for a rate — recomputed per round from what the probe actually measured. */
+  const budgetFor = (reqPerSec: number): number => Math.min(computeFinderDidBudget(reqPerSec), maxDidsPerRound);
 
   const listeners = new Set<(snapshot: SignalFinderSnapshot) => void>();
   let snapshot: SignalFinderSnapshot = {
@@ -342,10 +340,12 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     engineRequirement: null,
     timeline: null,
     round: 0,
-    budget,
+    budget: budgetFor(assumedReqPerSec),
     readDids: [],
     notReadDids: [],
     notReadCount: 0,
+    silentDids: [],
+    silentEcus: [],
     passes: [],
     ecus: [],
     step: null,
@@ -355,7 +355,8 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     confirmedChannels: [],
     sessionId: null,
     startedAtUtc: null,
-    measuredReqPerSec,
+    measuredReqPerSec: assumedReqPerSec,
+    rateSource: 'assumed',
     error: null,
   };
 
@@ -447,14 +448,29 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         hypotheses.push({ ecu, did: hypothesis.did });
       }
     }
+    /**
+     * P4m-FIX1 X5 (Codex P4m-REV1 finding 5): the cached pools belong to THIS
+     * TARGET's ECUs — the ones it has a hypothesis on, plus the ones its own
+     * discovery ranges name. Build 6 pulled cached responders from every ECU
+     * the sweep store had ever seen, so a bounded 12-DID round could be spent
+     * on an address that has nothing to do with the signal being hunted. A
+     * range with `ecu: null` ("every ECU that answered", the generic catalog)
+     * is the one case where all of them are eligible.
+     */
+    const allowedEcus = new Set<number>(targetHypothesisEcus(target));
+    let allEcusAllowed = false;
+    for (const discoveryRange of target.discoveryRanges) {
+      if (discoveryRange.ecu === null) allEcusAllowed = true;
+      else allowedEcus.add(discoveryRange.ecu);
+    }
     const changed: SignalFinderTargetRef[] = [];
     const cached: SignalFinderTargetRef[] = [];
     const store = deps.sweepStore;
     if (store !== undefined) {
       const runs = await store.listRuns();
-      const ecus = [...new Set(runs.map((run) => run.targetAddress).filter((address): address is number => address !== null))].sort(
-        (a, b) => a - b,
-      );
+      const ecus = [...new Set(runs.map((run) => run.targetAddress).filter((address): address is number => address !== null))]
+        .filter((ecu) => allEcusAllowed || allowedEcus.has(ecu))
+        .sort((a, b) => a - b);
       for (const ecu of ecus) {
         const ecuRuns = runs.filter((run) => run.targetAddress === ecu);
         // (b) prior CHANGE evidence, from the observation summaries of this
@@ -509,57 +525,61 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
       samples,
       timeline,
       shape: target.expectedShape,
+      // P4m-FIX1 X6: the flag exception is DATA — which DIDs this target
+      // declares to be a boolean flag inside a word (DME 0x4007).
+      declaredFlagDids: targetDeclaredFlagDids(target),
       options: { minSamplesPerWindow: MIN_SAMPLES_PER_WINDOW },
     });
   }
 
-  /** Runs ONE metronome against every ECU of `plan` on ONE fresh transport. */
-  async function runRound(myGeneration: number, plan: readonly SignalFinderPlanEntry[], timeline: MetronomeTimeline): Promise<void> {
-    const routes = new Map<number, number>();
-    for (const entry of plan) routes.set(entry.did, entry.ecu);
-    const transport = deps.transportFactory();
-    activeTransport = transport;
-    try {
-      await transport.connect();
-      if (myGeneration !== generation || control.stopped) return;
-      const channel = createMultiEcuUdsChannel(transport, deps.testerAddress, routes);
-      const targetHz = clamp(measuredReqPerSec / Math.max(1, plan.length), MIN_TARGET_HZ, MAX_TARGET_HZ);
-      const result = await runDidObservation({
-        responders: plan.map((entry) => entry.did),
-        transport: channel,
-        clock: deps.clock,
-        durationMs: timeline.pollDurationMs,
-        targetHz,
-        pacing: deps.pacing,
-        control,
-        requestTimeoutMs: deps.requestTimeoutMs,
-        maxResponsePendingExtensions: deps.maxResponsePendingExtensions,
-        onStarted: (startedAtMs) => {
-          if (myGeneration === generation) startTicker(timeline, startedAtMs);
-        },
-      });
-      stopTicker();
-      // `series[].samples[].tMs` is already relative to THIS round's own start
-      // -- the same origin the metronome timeline uses, and the same one every
-      // other round uses, so rounds are directly comparable.
-      for (const series of result.series) {
-        const ecu = routes.get(series.did);
-        if (ecu === undefined) continue;
-        for (const sample of series.samples) {
-          samples.push({ ecu, did: series.did, tMs: sample.tMs, raw: sample.raw });
-        }
-      }
-    } finally {
-      stopTicker();
-      await teardownTransport();
-    }
+  function refOf(entry: SignalFinderTargetRef): SignalFinderTargetRef {
+    return { ecu: entry.ecu, did: entry.did };
   }
 
-  /** One round: plan → reserve → read → score. `roundNumber` is 1 for `find()`, +1 per `nextRound()`. */
+  function keyOf(entry: SignalFinderTargetRef): string {
+    return `${entry.ecu}:${entry.did}`;
+  }
+
+  /** One slice of the eligible pools at `reqPerSec`, minus what earlier rounds read and minus the ECUs the probe found silent. */
+  function planRound(reqPerSec: number, silentEcus: readonly number[]): FinderRunPlan {
+    return planFinderRun(reqPerSec, currentPools.hypotheses, currentPools.changed, currentPools.cached, {
+      budget: budgetFor(reqPerSec),
+      exclude: readEntries,
+      silentEcus,
+    });
+  }
+
+  function emitPlan(plan: FinderRunPlan, unattempted: readonly SignalFinderTargetRef[] = []): void {
+    emit({
+      budget: plan.budget,
+      ecus: [...new Set(plan.dids.map((entry) => entry.ecu))].sort((a, b) => a - b),
+      notReadDids: [...plan.notRead.map(refOf), ...unattempted.map(refOf)],
+      notReadCount: plan.notRead.length + unattempted.length,
+      silentDids: plan.silent.map(refOf),
+      silentEcus: [...new Set(plan.silent.map((entry) => entry.ecu))].sort((a, b) => a - b),
+    });
+  }
+
+  /**
+   * One round: plan → reserve → PROBE → re-plan → ONE script → score.
+   * `roundNumber` is 1 for `find()`, +1 per `nextRound()`.
+   *
+   * P4m-FIX1 X1/X2/X3 (Codex P4m-REV1 findings 1–3, all HIGH) are the three
+   * steps that were missing here:
+   *
+   *  - the ~2 s PROBE reads every planned DID once, which is where the
+   *    MEASURED request rate and the per-ECU liveness come from. The budget is
+   *    then recomputed from that rate, not from an assumption;
+   *  - a silent ECU's DIDs are dropped before the human script starts, and the
+   *    freed budget is refilled from the next pool;
+   *  - what the script ATTEMPTED is what counts as read. Everything else stays
+   *    "not read", whatever ended the round.
+   */
   async function doRound(myGeneration: number, target: SignalTargetDefinition, roundNumber: number): Promise<void> {
     let token: EnetAdapterToken | null = null;
     try {
-      const timeline = buildMetronomeTimeline(target.actionScript, { verbs: resolveSignalActionVerbs(target, getLanguage()) });
+      const language = getLanguage();
+      const timeline = buildMetronomeTimeline(target.actionScript, { verbs: resolveSignalActionVerbs(target, language) });
       emit({
         phase: 'preparing',
         targetId: target.id,
@@ -572,25 +592,20 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         timeline,
       });
 
-      const plan = planFinderRun(measuredReqPerSec, currentPools.hypotheses, currentPools.changed, currentPools.cached, {
-        budget,
-        exclude: readEntries,
-      });
-      emit({
-        ecus: [...new Set(plan.dids.map((entry) => entry.ecu))].sort((a, b) => a - b),
-        notReadDids: plan.notRead.map((entry) => ({ ecu: entry.ecu, did: entry.did })),
-        notReadCount: plan.notRead.length,
-      });
+      // Sized from whatever rate is known so far (the probe's own reading from
+      // the previous round, else the assumed fallback) -- this list is what the
+      // probe then measures against.
+      const provisional = planRound(snapshot.measuredReqPerSec, []);
+      emitPlan(provisional);
 
-      if (plan.dids.length === 0) {
+      if (provisional.dids.length === 0) {
         // Item 4 (binding): never "no brake on this car" -- say what was read
-        // and what the next concrete step is.
+        // and what the next concrete step is. X9: no DIDs means NO script,
+        // and the round counter must not pretend otherwise.
         emit({
           phase: 'result',
-          // No script was performed, so this round does not count as one --
-          // "in R round(s)" must never overstate what the driver did.
           round: Math.max(0, roundNumber - 1),
-          nextStep: nextDiscoveryStep(target, measuredReqPerSec),
+          nextStep: nextDiscoveryStep(target, snapshot.measuredReqPerSec, [], language),
           step: null,
         });
         return;
@@ -610,28 +625,100 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
       }
 
       emit({ phase: 'reading' });
-      await runRound(myGeneration, plan.dids, timeline);
+      const requestTimeoutMs =
+        deps.requestTimeoutMs !== undefined && Number.isFinite(deps.requestTimeoutMs) && deps.requestTimeoutMs > 0
+          ? deps.requestTimeoutMs
+          : FINDER_REQUEST_TIMEOUT_MS;
+
+      let plan = provisional;
+      let attempted: readonly SignalFinderTargetRef[] = [];
+      let scriptStarted = false;
+
+      const transport = deps.transportFactory();
+      activeTransport = transport;
+      try {
+        await transport.connect();
+        if (myGeneration !== generation || control.stopped) return;
+        const channels = createEcuChannels(transport, deps.testerAddress, provisional.dids.map((entry) => entry.ecu));
+
+        // X1: MEASURE. One pass over the planned DIDs, capped at ~2 s.
+        const probe = await runFinderRound({
+          entries: provisional.dids,
+          channels,
+          clock: deps.clock,
+          control,
+          durationMs: FINDER_PROBE_DURATION_MS,
+          requestTimeoutMs,
+          maxPasses: 1,
+        });
+        const summary = summarizeFinderProbe(
+          probe,
+          provisional.dids.map((entry) => entry.ecu),
+          assumedReqPerSec,
+        );
+        emit({ measuredReqPerSec: summary.reqPerSec, rateSource: summary.rateSource });
+        if (myGeneration !== generation || control.stopped) return;
+
+        // X2: re-plan at the measured rate, without the silent ECUs -- the
+        // budget they were consuming is refilled from the next pool.
+        plan = planRound(summary.reqPerSec, summary.silentEcus);
+        emitPlan(plan);
+        if (plan.dids.length > 0) {
+          for (const ecu of new Set(plan.dids.map((entry) => entry.ecu))) {
+            if (!channels.has(ecu)) channels.set(ecu, createRawUdsChannel(transport, deps.testerAddress, ecu));
+          }
+          const result = await runFinderRound({
+            entries: plan.dids,
+            channels,
+            clock: deps.clock,
+            control,
+            durationMs: timeline.pollDurationMs,
+            requestTimeoutMs,
+            onStarted: (startedAtMs) => {
+              if (myGeneration !== generation) return;
+              scriptStarted = true;
+              startTicker(timeline, startedAtMs);
+            },
+          });
+          stopTicker();
+          // `samples[].tMs` is relative to THIS script's own start -- the same
+          // origin the metronome timeline uses, and the same one every other
+          // round uses, so rounds are directly comparable.
+          samples.push(...result.samples);
+          attempted = result.attempted;
+        }
+      } finally {
+        stopTicker();
+        await teardownTransport();
+      }
       if (myGeneration !== generation) return;
 
       emit({ phase: 'scoring', step: null });
-      readEntries = [...readEntries, ...plan.dids];
+      // X3 (binding): ONLY what a request actually went out for is "read".
+      const attemptedKeys = new Set(attempted.map(keyOf));
+      const attemptedEntries = plan.dids.filter((entry) => attemptedKeys.has(keyOf(entry)));
+      const unattempted = plan.dids.filter((entry) => !attemptedKeys.has(keyOf(entry)));
+      readEntries = [...readEntries, ...attemptedEntries];
+      emitPlan(plan, unattempted);
+
       const answered = new Set(samples.map((sample) => `${sample.ecu}:${sample.did}`));
-      noResponse = readEntries
-        .filter((entry) => !answered.has(`${entry.ecu}:${entry.did}`))
-        .map((entry) => ({ ecu: entry.ecu, did: entry.did }));
+      noResponse = readEntries.filter((entry) => !answered.has(keyOf(entry))).map(refOf);
       const scores = rescore(target, timeline);
       const found = scores.some((score) => score.verdict === 'found');
       emit({
         phase: 'result',
         scores,
-        readDids: readEntries.map((entry) => ({ ecu: entry.ecu, did: entry.did })),
+        // A script the driver never performed (stopped during the probe) does
+        // not count as a round -- "in R round(s)" must never overstate it.
+        round: scriptStarted ? roundNumber : Math.max(0, roundNumber - 1),
+        readDids: readEntries.map(refOf),
         passes: passesFromReadEntries(readEntries),
         noResponseDids: noResponse,
         // Item 4 (binding). NOT excluding the ECUs this session read: reading
         // a handful of hypothesis/cached DIDs on an ECU is not the same as
         // SWEEPING its remaining range, and the unswept remainder is exactly
         // the step the user needs told about next.
-        nextStep: found ? null : nextDiscoveryStep(target, measuredReqPerSec),
+        nextStep: found ? null : nextDiscoveryStep(target, snapshot.measuredReqPerSec, [], language),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -681,6 +768,8 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         readDids: [],
         notReadDids: [],
         notReadCount: 0,
+        silentDids: [],
+        silentEcus: [],
         passes: [],
         ecus: [],
         step: null,
@@ -688,6 +777,11 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         noResponseDids: [],
         nextStep: null,
         error: null,
+        // X1: a fresh find has measured NOTHING yet -- it says so until its
+        // own probe reports, and never inherits the last find's reading.
+        measuredReqPerSec: assumedReqPerSec,
+        rateSource: 'assumed',
+        budget: budgetFor(assumedReqPerSec),
         sessionId: `signal-finder-${deps.clock.now()}-${Math.random().toString(36).slice(2, 8)}`,
         startedAtUtc: nowUtc(),
         timeline: null,
@@ -698,6 +792,20 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
       activeRun = run;
       await run;
       if (activeRun === run) activeRun = null;
+    },
+
+    async eligibleDidCount(targetId): Promise<number> {
+      // X9 (binding): "Find is disabled (with reason) when the plan has zero
+      // DIDs" -- so the screen must be able to ASK, before the driver taps
+      // anything, whether one script would read anything at all.
+      const target = findSignalTarget(catalog, targetId);
+      if (target === null) return 0;
+      const pools = await collectPools(target);
+      const keys = new Set<string>();
+      for (const pool of [pools.hypotheses, pools.changed, pools.cached]) {
+        for (const entry of pool) keys.add(`${entry.ecu}:${entry.did}`);
+      }
+      return keys.size;
     },
 
     async nextRound(): Promise<void> {

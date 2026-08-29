@@ -109,6 +109,7 @@ function input(overrides: Partial<SignalFinderExportInput> = {}): SignalFinderEx
     engineRequirement: 'off-ok',
     startedAtUtc: '2026-08-29T18:10:00.000Z',
     measuredReqPerSec: 15.8,
+    rateSource: 'measured',
     timeline: TIMELINE,
     passes: [
       { ecu: 0x12, dids: [0x58b7], hypothesisDids: [0x58b7], changedDids: [], cachedDids: [] },
@@ -117,6 +118,8 @@ function input(overrides: Partial<SignalFinderExportInput> = {}): SignalFinderEx
     rounds: 1,
     budget: 12,
     notReadDids: [],
+    silentDids: [],
+    silentEcus: [],
     scores: [score(), score({ did: 0x500b, length: 2, verdict: 'unrelated', matchedEdges: 2, min: 2, max: 6, restValueHex: '0002', lastRawHex: '0002' })],
     noResponseDids: [{ ecu: 0x12, did: 0x58b7 }],
     samples: [{ ecu: 0x29, did: 0x500c, tMs: 1_250, raw: Uint8Array.from([0x04]) }],
@@ -140,6 +143,8 @@ function snapshot(overrides: Partial<SignalFinderSnapshot> = {}): SignalFinderSn
     readDids: [{ ecu: 0x29, did: 0x500c }],
     notReadDids: [],
     notReadCount: 0,
+    silentDids: [],
+    silentEcus: [],
     ecus: [0x29],
     step: null,
     scores: [score()],
@@ -149,6 +154,7 @@ function snapshot(overrides: Partial<SignalFinderSnapshot> = {}): SignalFinderSn
     sessionId: 'signal-finder-1788-abc',
     startedAtUtc: '2026-08-29T18:10:00.000Z',
     measuredReqPerSec: 15.8,
+    rateSource: 'measured',
     error: null,
     ...overrides,
   };
@@ -163,10 +169,10 @@ beforeEach(() => {
 });
 
 describe('buildSignalFinderExportDocument', () => {
-  it('is schemaVersion 2 of trace-signal-finder and carries the whole session, rounds included (P4m M3)', () => {
+  it('is schemaVersion 3 of trace-signal-finder and carries the whole session, rounds included (P4m M3, P4m-FIX1 X1/X2)', () => {
     const doc = buildSignalFinderExportDocument(input());
     expect(doc.schemaVersion).toBe(SIGNAL_FINDER_EXPORT_SCHEMA_VERSION);
-    expect(doc.schemaVersion).toBe(2);
+    expect(doc.schemaVersion).toBe(3);
     expect(doc.kind).toBe(SIGNAL_FINDER_EXPORT_KIND);
     expect(doc.kind).toBe('trace-signal-finder');
     expect(doc.session).toMatchObject({

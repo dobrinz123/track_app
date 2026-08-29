@@ -174,6 +174,15 @@ export interface ScoreSignalCandidatesInput {
   samples: readonly SignalFinderSample[];
   timeline: MetronomeTimeline;
   shape: SignalExpectedShape;
+  /**
+   * P4m-FIX1 X6 (Codex P4m-REV1 finding 7): `(ecu, did)` pairs the TARGET
+   * CATALOG declares to be a boolean flag inside a word — `targets.ts`'s
+   * `SignalTargetHypothesis.expectedShape: 'boolean-edge'` (DME 0x4007 is the
+   * field's own case). Reason (a) of the flag exception below; everything
+   * else must earn it from the evidence, reason (b). Data, never a constant
+   * in this module.
+   */
+  declaredFlagDids?: readonly { ecu: number; did: number }[];
   options?: SignalScoringOptions;
 }
 
@@ -303,6 +312,12 @@ function scoreSeries(
   expectedEdges: number,
   byteOffset: number | null,
   options: ScoringThresholds,
+  /**
+   * P4m-FIX1 X6: may this series' two levels be read as a FLAG (and so escape
+   * the analog direction rule)? Decided per DID by the caller — the catalog
+   * declared it, or every action window held >= 2 AGREEING samples.
+   */
+  flagExceptionAllowed: boolean,
 ): SeriesScore {
   const baselineValues = points.filter((p) => p.step?.kind === 'baseline').map((p) => p.value);
   // P4m (item 11, field test 5): a series that only ever takes TWO values
@@ -313,7 +328,13 @@ function scoreSeries(
   // not apply to it (a flag that CLEARS when actuated is just as much an
   // answer as one that sets). Anything that moves by more than one bit
   // (e.g. 0x0150 -> 0x0000) keeps the analog rules in full.
-  const flagBit = singleBitFlag(points.map((p) => p.value));
+  //
+  // P4m-FIX1 X6 (Codex P4m-REV1 finding 7): the XOR SHAPE ALONE is not enough
+  // to earn that waiver -- an LSB counter or a jittering bit, caught once per
+  // window, has exactly the same shape. The exception now needs an
+  // independent reason (catalog declaration, or >= 2 agreeing samples in
+  // every action window), which the caller passes in.
+  const flagBit = flagExceptionAllowed ? singleBitFlag(points.map((p) => p.value)) : null;
   const boolean = shape === 'boolean-edge' || flagBit !== null;
   const restValue = boolean ? modeOf(baselineValues) : meanOf(baselineValues);
   const noiseFloor = boolean
@@ -568,11 +589,25 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
     }
     const averagePerWindow = windowCount > 0 ? inWindowSamples / windowCount : 0;
     const undersampled = emptyWindows > 0 || averagePerWindow < minSamplesPerWindow;
-    // A DID that answered the WHOLE script with one identical response did
-    // not answer the driver -- that is knowledge, not a sampling failure
-    // (field: 0x12 0x4659 = 0x27FF in all 17 reads of the accelerator run).
+    /**
+     * A DID that answered the WHOLE script with one identical response did
+     * not answer the driver -- that is knowledge, not a sampling failure.
+     *
+     * P4m-FIX1 X7 (Codex P4m-REV1 finding 8): "whole script" is now taken
+     * literally. The old rule accepted the baseline plus ONE press window, so
+     * a DID whose later presses were never sampled at all was reported as
+     * `unrelated` -- a claim about the driver's action that the data did not
+     * support. `never-moved` now needs exactly the coverage the sparse
+     * `found` rule needs (item 11): the baseline sampled, and EVERY press and
+     * release window sampled at least once. Anything thinner is
+     * `insufficient`.
+     */
     const neverMoved =
-      raws.length >= 2 && baselineCovered && pressCovered && raws.every((raw) => bytesToHex(raw) === bytesToHex(raws[0] as Uint8Array));
+      raws.length >= 2 &&
+      baselineCovered &&
+      pressCovered &&
+      everyActionWindowCovered &&
+      raws.every((raw) => bytesToHex(raw) === bytesToHex(raws[0] as Uint8Array));
 
     /**
      * P4m (item 11, binding): "A DID whose every press window and every
@@ -651,6 +686,40 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
     const seriesOffsets: (number | null)[] = length >= 1 && length <= 4 ? [null] : [];
     if (seriesOffsets.length === 0) for (let offset = 0; offset < length; offset += 1) seriesOffsets.push(offset);
 
+    /**
+     * P4m-FIX1 X6 (binding): the two independent reasons a two-level series
+     * may be read as a FLAG rather than as an analog reading.
+     *
+     *  (a) the catalog DECLARED this (ecu, did) a boolean flag inside a word
+     *      (`declaredFlagDids`, from the target's own hypothesis data), or
+     *  (b) the evidence is dense AND self-consistent: every press/hold and
+     *      release window held at least `minSamplesPerWindow` samples that
+     *      AGREE with each other. That is precisely what an LSB counter or a
+     *      jittering bit cannot do -- and it is why "sparse + flag" is no
+     *      longer a combination that can reach `found`.
+     *
+     * A `boolean-edge` TARGET waives nothing (the series is already read as a
+     * switch), so it keeps reporting its flag bit.
+     */
+    const declaredFlag = (input.declaredFlagDids ?? []).some(
+      (ref) => ref.ecu === group.ecu && ref.did === group.did,
+    );
+    let denseAgreement = true;
+    for (const step of timeline.steps) {
+      if (step.durationMs <= 0 || step.kind === 'baseline') continue;
+      const inStep = group.entries.filter((entry) => entry.step?.index === step.index);
+      if (inStep.length < minSamplesPerWindow) {
+        denseAgreement = false;
+        break;
+      }
+      const first = bytesToHex(inStep[0]!.raw);
+      if (inStep.some((entry) => bytesToHex(entry.raw) !== first)) {
+        denseAgreement = false;
+        break;
+      }
+    }
+    const flagExceptionAllowed = input.shape === 'boolean-edge' || declaredFlag || denseAgreement;
+
     const seriesScores: SeriesScore[] = [];
     for (const offset of seriesOffsets) {
       const points: SeriesPoint[] = group.entries.map((entry) => ({
@@ -658,7 +727,7 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
         step: entry.step,
       }));
       seriesScores.push(
-        scoreSeries(points, input.shape, repetitions, timeline.expectedEdges, offset, thresholds),
+        scoreSeries(points, input.shape, repetitions, timeline.expectedEdges, offset, thresholds, flagExceptionAllowed),
       );
     }
 

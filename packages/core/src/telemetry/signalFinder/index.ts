@@ -6,9 +6,11 @@
  *
  * No I/O, no clock, no transport: the mobile controller
  * (`apps/mobile/src/session/signalFinderController.ts`) owns every wire-level
- * concern and reuses `runDidObservation` for the polling itself.
+ * concern; the polling itself is `runner.ts`'s composite `(ecu, did)` round
+ * (P4m-FIX1 X1–X4), which the controller drives over one channel per ECU.
  */
 export * from './targets';
 export * from './metronome';
 export * from './scoring';
 export * from './plan';
+export * from './runner';

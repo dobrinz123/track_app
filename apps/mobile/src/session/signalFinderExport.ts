@@ -2,6 +2,7 @@ import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import {
   resolveSignalTargetCatalog,
+  type FinderRateSource,
   type MetronomeTimeline,
   type NextDiscoveryStep,
   type SignalBipolarSides,
@@ -36,8 +37,17 @@ import type { SignalFinderEcuPass, SignalFinderSnapshot } from './signalFinderCo
  * so the screen can offer {@link shareSignalFinderJson} as a second button.
  */
 
-/** P4m M3 (binding): schema 2 adds `session.rounds` and the top-level `notRead` list (items 10 and 12). */
-export const SIGNAL_FINDER_EXPORT_SCHEMA_VERSION = 2;
+/**
+ * P4m M3 (binding): schema 2 added `session.rounds` and the top-level
+ * `notRead` list (items 10 and 12).
+ *
+ * P4m-FIX1 (X1/X2): schema 3 adds `session.rateSource` — whether
+ * `measuredReqPerSec` was MEASURED by this find's own probe or assumed — and
+ * the top-level `silent` list (DIDs skipped because their ECU answered
+ * nothing). Both are honesty fields: a reader of an old export cannot tell an
+ * assumed rate from a measured one, which is the defect they close.
+ */
+export const SIGNAL_FINDER_EXPORT_SCHEMA_VERSION = 3;
 export const SIGNAL_FINDER_EXPORT_KIND = 'trace-signal-finder';
 
 /** RO/EN, per contracts.md item 8. Ticket P4l-FIX1 F2 (binding): the screen now passes the app's `language` setting (`settingsStore.ts`'s `AppLanguage`, the same two values), defaulted from the device locale -- it no longer hard-codes `'en'`. */
@@ -52,6 +62,8 @@ export interface SignalFinderExportInput {
   engineRequirement: SignalEngineRequirement;
   startedAtUtc: string | null;
   measuredReqPerSec: number;
+  /** P4m-FIX1 X1: was that rate measured by the probe, or assumed? */
+  rateSource: FinderRateSource;
   timeline: MetronomeTimeline | null;
   passes: readonly SignalFinderEcuPass[];
   /** P4m (item 9/10): how many metronome scripts the driver actually performed for this target. */
@@ -62,6 +74,10 @@ export interface SignalFinderExportInput {
   noResponseDids: readonly { ecu: number; did: number }[];
   /** P4m (item 12): eligible DIDs no round reached — reported as "not read", NEVER as "no response". */
   notReadDids: readonly { ecu: number; did: number }[];
+  /** P4m-FIX1 X2: eligible DIDs skipped because their ECU answered nothing in the probe. */
+  silentDids: readonly { ecu: number; did: number }[];
+  /** P4m-FIX1 X2: the ECUs those DIDs sit on. */
+  silentEcus: readonly number[];
   samples: readonly SignalFinderSample[];
   confirmedBindings: readonly VehicleProfileBinding[];
   nextStep: NextDiscoveryStep | null;
@@ -129,6 +145,8 @@ export interface SignalFinderExportDocument {
     engineRequirement: SignalEngineRequirement;
     startedAtUtc: string | null;
     measuredReqPerSec: number;
+    /** P4m-FIX1 X1 (schema 3): `'measured'` only when this find's own probe measured it. */
+    rateSource: FinderRateSource;
     /** P4m (schema 2): metronome scripts actually performed, and the per-round DID budget. */
     rounds: number;
     budget: number;
@@ -147,6 +165,8 @@ export interface SignalFinderExportDocument {
   noResponse: Array<{ ecuHex: string; didHex: string }>;
   /** P4m (item 12, schema 2): eligible DIDs no round reached. Build 5 reported these 1372 DIDs as "No response" — an honesty bug. */
   notRead: Array<{ ecuHex: string; didHex: string }>;
+  /** P4m-FIX1 X2 (schema 3): DIDs skipped because their ECU answered nothing in the probe, with those ECUs named. */
+  silent: { ecus: string[]; dids: Array<{ ecuHex: string; didHex: string }> };
   samples: Array<{ ecuHex: string; didHex: string; tMs: number; rawHex: string }>;
   confirmedBindings: Array<{
     channel: string;
@@ -200,6 +220,7 @@ export function signalFinderExportInputFromSnapshot(
     engineRequirement: snap.engineRequirement ?? 'off-ok',
     startedAtUtc: snap.startedAtUtc,
     measuredReqPerSec: snap.measuredReqPerSec,
+    rateSource: snap.rateSource,
     timeline: snap.timeline,
     passes: snap.passes,
     rounds: snap.round,
@@ -207,6 +228,8 @@ export function signalFinderExportInputFromSnapshot(
     scores: snap.scores,
     noResponseDids: snap.noResponseDids,
     notReadDids: snap.notReadDids,
+    silentDids: snap.silentDids,
+    silentEcus: snap.silentEcus,
     samples,
     confirmedBindings,
     nextStep: snap.nextStep,
@@ -228,6 +251,7 @@ export function buildSignalFinderExportDocument(input: SignalFinderExportInput):
       engineRequirement: input.engineRequirement,
       startedAtUtc: input.startedAtUtc,
       measuredReqPerSec: input.measuredReqPerSec,
+      rateSource: input.rateSource,
       rounds: input.rounds,
       budget: input.budget,
     },
@@ -287,6 +311,10 @@ export function buildSignalFinderExportDocument(input: SignalFinderExportInput):
     })),
     noResponse: input.noResponseDids.map((entry) => ({ ecuHex: ecuHex(entry.ecu), didHex: didHex(entry.did) })),
     notRead: input.notReadDids.map((entry) => ({ ecuHex: ecuHex(entry.ecu), didHex: didHex(entry.did) })),
+    silent: {
+      ecus: input.silentEcus.map(ecuHex),
+      dids: input.silentDids.map((entry) => ({ ecuHex: ecuHex(entry.ecu), didHex: didHex(entry.did) })),
+    },
     samples: input.samples.map((sample) => ({
       ecuHex: ecuHex(sample.ecu),
       didHex: didHex(sample.did),
@@ -357,6 +385,17 @@ interface SummaryStrings {
   /** P4l-FIX3 J6: `"capped: one-sided"`. */
   cappedLabel: (reason: string) => string;
   capReasons: Record<SignalVerdictCapReason, string>;
+  /** P4m-FIX1 X1: the header states whether the rate was MEASURED by the find's own probe or assumed. */
+  rateMeasured: (reqPerSec: number) => string;
+  rateAssumed: (reqPerSec: number) => string;
+  /** P4m-FIX1 X2: "Not read: 4 — ECU 0x29 silent". */
+  silent: (count: number, ecus: string) => string;
+  /** P4m-FIX1 X8: the list-truncation marker — an RO summary used to end its lists in English. */
+  moreItems: (count: number) => string;
+  /** P4m-FIX1 X8: the free-text truncation marker. */
+  moreChars: (count: number) => string;
+  /** P4m-FIX1 X8: the whole-summary budget marker. */
+  truncated: string;
 }
 
 const EN: SummaryStrings = {
@@ -384,6 +423,12 @@ const EN: SummaryStrings = {
   extraSuffix: (n) => `${n} extra`,
   baselineMoved: (n) => `baseline moved ${n}x`,
   cappedLabel: (reason) => `capped: ${reason}`,
+  rateMeasured: (reqPerSec) => `${reqPerSec.toFixed(1)} req/s measured`,
+  rateAssumed: (reqPerSec) => `rate assumed ${reqPerSec.toFixed(1)} req/s — probe failed`,
+  silent: (count, ecus) => `Not read: ${count} — ECU ${ecus} silent`,
+  moreItems: (count) => `(+${count} more)`,
+  moreChars: (count) => `(+${count} more chars)`,
+  truncated: '_(+ more, truncated to stay within the summary budget)_',
   capReasons: {
     'response-baseline-changes': 'restless baseline',
     'one-sided-bipolar': 'one-sided',
@@ -417,6 +462,12 @@ const RO: SummaryStrings = {
   extraSuffix: (n) => `${n} în plus`,
   baselineMoved: (n) => `repaus schimbat de ${n} ori`,
   cappedLabel: (reason) => `plafonat: ${reason}`,
+  rateMeasured: (reqPerSec) => `${reqPerSec.toFixed(1)} cereri/s măsurate`,
+  rateAssumed: (reqPerSec) => `rată presupusă ${reqPerSec.toFixed(1)} cereri/s — sondarea nu a răspuns`,
+  silent: (count, ecus) => `Necitite: ${count} — ECU ${ecus} nu răspunde`,
+  moreItems: (count) => `(+încă ${count})`,
+  moreChars: (count) => `(+încă ${count} caractere)`,
+  truncated: '_(+ restul, tăiat ca rezumatul să rămână de o pagină)_',
   capReasons: {
     'response-baseline-changes': 'repaus neliniștit',
     'one-sided-bipolar': 'unilateral',
@@ -424,6 +475,9 @@ const RO: SummaryStrings = {
     'never-moved': 'nu s-a schimbat deloc',
   },
 };
+
+/** P4m-FIX1 X8: both tables, exported so a test can pin that RO carries every key EN does — nothing a driver reads may be English-only. */
+export const SIGNAL_FINDER_SUMMARY_STRINGS: Readonly<Record<SignalFinderLanguage, SummaryStrings>> = { en: EN, ro: RO };
 
 /**
  * P4l-FIX3 J3 (binding, after Codex P4l-REV1 M8/MEDIUM: "the Markdown
@@ -442,16 +496,16 @@ const SUMMARY_MAX_CONFIRMED_LISTED = 10;
 const SUMMARY_MAX_DECODE_CHARS = 80;
 
 /** `item, item, item (+N more)` — every variable-length list section renders through this ONE helper, so the marker text/format never drifts between sections. */
-function joinWithMoreMarker<T>(items: readonly T[], max: number, render: (item: T) => string): string {
+function joinWithMoreMarker<T>(items: readonly T[], max: number, render: (item: T) => string, s: SummaryStrings): string {
   const shown = items.slice(0, max).map(render).join(', ');
   const omitted = items.length - max;
-  return omitted > 0 ? `${shown} (+${omitted} more)` : shown;
+  return omitted > 0 ? `${shown} ${s.moreItems(omitted)}` : shown;
 }
 
 /** Truncates free-text (a binding's decode guess) to `maxChars`, marking how much was cut. Never splits a section's OWN "(+N more)" convention — this is chars, not items, so the wording says so. */
-function truncateText(text: string, maxChars: number): string {
+function truncateText(text: string, maxChars: number, s: SummaryStrings): string {
   if (text.length <= maxChars) return text;
-  return `${text.slice(0, maxChars)}… (+${text.length - maxChars} more chars)`;
+  return `${text.slice(0, maxChars)}… ${s.moreChars(text.length - maxChars)}`;
 }
 
 /**
@@ -462,7 +516,7 @@ function truncateText(text: string, maxChars: number): string {
  * final marker line — the one place a truncation can still occur without a
  * dedicated "(+N more)" of its own, so it gets one here.
  */
-function enforceTotalBudget(lines: readonly string[]): string {
+function enforceTotalBudget(lines: readonly string[], s: SummaryStrings): string {
   let text = lines.join('\n');
   if (text.length <= SUMMARY_MAX_CHARS && lines.length <= SUMMARY_MAX_LINES) return text;
   let kept = lines;
@@ -472,7 +526,7 @@ function enforceTotalBudget(lines: readonly string[]): string {
     kept = kept.slice(0, kept.length - 1);
     text = kept.join('\n');
   }
-  return `${text}\n_(+ more, truncated to stay within the summary budget)_`;
+  return `${text}\n${s.truncated}`;
 }
 
 /**
@@ -520,6 +574,18 @@ export function buildSignalFinderSummaryMarkdown(
     }`,
   );
   if (doc.notRead.length > 0) lines.push(`- ${s.notRead(doc.notRead.length)}`);
+  // P4m-FIX1 X2: a silent ECU gets its own line WITH the reason -- never mixed
+  // into "not read (tap Next round)" (no round can fix a silent ECU), never
+  // into "no response" (those DIDs were actually asked).
+  if (doc.silent.dids.length > 0) lines.push(`- ${s.silent(doc.silent.dids.length, doc.silent.ecus.join(', '))}`);
+  // P4m-FIX1 X1: the rate the budget rested on, and whether it was measured.
+  lines.push(
+    `- ${
+      doc.session.rateSource === 'measured'
+        ? s.rateMeasured(doc.session.measuredReqPerSec)
+        : s.rateAssumed(doc.session.measuredReqPerSec)
+    }`,
+  );
   lines.push('');
   lines.push(s.tableHeader);
   lines.push('| --- | --- | --- | --- | --- | --- |');
@@ -542,7 +608,7 @@ export function buildSignalFinderSummaryMarkdown(
   }
   if (doc.noResponse.length > 0) {
     lines.push(
-      `**${s.noResponse}:** ${joinWithMoreMarker(doc.noResponse, SUMMARY_MAX_NO_RESPONSE_LISTED, (entry) => `${entry.didHex} (${entry.ecuHex})`)}`,
+      `**${s.noResponse}:** ${joinWithMoreMarker(doc.noResponse, SUMMARY_MAX_NO_RESPONSE_LISTED, (entry) => `${entry.didHex} (${entry.ecuHex})`, s)}`,
     );
     lines.push('');
   }
@@ -553,7 +619,8 @@ export function buildSignalFinderSummaryMarkdown(
         : joinWithMoreMarker(
             doc.confirmedBindings,
             SUMMARY_MAX_CONFIRMED_LISTED,
-            (b) => `${b.channel} = ${b.ecuHex} ${b.didHex} — ${truncateText(b.decode, SUMMARY_MAX_DECODE_CHARS)}`,
+            (b) => `${b.channel} = ${b.ecuHex} ${b.didHex} — ${truncateText(b.decode, SUMMARY_MAX_DECODE_CHARS, s)}`,
+            s,
           )
     }`,
   );
@@ -567,7 +634,7 @@ export function buildSignalFinderSummaryMarkdown(
   }
   lines.push('');
   lines.push(`_${s.generated}: ${doc.generatedAtUtc} · ${doc.kind} v${doc.schemaVersion}_`);
-  return enforceTotalBudget(lines);
+  return enforceTotalBudget(lines, s);
 }
 
 // ---------------------------------------------------------------------------

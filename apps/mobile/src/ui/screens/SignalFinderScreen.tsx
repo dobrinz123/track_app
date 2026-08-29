@@ -6,9 +6,11 @@ import {
   DEFAULT_ENET_DID_SCENARIO,
   SIGNAL_TARGET_CATALOGS,
   resolveSignalTargetCatalog,
+  resolveSignalTargetLabel,
   type ObdTransport,
   type SignalCandidateScore,
   type SignalTargetDefinition,
+  type SignalTargetId,
 } from '@circuit/core';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
@@ -18,6 +20,7 @@ import { useSettings } from '../hooks/useSettings';
 import { EnetTcpTransport } from '../../session/enetTcpTransport';
 import { createDidSweepStore, createVehicleProfileBindingStore, type VehicleProfileBinding } from '../../persistence/didSweepStore';
 import { createSignalFinderController, type SignalFinderSnapshot } from '../../session/signalFinderController';
+import { resolveSignalFinderScreenStrings, type SignalFinderScreenStrings } from './signalFinderStrings';
 import {
   buildSignalFinderExportDocument,
   buildSignalFinderSummaryMarkdown,
@@ -56,58 +59,13 @@ const VERDICT_COLOR: Readonly<Record<SignalCandidateScore['verdict'], string>> =
 };
 
 /**
- * P4m M4 (binding): the RESULT strings the driver reads, in the app's own
- * language. The metronome's own prompts are NOT here — those are target data
- * (`@circuit/core`'s `resolveSignalActionVerbs`), resolved by the controller,
- * so nothing about a pedal is ever written into this screen.
+ * P4m-FIX1 X8 (Codex P4m-REV1 finding 9): every visible string of this screen
+ * — evidence, verdicts, statuses, engine text, banners, the next step, the
+ * share controls and every accessibility label — comes from
+ * `signalFinderStrings.ts`'s RO/EN table, and every NAME (targets, discovery
+ * notes, metronome prompts) from the target catalog's own per-language data.
+ * Nothing below writes prose of its own, in either language.
  */
-interface ScreenStrings {
-  readSummary: (dids: number, ecus: number, rounds: number) => string;
-  engineOff: string;
-  engineRunning: string;
-  notRead: (count: number) => string;
-  nextRound: (dids: number, seconds: number) => string;
-  nothingAnswered: string;
-  noResponse: string;
-  sparseSuffix: string;
-  stop: string;
-  result: string;
-  find: string;
-  confirmAs: (target: string) => string;
-}
-
-const SCREEN_STRINGS: Readonly<Record<'en' | 'ro', ScreenStrings>> = {
-  en: {
-    readSummary: (dids, ecus, rounds) =>
-      `Read ${dids} DID${dids === 1 ? '' : 's'} across ${ecus} ECU${ecus === 1 ? '' : 's'} in ${rounds} round${rounds === 1 ? '' : 's'}`,
-    engineOff: 'engine off',
-    engineRunning: 'engine running',
-    notRead: (count) => `Not read: ${count}`,
-    nextRound: (dids, seconds) => `Next round (${dids} DIDs, ≈ ${seconds} s)`,
-    nothingAnswered: 'Nothing answered.',
-    noResponse: 'No response',
-    sparseSuffix: ' (sparse)',
-    stop: 'Stop',
-    result: 'Result',
-    find: 'Find',
-    confirmAs: (target) => `Confirm as ${target}`,
-  },
-  ro: {
-    readSummary: (dids, ecus, rounds) =>
-      `Citite ${dids} DID-uri pe ${ecus} ECU în ${rounds} rund${rounds === 1 ? 'ă' : 'e'}`,
-    engineOff: 'motor oprit',
-    engineRunning: 'motor pornit',
-    notRead: (count) => `Necitite: ${count}`,
-    nextRound: (dids, seconds) => `Runda următoare (${dids} DID-uri, ≈ ${seconds} s)`,
-    nothingAnswered: 'Nimic nu a răspuns.',
-    noResponse: 'Fără răspuns',
-    sparseSuffix: ' (rar)',
-    stop: 'Oprește',
-    result: 'Rezultat',
-    find: 'Caută',
-    confirmAs: (target) => `Confirmă ca ${target}`,
-  },
-};
 
 function didHex(did: number): string {
   return `0x${did.toString(16).toUpperCase().padStart(4, '0')}`;
@@ -118,26 +76,16 @@ function ecuHex(ecu: number): string {
 }
 
 /** P4l-FIX3 J6 (binding, Codex re-review finding L12): the SAME `netEdges`-first evidence line as the `.md`/JSON export (`signalFinderExport.ts`'s `evidenceCell`) — what the verdict was ACTUALLY computed from, plus the P4l-FIX2 extras/cap reason when present. */
-const CAP_REASON_LABEL: Readonly<Record<string, string>> = {
-  'response-baseline-changes': 'restless baseline',
-  'one-sided-bipolar': 'one-sided',
-  'extra-transitions': 'extra transitions',
-  'never-moved': 'never moved',
-};
-
-function evidenceLine(score: SignalCandidateScore): string {
+function evidenceLine(score: SignalCandidateScore, strings: SignalFinderScreenStrings): string {
   const extraTransitions = score.extraTransitions ?? 0;
   const didBaselineChanges = score.didBaselineChanges ?? 0;
   const netEdges = Math.max(0, score.matchedEdges - extraTransitions);
   // P4m item 11: a sparse verdict rests on window AGREEMENT, so that is the
   // count shown for it (the transition count understates thin evidence).
-  let line =
-    score.sparse === true
-      ? `${score.windowMatchedEdges ?? netEdges}/${score.expectedEdges} edges`
-      : `${netEdges}/${score.expectedEdges} edges`;
-  if (extraTransitions > 0) line += ` (${extraTransitions} extra)`;
-  if (didBaselineChanges > 0) line += `, baseline moved ${didBaselineChanges}x`;
-  if (score.verdictCapReason != null) line += `, capped: ${CAP_REASON_LABEL[score.verdictCapReason] ?? score.verdictCapReason}`;
+  let line = strings.edges(score.sparse === true ? score.windowMatchedEdges ?? netEdges : netEdges, score.expectedEdges);
+  if (extraTransitions > 0) line += ` ${strings.extra(extraTransitions)}`;
+  if (didBaselineChanges > 0) line += `, ${strings.baselineMoved(didBaselineChanges)}`;
+  if (score.verdictCapReason != null) line += `, ${strings.capped(strings.capReasons[score.verdictCapReason])}`;
   return line;
 }
 
@@ -210,6 +158,7 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
     setSummary(null);
     ensureController();
     void bindingStoreRef.current.listBindings(profileId).then(setBindings);
+    void refreshEligibility();
     // (No `react-hooks/exhaustive-deps` suppression here: this project's flat
     // eslint config does not wire `eslint-plugin-react-hooks`, and referencing
     // an unknown rule is itself a lint ERROR -- the F8 fix `DidSweepScreen.tsx`
@@ -228,7 +177,33 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
   );
 
   const busy = snapshot !== null && (snapshot.phase === 'preparing' || snapshot.phase === 'reading' || snapshot.phase === 'scoring');
-  const strings = SCREEN_STRINGS[settings.language === 'ro' ? 'ro' : 'en'];
+  const strings = resolveSignalFinderScreenStrings(settings.language);
+  /**
+   * X9 (binding, Codex P4m-REV1 finding 10): how many DIDs a find for each
+   * target could read at all. A target with 0 has its Find button DISABLED
+   * with the reason on the row — "one script per find" is a promise about
+   * what a tap does, and a tap that performs no script at all breaks it.
+   * Refreshed whenever the profile changes or a round finishes (a sweep run
+   * or a confirmed binding can make a target eligible).
+   */
+  const [eligible, setEligible] = React.useState<Partial<Record<SignalTargetId, number>>>({});
+  const refreshEligibility = React.useCallback(async (): Promise<void> => {
+    const controller = controllerRef.current;
+    if (controller === null) return;
+    const counts: Partial<Record<SignalTargetId, number>> = {};
+    for (const target of catalog.targets) counts[target.id] = await controller.eligibleDidCount(target.id);
+    setEligible(counts);
+  }, [catalog]);
+  /** The target the RESULT section is about, in the app's language (the label the catalog carries is the English/export one). */
+  const resultTargetLabel =
+    snapshot?.targetId == null
+      ? ''
+      : resolveSignalTargetLabel(
+          catalog.targets.find((target) => target.id === snapshot.targetId) ?? {
+            label: snapshot.targetLabel ?? '',
+          } as SignalTargetDefinition,
+          settings.language,
+        );
   /** What one more script would cost the driver: how many DIDs it reads, and how long it takes. */
   const nextRoundDidCount = snapshot === null ? 0 : Math.min(snapshot.budget, snapshot.notReadCount);
   const nextRoundSeconds = snapshot?.timeline == null ? 0 : Math.round(snapshot.timeline.pollDurationMs / 1_000);
@@ -258,6 +233,7 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
     await ensureController().find(target.id);
     const doc = buildDocument();
     if (doc !== null) setSummary(buildSignalFinderSummaryMarkdown(doc, settings.language));
+    void refreshEligibility();
   }
 
   /**
@@ -279,8 +255,8 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
     const written = await controller.confirmBinding(snapshot.targetId, score);
     setBanner(
       written === null
-        ? 'No profile storage on this platform -- nothing was written.'
-        : `Confirmed ${written.channel} = ${ecuHex(written.ecu)} ${didHex(written.did)}`,
+        ? strings.bannerNoProfileStorage
+        : strings.bannerConfirmed(written.channel, ecuHex(written.ecu), didHex(written.did)),
     );
     setBindings(await bindingStoreRef.current.listBindings(profileId));
     // P4l-FIX3 J5 (binding): a confirmed channel must reach live telemetry
@@ -292,7 +268,7 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
   async function handleShare(kind: 'summary' | 'json'): Promise<void> {
     const doc = buildDocument();
     if (doc === null) {
-      setBanner('Run a find first -- there is nothing to share yet.');
+      setBanner(strings.bannerRunFindFirst);
       return;
     }
     setSharing(true);
@@ -301,9 +277,9 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
       setBanner(
         result.shared
           ? kind === 'summary'
-            ? 'Summary shared. Tap "Share JSON" for the full session file.'
-            : 'JSON shared.'
-          : result.error ?? 'Sharing is unavailable on this platform (the files were still built).',
+            ? strings.bannerSummaryShared
+            : strings.bannerJsonShared
+          : result.error ?? strings.bannerSharingUnavailable,
       );
     } finally {
       setSharing(false);
@@ -322,26 +298,30 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
     try {
       const doc = buildVehicleProfileDocument(profileId, bindings, new Date().toISOString());
       const result = await shareVehicleProfileExport(doc);
-      setBanner(result.shared ? 'Vehicle profile shared.' : result.error ?? 'Sharing is unavailable on this platform (the file was still built).');
+      setBanner(result.shared ? strings.bannerProfileShared : result.error ?? strings.bannerSharingUnavailable);
     } finally {
       setSharing(false);
     }
   }
 
   const targetStatus = (target: SignalTargetDefinition): string => {
-    if (bindings.some((binding) => binding.channel === target.id)) return 'confirmed';
+    if (bindings.some((binding) => binding.channel === target.id)) return strings.statusConfirmed;
     if (snapshot?.targetId === target.id && snapshot.phase === 'result') {
-      return snapshot.scores.some((score) => score.verdict === 'found') ? 'found' : 'missing';
+      return snapshot.scores.some((score) => score.verdict === 'found') ? strings.statusFound : strings.statusMissing;
     }
-    return target.hypotheses.length > 0 ? `${target.hypotheses.length} hypotheses` : 'no hypotheses yet';
+    // X9 (binding): a target with nothing to read says so HERE, and its Find
+    // button is disabled -- "one script per find" must not mean "a find that
+    // performs no script at all".
+    if (eligible[target.id] === 0) return strings.nothingToRead;
+    return target.hypotheses.length > 0 ? strings.statusHypotheses(target.hypotheses.length) : strings.statusNoHypotheses;
   };
 
   return (
     <SafeAreaView style={styles.safe} edges={['bottom']}>
       <ScrollView contentContainerStyle={styles.container}>
-        <Text style={styles.title}>Signal Finder</Text>
+        <Text style={styles.title}>{strings.screenTitle}</Text>
         <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Vehicle profile</Text>
+          <Text style={styles.sectionLabel}>{strings.vehicleProfile}</Text>
           <View style={styles.chipRow}>
             {SIGNAL_TARGET_CATALOGS.map((entry) => (
               <Pressable
@@ -350,7 +330,7 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
                 disabled={busy}
                 onPress={() => setProfileId(entry.profileId)}
                 accessibilityRole="button"
-                accessibilityLabel={`Use the ${entry.label} profile`}
+                accessibilityLabel={strings.useProfile(entry.label)}
               >
                 <Text style={entry.profileId === profileId ? styles.chipTextActive : styles.chipText}>{entry.label}</Text>
               </Pressable>
@@ -362,9 +342,9 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
             disabled={sharing || bindings.length === 0}
             onPress={() => void handleShareProfile()}
             accessibilityRole="button"
-            accessibilityLabel="Share the vehicle profile"
+            accessibilityLabel={strings.shareProfileA11y}
           >
-            <Text style={styles.secondaryButtonText}>Share profile</Text>
+            <Text style={styles.secondaryButtonText}>{strings.shareProfile}</Text>
           </Pressable>
         </View>
 
@@ -381,29 +361,29 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
                 more, because there are no passes. The ECUs of this round are
                 all read inside this single script. */}
             <Text style={styles.caption}>
-              Step {snapshot.step.index + 1}/{snapshot.step.total}
+              {strings.stepCounter(snapshot.step.index + 1, snapshot.step.total)}
               {snapshot.ecus.length > 0 ? ` · ${snapshot.ecus.map(ecuHex).join(', ')}` : ''}
             </Text>
           </View>
         ) : null}
 
         <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Targets</Text>
+          <Text style={styles.sectionLabel}>{strings.targets}</Text>
           {catalog.targets.map((target) => (
             <View key={target.id} style={styles.row}>
               <View style={styles.rowText}>
-                <Text style={styles.rowTitle}>{target.label}</Text>
+                <Text style={styles.rowTitle}>{resolveSignalTargetLabel(target, settings.language)}</Text>
                 <Text style={styles.caption}>
-                  {target.engineRequirement === 'running' ? 'engine running / moving' : 'engine off, ignition on'} ·{' '}
+                  {target.engineRequirement === 'running' ? strings.engineRunningHint : strings.engineOffHint} ·{' '}
                   {targetStatus(target)}
                 </Text>
               </View>
               <Pressable
-                style={[styles.button, busy ? styles.buttonDisabled : null]}
-                disabled={busy}
+                style={[styles.button, busy || eligible[target.id] === 0 ? styles.buttonDisabled : null]}
+                disabled={busy || eligible[target.id] === 0}
                 onPress={() => void handleFind(target)}
                 accessibilityRole="button"
-                accessibilityLabel={`Find ${target.label}`}
+                accessibilityLabel={strings.findA11y(resolveSignalTargetLabel(target, settings.language))}
               >
                 <Text style={styles.buttonText}>{strings.find}</Text>
               </Pressable>
@@ -412,7 +392,12 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
         </View>
 
         {busy ? (
-          <Pressable style={styles.secondaryButton} onPress={() => void controllerRef.current?.stop()} accessibilityRole="button">
+          <Pressable
+            style={styles.secondaryButton}
+            onPress={() => void controllerRef.current?.stop()}
+            accessibilityRole="button"
+            accessibilityLabel={strings.stopA11y}
+          >
             <Text style={styles.secondaryButtonText}>{strings.stop}</Text>
           </Pressable>
         ) : null}
@@ -431,7 +416,11 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
                 snapshot.round,
               )}
               {snapshot.passes.length > 0 ? ` (${snapshot.passes.map((pass) => ecuHex(pass.ecu)).join(', ')})` : ''} ·{' '}
-              {snapshot.engineRequirement === 'running' ? strings.engineRunning : strings.engineOff}
+              {snapshot.engineRequirement === 'running' ? strings.engineRunning : strings.engineOff} ·{' '}
+              {/* X1 (binding): the header says whether the rate the budget rests on was MEASURED or assumed. */}
+              {snapshot.rateSource === 'measured'
+                ? strings.rateMeasured(snapshot.measuredReqPerSec)
+                : strings.rateAssumed(snapshot.measuredReqPerSec)}
             </Text>
             {snapshot.scores.length === 0 ? <Text style={styles.caption}>{strings.nothingAnswered}</Text> : null}
             {snapshot.scores.slice(0, 20).map((score) => (
@@ -442,14 +431,15 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
                     {score.byteOffset === null ? '' : ` b${score.byteOffset}`} · {ecuHex(score.ecu)}
                   </Text>
                   <Text style={styles.caption}>
-                    {evidenceLine(score)} · raw {score.restValueHex ?? '-'} → {score.min ?? '-'}..{score.max ?? '-'}
-                    {score.insufficientReason === null ? '' : ` · ${score.insufficientReason}`}
+                    {evidenceLine(score, strings)} ·{' '}
+                    {strings.rawRange(score.restValueHex ?? '-', String(score.min ?? '-'), String(score.max ?? '-'))}
+                    {score.insufficientReason === null ? '' : ` · ${strings.insufficientReasons[score.insufficientReason]}`}
                   </Text>
                 </View>
                 <View style={styles.verdictColumn}>
                   {/* P4m item 11: sparse-but-consistent evidence says so. */}
                   <Text style={[styles.verdict, { color: VERDICT_COLOR[score.verdict] }]}>
-                    {score.verdict}
+                    {strings.verdicts[score.verdict]}
                     {score.sparse === true ? strings.sparseSuffix : ''}
                   </Text>
                   {score.verdict === 'found' || score.verdict === 'probable' ? (
@@ -457,9 +447,9 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
                       style={styles.button}
                       onPress={() => void handleConfirm(score)}
                       accessibilityRole="button"
-                      accessibilityLabel={`Confirm ${didHex(score.did)} as ${snapshot.targetLabel ?? ''}`}
+                      accessibilityLabel={strings.confirmA11y(didHex(score.did), resultTargetLabel)}
                     >
-                      <Text style={styles.buttonText}>{strings.confirmAs(snapshot.targetLabel ?? '')}</Text>
+                      <Text style={styles.buttonText}>{strings.confirmAs(resultTargetLabel)}</Text>
                     </Pressable>
                   ) : null}
                 </View>
@@ -476,6 +466,14 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
             {/* P4m items 10/12 (binding): what was NOT read is stated with its
                 count and a button for one more script -- never silently
                 dropped, and never mixed into "No response". */}
+            {/* X2 (binding): a silent ECU's DIDs are listed with THAT reason,
+                never as "no response" and never as work a Next round could do. */}
+            {snapshot.silentDids.length > 0 ? (
+              <Text style={styles.caption}>
+                {strings.notReadSilent(snapshot.silentDids.length, snapshot.silentEcus.map(ecuHex).join(', '))}
+              </Text>
+            ) : null}
+
             {snapshot.notReadCount > 0 ? (
               <View style={styles.shareRow}>
                 <Text style={styles.caption}>{strings.notRead(snapshot.notReadCount)}</Text>
@@ -493,10 +491,13 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
 
             {snapshot.nextStep !== null ? (
               <Text style={styles.nextStep}>
-                Next step: sweep {snapshot.nextStep.ecu === null ? 'every ECU that answered' : ecuHex(snapshot.nextStep.ecu)}{' '}
-                {didHex(snapshot.nextStep.fromDid)}–{didHex(snapshot.nextStep.toDid)}, ≈{' '}
-                {Math.max(1, Math.round(snapshot.nextStep.estimatedMinutes))} min,{' '}
-                {snapshot.nextStep.engineRequirement === 'running' ? 'engine running' : 'engine off'} — {snapshot.nextStep.note}
+                {strings.nextStep(
+                  `${didHex(snapshot.nextStep.fromDid)}–${didHex(snapshot.nextStep.toDid)}`,
+                  snapshot.nextStep.ecu === null ? strings.everyEcuThatAnswered : ecuHex(snapshot.nextStep.ecu),
+                  Math.max(1, Math.round(snapshot.nextStep.estimatedMinutes)),
+                  snapshot.nextStep.engineRequirement === 'running' ? strings.engineRunning : strings.engineOff,
+                  snapshot.nextStep.note,
+                )}
               </Text>
             ) : null}
 
@@ -506,24 +507,24 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
                 disabled={sharing}
                 onPress={() => void handleShare('summary')}
                 accessibilityRole="button"
-                accessibilityLabel="Share the Signal Finder summary"
+                accessibilityLabel={strings.shareA11y}
               >
-                <Text style={styles.buttonText}>Share</Text>
+                <Text style={styles.buttonText}>{strings.share}</Text>
               </Pressable>
               <Pressable
                 style={[styles.secondaryButton, sharing ? styles.buttonDisabled : null]}
                 disabled={sharing}
                 onPress={() => void handleShare('json')}
                 accessibilityRole="button"
-                accessibilityLabel="Share the Signal Finder session JSON"
+                accessibilityLabel={strings.shareJsonA11y}
               >
-                <Text style={styles.secondaryButtonText}>Share JSON</Text>
+                <Text style={styles.secondaryButtonText}>{strings.shareJson}</Text>
               </Pressable>
             </View>
 
             {summary !== null ? (
               <View style={styles.summaryBox}>
-                <Text style={styles.sectionLabel}>Summary (this is what gets shared)</Text>
+                <Text style={styles.sectionLabel}>{strings.summaryHeading}</Text>
                 <Text selectable style={styles.summaryText}>
                   {summary}
                 </Text>

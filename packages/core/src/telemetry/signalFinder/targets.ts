@@ -97,6 +97,17 @@ export interface SignalTargetHypothesis {
   /** Human-readable decode guess (never executable code — the confirmation step writes the real binding). */
   decode: string;
   status: SignalHypothesisStatus;
+  /**
+   * P4m-FIX1 X6 (binding, Codex P4m-REV1 finding 7): what THIS DID's raw
+   * value looks like, when that differs from the target's own shape — DME
+   * 0x4007 is a boolean FLAG inside a word (bit0 clears while the accelerator
+   * is pressed) under an `analog-monotone` target. The scorer waives the
+   * analog direction rule for a DECLARED flag; without this declaration a
+   * two-level series must earn that waiver from dense, agreeing evidence, so
+   * an LSB counter can no longer alternate its way to `found`. Omitted = the
+   * target's own `expectedShape` applies.
+   */
+  expectedShape?: SignalExpectedShape;
   /** REQUIRED: where this hypothesis came from. No public DID table exists; every entry is a citation or a field observation. */
   provenance: string;
 }
@@ -107,12 +118,18 @@ export interface SignalDiscoveryRange {
   ecu: number | null;
   fromDid: number;
   toDid: number;
+  /** English note — the stable one the JSON export carries. */
   note: string;
+  /** P4m-FIX1 X8: the same note per language; the driver reads it on the result screen ("Next step: ..."). Resolved only through {@link resolveDiscoveryRangeNote}. */
+  notes?: Readonly<Record<SignalLanguage, string>>;
 }
 
 export interface SignalTargetDefinition {
   id: SignalTargetId;
+  /** English label — also the stable name the export carries. */
   label: string;
+  /** P4m-FIX1 X8: the label per language. The UI reads it only through {@link resolveSignalTargetLabel}. */
+  labels?: Readonly<Record<SignalLanguage, string>>;
   engineRequirement: SignalEngineRequirement;
   expectedShape: SignalExpectedShape;
   actionScript: SignalActionScript;
@@ -173,20 +190,41 @@ const STEERING_SCRIPT: SignalActionScript = {
  * ranges only" means for a vehicle nobody has profiled yet: a standards-based
  * range, never a guessed DID.
  */
+/** P4m-FIX1 X8: one range literal, both languages — so no caller can build a range that only speaks English. */
+function range(ecu: number | null, fromDid: number, toDid: number, en: string, ro: string): SignalDiscoveryRange {
+  return { ecu, fromDid, toDid, note: en, notes: { en, ro } };
+}
+
 const GENERIC_DISCOVERY_RANGES: readonly SignalDiscoveryRange[] = [
-  {
-    ecu: null,
-    fromDid: 0x0100,
-    toDid: 0xa5ff,
-    note: 'ISO 14229-1 Annex C vehicleManufacturerSpecific DID range — sweep every ECU that answered',
-  },
-  {
-    ecu: null,
-    fromDid: 0xa800,
-    toDid: 0xacff,
-    note: 'ISO 14229-1 Annex C vehicleManufacturerSpecific DID range (upper window)',
-  },
+  range(
+    null,
+    0x0100,
+    0xa5ff,
+    'ISO 14229-1 Annex C vehicleManufacturerSpecific DID range — sweep every ECU that answered',
+    'interval de DID-uri specifice producătorului (ISO 14229-1 Anexa C) — scanează fiecare ECU care a răspuns',
+  ),
+  range(
+    null,
+    0xa800,
+    0xacff,
+    'ISO 14229-1 Annex C vehicleManufacturerSpecific DID range (upper window)',
+    'interval de DID-uri specifice producătorului (ISO 14229-1 Anexa C, fereastra superioară)',
+  ),
 ];
+
+/**
+ * P4m-FIX1 X8 (Codex P4m-REV1 finding 9): the target's own NAME is something
+ * the driver reads on the result screen, so it is data in both languages —
+ * shared by every catalog, because "Brake switch" is not vehicle-specific.
+ */
+const TARGET_LABELS: Readonly<Record<SignalTargetId, Readonly<Record<SignalLanguage, string>>>> = {
+  brakeSwitch: { en: 'Brake switch', ro: 'Contact de frână' },
+  brakePressure: { en: 'Brake pressure', ro: 'Presiune de frânare' },
+  steeringAngle: { en: 'Steering angle', ro: 'Unghi volan' },
+  accelPedal: { en: 'Accelerator pedal', ro: 'Pedală de accelerație' },
+  longG: { en: 'Longitudinal acceleration', ro: 'Accelerație longitudinală' },
+  latG: { en: 'Lateral acceleration', ro: 'Accelerație laterală' },
+};
 
 function genericTarget(
   id: SignalTargetId,
@@ -199,6 +237,7 @@ function genericTarget(
   return {
     id,
     label,
+    labels: TARGET_LABELS[id],
     engineRequirement,
     expectedShape,
     actionScript,
@@ -310,6 +349,7 @@ const SUPRA_B58_CATALOG: SignalTargetCatalog = {
     {
       id: 'brakeSwitch',
       label: 'Brake switch',
+      labels: TARGET_LABELS.brakeSwitch,
       engineRequirement: 'off-ok',
       expectedShape: 'boolean-edge',
       actionScript: PEDAL_SCRIPT,
@@ -351,12 +391,13 @@ const SUPRA_B58_CATALOG: SignalTargetCatalog = {
         },
       ],
       discoveryRanges: [
-        { ecu: 0x29, fromDid: 0x58f3, toDid: 0x6fff, note: 'the part of 0x29 test 4 stopped short of' },
+        range(0x29, 0x58f3, 0x6fff, 'the part of 0x29 test 4 stopped short of', 'partea din 0x29 la care testul 4 nu a ajuns'),
       ],
     },
     {
       id: 'brakePressure',
       label: 'Brake pressure',
+      labels: TARGET_LABELS.brakePressure,
       // Field fact (user, 2026-08-29): with the engine off the booster has no
       // vacuum and hydraulic pressure barely builds -- pressure DIDs are only
       // testable with the engine running.
@@ -393,12 +434,13 @@ const SUPRA_B58_CATALOG: SignalTargetCatalog = {
         },
       ],
       discoveryRanges: [
-        { ecu: 0x12, fromDid: 0x6000, toDid: 0x6fff, note: 'DME range beyond the 0x5000–0x5FFF test 4 covered' },
+        range(0x12, 0x6000, 0x6fff, 'DME range beyond the 0x5000–0x5FFF test 4 covered', 'interval DME dincolo de 0x5000–0x5FFF, acoperit de testul 4'),
       ],
     },
     {
       id: 'steeringAngle',
       label: 'Steering angle',
+      labels: TARGET_LABELS.steeringAngle,
       // Field fact (user, 2026-08-29): the EPS is unpowered with the engine
       // off -- the wheel cannot be turned, so steering needs the engine running.
       engineRequirement: 'running',
@@ -407,19 +449,21 @@ const SUPRA_B58_CATALOG: SignalTargetCatalog = {
       verbs: STEERING_VERBS,
       hypotheses: [],
       discoveryRanges: [
-        {
-          ecu: 0x29,
-          fromDid: 0x58f3,
-          toDid: 0x6fff,
-          note: 'test 4 stopped at 0x58F2; 0x29 is the only ECU that carried a confirmed brake bit',
-        },
-        { ecu: 0x30, fromDid: 0x4000, toDid: 0x5fff, note: 'EPS candidate address (public sources, unverified for J29)' },
-        { ecu: 0x65, fromDid: 0x4000, toDid: 0x5fff, note: 'SZL/steering-column candidate address (public sources, unverified)' },
+        range(
+          0x29,
+          0x58f3,
+          0x6fff,
+          'test 4 stopped at 0x58F2; 0x29 is the only ECU that carried a confirmed brake bit',
+          'testul 4 s-a oprit la 0x58F2; 0x29 este singurul ECU cu un bit de frână confirmat',
+        ),
+        range(0x30, 0x4000, 0x5fff, 'EPS candidate address (public sources, unverified for J29)', 'adresă candidată EPS (surse publice, neverificată pentru J29)'),
+        range(0x65, 0x4000, 0x5fff, 'SZL/steering-column candidate address (public sources, unverified)', 'adresă candidată SZL/coloană de direcție (surse publice, neverificată)'),
       ],
     },
     {
       id: 'accelPedal',
       label: 'Accelerator pedal',
+      labels: TARGET_LABELS.accelPedal,
       engineRequirement: 'off-ok',
       expectedShape: 'analog-monotone',
       actionScript: PEDAL_SCRIPT,
@@ -437,6 +481,10 @@ const SUPRA_B58_CATALOG: SignalTargetCatalog = {
           length: 2,
           decode: 'bit0 of a 2-byte word: 0x9001 at idle → 0x9000 while the accelerator is pressed (0 = off idle)',
           status: 'field-observed',
+          // P4m-FIX1 X6: DECLARED a flag, so the scorer waives the analog
+          // direction rule for it (bit 0 CLEARS when the pedal is pressed).
+          // Everything else under this analog target has to prove itself.
+          expectedShape: 'boolean-edge',
           provenance:
             'field test 5 2026-08-29 (Signal Finder, engine off, ignition on): data/field/signal-finder/2026-08-29-accelPedal.json — 0x9001→0x9000 in the press windows, back in every release window; flat 0x9001 in 2026-08-29-brakeSwitch.json',
         },
@@ -450,11 +498,12 @@ const SUPRA_B58_CATALOG: SignalTargetCatalog = {
             'guided observation 2026-08-29 (test 3, ENGINE RUNNING): 0 → 4095 only in the throttle phase. Field test 5 (engine off) read a constant 0x27FF in all 17 samples — the 0→4095 swing was engine-running throttle, so this is not testable with the engine off.',
         },
       ],
-      discoveryRanges: [{ ecu: 0x12, fromDid: 0x6000, toDid: 0x6fff, note: 'DME range beyond test 4' }],
+      discoveryRanges: [range(0x12, 0x6000, 0x6fff, 'DME range beyond test 4', 'interval DME dincolo de testul 4')],
     },
     {
       id: 'longG',
       label: 'Longitudinal acceleration',
+      labels: TARGET_LABELS.longG,
       engineRequirement: 'running',
       expectedShape: 'analog-bipolar',
       actionScript: PEDAL_SCRIPT,
@@ -470,11 +519,12 @@ const SUPRA_B58_CATALOG: SignalTargetCatalog = {
             'https://thesecretingredient.neocities.org/bmw/dme/b58 ("Vehicle longitudinal acceleration"); field sweep: answers 0x00 at rest',
         },
       ],
-      discoveryRanges: [{ ecu: 0x12, fromDid: 0x6000, toDid: 0x6fff, note: 'DME range beyond test 4' }],
+      discoveryRanges: [range(0x12, 0x6000, 0x6fff, 'DME range beyond test 4', 'interval DME dincolo de testul 4')],
     },
     {
       id: 'latG',
       label: 'Lateral acceleration',
+      labels: TARGET_LABELS.latG,
       engineRequirement: 'running',
       expectedShape: 'analog-bipolar',
       actionScript: STEERING_SCRIPT,
@@ -490,7 +540,7 @@ const SUPRA_B58_CATALOG: SignalTargetCatalog = {
             'same page ("Vehicle lateral acceleration"); field sweep: answers 0xFF4A = −0.28 m/s² at rest (plausible)',
         },
       ],
-      discoveryRanges: [{ ecu: 0x12, fromDid: 0x6000, toDid: 0x6fff, note: 'DME range beyond test 4' }],
+      discoveryRanges: [range(0x12, 0x6000, 0x6fff, 'DME range beyond test 4', 'interval DME dincolo de testul 4')],
     },
   ],
 };
@@ -520,6 +570,36 @@ export function resolveSignalActionVerbs(
 ): SignalActionVerbs {
   if (language === 'ro') return target.verbs.ro;
   return target.verbs.en;
+}
+
+/**
+ * P4m-FIX1 X8 (binding, Codex P4m-REV1 finding 9): the target's name in the
+ * app's own language. The UI must call this — never `target.label`, which is
+ * the English/export name. A catalog entry without `labels` falls back to it
+ * rather than rendering blank.
+ */
+export function resolveSignalTargetLabel(
+  target: SignalTargetDefinition,
+  language: SignalLanguage | null | undefined,
+): string {
+  if (language === 'ro') return target.labels?.ro ?? target.label;
+  return target.labels?.en ?? target.label;
+}
+
+/** P4m-FIX1 X8: the discovery range's note in the app's own language ({@link resolveSignalTargetLabel}'s own discipline). */
+export function resolveDiscoveryRangeNote(
+  discoveryRange: SignalDiscoveryRange,
+  language: SignalLanguage | null | undefined,
+): string {
+  if (language === 'ro') return discoveryRange.notes?.ro ?? discoveryRange.note;
+  return discoveryRange.notes?.en ?? discoveryRange.note;
+}
+
+/** P4m-FIX1 X6: every `(ecu, did)` this target DECLARES to be a boolean flag — what `scoreSignalCandidates` takes as `declaredFlagDids`. */
+export function targetDeclaredFlagDids(target: SignalTargetDefinition): Array<{ ecu: number; did: number }> {
+  return target.hypotheses
+    .filter((hypothesis) => hypothesis.expectedShape === 'boolean-edge')
+    .map((hypothesis) => ({ ecu: hypothesis.ecu, did: hypothesis.did }));
 }
 
 /** Every ECU address this target has a hypothesis on, each once, ascending — the pass order the finder iterates. */
@@ -561,6 +641,8 @@ export function nextDiscoveryStep(
   target: SignalTargetDefinition,
   measuredReqPerSec: number,
   coveredEcus: readonly number[] = [],
+  /** P4m-FIX1 X8: which language the returned `note` is in. Defaults to English (the export's own). */
+  language: SignalLanguage | null | undefined = 'en',
 ): NextDiscoveryStep | null {
   const covered = new Set(coveredEcus);
   for (const range of target.discoveryRanges) {
@@ -577,7 +659,7 @@ export function nextDiscoveryStep(
       // engine running only once the shortlist exists) -- independent of the
       // target's own action requirement.
       engineRequirement: 'off-ok',
-      note: range.note,
+      note: resolveDiscoveryRangeNote(range, language),
     };
   }
   return null;

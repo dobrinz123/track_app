@@ -233,18 +233,42 @@ describe('scoreSignalCandidates -- sample gate and ordering', () => {
     expect(score!.windowsBelowMinimum).toBe(0);
   });
 
-  // P4m (item 11): thin sampling alone is no longer `insufficient` -- this
-  // DID answered 8 times with the identical 0x04, which is knowledge (it did
+  // P4m (item 11): thin sampling alone is no longer `insufficient` -- a DID
+  // that answered EVERY window with the identical 0x04 is knowledge (it did
   // not answer the driver), so the honest verdict is `unrelated`.
-  it('a DID that answered the whole script with ONE identical value is UNRELATED, however thin the sampling', () => {
+  it('a DID that answered EVERY window with ONE identical value is UNRELATED, even at one sample per window', () => {
     const samples: SignalFinderSample[] = [];
-    for (let tMs = 1_250; tMs < timeline.pollDurationMs; tMs += 3_000) {
-      samples.push({ ecu: ECU_29, did: 0x5555, tMs, raw: hexToBytes('04') });
+    for (const step of timeline.steps) {
+      samples.push({
+        ecu: ECU_29,
+        did: 0x5555,
+        tMs: (step.evidenceFromMs + step.evidenceToMs) / 2,
+        raw: hexToBytes('04'),
+      });
     }
     const [score] = scoreSignalCandidates({ samples, timeline, shape: 'boolean-edge' });
     expect(score).toMatchObject({ verdict: 'unrelated', verdictCapReason: 'never-moved' });
     expect(score!.windowsBelowMinimum).toBeGreaterThan(0);
     expect(score!.insufficientReason).toBeNull();
+  });
+
+  /**
+   * P4m-FIX1 X7 (Codex P4m-REV1 finding 8, MEDIUM): `never-moved` used to
+   * need only two identical samples plus the baseline and ONE press window,
+   * so a barely-polled DID -- one the driver's action may simply never have
+   * been observed on -- was reported as `unrelated`, i.e. as knowledge. The
+   * same coverage the sparse rule demands before it says `found` is now
+   * demanded before it says `unrelated`: every press AND every release window
+   * must have been sampled at least once.
+   */
+  it('X7: a never-moved DID whose action windows were NOT all sampled is INSUFFICIENT, not unrelated', () => {
+    const samples: SignalFinderSample[] = [];
+    for (let tMs = 1_250; tMs < timeline.pollDurationMs; tMs += 5_000) {
+      samples.push({ ecu: ECU_29, did: 0x5557, tMs, raw: hexToBytes('04') });
+    }
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'boolean-edge' });
+    expect(score).toMatchObject({ verdict: 'insufficient', insufficientReason: 'undersampled' });
+    expect(score!.verdictCapReason).toBeNull();
   });
 
   it('a window with ZERO samples is INSUFFICIENT -- nothing was observed there to judge (item 11)', () => {
@@ -724,7 +748,23 @@ describe('scoreSignalCandidates -- P4m item 11 (sparse but consistent)', () => {
     expect(score!.extraTransitions ?? 0).toBeGreaterThan(0);
   });
 
-  it('a single-bit FLAG inside an analog target is scored as a switch -- direction does not apply (0x9001 -> 0x9000)', () => {
+  /**
+   * P4m-FIX1 X6 (Codex P4m-REV1 finding 7, MEDIUM). Build 6 gave the flag
+   * exception to ANY two-level series differing in one bit. Combined with the
+   * sparse rule that meant an LSB counter or a noisy bit, sampled once per
+   * window, could alternate its way to `found` under an ANALOG target -- the
+   * direction rule (the thing that separates a pedal from a bit that merely
+   * moves) was waived on the strength of the XOR shape alone.
+   *
+   * The exception now needs one of two independent reasons:
+   *   (a) the DID is DECLARED a flag by the target catalog (data:
+   *       `expectedShape: 'boolean-edge'` on the hypothesis -- DME 0x4007 is
+   *       one, see `targets.ts`), or
+   *   (b) every press AND every release window holds >= 2 AGREEING samples,
+   *       i.e. the evidence is dense enough that the two levels are not an
+   *       artefact of catching a counter at one sample per window.
+   */
+  it('X6: a SPARSE single-bit drop under an analog target is NOT rescued by the flag exception on its own', () => {
     const samples = layOnTimeline(
       timeline,
       ECU_12,
@@ -738,7 +778,64 @@ describe('scoreSignalCandidates -- P4m item 11 (sparse but consistent)', () => {
       ]),
     );
     const [score] = scoreSignalCandidates({ samples, timeline, shape: 'analog-monotone' });
+    expect(score!.verdict).not.toBe('found');
+    expect(score!.flagBit).toBeNull();
+  });
+
+  it('X6 (a): the SAME sparse series IS found when the catalog declares that DID a boolean-edge flag', () => {
+    const samples = layOnTimeline(
+      timeline,
+      ECU_12,
+      0x4007,
+      cycles(['9001'], [
+        [['9000'], ['9001']],
+        [['9000'], ['9001']],
+        [['9000'], ['9001']],
+        [['9000'], ['9001']],
+        [['9000'], ['9001']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({
+      samples,
+      timeline,
+      shape: 'analog-monotone',
+      declaredFlagDids: [{ ecu: ECU_12, did: 0x4007 }],
+    });
     expect(score).toMatchObject({ verdict: 'found', flagBit: 0, sparse: true, restValueHex: '9001' });
+  });
+
+  it('X6 (b): two AGREEING samples in every press and release window earn the exception without any catalog help', () => {
+    const samples = layOnTimeline(
+      timeline,
+      ECU_12,
+      0x4007,
+      cycles(['9001', '9001'], [
+        [['9000', '9000'], ['9001', '9001']],
+        [['9000', '9000'], ['9001', '9001']],
+        [['9000', '9000'], ['9001', '9001']],
+        [['9000', '9000'], ['9001', '9001']],
+        [['9000', '9000'], ['9001', '9001']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'analog-monotone' });
+    expect(score).toMatchObject({ verdict: 'found', flagBit: 0, sparse: false });
+  });
+
+  it('X6 (b): windows that DISAGREE with themselves never earn it -- that is exactly the LSB counter case', () => {
+    const samples = layOnTimeline(
+      timeline,
+      ECU_12,
+      0x4650,
+      cycles(['9001', '9001'], [
+        [['9000', '9001'], ['9001', '9000']],
+        [['9000', '9001'], ['9001', '9000']],
+        [['9000', '9001'], ['9001', '9000']],
+        [['9000', '9001'], ['9001', '9000']],
+        [['9000', '9001'], ['9001', '9000']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'analog-monotone' });
+    expect(score!.verdict).not.toBe('found');
   });
 
   it('a TWO-BIT drop under an analog-monotone target is still the wrong direction, sparse or not', () => {
