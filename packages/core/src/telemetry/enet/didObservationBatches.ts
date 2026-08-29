@@ -24,6 +24,17 @@ import { DID_OBSERVATION_PHASES, computeGuidedPhaseDurationMs, ASSUMED_GUIDED_RE
 export const DEFAULT_BATCH_SIZE = 16;
 /** ticket P4j: "minSamplesPerPhase=5". */
 export const DEFAULT_MIN_SAMPLES_PER_PHASE = 5;
+/**
+ * Ticket P4j-FIX1 M1 (binding, after Codex P4j-REV1 MEDIUM #1: "`batchSize:
+ * 128` therefore creates a 128-DID batch"): a HARD ceiling, not a default --
+ * batching only works because a batch is small enough for every DID in it to
+ * reach `minSamplesPerPhase` inside one phase window.
+ */
+export const MAX_BATCH_SIZE = 16;
+/** Ticket P4j-FIX1 M1 (binding): "Extremely large `minSamplesPerPhase` values are also uncapped and can create effectively infinite phase durations." */
+export const MAX_MIN_SAMPLES_PER_PHASE = 20;
+/** Ticket P4j-FIX1 M1 (binding): "focused shortlist <= 16 DIDs (error shown)" -- enforced by the controller/screen, defined here alongside the other observation bounds. */
+export const MAX_FOCUSED_SHORTLIST_SIZE = 16;
 
 /** A phase's own base (fixed, unscaled) duration -- reuses `DID_OBSERVATION_PHASES`' own ~6s baseline as the floor a batch's computed duration never shrinks below (mirrors `computeGuidedPhaseDurationMs`'s own floor discipline). */
 const BASE_PHASE_DURATION_MS = DID_OBSERVATION_PHASES[0]?.durationMs ?? 6_000;
@@ -54,9 +65,10 @@ export interface ObservationBatch {
   phaseDurationMs: number;
 }
 
-function sanitizeCount(value: number | undefined, fallback: number): number {
+/** M1 (binding): non-finite/below-1 falls back to `fallback`; anything above `max` is CLAMPED to it (never accepted as given). */
+function sanitizeCount(value: number | undefined, fallback: number, max: number): number {
   if (value === undefined || !Number.isFinite(value) || value < 1) return fallback;
-  return Math.floor(value);
+  return Math.min(max, Math.floor(value));
 }
 
 /**
@@ -76,8 +88,8 @@ export function planObservationBatches(
   options: PlanObservationBatchesOptions,
 ): ObservationBatch[] {
   if (candidates.length === 0) return [];
-  const batchSize = sanitizeCount(options.batchSize, DEFAULT_BATCH_SIZE);
-  const minSamplesPerPhase = sanitizeCount(options.minSamplesPerPhase, DEFAULT_MIN_SAMPLES_PER_PHASE);
+  const batchSize = sanitizeCount(options.batchSize, DEFAULT_BATCH_SIZE, MAX_BATCH_SIZE);
+  const minSamplesPerPhase = sanitizeCount(options.minSamplesPerPhase, DEFAULT_MIN_SAMPLES_PER_PHASE, MAX_MIN_SAMPLES_PER_PHASE);
   const measuredReqPerSec =
     Number.isFinite(options.measuredReqPerSec) && options.measuredReqPerSec > 0
       ? options.measuredReqPerSec

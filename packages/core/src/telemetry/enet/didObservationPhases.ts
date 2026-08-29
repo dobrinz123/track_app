@@ -77,6 +77,22 @@ export interface DidPhaseSample {
  */
 export type DidCandidateRank = 'brakeCandidate' | 'steeringCandidate' | 'throttleCandidate' | 'changedInSeveral' | 'static';
 
+/**
+ * Ticket P4j-FIX1 H2 (binding, after Codex P4j-REV1 HIGH #2): a phase's own
+ * verdict is TRI-state, never a bare boolean --
+ *  - `changed`      : the phase genuinely differs from baseline under the rule below;
+ *  - `unchanged`    : enough evidence, and it does not differ;
+ *  - `insufficient` : NOT enough evidence to say either way (fewer than
+ *                     `minSamplesPerPhase` positive samples in this phase or in
+ *                     baseline, or the DID's samples disagreed on length).
+ * The pre-fix code silently fell back to naive "did the bytes ever differ"
+ * distinctness in exactly the `insufficient` case, which is what re-flagged
+ * ordinary idle jitter (field: DID 0x4522 read 297 -> 305 -> 295 across ONE
+ * baseline and TWO brake samples) as a brake candidate. `insufficient` never
+ * counts as `changed` for ranking -- it is reported instead.
+ */
+export type DidPhaseEvidence = 'changed' | 'unchanged' | 'insufficient';
+
 export interface DidCandidateSummary {
   did: number;
   /** Hex of the MOST RECENT sample across every phase, in the order `samples` was given. */
@@ -90,6 +106,22 @@ export interface DidCandidateSummary {
   distinctValueCount: number;
   /** Whether THIS did's bytes varied at all during each phase (per-phase "CHANGED" badge). Always has an entry for every {@link DID_OBSERVATION_PHASES} id, `false` if that phase had zero samples. */
   changedInPhase: Record<DidObservationPhaseId, boolean>;
+  /**
+   * Ticket P4j-FIX1 H2 (binding): the tri-state verdict per phase --
+   * `changedInPhase[p]` is exactly `phaseEvidence[p] === 'changed'`; the extra
+   * information is WHICH of the two "not changed" cases applies. Legacy
+   * callers (`useMarginRule` unset/false) only ever see `changed`/`unchanged`.
+   */
+  phaseEvidence: Record<DidObservationPhaseId, DidPhaseEvidence>;
+  /**
+   * Ticket P4j-FIX1 M3 (binding, after Codex P4j-REV1 MEDIUM #3): false when
+   * THIS DID's samples disagreed on response length (e.g. a DID alternating
+   * between 8 and 9 bytes). Such a DID is marked inconsistent and never ranked
+   * as a candidate -- and, critically, is never SPLIT into two apparently
+   * consistent candidates by a caller that routes samples to the numeric or
+   * block summarizer before grouping them per DID.
+   */
+  lengthConsistent: boolean;
   rank: DidCandidateRank;
 }
 
@@ -165,14 +197,144 @@ export interface DidCandidateRankingOptions {
   marginRawUnits?: number;
 }
 
-function rangeOf(values: readonly number[]): number {
-  let min = values[0] as number;
-  let max = values[0] as number;
-  for (const v of values) {
-    if (v < min) min = v;
-    if (v > max) max = v;
+// ---------------------------------------------------------------------------
+// Ticket P4j-FIX1 H2 (binding) -- the change rule, shared verbatim by the
+// numeric summaries, the 5-8-byte byte-wise comparison, and the 9-32-byte
+// block per-offset comparison ("Same rule for block offsets").
+//
+//   A DID "changed in phase P" iff
+//     (a) the SET of values seen in P differs from the baseline value set
+//         (any value in P not seen in baseline, or vice-versa), AND
+//     (b) the phase MEAN shifts vs baseline by more than
+//         max(marginRawUnits, marginMultiplier * (baseline P90 - P10))
+//         OR the value set is boolean-like (<= 2 distinct values overall)
+//         and differs.
+//
+// (b)'s boolean-like clause is what catches a stable 0 -> 1 switch and a
+// 0/1/0/1 toggle -- both have an in-phase RANGE at or below the raw-unit
+// floor, which is precisely why the pre-fix "active range > max(2x baseline
+// range, 3)" rule missed every boolean brake/clutch signal. The baseline
+// P90-P10 spread (never a distinct COUNT) is the noise floor, so baseline
+// jitter can no longer disqualify a genuine level shift.
+// ---------------------------------------------------------------------------
+
+/** Sorted-ascending linear-interpolated percentile (`q` in 0..1). `0` for an empty list; the single value for a one-element list. */
+function percentileOfSorted(sortedAsc: readonly number[], q: number): number {
+  if (sortedAsc.length === 0) return 0;
+  if (sortedAsc.length === 1) return sortedAsc[0] as number;
+  const position = q * (sortedAsc.length - 1);
+  const lowIndex = Math.floor(position);
+  const highIndex = Math.ceil(position);
+  const low = sortedAsc[lowIndex] as number;
+  const high = sortedAsc[highIndex] as number;
+  return low + (high - low) * (position - lowIndex);
+}
+
+/** The baseline NOISE FLOOR: its own P90-P10 spread (robust to a single outlier in a 5-sample window, unlike a bare max-min range). */
+function spreadP90P10(values: readonly number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  return percentileOfSorted(sorted, 0.9) - percentileOfSorted(sorted, 0.1);
+}
+
+function meanOf(values: readonly number[]): number {
+  let total = 0;
+  for (const v of values) total += v;
+  return values.length === 0 ? 0 : total / values.length;
+}
+
+/** (a): symmetric set difference is non-empty. */
+function valueSetsDiffer(baseline: readonly number[], phase: readonly number[]): boolean {
+  const baselineSet = new Set(baseline);
+  const phaseSet = new Set(phase);
+  for (const v of phaseSet) if (!baselineSet.has(v)) return true;
+  for (const v of baselineSet) if (!phaseSet.has(v)) return true;
+  return false;
+}
+
+export interface DidChangeRuleThresholds {
+  /** Default 2 ("2x baseline P90-P10"). */
+  marginMultiplier: number;
+  /** Default 3 ("3 raw units") -- the floor applied even when the baseline spread is 0. */
+  marginRawUnits: number;
+}
+
+const DEFAULT_MARGIN_MULTIPLIER = 2;
+const DEFAULT_MARGIN_RAW_UNITS = 3;
+
+/**
+ * The single, shared H2 change rule (see the block comment above). Both
+ * series must be non-empty; the caller is responsible for the sample-count
+ * gate (below `minSamplesPerPhase` the verdict is `insufficient`, never a
+ * call into here).
+ */
+export function didPhaseValuesChanged(
+  baselineValues: readonly number[],
+  phaseValues: readonly number[],
+  thresholds: DidChangeRuleThresholds,
+): boolean {
+  if (baselineValues.length === 0 || phaseValues.length === 0) return false;
+  if (!valueSetsDiffer(baselineValues, phaseValues)) return false; // (a) fails -- identical value sets are never a change.
+  const distinctOverall = new Set([...baselineValues, ...phaseValues]).size;
+  if (distinctOverall <= 2) return true; // boolean-like AND differs (a stable 0 -> 1 switch, a 0/1 toggle).
+  const noiseFloor = Math.max(thresholds.marginRawUnits, thresholds.marginMultiplier * spreadP90P10(baselineValues));
+  return Math.abs(meanOf(phaseValues) - meanOf(baselineValues)) > noiseFloor;
+}
+
+/** The byte offsets (0-based) at which `phaseRaws` shifted level vs `baselineRaws` under {@link didPhaseValuesChanged}. `length` is the shared response length of every sample in both lists. */
+function changedByteOffsets(
+  baselineRaws: readonly Uint8Array[],
+  phaseRaws: readonly Uint8Array[],
+  length: number,
+  thresholds: DidChangeRuleThresholds,
+): number[] {
+  const changed: number[] = [];
+  for (let offset = 0; offset < length; offset += 1) {
+    const baselineBytes = baselineRaws.map((raw) => raw[offset] ?? 0);
+    const phaseBytes = phaseRaws.map((raw) => raw[offset] ?? 0);
+    if (didPhaseValuesChanged(baselineBytes, phaseBytes, thresholds)) changed.push(offset);
   }
-  return max - min;
+  return changed;
+}
+
+/** Unsigned big-endian decode for the NUMERICALLY decodable widths of the H2 rule (1-4 bytes: u8/u16/u24/u32). `null` outside that window -- 5-8 bytes are compared byte-wise instead, > 8 bytes belong to {@link computeDidBlockCandidateSummaries}. Deliberately SEPARATE from {@link decodeUint}, which still backs the 1-2-byte `min`/`max` display fields. */
+function decodeNumericValue(raw: Uint8Array): number | null {
+  if (raw.length < 1 || raw.length > 4) return null;
+  let value = 0;
+  for (const byte of raw) value = value * 256 + byte;
+  return value;
+}
+
+/**
+ * H2 (binding), routed by WIDTH: 1-4 bytes decode to one unsigned integer and
+ * go through {@link didPhaseValuesChanged}; 5-8 bytes are compared BYTE-WISE
+ * (any single offset with a level shift makes the phase changed). `null` for
+ * any other width -- the caller reports `insufficient` rather than guessing.
+ */
+function didNumericPhaseChanged(
+  baselineRaws: readonly Uint8Array[],
+  phaseRaws: readonly Uint8Array[],
+  length: number,
+  thresholds: DidChangeRuleThresholds,
+): boolean | null {
+  if (length >= 1 && length <= 4) {
+    const baselineValues: number[] = [];
+    const phaseValues: number[] = [];
+    for (const raw of baselineRaws) {
+      const decoded = decodeNumericValue(raw);
+      if (decoded === null) return null;
+      baselineValues.push(decoded);
+    }
+    for (const raw of phaseRaws) {
+      const decoded = decodeNumericValue(raw);
+      if (decoded === null) return null;
+      phaseValues.push(decoded);
+    }
+    return didPhaseValuesChanged(baselineValues, phaseValues, thresholds);
+  }
+  if (length >= 5 && length <= 8) {
+    return changedByteOffsets(baselineRaws, phaseRaws, length, thresholds).length > 0;
+  }
+  return null;
 }
 
 /**
@@ -189,34 +351,38 @@ export function computeDidCandidateSummaries(
 ): DidCandidateSummary[] {
   const minSamplesPerPhase = options.minSamplesPerPhase ?? 1;
   const useMarginRule = options.useMarginRule ?? false;
-  const marginMultiplier = options.marginMultiplier ?? 2;
-  const marginRawUnits = options.marginRawUnits ?? 3;
+  const thresholds: DidChangeRuleThresholds = {
+    marginMultiplier: options.marginMultiplier ?? DEFAULT_MARGIN_MULTIPLIER,
+    marginRawUnits: options.marginRawUnits ?? DEFAULT_MARGIN_RAW_UNITS,
+  };
 
   interface Accum {
     hexesByPhase: Map<DidObservationPhaseId, string[]>;
-    /** Decoded values per phase -- only pushed when `decodeUint` succeeds for that sample (ticket P4j margin rule); `undefined` entry means the phase was never sampled at all. */
-    valuesByPhase: Map<DidObservationPhaseId, number[]>;
+    /** Every raw response per phase, in arrival order -- the H2 rule needs the BYTES (numeric decode for 1-4 bytes, byte-wise for 5-8), never a pre-filtered subset. */
+    rawsByPhase: Map<DidObservationPhaseId, Uint8Array[]>;
     allHexes: string[];
     allRaws: Uint8Array[];
+    /** M3 (binding): the response length every sample agreed on, or `null` once two samples disagreed. */
+    length: number | null;
+    lengthConsistent: boolean;
   }
   const byDid = new Map<number, Accum>();
 
   for (const sample of samples) {
     let entry = byDid.get(sample.did);
     if (entry === undefined) {
-      entry = { hexesByPhase: new Map(), valuesByPhase: new Map(), allHexes: [], allRaws: [] };
+      entry = { hexesByPhase: new Map(), rawsByPhase: new Map(), allHexes: [], allRaws: [], length: null, lengthConsistent: true };
       byDid.set(sample.did, entry);
     }
     const hex = bytesToHex(sample.raw);
     const phaseHexes = entry.hexesByPhase.get(sample.phase) ?? [];
     phaseHexes.push(hex);
     entry.hexesByPhase.set(sample.phase, phaseHexes);
-    const decoded = decodeUint(sample.raw);
-    if (decoded !== null) {
-      const phaseValues = entry.valuesByPhase.get(sample.phase) ?? [];
-      phaseValues.push(decoded);
-      entry.valuesByPhase.set(sample.phase, phaseValues);
-    }
+    const phaseRaws = entry.rawsByPhase.get(sample.phase) ?? [];
+    phaseRaws.push(sample.raw);
+    entry.rawsByPhase.set(sample.phase, phaseRaws);
+    if (entry.length === null) entry.length = sample.raw.length;
+    else if (entry.length !== sample.raw.length) entry.lengthConsistent = false;
     entry.allHexes.push(hex);
     entry.allRaws.push(sample.raw);
   }
@@ -224,31 +390,49 @@ export function computeDidCandidateSummaries(
   const summaries: DidCandidateSummary[] = [];
   for (const [did, entry] of byDid) {
     const changedInPhase = {} as Record<DidObservationPhaseId, boolean>;
-    const baselineHexes = entry.hexesByPhase.get('baseline') ?? [];
-    const baselineValues = entry.valuesByPhase.get('baseline');
-    // ticket P4j: the margin rule needs EVERY baseline sample to have decoded
-    // (a phase with even one non-numeric-width response can't support a
-    // meaningful "baseline range" -- fall back to naive distinctness instead
-    // of comparing a partial range).
-    const baselineDecodedFully = baselineValues !== undefined && baselineValues.length === baselineHexes.length;
-    const baselineRange = baselineDecodedFully ? rangeOf(baselineValues!) : null;
+    const phaseEvidence = {} as Record<DidObservationPhaseId, DidPhaseEvidence>;
+    const baselineRaws = entry.rawsByPhase.get('baseline') ?? [];
+    const length = entry.length;
 
-    for (const spec of DID_OBSERVATION_PHASES) {
-      const hexes = entry.hexesByPhase.get(spec.id) ?? [];
-      const naiveChanged = new Set(hexes).size > 1;
-      if (spec.id === 'baseline' || !useMarginRule) {
-        changedInPhase[spec.id] = naiveChanged;
-        continue;
+    if (!useMarginRule) {
+      // Legacy (pre-ticket) behaviour, byte-identical: naive "did the raw
+      // bytes ever differ within this phase" distinctness, no sample gate,
+      // and never an `insufficient` verdict.
+      for (const spec of DID_OBSERVATION_PHASES) {
+        const changed = new Set(entry.hexesByPhase.get(spec.id) ?? []).size > 1;
+        changedInPhase[spec.id] = changed;
+        phaseEvidence[spec.id] = changed ? 'changed' : 'unchanged';
       }
-      const values = entry.valuesByPhase.get(spec.id);
-      const decodedFully = values !== undefined && values.length === hexes.length;
-      const enoughSamples = hexes.length >= minSamplesPerPhase && baselineHexes.length >= minSamplesPerPhase;
-      if (!enoughSamples || !decodedFully || baselineRange === null) {
-        changedInPhase[spec.id] = naiveChanged; // insufficient evidence for the margin rule -- fall back rather than silently reporting "unchanged".
-        continue;
+    } else {
+      // H2 (binding). Baseline is the CONTROL: its own spread is the noise
+      // floor consumed by every active phase's test below, so it never
+      // reports `changed` and can never disqualify a candidate on its own
+      // jitter (the pre-fix defect). It only reports `insufficient` when
+      // there is not enough of it to be a noise floor at all.
+      // M3 (binding): a length-inconsistent DID supports no comparison of any
+      // kind -- every phase is `insufficient`, and the DID ranks `static`.
+      const baselineUsable = entry.lengthConsistent && length !== null && baselineRaws.length >= minSamplesPerPhase;
+      phaseEvidence.baseline = baselineUsable ? 'unchanged' : 'insufficient';
+      changedInPhase.baseline = false;
+      for (const phaseId of ACTIVE_PHASES) {
+        const phaseRaws = entry.rawsByPhase.get(phaseId) ?? [];
+        if (!baselineUsable || phaseRaws.length < minSamplesPerPhase) {
+          phaseEvidence[phaseId] = 'insufficient';
+          changedInPhase[phaseId] = false;
+          continue;
+        }
+        const changed = didNumericPhaseChanged(baselineRaws, phaseRaws, length as number, thresholds);
+        if (changed === null) {
+          // A width this rule cannot decode either numerically (1-4 bytes) or
+          // byte-wise (5-8) -- e.g. a mid-size block fed here by mistake.
+          // NEVER a naive-distinctness fallback (that is the H2 defect).
+          phaseEvidence[phaseId] = 'insufficient';
+          changedInPhase[phaseId] = false;
+          continue;
+        }
+        phaseEvidence[phaseId] = changed ? 'changed' : 'unchanged';
+        changedInPhase[phaseId] = changed;
       }
-      const activeRange = rangeOf(values!);
-      changedInPhase[spec.id] = activeRange > Math.max(marginMultiplier * baselineRange, marginRawUnits);
     }
 
     let min: number | null = null;
@@ -268,6 +452,8 @@ export function computeDidCandidateSummaries(
       max,
       distinctValueCount: new Set(entry.allHexes).size,
       changedInPhase,
+      phaseEvidence,
+      lengthConsistent: entry.lengthConsistent,
       rank: rankOf(changedInPhase),
     });
   }
@@ -293,6 +479,8 @@ export interface DidBlockCandidateSummary {
   sampleCount: number;
   /** Byte offsets (0-based) whose value RANGE exceeded the baseline's own range at that offset by the margin, per active phase. Always has an entry for every phase id (baseline's is always `[]` -- it is the reference, never "changed" against itself). */
   changedOffsetsByPhase: Record<DidObservationPhaseId, number[]>;
+  /** Ticket P4j-FIX1 H2 (binding): the SAME tri-state verdict the numeric summaries carry -- an under-sampled phase reports `insufficient`, never a bare empty offset list that reads as "nothing changed". `baseline` is always `unchanged` (the control) or `insufficient`. */
+  phaseEvidence: Record<DidObservationPhaseId, DidPhaseEvidence>;
   rank: DidCandidateRank;
 }
 
@@ -321,8 +509,10 @@ export function computeDidBlockCandidateSummaries(
   options: DidBlockCandidateOptions = {},
 ): DidBlockCandidateSummary[] {
   const minSamplesPerPhase = options.minSamplesPerPhase ?? 1;
-  const marginMultiplier = options.marginMultiplier ?? 2;
-  const marginRawUnits = options.marginRawUnits ?? 3;
+  const thresholds: DidChangeRuleThresholds = {
+    marginMultiplier: options.marginMultiplier ?? DEFAULT_MARGIN_MULTIPLIER,
+    marginRawUnits: options.marginRawUnits ?? DEFAULT_MARGIN_RAW_UNITS,
+  };
   const minLen = options.minLen ?? 9;
   const maxLen = options.maxLen ?? 32;
 
@@ -356,32 +546,24 @@ export function computeDidBlockCandidateSummaries(
     const baselineRaws = entry.byPhase.get('baseline') ?? [];
     const baselineEnough = baselineRaws.length >= minSamplesPerPhase;
     const changedOffsetsByPhase = {} as Record<DidObservationPhaseId, number[]>;
+    const phaseEvidence = {} as Record<DidObservationPhaseId, DidPhaseEvidence>;
     for (const spec of DID_OBSERVATION_PHASES) changedOffsetsByPhase[spec.id] = [];
+    phaseEvidence.baseline = baselineEnough ? 'unchanged' : 'insufficient';
 
     for (const phaseId of ACTIVE_PHASES) {
       const phaseRaws = entry.byPhase.get(phaseId) ?? [];
-      if (!baselineEnough || phaseRaws.length < minSamplesPerPhase) continue; // not enough evidence -- every offset stays unchanged.
-      const changed: number[] = [];
-      for (let offset = 0; offset < length; offset += 1) {
-        let baselineMin = baselineRaws[0]![offset] ?? 0;
-        let baselineMax = baselineMin;
-        for (const raw of baselineRaws) {
-          const b = raw[offset] ?? 0;
-          if (b < baselineMin) baselineMin = b;
-          if (b > baselineMax) baselineMax = b;
-        }
-        let phaseMin = phaseRaws[0]![offset] ?? 0;
-        let phaseMax = phaseMin;
-        for (const raw of phaseRaws) {
-          const b = raw[offset] ?? 0;
-          if (b < phaseMin) phaseMin = b;
-          if (b > phaseMax) phaseMax = b;
-        }
-        const baselineRange = baselineMax - baselineMin;
-        const phaseRange = phaseMax - phaseMin;
-        if (phaseRange > Math.max(marginMultiplier * baselineRange, marginRawUnits)) changed.push(offset);
+      if (!baselineEnough || phaseRaws.length < minSamplesPerPhase) {
+        // H2 (binding): NOT enough evidence -- reported as `insufficient`,
+        // never silently as "no offset changed".
+        phaseEvidence[phaseId] = 'insufficient';
+        continue;
       }
+      // H2 (binding): "Same rule for block offsets" -- the identical
+      // set-difference + mean-shift/boolean-like rule the numeric summaries
+      // use, applied per byte offset.
+      const changed = changedByteOffsets(baselineRaws, phaseRaws, length, thresholds);
       changedOffsetsByPhase[phaseId] = changed;
+      phaseEvidence[phaseId] = changed.length > 0 ? 'changed' : 'unchanged';
     }
 
     const changedActivePhases = ACTIVE_PHASES.filter((phase) => changedOffsetsByPhase[phase].length > 0);
@@ -394,7 +576,7 @@ export function computeDidBlockCandidateSummaries(
       rank = 'static';
     }
 
-    summaries.push({ did, length, sampleCount: entry.sampleCount, changedOffsetsByPhase, rank });
+    summaries.push({ did, length, sampleCount: entry.sampleCount, changedOffsetsByPhase, phaseEvidence, rank });
   }
 
   return summaries.sort((a, b) => RANK_ORDER[a.rank] - RANK_ORDER[b.rank] || a.did - b.did);

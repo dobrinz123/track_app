@@ -145,6 +145,36 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
  * nothing plausible (or whose length matches no known decode at all) is
  * dropped from observation -- it is still kept in the full EXPORT.
  */
+/**
+ * Coordinator addendum to P4j-FIX1 (binding, from field evidence): "the
+ * pre-pass is ADVISORY only -- it may ORDER candidates (changed-first) but
+ * must never EXCLUDE a DID from the batched phases."
+ *
+ * Field evidence: in the user's guided run, DME DIDs 0x4A1D (brake booster
+ * sensor), 0x4811/0x4812 (accelerator) all answered the sweep but were NEVER
+ * observed in the phases -- {@link selectChangingCandidates} dropped them as
+ * "static" because the user simply did not press the brake during the
+ * two-sample pre-pass. A pre-pass that runs BEFORE the guided prompts cannot
+ * possibly know whether a DID would have moved; using it as a filter throws
+ * away exactly the DIDs the guided phases exist to find.
+ *
+ * Returns EVERY DID in `allDids` (a permutation, never a subset), with the
+ * DIDs whose bytes changed between the two pre-pass reads first, each group
+ * keeping its original relative order (deterministic). A DID with no pre-pass
+ * pair at all (it never answered either round) sorts with the unchanged group
+ * -- observed last, but always observed.
+ */
+export function orderChangingCandidatesFirst(
+  pairs: readonly DidChangeSamplePair[],
+  allDids: readonly number[],
+): number[] {
+  const changedDids = new Set(selectChangingCandidates(pairs.filter((pair) => !bytesEqual(pair.first, pair.second))));
+  const changed: number[] = [];
+  const rest: number[] = [];
+  for (const did of allDids) (changedDids.has(did) ? changed : rest).push(did);
+  return [...changed, ...rest];
+}
+
 export function selectChangingCandidates(pairs: readonly DidChangeSamplePair[]): number[] {
   const kept: number[] = [];
   for (const pair of pairs) {

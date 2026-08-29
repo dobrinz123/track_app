@@ -17,6 +17,17 @@ import type { SqlDatabase } from '@circuit/core';
  * `CREATE TABLE IF NOT EXISTS` keeps this idempotent across repeated app
  * launches.
  *
+ * Ticket P4j-FIX1 H3 (binding, after Codex P4j-REV1 HIGH #3, "Batched
+ * samples, summaries, and `batchIndex` are memory-only and do not survive
+ * restart"): schema v2 adds `did_sweep_observation_samples` (every guided /
+ * batched / focused phase sample, keyed by `run_id` + `observation_id`, so a
+ * LATER observation on the same run APPENDS rather than resetting) and
+ * `did_sweep_observation_summaries` (one JSON summary blob per observation:
+ * ranked candidates, block candidates, insufficient/inconsistent DIDs). Both
+ * are plain `CREATE TABLE IF NOT EXISTS` additions -- no column was added to
+ * an existing table, so an app upgrading from v1 needs no `ALTER TABLE` and
+ * no data migration; the version row simply moves 1 -> 2.
+ *
  * `did_sweep_runs` is circuit-agnostic (no `circuit_id` column) -- a DID
  * sweep characterizes the VEHICLE's ECU, not a specific circuit, so a run
  * persists and resumes regardless of which circuit is currently selected.
@@ -24,7 +35,7 @@ import type { SqlDatabase } from '@circuit/core';
  * than a separate table -- in practice a handful of distinct NRC values per
  * run, never worth a join.
  */
-export const DID_SWEEP_SCHEMA_VERSION = 1;
+export const DID_SWEEP_SCHEMA_VERSION = 2;
 
 const DID_SWEEP_DDL = `
 CREATE TABLE IF NOT EXISTS did_sweep_schema_migrations (
@@ -62,6 +73,30 @@ CREATE TABLE IF NOT EXISTS did_sweep_responders (
 );
 
 CREATE INDEX IF NOT EXISTS idx_did_sweep_responders_run ON did_sweep_responders (run_id);
+
+CREATE TABLE IF NOT EXISTS did_sweep_observation_samples (
+  run_id TEXT NOT NULL,
+  observation_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  did INTEGER NOT NULL,
+  phase TEXT NOT NULL,
+  t_ms REAL NOT NULL,
+  raw_hex TEXT NOT NULL,
+  batch_index INTEGER,
+  PRIMARY KEY (run_id, observation_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_did_sweep_observation_samples_run ON did_sweep_observation_samples (run_id);
+
+CREATE TABLE IF NOT EXISTS did_sweep_observation_summaries (
+  run_id TEXT NOT NULL,
+  observation_id TEXT NOT NULL,
+  created_at_utc TEXT NOT NULL,
+  summary_json TEXT NOT NULL,
+  PRIMARY KEY (run_id, observation_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_did_sweep_observation_summaries_run ON did_sweep_observation_summaries (run_id);
 `;
 
 /** Applies `DID_SWEEP_DDL` and records/bumps the schema version row. Safe to call on every app launch (idempotent), and safe to call more than once against the same `db` within a single launch. */

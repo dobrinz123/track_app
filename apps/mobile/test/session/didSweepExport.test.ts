@@ -140,12 +140,23 @@ describe('buildDidSweepExportDocument (binding, P4i)', () => {
       run: run(),
       responders: [],
       candidateSummaries: [
-        { did: 0x2010, lastRawHex: 'FF', sampleCount: 12, min: 0, max: 255, distinctValueCount: 2, changedInPhase: { baseline: false, brake: true, steering: false, throttle: false }, rank: 'brakeCandidate' },
+        { did: 0x2010, lastRawHex: 'FF', sampleCount: 12, min: 0, max: 255, distinctValueCount: 2, changedInPhase: { baseline: false, brake: true, steering: false, throttle: false }, phaseEvidence: { baseline: 'unchanged', brake: 'changed', steering: 'unchanged', throttle: 'unchanged' }, lengthConsistent: true, rank: 'brakeCandidate' },
       ],
       nowIso: '2026-08-27T19:00:00.000Z',
     });
     expect(doc.candidates).toEqual([
-      { didHex: '0x2010', rank: 'brakeCandidate', lastRawHex: 'FF', sampleCount: 12, min: 0, max: 255, distinctValueCount: 2, changedInPhase: { baseline: false, brake: true, steering: false, throttle: false } },
+      {
+        didHex: '0x2010',
+        rank: 'brakeCandidate',
+        lastRawHex: 'FF',
+        sampleCount: 12,
+        min: 0,
+        max: 255,
+        distinctValueCount: 2,
+        changedInPhase: { baseline: false, brake: true, steering: false, throttle: false },
+        // Ticket P4j-FIX1 H2/M6 (binding): the tri-state verdict travels with the candidate.
+        phaseEvidence: { baseline: 'unchanged', brake: 'changed', steering: 'unchanged', throttle: 'unchanged' },
+      },
     ]);
   });
 
@@ -200,12 +211,20 @@ describe('buildDidSweepExportDocument (binding, P4i)', () => {
           sampleCount: 8,
           rank: 'brakeCandidate',
           changedOffsetsByPhase: { baseline: [], brake: [4, 5], steering: [], throttle: [] },
+          phaseEvidence: { baseline: 'unchanged', brake: 'changed', steering: 'unchanged', throttle: 'unchanged' },
         },
       ],
       nowIso: '2026-08-27T19:00:00.000Z',
     });
     expect(doc.blockCandidates).toEqual([
-      { didHex: '0x40B5', length: 10, sampleCount: 8, rank: 'brakeCandidate', changedOffsetsByPhase: { baseline: [], brake: [4, 5], steering: [], throttle: [] } },
+      {
+        didHex: '0x40B5',
+        length: 10,
+        sampleCount: 8,
+        rank: 'brakeCandidate',
+        changedOffsetsByPhase: { baseline: [], brake: [4, 5], steering: [], throttle: [] },
+        phaseEvidence: { baseline: 'unchanged', brake: 'changed', steering: 'unchanged', throttle: 'unchanged' },
+      },
     ]);
   });
 
@@ -431,8 +450,8 @@ describe('buildCopySummaryText (binding, P4i: "Copy summary ... counts + top can
       run: run(),
       responders: [],
       candidateSummaries: [
-        { did: 0x2010, lastRawHex: 'FF', sampleCount: 1, min: null, max: null, distinctValueCount: 1, changedInPhase: { baseline: false, brake: true, steering: false, throttle: false }, rank: 'brakeCandidate' },
-        { did: 0x3000, lastRawHex: '00', sampleCount: 1, min: null, max: null, distinctValueCount: 1, changedInPhase: { baseline: false, brake: false, steering: false, throttle: false }, rank: 'static' },
+        { did: 0x2010, lastRawHex: 'FF', sampleCount: 1, min: null, max: null, distinctValueCount: 1, changedInPhase: { baseline: false, brake: true, steering: false, throttle: false }, phaseEvidence: { baseline: 'unchanged', brake: 'changed', steering: 'unchanged', throttle: 'unchanged' }, lengthConsistent: true, rank: 'brakeCandidate' },
+        { did: 0x3000, lastRawHex: '00', sampleCount: 1, min: null, max: null, distinctValueCount: 1, changedInPhase: { baseline: false, brake: false, steering: false, throttle: false }, phaseEvidence: { baseline: 'unchanged', brake: 'unchanged', steering: 'unchanged', throttle: 'unchanged' }, lengthConsistent: true, rank: 'static' },
       ],
       nowIso: '2026-08-27T19:00:00.000Z',
     });
@@ -502,5 +521,162 @@ describe('shareDidSweepExport (binding, P4i: OS share sheet, never throws)', () 
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/share sheet failed/);
     expect(logSpy).toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ticket P4j-FIX1 M6 + H3 (binding, after Codex P4j-REV1). Kept in THIS file
+// (never a new one) because the expo-file-system / expo-sharing mocks above
+// are hoisted per test FILE -- a second export test file would collect them
+// separately and re-run the whole module.
+// ---------------------------------------------------------------------------
+
+describe('P4j-FIX1 M6 — export schemaVersion 2 with a note and a numeric target (binding)', () => {
+  it('declares schemaVersion 2 and explains the v1 -> v2 change in the document itself', () => {
+    expect(DID_SWEEP_EXPORT_SCHEMA_VERSION).toBe(2);
+    const doc = buildDidSweepExportDocument({ run: run(), responders: [], nowIso: '2026-08-27T19:00:00.000Z' });
+    expect(doc.schemaVersion).toBe(2);
+    expect(doc.schemaNote).toMatch(/targetAddress/);
+  });
+
+  it('keeps run.targetAddress as the hex string AND adds targetAddressNumeric (a v1 consumer expecting a number has somewhere to look)', () => {
+    const doc = buildDidSweepExportDocument({ run: run({ targetAddress: 0x12 }), responders: [], nowIso: '2026-08-27T19:00:00.000Z' });
+    expect(doc.run.targetAddress).toBe('0x12');
+    expect(doc.run.targetAddressNumeric).toBe(0x12);
+
+    const nullDoc = buildDidSweepExportDocument({ run: run({ targetAddress: null }), responders: [], nowIso: '2026-08-27T19:00:00.000Z' });
+    expect(nullDoc.run.targetAddress).toBeNull();
+    expect(nullDoc.run.targetAddressNumeric).toBeNull();
+  });
+
+  it('exports the per-phase EVIDENCE (changed / unchanged / insufficient) alongside the boolean changedInPhase', () => {
+    const doc = buildDidSweepExportDocument({
+      run: run(),
+      responders: [],
+      candidateSummaries: [
+        {
+          did: 0x4522,
+          lastRawHex: '0127',
+          sampleCount: 3,
+          min: 295,
+          max: 305,
+          distinctValueCount: 3,
+          changedInPhase: { baseline: false, brake: false, steering: false, throttle: false },
+          phaseEvidence: { baseline: 'insufficient', brake: 'insufficient', steering: 'insufficient', throttle: 'insufficient' },
+          lengthConsistent: true,
+          rank: 'static',
+        },
+      ],
+      insufficientDids: [0x4522],
+      inconsistentDids: [0x4659],
+      nowIso: '2026-08-27T19:00:00.000Z',
+    });
+    expect(doc.candidates[0]!.phaseEvidence.brake).toBe('insufficient');
+    expect(doc.observationInsufficientDidHex).toEqual(['0x4522']);
+    expect(doc.inconsistentDidHex).toEqual(['0x4659']);
+  });
+});
+
+describe('P4j-FIX1 H3 — the export reads the observation series from the STORE, not only live memory (binding)', () => {
+  it('a RECREATED controller (kill/reopen) still exports the persisted series, batchIndex and ranked candidates', async () => {
+    const store = createInMemoryDidSweepStore();
+    await store.createRun({
+      runId: 'run-killed',
+      adapterType: 'enet',
+      targetAddress: 0x12,
+      rangeFrom: 0x4000,
+      rangeTo: 0x4fff,
+      lastDid: 0x4fff,
+      startedAtUtc: '2026-08-29T10:45:03.790Z',
+      updatedAtUtc: '2026-08-29T10:49:58.177Z',
+      status: 'complete',
+      visitedCount: 4096,
+      timeoutCount: 36,
+      unmatchedCount: 1,
+      errorCount: 0,
+      nrcCounts: { '49': 3519 },
+    });
+    // Real field shapes: 0x4522 read 297 -> 305 (0x0129 / 0x0131).
+    await store.appendObservationSamples('run-killed', 'obs-a', [
+      { did: 0x4522, phase: 'baseline', tMs: 8030, raw: Uint8Array.from([0x01, 0x29]), batchIndex: 2 },
+      { did: 0x4522, phase: 'brake', tMs: 4221, raw: Uint8Array.from([0x01, 0x31]), batchIndex: 2 },
+    ]);
+    await store.saveObservationSummary(
+      'run-killed',
+      'obs-a',
+      JSON.stringify({
+        candidates: [
+          {
+            did: 0x4522,
+            lastRawHex: '0131',
+            sampleCount: 2,
+            min: 297,
+            max: 305,
+            distinctValueCount: 2,
+            changedInPhase: { baseline: false, brake: false, steering: false, throttle: false },
+            phaseEvidence: { baseline: 'insufficient', brake: 'insufficient', steering: 'insufficient', throttle: 'insufficient' },
+            lengthConsistent: true,
+            rank: 'static',
+          },
+        ],
+        blockCandidates: [],
+        insufficientDids: [0x4522],
+        inconsistentDids: [],
+        noResponseDids: [],
+      }),
+      '2026-08-29T10:50:00.000Z',
+    );
+
+    // A FRESH controller instance -- exactly what a kill/reopen produces: it
+    // has never run an observation, so its live memory is empty.
+    const controller = createDidSweepController({
+      transportFactory: () =>
+        new SimulatedEnetTransport({ monotonicNow: () => Date.now(), scenario: DEFAULT_ENET_DID_SCENARIO, testerAddress: 0xf4, targetAddress: 0x12 }),
+      testerAddress: 0xf4,
+      targetAddress: 0x12,
+      clock: { now: () => Date.now() },
+      store,
+    });
+    expect(controller.getGuidedSamples()).toEqual([]);
+
+    const doc = await buildDidSweepExportForRun(controller, store, 'run-killed', '2026-08-29T11:00:00.000Z');
+    expect(doc).not.toBeNull();
+    const series = doc!.observationSeries.find((s) => s.didHex === '0x4522' && s.phase === 'brake');
+    expect(series?.batchIndex).toBe(2);
+    expect(series?.samples).toEqual([{ tMs: 4221, rawHex: '0131' }]);
+    expect(doc!.candidates.map((c) => c.didHex)).toEqual(['0x4522']);
+    expect(doc!.observationInsufficientDidHex).toEqual(['0x4522']);
+  });
+
+  it('a run with NOTHING persisted still exports the sweep results with empty observation sections', async () => {
+    const store = createInMemoryDidSweepStore();
+    await store.createRun({
+      runId: 'run-bare',
+      adapterType: 'enet',
+      targetAddress: 0x12,
+      rangeFrom: 0,
+      rangeTo: 0xffff,
+      lastDid: null,
+      startedAtUtc: '2026-08-29T10:45:03.790Z',
+      updatedAtUtc: '2026-08-29T10:45:03.790Z',
+      status: 'stopped',
+      visitedCount: 0,
+      timeoutCount: 0,
+      unmatchedCount: 0,
+      errorCount: 0,
+      nrcCounts: {},
+    });
+    const controller = createDidSweepController({
+      transportFactory: () =>
+        new SimulatedEnetTransport({ monotonicNow: () => Date.now(), scenario: DEFAULT_ENET_DID_SCENARIO, testerAddress: 0xf4, targetAddress: 0x12 }),
+      testerAddress: 0xf4,
+      targetAddress: 0x12,
+      clock: { now: () => Date.now() },
+      store,
+    });
+    const doc = await buildDidSweepExportForRun(controller, store, 'run-bare', '2026-08-29T11:00:00.000Z');
+    expect(doc!.observationSeries).toEqual([]);
+    expect(doc!.candidates).toEqual([]);
+    expect(doc!.blockCandidates).toEqual([]);
   });
 });

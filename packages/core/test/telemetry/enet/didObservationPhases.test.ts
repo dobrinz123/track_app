@@ -340,15 +340,21 @@ describe('computeDidCandidateSummaries -- margin-based ranking (ticket P4j, bind
     expect(summary?.rank).toBe('brakeCandidate');
   });
 
-  it('below minSamplesPerPhase, the margin rule does not apply -- falls back to naive distinctness', () => {
+  // SUPERSEDED by ticket P4j-FIX1 H2 (binding, after Codex P4j-REV1 HIGH #2):
+  // the naive-distinctness fallback below `minSamplesPerPhase` is exactly what
+  // re-flagged ordinary idle jitter as a candidate (field: 0x4522, one
+  // baseline and two brake samples reading 297 / 305 / 295). Under-sampling is
+  // now reported as `insufficient` and never ranked.
+  it('below minSamplesPerPhase, the phase reports `insufficient` -- NEVER a naive-distinctness fallback', () => {
     const samples: DidPhaseSample[] = [
       sample(0x4700, 'baseline', 0, [100]),
       sample(0x4700, 'brake', 0, [100]),
-      sample(0x4700, 'brake', 100, [101]), // only 2 samples -- below minSamplesPerPhase: 5, so the naive rule (any distinctness) still applies.
+      sample(0x4700, 'brake', 100, [101]), // only 2 samples -- below minSamplesPerPhase: 5.
     ];
     const [summary] = computeDidCandidateSummaries(samples, { useMarginRule: true, minSamplesPerPhase: 5 });
-    expect(summary?.changedInPhase.brake).toBe(true);
-    expect(summary?.rank).toBe('brakeCandidate');
+    expect(summary?.phaseEvidence.brake).toBe('insufficient');
+    expect(summary?.changedInPhase.brake).toBe(false);
+    expect(summary?.rank).toBe('static');
   });
 
   it('a phase that does not decode cleanly (mixed lengths) falls back to naive distinctness rather than reporting "unchanged"', () => {

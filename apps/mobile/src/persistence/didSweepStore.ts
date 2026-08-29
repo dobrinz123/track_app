@@ -1,4 +1,4 @@
-import type { SqlBindValue, SqlDatabase } from '@circuit/core';
+import type { DidPhaseSample, SqlBindValue, SqlDatabase } from '@circuit/core';
 
 /**
  * DID sweep — results persistence, export & candidate filtering addendum
@@ -61,6 +61,35 @@ export interface DidSweepRunProgressPatch {
   nrcCounts?: Record<string, number>;
 }
 
+/**
+ * Ticket P4j-FIX1 H3 (binding): one persisted guided/batched/focused
+ * observation sample. `observationId` groups every sample of ONE observation
+ * run; a LATER observation on the same sweep run gets a NEW `observationId`
+ * and APPENDS (the pre-fix in-memory-only `guidedSamples` array was reset by
+ * every new observation, destroying the earlier batched series before export).
+ */
+export interface DidSweepObservationSampleRecord {
+  runId: string;
+  observationId: string;
+  /** 0-based position within `observationId`, preserving arrival order. */
+  seq: number;
+  did: number;
+  phase: string;
+  tMs: number;
+  /** Uppercase hex, no separators. */
+  rawHex: string;
+  /** `null` for an observation that never batched its candidates (a focused shortlist, or the legacy single-pass guided run). */
+  batchIndex: number | null;
+}
+
+/** Ticket P4j-FIX1 H3 (binding): "summaries JSON on the run" -- one blob per observation run (ranked candidates, block candidates, insufficient/inconsistent DIDs), so a kill/reopen Share still reports what the observation concluded. */
+export interface DidSweepObservationSummaryRecord {
+  runId: string;
+  observationId: string;
+  createdAtUtc: string;
+  summaryJson: string;
+}
+
 export interface DidSweepStore {
   /** Inserts a fresh run row. `runId` must not already exist (callers generate a fresh one per `start()`). */
   createRun(run: Omit<DidSweepRunRecord, 'responderCount'>): Promise<void>;
@@ -89,8 +118,22 @@ export interface DidSweepStore {
   getRun(runId: string): Promise<DidSweepRunRecord | null>;
   getResponders(runId: string): Promise<DidSweepResponderRecord[]>;
   deleteRun(runId: string): Promise<void>;
-  /** Deletes every run beyond the `keep` most-recently-updated ones (and their responders) -- addendum: "Retention: keep the last 5 runs." */
+  /** Deletes every run beyond the `keep` most-recently-updated ones (and their responders/observation rows) -- addendum: "Retention: keep the last 5 runs." */
   enforceRetention(keep: number): Promise<void>;
+  /**
+   * Ticket P4j-FIX1 H3 (binding): APPENDS `samples` to `runId`'s
+   * `observationId` group, preserving arrival order. Never resets anything
+   * already stored (a later observation passes a new `observationId`). No-op
+   * (writes nothing) if `runId` doesn't exist, so a queued write racing
+   * retention can never orphan rows.
+   */
+  appendObservationSamples(runId: string, observationId: string, samples: readonly DidPhaseSample[]): Promise<void>;
+  /** Every persisted observation sample for `runId`, ordered by observation then arrival order. */
+  getObservationSamples(runId: string): Promise<DidSweepObservationSampleRecord[]>;
+  /** Upserts ONE observation's summary blob (re-saving the same `observationId` replaces it). No-op if `runId` doesn't exist. */
+  saveObservationSummary(runId: string, observationId: string, summaryJson: string, nowUtc: string): Promise<void>;
+  /** Every persisted observation summary for `runId`, oldest first. */
+  getObservationSummaries(runId: string): Promise<DidSweepObservationSummaryRecord[]>;
 }
 
 /**
@@ -131,6 +174,10 @@ export function hexToBytes(hex: string): Uint8Array {
 
 interface MemoryRun extends DidSweepRunRecord {
   responders: Map<number, DidSweepResponderRecord>;
+  /** P4j-FIX1 H3 (binding): appended to, never replaced -- one flat list in arrival order across every `observationId`. */
+  observationSamples: DidSweepObservationSampleRecord[];
+  /** P4j-FIX1 H3 (binding): keyed by `observationId` (insertion-ordered = oldest first). */
+  observationSummaries: Map<string, DidSweepObservationSummaryRecord>;
 }
 
 /** Shared by `updateRunProgress` and `flushRunProgress` -- mutates `run` in place, synchronously (no `await`s), so both callers apply a patch the identical way. */
@@ -175,13 +222,20 @@ export function createInMemoryDidSweepStore(): DidSweepStore {
   const runs = new Map<string, MemoryRun>();
 
   function toRecord(run: MemoryRun): DidSweepRunRecord {
-    const { responders: _responders, ...record } = run;
+    const { responders: _responders, observationSamples: _samples, observationSummaries: _summaries, ...record } = run;
     return { ...record, nrcCounts: { ...record.nrcCounts } };
   }
 
   return {
     async createRun(run): Promise<void> {
-      runs.set(run.runId, { ...run, nrcCounts: { ...run.nrcCounts }, responderCount: 0, responders: new Map() });
+      runs.set(run.runId, {
+        ...run,
+        nrcCounts: { ...run.nrcCounts },
+        responderCount: 0,
+        responders: new Map(),
+        observationSamples: [],
+        observationSummaries: new Map(),
+      });
     },
 
     async updateRunProgress(runId, patch, nowUtc): Promise<void> {
@@ -230,6 +284,42 @@ export function createInMemoryDidSweepStore(): DidSweepStore {
     async enforceRetention(keep): Promise<void> {
       const ordered = [...runs.values()].sort((a, b) => (a.updatedAtUtc < b.updatedAtUtc ? 1 : -1));
       for (const run of ordered.slice(Math.max(0, keep))) runs.delete(run.runId);
+    },
+
+    // P4j-FIX1 H3 (binding): observation samples/summaries live on the run
+    // record itself, so `deleteRun`/`enforceRetention` drop them with it (no
+    // separate cleanup, no orphan rows).
+    async appendObservationSamples(runId, observationId, samples): Promise<void> {
+      const run = runs.get(runId);
+      if (run === undefined) return;
+      let seq = run.observationSamples.filter((s) => s.observationId === observationId).length;
+      for (const sample of samples) {
+        run.observationSamples.push({
+          runId,
+          observationId,
+          seq,
+          did: sample.did,
+          phase: sample.phase,
+          tMs: sample.tMs,
+          rawHex: bytesToHex(sample.raw),
+          batchIndex: sample.batchIndex ?? null,
+        });
+        seq += 1;
+      }
+    },
+
+    async getObservationSamples(runId): Promise<DidSweepObservationSampleRecord[]> {
+      return (runs.get(runId)?.observationSamples ?? []).map((s) => ({ ...s }));
+    },
+
+    async saveObservationSummary(runId, observationId, summaryJson, nowUtc): Promise<void> {
+      const run = runs.get(runId);
+      if (run === undefined) return;
+      run.observationSummaries.set(observationId, { runId, observationId, createdAtUtc: nowUtc, summaryJson });
+    },
+
+    async getObservationSummaries(runId): Promise<DidSweepObservationSummaryRecord[]> {
+      return [...(runs.get(runId)?.observationSummaries.values() ?? [])].map((s) => ({ ...s }));
     },
   };
 }
@@ -368,6 +458,32 @@ async function upsertRespondersSql(
   }
 }
 
+interface ObservationSampleRow {
+  run_id: string;
+  observation_id: string;
+  seq: number;
+  did: number;
+  phase: string;
+  t_ms: number;
+  raw_hex: string;
+  batch_index: number | null;
+}
+
+interface ObservationSummaryRow {
+  run_id: string;
+  observation_id: string;
+  created_at_utc: string;
+  summary_json: string;
+}
+
+/** P4j-FIX1 H3 (binding): ONE place that knows every table a run owns, so `deleteRun` and `enforceRetention` can never drift apart and leave observation rows behind. */
+async function deleteRunRowsSql(db: SqlDatabase, runId: string): Promise<void> {
+  await db.runAsync('DELETE FROM did_sweep_observation_samples WHERE run_id = ?', [runId]);
+  await db.runAsync('DELETE FROM did_sweep_observation_summaries WHERE run_id = ?', [runId]);
+  await db.runAsync('DELETE FROM did_sweep_responders WHERE run_id = ?', [runId]);
+  await db.runAsync('DELETE FROM did_sweep_runs WHERE run_id = ?', [runId]);
+}
+
 async function countRespondersSql(db: SqlDatabase, runId: string): Promise<number> {
   const countRows = await db.getAllAsync<{ n: number }>(
     'SELECT COUNT(*) AS n FROM did_sweep_responders WHERE run_id = ?',
@@ -474,8 +590,7 @@ export function createSqlDidSweepStore(db: SqlDatabase): DidSweepStore {
     },
 
     async deleteRun(runId): Promise<void> {
-      await db.runAsync('DELETE FROM did_sweep_responders WHERE run_id = ?', [runId]);
-      await db.runAsync('DELETE FROM did_sweep_runs WHERE run_id = ?', [runId]);
+      await deleteRunRowsSql(db, runId);
     },
 
     async enforceRetention(keep): Promise<void> {
@@ -483,10 +598,75 @@ export function createSqlDidSweepStore(db: SqlDatabase): DidSweepStore {
         'SELECT run_id FROM did_sweep_runs ORDER BY updated_at_utc DESC LIMIT -1 OFFSET ?',
         [Math.max(0, keep)],
       );
-      for (const row of rows) {
-        await db.runAsync('DELETE FROM did_sweep_responders WHERE run_id = ?', [row.run_id]);
-        await db.runAsync('DELETE FROM did_sweep_runs WHERE run_id = ?', [row.run_id]);
-      }
+      for (const row of rows) await deleteRunRowsSql(db, row.run_id);
+    },
+
+    // P4j-FIX1 H3 (binding). The existence check mirrors `flushRunProgress`'s
+    // own (see its doc): these tables carry no FK either, and a write queued
+    // behind a slow one can land after retention already deleted the run --
+    // it must then be a complete no-op, never an orphan row.
+    async appendObservationSamples(runId, observationId, samples): Promise<void> {
+      if (samples.length === 0) return;
+      await db.withTransactionAsync(async () => {
+        const existing = await db.getAllAsync<{ run_id: string }>('SELECT run_id FROM did_sweep_runs WHERE run_id = ? LIMIT 1', [runId]);
+        if (existing.length === 0) return;
+        const seqRows = await db.getAllAsync<{ n: number }>(
+          'SELECT COUNT(*) AS n FROM did_sweep_observation_samples WHERE run_id = ? AND observation_id = ?',
+          [runId, observationId],
+        );
+        let seq = seqRows[0]?.n ?? 0;
+        for (const sample of samples) {
+          await db.runAsync(
+            `INSERT OR REPLACE INTO did_sweep_observation_samples (run_id, observation_id, seq, did, phase, t_ms, raw_hex, batch_index)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [runId, observationId, seq, sample.did, sample.phase, sample.tMs, bytesToHex(sample.raw), sample.batchIndex ?? null],
+          );
+          seq += 1;
+        }
+      });
+    },
+
+    async getObservationSamples(runId): Promise<DidSweepObservationSampleRecord[]> {
+      const rows = await db.getAllAsync<ObservationSampleRow>(
+        'SELECT * FROM did_sweep_observation_samples WHERE run_id = ? ORDER BY observation_id ASC, seq ASC',
+        [runId],
+      );
+      return rows.map((row) => ({
+        runId: row.run_id,
+        observationId: row.observation_id,
+        seq: row.seq,
+        did: row.did,
+        phase: row.phase,
+        tMs: row.t_ms,
+        rawHex: row.raw_hex,
+        batchIndex: row.batch_index ?? null,
+      }));
+    },
+
+    async saveObservationSummary(runId, observationId, summaryJson, nowUtc): Promise<void> {
+      await db.withTransactionAsync(async () => {
+        const existing = await db.getAllAsync<{ run_id: string }>('SELECT run_id FROM did_sweep_runs WHERE run_id = ? LIMIT 1', [runId]);
+        if (existing.length === 0) return;
+        await db.runAsync(
+          `INSERT INTO did_sweep_observation_summaries (run_id, observation_id, created_at_utc, summary_json)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(run_id, observation_id) DO UPDATE SET created_at_utc = excluded.created_at_utc, summary_json = excluded.summary_json`,
+          [runId, observationId, nowUtc, summaryJson],
+        );
+      });
+    },
+
+    async getObservationSummaries(runId): Promise<DidSweepObservationSummaryRecord[]> {
+      const rows = await db.getAllAsync<ObservationSummaryRow>(
+        'SELECT * FROM did_sweep_observation_summaries WHERE run_id = ? ORDER BY created_at_utc ASC, observation_id ASC',
+        [runId],
+      );
+      return rows.map((row) => ({
+        runId: row.run_id,
+        observationId: row.observation_id,
+        createdAtUtc: row.created_at_utc,
+        summaryJson: row.summary_json,
+      }));
     },
   };
 }

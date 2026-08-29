@@ -1,6 +1,14 @@
 import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
-import type { DidBlockCandidateSummary, DidCandidateSummary, DidHeuristicSuggestion, DidObservationPhaseId, DidPhaseSample } from '@circuit/core';
+import type {
+  DidBlockCandidateSummary,
+  DidCandidateSummary,
+  DidHeuristicSuggestion,
+  DidObservationPhaseId,
+  DidPhaseEvidence,
+  DidPhaseSample,
+} from '@circuit/core';
+import { hexToBytes } from '../persistence/didSweepStore';
 import type { DidSweepStore, DidSweepResponderRecord, DidSweepRunRecord } from '../persistence/didSweepStore';
 import type { DidSweepController } from './didSweepController';
 
@@ -26,7 +34,22 @@ import type { DidSweepController } from './didSweepController';
  * lives under `expo-file-system/legacy` and is not used here.
  */
 
-export const DID_SWEEP_EXPORT_SCHEMA_VERSION = 1;
+/**
+ * Ticket P4j-FIX1 M6 (binding, after Codex P4j-REV1 MEDIUM #6: "The export
+ * format changed incompatibly without a schema-version bump"). v2 is what P4j
+ * actually shipped plus this fix wave:
+ *  - `run.targetAddress` became a HEX STRING (it was a number in v1);
+ *  - `run.targetAddressNumeric` is the v1-shaped numeric value, kept so a
+ *    consumer written against v1 has somewhere to read a number from;
+ *  - `blockCandidates` and per-series `batchIndex` were added;
+ *  - `candidates[].phaseEvidence` (changed / unchanged / insufficient) and the
+ *    `observationInsufficientDidHex` / `inconsistentDidHex` reports were added.
+ */
+export const DID_SWEEP_EXPORT_SCHEMA_VERSION = 2;
+
+/** Carried IN the document (M6, binding) so whoever opens the JSON sees why v1 parsers may choke, without having to find this file. */
+export const DID_SWEEP_EXPORT_SCHEMA_NOTE =
+  'schemaVersion 2: run.targetAddress is a hex string (v1 used a number -- see run.targetAddressNumeric); blockCandidates, per-series batchIndex, candidates[].phaseEvidence, observationInsufficientDidHex and inconsistentDidHex are new in v2.';
 
 /**
  * R1 fix (P4i-FIX2, binding, after Codex P4hrev3 H3 PARTIAL): Stop/Pause/
@@ -59,6 +82,8 @@ export interface DidSweepExportCandidate {
   max: number | null;
   distinctValueCount: number;
   changedInPhase: Record<DidObservationPhaseId, boolean>;
+  /** Ticket P4j-FIX1 H2/M6 (binding): the tri-state verdict per phase -- `insufficient` says "not enough samples to judge", which a bare `changedInPhase: false` could not distinguish from "measured, and it did not change". */
+  phaseEvidence: Record<DidObservationPhaseId, DidPhaseEvidence>;
 }
 
 /**
@@ -71,6 +96,8 @@ export interface DidSweepExportBlockCandidate {
   sampleCount: number;
   rank: DidBlockCandidateSummary['rank'];
   changedOffsetsByPhase: Record<DidObservationPhaseId, number[]>;
+  /** Ticket P4j-FIX1 H2/M6 (binding): same tri-state verdict as the numeric candidates -- an empty offset list under `insufficient` means "not measured", not "nothing moved". */
+  phaseEvidence: Record<DidObservationPhaseId, DidPhaseEvidence>;
 }
 
 export interface DidSweepExportPhaseSample {
@@ -104,6 +131,8 @@ export interface DidSweepExportSuggestion {
 
 export interface DidSweepExportDocument {
   schemaVersion: number;
+  /** Ticket P4j-FIX1 M6 (binding): see {@link DID_SWEEP_EXPORT_SCHEMA_NOTE}. */
+  schemaNote: string;
   generatedAtUtc: string;
   /** R1 fix (P4i-FIX2, binding): see {@link DID_SWEEP_RESUME_BOUND}'s own doc comment -- the accepted residual re-send window after a hard kill, disclosed to whoever reads this export. */
   resumeBound: string;
@@ -116,6 +145,8 @@ export interface DidSweepExportDocument {
      * has no target address recorded.
      */
     targetAddress: string | null;
+    /** Ticket P4j-FIX1 M6 (binding): the v1-shaped NUMERIC target address, kept alongside the hex string so a consumer written against schema v1 is not left parsing `"0x12"` as a number. `null` when the run recorded none. */
+    targetAddressNumeric: number | null;
     rangeFromHex: string;
     rangeToHex: string;
     lastDidHex: string | null;
@@ -142,6 +173,10 @@ export interface DidSweepExportDocument {
   observationSeries: DidSweepExportPhaseSeries[];
   /** `classifyResponders`-derived heuristic suggestions, if any single-window observation has run. */
   suggestions: DidSweepExportSuggestion[];
+  /** Ticket P4j-FIX1 H1/M6 (binding): DIDs that never reached the per-phase sample guarantee (NRC/timeout, or the phase's hard cap) -- excluded from ranking, REPORTED here so the export never looks like they were measured and found static. */
+  observationInsufficientDidHex: string[];
+  /** Ticket P4j-FIX1 M3/M6 (binding): DIDs whose observation samples disagreed on response length -- routed to neither summarizer, never split into two apparent candidates. */
+  inconsistentDidHex: string[];
 }
 
 function didHex(did: number): string {
@@ -162,6 +197,10 @@ export function buildDidSweepExportDocument(input: {
   blockCandidateSummaries?: readonly DidBlockCandidateSummary[];
   observationSamples?: readonly DidPhaseSample[];
   suggestions?: readonly DidHeuristicSuggestion[];
+  /** Ticket P4j-FIX1 H1 (binding): DIDs excluded from ranking for want of samples. */
+  insufficientDids?: readonly number[];
+  /** Ticket P4j-FIX1 M3 (binding): DIDs whose samples disagreed on length. */
+  inconsistentDids?: readonly number[];
   nowIso: string;
 }): DidSweepExportDocument {
   const observationSamples = input.observationSamples ?? [];
@@ -181,12 +220,14 @@ export function buildDidSweepExportDocument(input: {
 
   return {
     schemaVersion: DID_SWEEP_EXPORT_SCHEMA_VERSION,
+    schemaNote: DID_SWEEP_EXPORT_SCHEMA_NOTE,
     generatedAtUtc: input.nowIso,
     resumeBound: DID_SWEEP_RESUME_BOUND,
     run: {
       runId: input.run.runId,
       adapterType: input.run.adapterType,
       targetAddress: input.run.targetAddress === null ? null : hexByte(input.run.targetAddress),
+      targetAddressNumeric: input.run.targetAddress,
       rangeFromHex: didHex(input.run.rangeFrom),
       rangeToHex: didHex(input.run.rangeTo),
       lastDidHex: input.run.lastDid === null ? null : didHex(input.run.lastDid),
@@ -221,6 +262,7 @@ export function buildDidSweepExportDocument(input: {
       max: c.max,
       distinctValueCount: c.distinctValueCount,
       changedInPhase: c.changedInPhase,
+      phaseEvidence: c.phaseEvidence,
     })),
     blockCandidates: (input.blockCandidateSummaries ?? []).map((b) => ({
       didHex: didHex(b.did),
@@ -228,6 +270,7 @@ export function buildDidSweepExportDocument(input: {
       sampleCount: b.sampleCount,
       rank: b.rank,
       changedOffsetsByPhase: b.changedOffsetsByPhase,
+      phaseEvidence: b.phaseEvidence,
     })),
     observationSeries: [...seriesByKey.values()],
     suggestions: (input.suggestions ?? []).map((s) => ({
@@ -237,6 +280,8 @@ export function buildDidSweepExportDocument(input: {
       decode: s.decode,
       rationale: s.rationale,
     })),
+    observationInsufficientDidHex: [...(input.insufficientDids ?? [])].sort((a, b) => a - b).map(didHex),
+    inconsistentDidHex: [...(input.inconsistentDids ?? [])].sort((a, b) => a - b).map(didHex),
   };
 }
 
@@ -266,15 +311,60 @@ export async function buildDidSweepExportForRun(
   if (run === null) return null;
   const responders = await store.getResponders(runId);
   const snapshot = controller.getSnapshot();
+
+  // Ticket P4j-FIX1 H3 (binding, after Codex P4j-REV1 HIGH #3): the series and
+  // summaries come from the STORE, not only live memory. The pre-fix export
+  // read `controller.getGuidedSamples()` alone, so a kill/reopen (or simply
+  // starting a second observation, which reset the in-memory array) shared a
+  // run whose `observationSeries`, candidates, block offsets and `batchIndex`
+  // were all empty. Live memory is still preferred when it HAS something --
+  // it is strictly fresher than the last checkpoint mid-run.
+  const persistedSamples = await store.getObservationSamples(runId).catch(() => []);
+  const liveSamples = controller.getGuidedSamples();
+  const observationSamples: readonly DidPhaseSample[] =
+    liveSamples.length >= persistedSamples.length
+      ? liveSamples
+      : persistedSamples.map((row) => {
+          const phase = row.phase as DidObservationPhaseId;
+          return row.batchIndex === null
+            ? { did: row.did, phase, tMs: row.tMs, raw: hexToBytes(row.rawHex) }
+            : { did: row.did, phase, tMs: row.tMs, raw: hexToBytes(row.rawHex), batchIndex: row.batchIndex };
+        });
+
+  const persistedSummary = await readLatestObservationSummary(store, runId);
+  const useLiveSummary = snapshot.candidateSummaries.length > 0 || snapshot.blockCandidateSummaries.length > 0;
+
   return buildDidSweepExportDocument({
     run,
     responders,
-    candidateSummaries: snapshot.candidateSummaries,
-    blockCandidateSummaries: snapshot.blockCandidateSummaries,
-    observationSamples: controller.getGuidedSamples(),
+    candidateSummaries: useLiveSummary ? snapshot.candidateSummaries : persistedSummary?.candidates,
+    blockCandidateSummaries: useLiveSummary ? snapshot.blockCandidateSummaries : persistedSummary?.blockCandidates,
+    observationSamples,
     suggestions: snapshot.suggestions,
+    insufficientDids: useLiveSummary ? snapshot.observationInsufficientDids : persistedSummary?.insufficientDids,
+    inconsistentDids: useLiveSummary ? snapshot.inconsistentCandidateDids : persistedSummary?.inconsistentDids,
     nowIso,
   });
+}
+
+/** The shape `didSweepController.ts`'s `persistObservationSummary` writes (P4j-FIX1 H3). Read defensively -- a corrupt/older blob degrades to "no summary", never a throw. */
+interface PersistedObservationSummary {
+  candidates?: DidCandidateSummary[];
+  blockCandidates?: DidBlockCandidateSummary[];
+  insufficientDids?: number[];
+  inconsistentDids?: number[];
+}
+
+async function readLatestObservationSummary(store: DidSweepStore, runId: string): Promise<PersistedObservationSummary | null> {
+  try {
+    const summaries = await store.getObservationSummaries(runId);
+    const latest = summaries[summaries.length - 1];
+    if (latest === undefined) return null;
+    const parsed: unknown = JSON.parse(latest.summaryJson);
+    return typeof parsed === 'object' && parsed !== null ? (parsed as PersistedObservationSummary) : null;
+  } catch {
+    return null;
+  }
 }
 
 /** `trace-did-sweep-<date>.json`, `<date>` being the export's own `generatedAtUtc` truncated to `YYYY-MM-DD` (addendum's own exact filename pattern). */

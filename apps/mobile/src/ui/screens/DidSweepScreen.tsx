@@ -6,6 +6,7 @@ import {
   SimulatedEnetTransport,
   DEFAULT_ENET_DID_SCENARIO,
   DID_OBSERVATION_PHASES,
+  MAX_FOCUSED_SHORTLIST_SIZE,
   filterCandidatePool,
   type DidCandidateSummary,
   type ObdTransport,
@@ -18,7 +19,7 @@ import { facade, getTelemetryReadDb, settingsStore } from '../../session/composi
 import { useSettings } from '../hooks/useSettings';
 import { EnetTcpTransport } from '../../session/enetTcpTransport';
 import { formatHexByte, mergeEnetChannelSpecJson } from '../../session/enetSettingsValidation';
-import { createDidSweepController, type DidSweepSnapshot } from '../../session/didSweepController';
+import { createDidSweepController, parseFocusedDidList, type DidSweepSnapshot } from '../../session/didSweepController';
 import { createDidSweepStore, selectResumableRun, type DidSweepRunRecord } from '../../persistence/didSweepStore';
 import { buildDidSweepExportForRun, buildCopySummaryText, shareDidSweepExport } from '../../session/didSweepExport';
 
@@ -70,19 +71,27 @@ function formatOffsetRanges(offsets: readonly number[]): string {
 }
 
 /**
- * Ticket P4j (binding): "the user can tick candidates (or type DIDs)."
- * Parses a comma/whitespace-separated list of hex DIDs (each with an
- * optional `0x` prefix) -- invalid tokens are simply skipped (never blocks
- * the valid ones).
+ * Ticket P4j-FIX1 A3 / coordinator addendum (binding): "add a 'Shortlist
+ * presets' hook: the screen can prefill the shortlist from `data`-style
+ * presets ... keep it data, not logic."
+ *
+ * DATA, not logic: a plain, labelled list of DIDs the user may prefill the
+ * focused shortlist with in one tap. Every entry is an explicit HYPOTHESIS
+ * from the user's own field sweeps, never a claim of fact and never consulted
+ * by any decision path -- the vehicle-agnostic addendum (2026-08-28, binding)
+ * forbids brand-specific knowledge in generic modules, so this stays a
+ * screen-local constant with the make/model named in its own label and never
+ * leaks into the controller, the export, or a channel spec.
  */
-function parseTypedDidList(text: string): number[] {
-  const out: number[] = [];
-  for (const token of text.split(/[\s,]+/)) {
-    if (token.trim().length === 0) continue;
-    const parsed = parseHexRange(token);
-    if (parsed !== null) out.push(parsed);
-  }
-  return out;
+const SHORTLIST_PRESETS: readonly { label: string; dids: readonly number[] }[] = [
+  {
+    label: 'Supra B58 brake/accel (hypothesis)',
+    dids: [0x4a1d, 0x5892, 0x58b7, 0x4811, 0x4812, 0x4536, 0x4520, 0x4659],
+  },
+];
+
+function formatDidListDraft(dids: readonly number[]): string {
+  return dids.map((did) => did.toString(16).toUpperCase().padStart(4, '0')).join(', ');
 }
 
 /**
@@ -125,6 +134,10 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   // (or both) source the shortlist `startFocusedObservation` runs.
   const [selectedDids, setSelectedDids] = React.useState<ReadonlySet<number>>(new Set());
   const [focusedDidsDraft, setFocusedDidsDraft] = React.useState('');
+  // Ticket P4j-FIX1 M1 (binding): an invalid hex token (or a shortlist longer
+  // than the hard bound) is SHOWN, never silently dropped -- the pre-fix
+  // screen started a two-DID run for `1234,ZZZZ,5678` without a word.
+  const [focusedDidsError, setFocusedDidsError] = React.useState<string | null>(null);
   const [shareBanner, setShareBanner] = React.useState<string | null>(null);
   const [sharing, setSharing] = React.useState(false);
   // R1 fix (P4i-FIX2, binding, after Codex P4hrev3 H3 PARTIAL): "public
@@ -238,11 +251,14 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   React.useEffect(
     () => () => {
       // Unmount cleanup: stop() closes the transport and releases the
-      // reservation on every path (idempotent if already idle/stopped). Its
-      // returned promise (R1 fix, P4i-FIX2) is intentionally not awaited here
-      // -- a cleanup function cannot be async/await anything -- the write is
-      // still queued and will land (this is a dev-only screen; the unmount
-      // path is not the one this ticket's "Saving…" UI cue targets).
+      // reservation on every path (idempotent if already idle/stopped).
+      // Ticket P4j-FIX1 M2 (binding): that promise now settles only AFTER the
+      // socket closed and the reservation was released -- but a React cleanup
+      // function cannot be async, so this stays deliberately fire-and-forget
+      // WITH a `.catch` (the teardown itself starts synchronously inside
+      // `stop()`, so the release is not delayed by not awaiting it here; only
+      // the durable persistence checkpoint is unobserved, which is the
+      // documented residual for a dev-only screen's unmount path).
       // X1 fix (P4i-FIX3, binding): `stop()` can now REJECT on a failed
       // terminal flush -- caught here (never an unhandled rejection); there
       // is no screen left to show a banner on after unmount anyway.
@@ -378,9 +394,27 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   }
 
   function handleStartFocusedObservation(): void {
+    // M1 (binding): parse FIRST and refuse on any invalid token -- never a
+    // partially-honoured shortlist.
+    const parsed = parseFocusedDidList(focusedDidsDraft);
+    if (parsed.error !== null) {
+      setFocusedDidsError(parsed.error);
+      return;
+    }
     const shortlist = new Set<number>(selectedDids);
-    for (const did of parseTypedDidList(focusedDidsDraft)) shortlist.add(did);
+    for (const did of parsed.dids) shortlist.add(did);
+    if (shortlist.size > MAX_FOCUSED_SHORTLIST_SIZE) {
+      setFocusedDidsError(`Pick at most ${MAX_FOCUSED_SHORTLIST_SIZE} DIDs for a focused run (got ${shortlist.size}).`);
+      return;
+    }
+    setFocusedDidsError(null);
     controllerRef.current?.startFocusedObservation([...shortlist]);
+  }
+
+  /** A3 (binding, coordinator addendum): one-tap prefill from the {@link SHORTLIST_PRESETS} data table -- it only fills the text field, nothing is started. */
+  function applyShortlistPreset(dids: readonly number[]): void {
+    setFocusedDidsError(null);
+    setFocusedDidsDraft(formatDidListDraft(dids));
   }
 
   async function handleShareResults(): Promise<void> {
@@ -488,7 +522,7 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
               editable={canStart}
               autoCapitalize="characters"
               autoCorrect={false}
-              keyboardType="numbers-and-punctuation"
+              // M1 (binding, P4j-FIX1): the DEFAULT keyboard -- `numbers-and-punctuation` hides A-F on iOS, and every value here is HEX.
               accessibilityLabel="Sweep range start, hex DID"
             />
           </View>
@@ -503,7 +537,7 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
               editable={canStart}
               autoCapitalize="characters"
               autoCorrect={false}
-              keyboardType="numbers-and-punctuation"
+              // M1 (binding, P4j-FIX1): the DEFAULT keyboard -- `numbers-and-punctuation` hides A-F on iOS, and every value here is HEX.
               accessibilityLabel="Sweep range end, hex DID"
             />
           </View>
@@ -576,6 +610,23 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
                   <Pressable style={styles.buttonSecondary} onPress={() => void handlePause()} disabled={saving} accessibilityRole="button" accessibilityLabel="Pause sweep">
                     <Text style={styles.buttonSecondaryText} maxFontSizeMultiplier={1.3}>
                       Pause
+                    </Text>
+                  </Pressable>
+                ) : null}
+                {/* Ticket P4j-FIX1 M2 (binding): pause is now available DURING
+                    a batched observation too -- it takes effect at the next
+                    BATCH boundary (the running batch always finishes its own
+                    four phases, so no batch is left half-observed). */}
+                {observing && snapshot !== null && snapshot.batchTotal !== null ? (
+                  <Pressable
+                    style={styles.buttonSecondary}
+                    onPress={() => void handlePause()}
+                    disabled={saving}
+                    accessibilityRole="button"
+                    accessibilityLabel="Pause observation at the next batch"
+                  >
+                    <Text style={styles.buttonSecondaryText} maxFontSizeMultiplier={1.3}>
+                      Pause after this batch
                     </Text>
                   </Pressable>
                 ) : null}
@@ -754,8 +805,15 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
                   {/* F2 fix (binding, "show it"): the countdown uses the
                       ACTUAL (possibly auto-raised) duration, not the fixed
                       ~6s spec -- a large candidate set's phase can run far
-                      longer than 6s. */}
-                  {guidedPhaseSpec.prompt} — {Math.max(0, Math.ceil((snapshot.guidedPhaseDurationMs - snapshot.guidedPhaseElapsedMs) / 1_000))}s
+                      longer than 6s.
+                      Ticket P4j-FIX1 H1 (binding): the countdown keeps showing
+                      that NOMINAL window; when the phase runs past it to
+                      finish the per-DID sample guarantee it says "extending…"
+                      rather than silently stalling at 0s. */}
+                  {guidedPhaseSpec.prompt} —{' '}
+                  {snapshot.guidedPhaseExtending
+                    ? 'extending… (finishing the sample count)'
+                    : `${Math.max(0, Math.ceil((snapshot.guidedPhaseDurationMs - snapshot.guidedPhaseElapsedMs) / 1_000))}s`}
                 </Text>
                 <Pressable style={styles.buttonDanger} onPress={handleStopGuidedObservationEarly} accessibilityRole="button" accessibilityLabel="Stop guided observation now">
                   <Text style={styles.buttonDangerText} maxFontSizeMultiplier={1.3}>
@@ -815,6 +873,14 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
                     .join(', ') || 'no change observed'}{' '}
                   · {candidate.sampleCount} samples
                   {candidate.min !== null && candidate.max !== null ? ` · range ${candidate.min}-${candidate.max}` : ''}
+                  {/* Ticket P4j-FIX1 H2 (binding): an under-sampled phase says
+                      so -- a bare "no change observed" used to be
+                      indistinguishable from "never measured". */}
+                  {(['brake', 'steering', 'throttle'] as const).some((p) => candidate.phaseEvidence[p] === 'insufficient')
+                    ? ` · not enough samples in ${(['brake', 'steering', 'throttle'] as const)
+                        .filter((p) => candidate.phaseEvidence[p] === 'insufficient')
+                        .join(', ')}`
+                    : ''}
                 </Text>
                 {/* Ticket P4j (binding): "the user can tick candidates ...
                     -> one long guided cycle on the shortlist only." */}
@@ -894,7 +960,15 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
               BLOCK CANDIDATES ({activeBlockCandidates.length})
             </Text>
             {activeBlockCandidates.map((block) => {
-              const changedPhase = (['brake', 'steering', 'throttle'] as const).find((p) => block.changedOffsetsByPhase[p].length > 0);
+              // Ticket P4j-FIX1 M4 (binding, after Codex P4j-REV1 MEDIUM #4:
+              // "Multi-phase block offset reporting hides all but the first
+              // changed phase"): EVERY active phase with changed offsets is
+              // reported -- the pre-fix code picked the first one and showed
+              // "changed (several) · bytes 4-5 changed (brake)" while byte 9's
+              // throttle change stayed invisible.
+              const changedPhases = (['brake', 'steering', 'throttle'] as const).filter(
+                (p) => block.changedOffsetsByPhase[p].length > 0,
+              );
               const label =
                 block.rank === 'brakeCandidate'
                   ? 'BRAKE?'
@@ -909,10 +983,18 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
                     {formatHexDid(block.did)} · {block.length} bytes — {label}
                   </Text>
                   <Text style={styles.rationaleText} maxFontSizeMultiplier={1.3}>
-                    {changedPhase === undefined
-                      ? 'changed offsets in several phases'
-                      : `bytes ${formatOffsetRanges(block.changedOffsetsByPhase[changedPhase])} changed (${changedPhase})`}{' '}
+                    {changedPhases.length === 0
+                      ? 'no changed offsets'
+                      : changedPhases
+                          .map((p) => `bytes ${formatOffsetRanges(block.changedOffsetsByPhase[p])} changed (${p})`)
+                          .join(' · ')}{' '}
                     · {block.sampleCount} samples
+                    {/* H2 (binding): an under-sampled phase is reported as such, never as "nothing changed". */}
+                    {(['brake', 'steering', 'throttle'] as const).some((p) => block.phaseEvidence[p] === 'insufficient')
+                      ? ` · not enough samples in ${(['brake', 'steering', 'throttle'] as const)
+                          .filter((p) => block.phaseEvidence[p] === 'insufficient')
+                          .join(', ')}`
+                      : ''}
                   </Text>
                   <Pressable
                     style={styles.presetChip}
@@ -939,8 +1021,27 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
               FOCUSED OBSERVATION
             </Text>
             <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
-              {selectedDids.size} selected. Type extra DIDs (hex, comma/space-separated) to add them even if not discovered yet.
+              {selectedDids.size} selected, max {MAX_FOCUSED_SHORTLIST_SIZE}. Type extra DIDs (hex, comma/space-separated) —
+              a DID the sweep never saw is read directly; an NRC answer shows as "no response".
             </Text>
+            {/* A3 (binding, coordinator addendum): "Shortlist presets" -- pure
+                data (see SHORTLIST_PRESETS), one tap prefills the field. */}
+            <View style={styles.presetRow}>
+              {SHORTLIST_PRESETS.map((preset) => (
+                <Pressable
+                  key={preset.label}
+                  style={styles.presetChip}
+                  onPress={() => applyShortlistPreset(preset.dids)}
+                  disabled={observing}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Prefill the shortlist with the ${preset.label} preset`}
+                >
+                  <Text style={styles.presetChipText} maxFontSizeMultiplier={1.3}>
+                    {preset.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
             <View style={styles.fieldRow}>
               <Text style={styles.fieldLabel} maxFontSizeMultiplier={1.3}>
                 DIDs (hex)
@@ -948,19 +1049,29 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
               <TextInput
                 style={styles.fieldInput}
                 value={focusedDidsDraft}
-                onChangeText={setFocusedDidsDraft}
+                onChangeText={(text) => {
+                  setFocusedDidsDraft(text);
+                  setFocusedDidsError(null);
+                }}
                 editable={!observing}
                 autoCapitalize="characters"
                 autoCorrect={false}
-                keyboardType="numbers-and-punctuation"
+                // M1 (binding): the DEFAULT keyboard -- `numbers-and-punctuation`
+                // does not expose A-F on iOS, so half of every hex DID was
+                // untypeable on the device this screen exists for.
                 accessibilityLabel="Typed DIDs for focused observation, hex, comma or space separated"
               />
             </View>
+            {focusedDidsError === null ? null : (
+              <Text style={styles.errorBanner} maxFontSizeMultiplier={1.3} accessibilityLiveRegion="polite">
+                {focusedDidsError}
+              </Text>
+            )}
             {(phase === 'sweepComplete' || phase === 'stopped' || phase === 'observationComplete') && !observing ? (
               <Pressable
                 style={styles.buttonSecondary}
                 onPress={handleStartFocusedObservation}
-                disabled={selectedDids.size === 0 && parseTypedDidList(focusedDidsDraft).length === 0}
+                disabled={selectedDids.size === 0 && focusedDidsDraft.trim().length === 0}
                 accessibilityRole="button"
                 accessibilityLabel="Start focused observation on the shortlist"
               >
@@ -969,6 +1080,24 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
                 </Text>
               </Pressable>
             ) : null}
+            {/* H1 + coordinator addendum (binding): DIDs that never produced
+                enough (or any) positive samples are REPORTED, never silently
+                absent from the ranking. */}
+            {snapshot.observationNoResponseDids.length === 0 ? null : (
+              <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                No response: {snapshot.observationNoResponseDids.map(formatHexDid).join(', ')}
+              </Text>
+            )}
+            {snapshot.observationInsufficientDids.length === 0 ? null : (
+              <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                Not enough samples to judge: {snapshot.observationInsufficientDids.map(formatHexDid).join(', ')}
+              </Text>
+            )}
+            {snapshot.inconsistentCandidateDids.length === 0 ? null : (
+              <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                Inconsistent response length (not ranked): {snapshot.inconsistentCandidateDids.map(formatHexDid).join(', ')}
+              </Text>
+            )}
           </View>
         )}
 
@@ -1182,4 +1311,7 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
   },
   presetChipText: { ...typography.caption, color: colors.textSecondary },
+  // A3 (binding, coordinator addendum): the shortlist-preset chip row -- wraps
+  // rather than clipping at 360pt / 1.3x (the preset labels are long).
+  presetRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
 });
