@@ -86,6 +86,14 @@ export interface SignalFinderScreenStrings {
   bannerJsonShared: string;
   bannerSharingUnavailable: string;
   bannerProfileShared: string;
+  /** P4m-FIX2 Y7: the reservation refusal — `signalFinderController`'s `'adapter-busy'` code. */
+  errorAdapterBusy: string;
+  /** P4m-FIX2 Y7: the catalog has no such target — the `'no-target'` code. */
+  errorNoTarget: string;
+  /** P4m-FIX2 Y7: any other runtime failure. A localized line PLUS the raw message in parentheses — the driver reads his own language, the developer still gets the real text. */
+  errorUnknown: (raw: string) => string;
+  /** P4m-FIX2 Y7: a share that reported its own error string (also raw, also parenthesised). */
+  bannerShareFailed: (raw: string) => string;
 }
 
 const EN: SignalFinderScreenStrings = {
@@ -154,6 +162,10 @@ const EN: SignalFinderScreenStrings = {
   bannerJsonShared: 'JSON shared.',
   bannerSharingUnavailable: 'Sharing is unavailable on this platform (the files were still built).',
   bannerProfileShared: 'Vehicle profile shared.',
+  errorAdapterBusy: 'The adapter is in use (telemetry, the DID probe or a sweep) — stop that first.',
+  errorNoTarget: 'This target is not defined for the selected vehicle profile.',
+  errorUnknown: (raw) => `The find could not be completed (${raw})`,
+  bannerShareFailed: (raw) => `Sharing failed (${raw})`,
 };
 
 const RO: SignalFinderScreenStrings = {
@@ -222,6 +234,10 @@ const RO: SignalFinderScreenStrings = {
   bannerJsonShared: 'JSON partajat.',
   bannerSharingUnavailable: 'Partajarea nu este disponibilă pe această platformă (fișierele au fost totuși create).',
   bannerProfileShared: 'Profilul vehiculului a fost partajat.',
+  errorAdapterBusy: 'Adaptorul este folosit (telemetrie, sonda DID sau o scanare) — oprește-l întâi.',
+  errorNoTarget: 'Această țintă nu este definită pentru profilul de vehicul selectat.',
+  errorUnknown: (raw) => `Căutarea nu a putut fi finalizată (${raw})`,
+  bannerShareFailed: (raw) => `Partajarea a eșuat (${raw})`,
 };
 
 export const SIGNAL_FINDER_SCREEN_STRINGS: Readonly<Record<SignalFinderUiLanguage, SignalFinderScreenStrings>> = {
@@ -232,4 +248,29 @@ export const SIGNAL_FINDER_SCREEN_STRINGS: Readonly<Record<SignalFinderUiLanguag
 /** The table for the app's language setting; anything other than `'ro'` reads English. */
 export function resolveSignalFinderScreenStrings(language: string | null | undefined): SignalFinderScreenStrings {
   return language === 'ro' ? RO : EN;
+}
+
+/**
+ * P4m-FIX2 Y7 (binding, Codex P4m-REV2 finding 9): the controller's error CODE
+ * rendered in the driver's own language. The raw `error` text stays what it
+ * always was — an English/underlying message the export and the logs keep —
+ * and an unrecognised failure gets the generic localized line WITH that raw
+ * text in parentheses, so nothing is hidden from whoever has to debug it.
+ *
+ * A plain function of its two arguments (no React, no controller): the screen
+ * calls it, and `signalFinderStrings.test.ts` pins it directly.
+ */
+export function signalFinderErrorMessage(
+  snapshot: { errorCode: 'adapter-busy' | 'no-target' | 'run-failed' | null; error: string | null },
+  strings: SignalFinderScreenStrings,
+): string | null {
+  if (snapshot.errorCode === null && snapshot.error === null) return null;
+  switch (snapshot.errorCode) {
+    case 'adapter-busy':
+      return strings.errorAdapterBusy;
+    case 'no-target':
+      return strings.errorNoTarget;
+    default:
+      return strings.errorUnknown(snapshot.error ?? '');
+  }
 }

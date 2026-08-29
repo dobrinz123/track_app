@@ -158,3 +158,50 @@ describe('planFinderRun (item 10) -- one round, every ECU, hypotheses FIRST', ()
     expect(planFinderRun(15, [], [], []).notRead).toEqual([]);
   });
 });
+
+/**
+ * Ticket P4m-FIX2 Y2 (Codex P4m-REV2 finding 12, HIGH): "an ECU that answers
+ * one probe request and then goes silent -- or has one answering DID plus many
+ * silent DIDs -- can produce a fast measured rate and retain every DID; 11
+ * retained DIDs can then consume 11 x 3 x 300 ms = 9.9 s".
+ *
+ * So the plan drops INDIVIDUAL silent DIDs too, not only wholly silent ECUs --
+ * except a HYPOTHESIS, which is the whole reason the find exists and is worth
+ * one retry inside the script.
+ */
+describe('planFinderRun -- individually silent DIDs (P4m-FIX2 Y2)', () => {
+  it('drops a DID that missed the probe, keeps a silent HYPOTHESIS for one retry, and refills the budget', () => {
+    const hypotheses = [entry(0x12, 0x4002)];
+    const cached = Array.from({ length: 12 }, (_v, i) => entry(0x12, 0x5000 + i));
+    const plan = planFinderRun(15, hypotheses, [], cached, {
+      budget: 4,
+      // The probe answered on 0x5000 only: the hypothesis and 0x5001..0x5003 missed.
+      silentDids: [entry(0x12, 0x4002), entry(0x12, 0x5001), entry(0x12, 0x5002), entry(0x12, 0x5003)],
+    });
+    // The hypothesis stays (one retry), the three silent cached DIDs are out,
+    // and the freed budget is refilled from the pool behind them.
+    expect(pairs(plan.dids)).toEqual([
+      [0x12, 0x4002],
+      [0x12, 0x5000],
+      [0x12, 0x5004],
+      [0x12, 0x5005],
+    ]);
+    expect(pairs(plan.silent)).toEqual([
+      [0x12, 0x5001],
+      [0x12, 0x5002],
+      [0x12, 0x5003],
+    ]);
+    // Nothing vanished.
+    expect(plan.dids.length + plan.silent.length + plan.notRead.length).toBe(13);
+  });
+
+  it('a silent ECU still drops everything on it, hypotheses included (P4m-FIX1 X2 is unchanged)', () => {
+    const plan = planFinderRun(15, [entry(0x29, 0x500c)], [], [entry(0x12, 0x2000)], {
+      budget: 4,
+      silentEcus: [0x29],
+      silentDids: [entry(0x29, 0x500c)],
+    });
+    expect(pairs(plan.silent)).toEqual([[0x29, 0x500c]]);
+    expect(pairs(plan.dids)).toEqual([[0x12, 0x2000]]);
+  });
+});

@@ -6,6 +6,7 @@ import {
   DEFAULT_ENET_DID_SCENARIO,
   SIGNAL_TARGET_CATALOGS,
   resolveSignalTargetCatalog,
+  resolveSignalTargetCatalogLabel,
   resolveSignalTargetLabel,
   type ObdTransport,
   type SignalCandidateScore,
@@ -20,7 +21,7 @@ import { useSettings } from '../hooks/useSettings';
 import { EnetTcpTransport } from '../../session/enetTcpTransport';
 import { createDidSweepStore, createVehicleProfileBindingStore, type VehicleProfileBinding } from '../../persistence/didSweepStore';
 import { createSignalFinderController, type SignalFinderSnapshot } from '../../session/signalFinderController';
-import { resolveSignalFinderScreenStrings, type SignalFinderScreenStrings } from './signalFinderStrings';
+import { resolveSignalFinderScreenStrings, signalFinderErrorMessage, type SignalFinderScreenStrings } from './signalFinderStrings';
 import {
   buildSignalFinderExportDocument,
   buildSignalFinderSummaryMarkdown,
@@ -274,12 +275,16 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
     setSharing(true);
     try {
       const result = kind === 'summary' ? await shareSignalFinderExport(doc, settings.language) : await shareSignalFinderJson(doc);
+      // P4m-FIX2 Y7: a share error is a RAW platform string -- shown inside a
+      // localized line, never as the whole banner.
       setBanner(
         result.shared
           ? kind === 'summary'
             ? strings.bannerSummaryShared
             : strings.bannerJsonShared
-          : result.error ?? strings.bannerSharingUnavailable,
+          : result.error === undefined
+            ? strings.bannerSharingUnavailable
+            : strings.bannerShareFailed(result.error),
       );
     } finally {
       setSharing(false);
@@ -298,7 +303,13 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
     try {
       const doc = buildVehicleProfileDocument(profileId, bindings, new Date().toISOString());
       const result = await shareVehicleProfileExport(doc);
-      setBanner(result.shared ? strings.bannerProfileShared : result.error ?? strings.bannerSharingUnavailable);
+      setBanner(
+        result.shared
+          ? strings.bannerProfileShared
+          : result.error === undefined
+            ? strings.bannerSharingUnavailable
+            : strings.bannerShareFailed(result.error),
+      );
     } finally {
       setSharing(false);
     }
@@ -330,13 +341,20 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
                 disabled={busy}
                 onPress={() => setProfileId(entry.profileId)}
                 accessibilityRole="button"
-                accessibilityLabel={strings.useProfile(entry.label)}
+                accessibilityLabel={strings.useProfile(resolveSignalTargetCatalogLabel(entry, settings.language))}
               >
-                <Text style={entry.profileId === profileId ? styles.chipTextActive : styles.chipText}>{entry.label}</Text>
+                {/* P4m-FIX2 Y7: a PROFILE NAME is catalog data, so it is
+                    resolved per language like every target name -- the chips
+                    were the last English left on an RO screen. */}
+                <Text style={entry.profileId === profileId ? styles.chipTextActive : styles.chipText}>
+                  {resolveSignalTargetCatalogLabel(entry, settings.language)}
+                </Text>
               </Pressable>
             ))}
           </View>
-          <Text style={styles.caption}>{catalog.label} ({catalog.profileId})</Text>
+          <Text style={styles.caption}>
+            {resolveSignalTargetCatalogLabel(catalog, settings.language)} ({catalog.profileId})
+          </Text>
           <Pressable
             style={[styles.secondaryButton, sharing || bindings.length === 0 ? styles.buttonDisabled : null]}
             disabled={sharing || bindings.length === 0}
@@ -402,7 +420,12 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
           </Pressable>
         ) : null}
 
-        {snapshot !== null && snapshot.error !== null ? <Text style={styles.error}>{snapshot.error}</Text> : null}
+        {/* P4m-FIX2 Y7: the controller's raw message never reaches the driver —
+            its CODE selects a localized line, with the raw text in parentheses
+            when nothing more specific is known. */}
+        {snapshot !== null && snapshot.error !== null ? (
+          <Text style={styles.error}>{signalFinderErrorMessage(snapshot, strings)}</Text>
+        ) : null}
 
         {snapshot !== null && snapshot.phase === 'result' ? (
           <View style={styles.section}>

@@ -66,6 +66,18 @@ export interface PlanFinderRunOptions extends FinderBudgetOptions {
    * either, because the honest reason is known: the ECU is silent.
    */
   silentEcus?: readonly number[];
+  /**
+   * P4m-FIX2 Y2 (Codex P4m-REV2 finding 12, HIGH): INDIVIDUAL `(ecu, did)`
+   * entries the probe attempted and got nothing from, on ECUs that are alive.
+   * "An ECU that answers one probe request ... or has one answering DID plus
+   * many silent DIDs ... can retain every DID; 11 retained DIDs can then
+   * consume `11 × 3 × 300 ms = 9.9 s`" — of a ~21 s script the driver is
+   * physically performing. They go to {@link FinderRunPlan.silent} with that
+   * reason, EXCEPT a hypothesis: the target's own hypotheses are the whole
+   * point of the find and are worth one retry inside the script (a single
+   * dropped frame during a 300 ms probe attempt is not proof of anything).
+   */
+  silentDids?: readonly SignalFinderTargetRef[];
 }
 
 export interface FinderRunPlan {
@@ -160,8 +172,12 @@ export function planFinderRun(
   const notRead: SignalFinderPlanEntry[] = [];
   const silent: SignalFinderPlanEntry[] = [];
   const silentEcus = new Set(options.silentEcus ?? []);
+  const silentDids = new Set((options.silentDids ?? []).map(key));
   for (const entry of ordered) {
-    if (silentEcus.has(entry.ecu)) {
+    // Y2: a silent ECU drops everything on it (X2, hypotheses included -- the
+    // ECU is not on this bus); a silent individual DID drops unless it is a
+    // hypothesis, which gets its one retry.
+    if (silentEcus.has(entry.ecu) || (silentDids.has(key(entry)) && entry.source !== 'hypothesis')) {
       silent.push(entry);
     } else if (dids.length < budget) {
       dids.push(entry);

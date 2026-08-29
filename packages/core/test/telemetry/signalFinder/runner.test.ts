@@ -210,7 +210,7 @@ describe('runFinderRound -- the probe (X1)', () => {
     });
     expect(log.requests).toHaveLength(2);
     expect(result.answeredCount).toBe(2);
-    const summary = summarizeFinderProbe(result, [0x12], 15.8);
+    const summary = summarizeFinderProbe(result, [{ ecu: 0x12, did: 0x4002 }, { ecu: 0x12, did: 0x4007 }], 15.8);
     expect(summary.rateSource).toBe('measured');
     expect(summary.reqPerSec).toBeGreaterThan(0);
     expect(summary.silentEcus).toEqual([]);
@@ -231,7 +231,7 @@ describe('runFinderRound -- the probe (X1)', () => {
       requestTimeoutMs: REQUEST_TIMEOUT_MS,
       maxPasses: 1,
     });
-    const summary = summarizeFinderProbe(result, [0x12, 0x29], 15.8);
+    const summary = summarizeFinderProbe(result, [{ ecu: 0x12, did: 0x4002 }, { ecu: 0x29, did: 0x500c }], 15.8);
     expect(summary.rateSource).toBe('assumed');
     expect(summary.reqPerSec).toBe(15.8);
     expect(summary.measuredReqPerSec).toBeNull();
@@ -253,9 +253,185 @@ describe('runFinderRound -- the probe (X1)', () => {
       requestTimeoutMs: REQUEST_TIMEOUT_MS,
       maxPasses: 1,
     });
-    const summary = summarizeFinderProbe(result, [0x12, 0x29], 15.8);
+    const summary = summarizeFinderProbe(result, [{ ecu: 0x12, did: 0x4002 }, { ecu: 0x29, did: 0x500c }], 15.8);
     expect(summary.silentEcus).toEqual([0x29]);
     expect(summary.liveEcus).toEqual([0x12]);
     expect(summary.rateSource).toBe('measured');
+  });
+});
+
+/**
+ * Ticket P4m-FIX2 (Codex P4m-REV2 findings 11–14, 2 HIGH + 2 MEDIUM).
+ *
+ *  Y1 (H11) The probe is "one attempted request per planned (ecu,did)", NOT a
+ *      2 s deadline: a slow first ECU must never leave later ECUs unattempted,
+ *      and an ECU is `silent` only when EVERY one of its probe attempts was
+ *      actually made and missed.
+ *  Y2 (H12) The measured rate INCLUDES timeout cost (attempts / wall time),
+ *      and the probe reports the individual DIDs that missed.
+ *  Y3 (M13) Back-off is a bounded cooldown for the CURRENT evidence window,
+ *      retried once at the start of every following window.
+ *  Y4 (M14) `attempted`/`requestCount` are recorded only after `send()`
+ *      actually resolved.
+ *  Y8 (LOW) One pass over the entries takes at least `entries / targetHz`.
+ */
+describe('runFinderRound -- P4m-FIX2 probe completeness, honest rate, bounded cooldown, confirmed sends, pacing', () => {
+  it('Y1: the probe attempts EVERY planned entry even when the first ECU times out on all of its DIDs', async () => {
+    const { channels, log } = harness((ecu) => (ecu === 0x12 ? 'silent' : Uint8Array.from([0x01])), [0x12, 0x29, 0x30]);
+    const entries = [
+      { ecu: 0x12, did: 0x4001 },
+      { ecu: 0x12, did: 0x4002 },
+      { ecu: 0x12, did: 0x4003 },
+      { ecu: 0x12, did: 0x4004 },
+      { ecu: 0x29, did: 0x500c },
+      { ecu: 0x30, did: 0x6001 },
+    ];
+    const result = await runFinderRound({
+      entries,
+      channels,
+      clock: CLOCK,
+      control: { paused: false, stopped: false },
+      // Deliberately far SHORTER than one pass costs (4 x 40 ms of timeouts):
+      // the probe's bound is the entry count, never this deadline.
+      durationMs: 10,
+      requestTimeoutMs: REQUEST_TIMEOUT_MS,
+      maxPasses: 1,
+      completePass: true,
+    });
+    expect(result.attempted).toEqual(entries);
+    expect(log.requests).toHaveLength(entries.length);
+    const summary = summarizeFinderProbe(result, entries, 15.8);
+    expect(summary.silentEcus).toEqual([0x12]);
+    expect(summary.liveEcus).toEqual([0x29, 0x30]);
+    expect(summary.unprobedEcus).toEqual([]);
+  });
+
+  it('Y1: an ECU whose entries were never attempted is UNPROBED -- never classified silent', async () => {
+    const control = { paused: false, stopped: false };
+    const { channels } = harness((ecu, did) => {
+      if (ecu === 0x12 && did === 0x4002) control.stopped = true; // stop before 0x29 is ever asked.
+      return 'silent';
+    }, [0x12, 0x29]);
+    const entries = [
+      { ecu: 0x12, did: 0x4002 },
+      { ecu: 0x29, did: 0x500c },
+    ];
+    const result = await runFinderRound({
+      entries,
+      channels,
+      clock: CLOCK,
+      control,
+      durationMs: 1_000,
+      requestTimeoutMs: REQUEST_TIMEOUT_MS,
+      maxPasses: 1,
+      completePass: true,
+    });
+    const summary = summarizeFinderProbe(result, entries, 15.8);
+    expect(summary.silentEcus).toEqual([0x12]);
+    expect(summary.unprobedEcus).toEqual([0x29]);
+  });
+
+  it('Y2: the measured rate INCLUDES the timeout cost of the misses, and the missed DIDs are named', async () => {
+    const { channels } = harness((_ecu, did) => (did === 0x4002 ? Uint8Array.from([0x01]) : 'silent'), [0x12]);
+    const entries = [
+      { ecu: 0x12, did: 0x4002 },
+      { ecu: 0x12, did: 0x4003 },
+      { ecu: 0x12, did: 0x4004 },
+      { ecu: 0x12, did: 0x4005 },
+    ];
+    const result = await runFinderRound({
+      entries,
+      channels,
+      clock: CLOCK,
+      control: { paused: false, stopped: false },
+      durationMs: 10,
+      requestTimeoutMs: REQUEST_TIMEOUT_MS,
+      maxPasses: 1,
+      completePass: true,
+    });
+    const summary = summarizeFinderProbe(result, entries, 15.8);
+    expect(summary.rateSource).toBe('measured');
+    // 4 attempts over ~120 ms of wall time is ~33 req/s -- the answered-only
+    // denominator would have reported four figures.
+    expect(summary.measuredReqPerSec).toBeLessThan(100);
+    expect(summary.silentDids).toEqual([
+      { ecu: 0x12, did: 0x4003 },
+      { ecu: 0x12, did: 0x4004 },
+      { ecu: 0x12, did: 0x4005 },
+    ]);
+    expect(summary.silentEcus).toEqual([]); // one answering DID keeps the ECU.
+  });
+
+  it('Y3: a back-off is a COOLDOWN for the current evidence window -- a recovering DID samples again', async () => {
+    let silent = true;
+    setTimeout(() => {
+      silent = false;
+    }, 150);
+    const { channels } = harness(() => (silent ? 'silent' : Uint8Array.from([0x07])), [0x12]);
+    const result = await runFinderRound({
+      entries: [{ ecu: 0x12, did: 0x4002 }],
+      channels,
+      clock: CLOCK,
+      control: { paused: false, stopped: false },
+      durationMs: 600,
+      requestTimeoutMs: 10,
+      windowMs: 100,
+      missesBeforeBackoff: 3,
+    });
+    // Build 7 removed the DID for the whole round after 3 misses, so every
+    // later window was empty and the scorer said `insufficient`.
+    expect(result.samples.length).toBeGreaterThan(0);
+    expect(Math.max(...result.samples.map((s) => s.tMs))).toBeGreaterThan(150);
+    expect(result.respondingEcus).toEqual([0x12]);
+  });
+
+  it('Y4: a send that throws leaves the key UNATTEMPTED and uncounted', async () => {
+    const channels = new Map<number, SweepTransport>([
+      [
+        0x12,
+        {
+          send(): Promise<void> {
+            throw new Error('socket gone');
+          },
+          nextResponse(): Promise<Uint8Array | 'timeout'> {
+            return Promise.resolve('timeout');
+          },
+          async keepAlive(): Promise<void> {},
+        },
+      ],
+    ]);
+    const result = await runFinderRound({
+      entries: [{ ecu: 0x12, did: 0x4002 }],
+      channels,
+      clock: CLOCK,
+      control: { paused: false, stopped: false },
+      durationMs: 200,
+      requestTimeoutMs: REQUEST_TIMEOUT_MS,
+    });
+    expect(result.attempted).toEqual([]);
+    expect(result.requestCount).toBe(0);
+  });
+
+  it('Y8: the round is PACED to the planned rate -- an instant channel never turns into a hot loop', async () => {
+    const { channels, log } = harness(() => Uint8Array.from([0x01]), [0x12]);
+    const entries = [
+      { ecu: 0x12, did: 0x4002 },
+      { ecu: 0x12, did: 0x4003 },
+      { ecu: 0x12, did: 0x4004 },
+      { ecu: 0x12, did: 0x4005 },
+    ];
+    const targetHz = 20;
+    const result = await runFinderRound({
+      entries,
+      channels,
+      clock: CLOCK,
+      control: { paused: false, stopped: false },
+      durationMs: 500,
+      requestTimeoutMs: REQUEST_TIMEOUT_MS,
+      targetReqPerSec: targetHz,
+    });
+    const perSecond = (log.requests.length * 1_000) / Math.max(1, result.elapsedMs);
+    expect(perSecond).toBeLessThanOrEqual(targetHz * 1.2);
+    expect(log.requests.length).toBeGreaterThan(0);
   });
 });

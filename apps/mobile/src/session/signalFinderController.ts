@@ -98,6 +98,23 @@ const TICK_INTERVAL_MS = 100;
 
 const RESERVATION_BUSY_MESSAGE = 'The adapter is in use (telemetry, the DID probe or a sweep) -- stop it first.';
 
+/**
+ * P4m-FIX2 Y6 (Codex P4m-REV2 finding 16): a `close()` that never resolves used
+ * to block BOTH `stop()` and the reservation release, because it was awaited
+ * without a bound before `release()`. Two seconds is generous for a socket
+ * teardown and short enough that a driver tapping Stop is never left waiting on
+ * a dead adapter.
+ */
+const DEFAULT_CLOSE_TIMEOUT_MS = 2_000;
+
+/**
+ * P4m-FIX2 Y7 (Codex P4m-REV2 finding 9): WHY a find failed, as a code the
+ * screen can translate. {@link SignalFinderSnapshot.error} keeps the raw
+ * English/underlying text for developers and the export; the driver reads the
+ * localized line the code selects.
+ */
+export type SignalFinderErrorCode = 'adapter-busy' | 'no-target' | 'run-failed';
+
 /** Ranks a previous observation gives a DID that did NOT change (or could not be judged) — never treated as change evidence (item 10b). */
 const NON_CHANGE_RANKS: ReadonlySet<string> = new Set(['static', 'insufficient']);
 
@@ -173,8 +190,10 @@ export interface SignalFinderSnapshot {
    * on an adapter nobody timed.
    */
   rateSource: FinderRateSource;
-  /** Non-null exactly when something went wrong; never thrown across this API. */
+  /** Non-null exactly when something went wrong; never thrown across this API. The RAW text — the screen renders {@link errorCode}'s localized line instead. */
   error: string | null;
+  /** P4m-FIX2 Y7: what KIND of failure {@link error} is, so the screen can say it in the driver's own language. */
+  errorCode: SignalFinderErrorCode | null;
 }
 
 export interface SignalFinderControllerDeps {
@@ -203,6 +222,8 @@ export interface SignalFinderControllerDeps {
   maxDidsPerRound?: number;
   /** The measured request rate to size the budget from. Default {@link ASSUMED_GUIDED_REQ_PER_SEC}. */
   measuredReqPerSec?: number;
+  /** P4m-FIX2 Y6: how long a `close()` may take before the transport is aborted. Default {@link DEFAULT_CLOSE_TIMEOUT_MS} (2 s). */
+  closeTimeoutMs?: number;
 }
 
 export interface SignalFinderController {
@@ -358,6 +379,7 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     measuredReqPerSec: assumedReqPerSec,
     rateSource: 'assumed',
     error: null,
+    errorCode: null,
   };
 
   let samples: SignalFinderSample[] = [];
@@ -422,15 +444,53 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     tickTimer = setInterval(tick, TICK_INTERVAL_MS);
   }
 
+  /**
+   * P4m-FIX2 Y6 (Codex P4m-REV2 finding 16, MEDIUM): "normal success, connect
+   * failure, runner error and stop all call `close()`, but an indefinitely
+   * pending `close()` blocks BOTH `stop()` and the reservation release because
+   * it is awaited without a bound".
+   *
+   * So the close is raced against {@link DEFAULT_CLOSE_TIMEOUT_MS}, and on the
+   * timeout the transport is aborted/destroyed if it offers that (the ENet TCP
+   * transport destroys its socket inside `close()`; a hung implementation that
+   * exposes `destroy()`/`abort()` gets one). Either way this resolves, and the
+   * caller's nested `finally` releases the reservation.
+   */
   async function teardownTransport(): Promise<void> {
     const transport = activeTransport;
     if (transport === null) return;
     activeTransport = null;
+    const closeTimeoutMs =
+      deps.closeTimeoutMs !== undefined && Number.isFinite(deps.closeTimeoutMs) && deps.closeTimeoutMs > 0
+        ? deps.closeTimeoutMs
+        : DEFAULT_CLOSE_TIMEOUT_MS;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const bounded = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        const abortable = transport as ObdTransport & { destroy?: () => void; abort?: () => void };
+        try {
+          if (typeof abortable.destroy === 'function') abortable.destroy();
+          else if (typeof abortable.abort === 'function') abortable.abort();
+        } catch {
+          // The fallback is best effort: a transport that cannot even be
+          // destroyed must still not hold the reservation hostage.
+        }
+        resolve();
+      }, closeTimeoutMs);
+    });
     try {
-      await transport.close();
-    } catch {
-      // A transport that fails to close is already gone as far as we care --
-      // never let it block the reservation release below.
+      await Promise.race([
+        (async (): Promise<void> => {
+          try {
+            await transport.close();
+          } catch {
+            // A transport that fails to close is already gone as far as we care.
+          }
+        })(),
+        bounded,
+      ]);
+    } finally {
+      if (timer !== null) clearTimeout(timer);
     }
   }
 
@@ -540,12 +600,21 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     return `${entry.ecu}:${entry.did}`;
   }
 
-  /** One slice of the eligible pools at `reqPerSec`, minus what earlier rounds read and minus the ECUs the probe found silent. */
-  function planRound(reqPerSec: number, silentEcus: readonly number[]): FinderRunPlan {
+  /**
+   * One slice of the eligible pools at `reqPerSec`, minus what earlier rounds
+   * read, minus the ECUs the probe found silent and (P4m-FIX2 Y2) minus the
+   * INDIVIDUAL DIDs it attempted and got nothing from.
+   */
+  function planRound(
+    reqPerSec: number,
+    silentEcus: readonly number[],
+    silentDids: readonly SignalFinderTargetRef[] = [],
+  ): FinderRunPlan {
     return planFinderRun(reqPerSec, currentPools.hypotheses, currentPools.changed, currentPools.cached, {
       budget: budgetFor(reqPerSec),
       exclude: readEntries,
       silentEcus,
+      silentDids,
     });
   }
 
@@ -589,6 +658,7 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         step: null,
         nextStep: null,
         error: null,
+        errorCode: null,
         timeline,
       });
 
@@ -611,6 +681,11 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         return;
       }
 
+      // Y5 (Codex P4m-REV2 finding 15): the LAST gate before anything is
+      // acquired or connected. A stop that landed while the pools were being
+      // collected must never be followed by a reservation or a socket.
+      if (myGeneration !== generation || control.stopped) return;
+
       token = reservation.tryAcquire('signalFinder');
       if (token === null && reservation.isReleasePending()) {
         // A prior holder's close+release is already in flight -- wait it out
@@ -620,7 +695,7 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         token = reservation.tryAcquire('signalFinder');
       }
       if (token === null) {
-        emit({ phase: 'error', error: RESERVATION_BUSY_MESSAGE, step: null });
+        emit({ phase: 'error', error: RESERVATION_BUSY_MESSAGE, errorCode: 'adapter-busy', step: null });
         return;
       }
 
@@ -634,6 +709,7 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
       let attempted: readonly SignalFinderTargetRef[] = [];
       let scriptStarted = false;
 
+      if (myGeneration !== generation || control.stopped) return; // Y5, again: nothing is opened after a stop.
       const transport = deps.transportFactory();
       activeTransport = transport;
       try {
@@ -641,7 +717,10 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         if (myGeneration !== generation || control.stopped) return;
         const channels = createEcuChannels(transport, deps.testerAddress, provisional.dids.map((entry) => entry.ecu));
 
-        // X1: MEASURE. One pass over the planned DIDs, capped at ~2 s.
+        // X1: MEASURE. P4m-FIX2 Y1: ONE ATTEMPT PER PLANNED ENTRY -- not a 2 s
+        // deadline. A first ECU that times out on all of its DIDs used to leave
+        // the ECUs behind it unattempted while the summary still called them
+        // silent; the per-DID timeout bounds this at entries x 300 ms instead.
         const probe = await runFinderRound({
           entries: provisional.dids,
           channels,
@@ -650,18 +729,17 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
           durationMs: FINDER_PROBE_DURATION_MS,
           requestTimeoutMs,
           maxPasses: 1,
+          completePass: true,
         });
-        const summary = summarizeFinderProbe(
-          probe,
-          provisional.dids.map((entry) => entry.ecu),
-          assumedReqPerSec,
-        );
+        const summary = summarizeFinderProbe(probe, provisional.dids, assumedReqPerSec);
         emit({ measuredReqPerSec: summary.reqPerSec, rateSource: summary.rateSource });
         if (myGeneration !== generation || control.stopped) return;
 
-        // X2: re-plan at the measured rate, without the silent ECUs -- the
-        // budget they were consuming is refilled from the next pool.
-        plan = planRound(summary.reqPerSec, summary.silentEcus);
+        // X2 + Y2: re-plan at the measured rate (which now INCLUDES the probe's
+        // own timeout cost), without the silent ECUs and without the individual
+        // DIDs that missed -- the budget they were consuming is refilled from
+        // the next pool.
+        plan = planRound(summary.reqPerSec, summary.silentEcus, summary.silentDids);
         emitPlan(plan);
         if (plan.dids.length > 0) {
           for (const ecu of new Set(plan.dids.map((entry) => entry.ecu))) {
@@ -674,6 +752,20 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
             control,
             durationMs: timeline.pollDurationMs,
             requestTimeoutMs,
+            // P4m-FIX2 Y3: the back-off cooldown is bounded to THIS script's
+            // own evidence window (its shortest step), so a DID that goes quiet
+            // for one press is retried at the next one instead of being written
+            // off for the rest of the round -- the defect that made a recovered
+            // DID score `insufficient`.
+            windowMs: timeline.steps.reduce(
+              (shortest, step) => Math.min(shortest, step.durationMs),
+              Number.POSITIVE_INFINITY,
+            ),
+            // P4m-FIX2 Y8: poll no faster than the rate the budget was sized
+            // from. On a real adapter the adapter is the bottleneck anyway; on
+            // the in-memory simulator this is what stops the round becoming a
+            // hot loop that over-polls every entry.
+            targetReqPerSec: summary.reqPerSec,
             onStarted: (startedAtMs) => {
               if (myGeneration !== generation) return;
               scriptStarted = true;
@@ -722,11 +814,17 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (myGeneration === generation) emit({ phase: 'error', error: message, step: null });
+      if (myGeneration === generation) emit({ phase: 'error', error: message, errorCode: 'run-failed', step: null });
     } finally {
       stopTicker();
-      await teardownTransport();
-      if (token !== null) reservation.release(token);
+      // Y6: the release lives in a NESTED finally, so even a teardown that
+      // somehow still throws or hangs past its own bound cannot leave the
+      // adapter reserved for a session that has ended.
+      try {
+        await teardownTransport();
+      } finally {
+        if (token !== null) reservation.release(token);
+      }
     }
   }
 
@@ -749,7 +847,11 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
       if (busy()) return;
       const target = findSignalTarget(catalog, targetId);
       if (target === null) {
-        emit({ phase: 'error', error: `No target definition for "${targetId}" in profile "${catalog.profileId}".` });
+        emit({
+          phase: 'error',
+          error: `No target definition for "${targetId}" in profile "${catalog.profileId}".`,
+          errorCode: 'no-target',
+        });
         return;
       }
       generation += 1;
@@ -777,6 +879,7 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         noResponseDids: [],
         nextStep: null,
         error: null,
+        errorCode: null,
         // X1: a fresh find has measured NOTHING yet -- it says so until its
         // own probe reports, and never inherits the last find's reading.
         measuredReqPerSec: assumedReqPerSec,
@@ -786,9 +889,22 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         startedAtUtc: nowUtc(),
         timeline: null,
       });
-      currentPools = await collectPools(target);
-      if (myGeneration !== generation) return;
-      const run = doRound(myGeneration, target, 1);
+      /**
+       * P4m-FIX2 Y5 (Codex P4m-REV2 finding 15, MEDIUM): "`stop()` does not
+       * await a find still collecting pools because `activeRun` is assigned
+       * only afterwards; stop can resolve and the old find can subsequently
+       * acquire/connect a transport before noticing `control.stopped`".
+       *
+       * So the WHOLE find — pool collection included — is one promise,
+       * registered SYNCHRONOUSLY before the first await. `stop()` awaits that,
+       * and `doRound` re-checks `control.stopped` before the reservation and
+       * before the transport.
+       */
+      const run = (async (): Promise<void> => {
+        currentPools = await collectPools(target);
+        if (myGeneration !== generation || control.stopped) return;
+        await doRound(myGeneration, target, 1);
+      })();
       activeRun = run;
       await run;
       if (activeRun === run) activeRun = null;

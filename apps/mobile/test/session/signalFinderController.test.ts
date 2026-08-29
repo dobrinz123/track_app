@@ -586,3 +586,141 @@ async function seedRun(
     nrcCounts: {},
   });
 }
+
+/**
+ * Ticket P4m-FIX2 (Codex P4m-REV2 findings 12, 15, 16).
+ *
+ *  Y2 (H12) The probe drops individually silent DIDs, and the freed budget is
+ *      refilled from the pools -- 11 retained-but-silent DIDs would otherwise
+ *      cost 11 x 3 x 300 ms of the driver's own script.
+ *  Y5 (M15) `stop()` awaits the WHOLE find, pool collection included: a stop
+ *      during collection must prevent acquire/connect entirely.
+ *  Y6 (M16) `close()` is bounded, and `release()` runs from a nested `finally`
+ *      so a hanging close never blocks stop or the reservation.
+ */
+/**
+ * contracts.md item 9's OWN script — baseline 3 s, then repetitions x {press
+ * 3 s, release 3 s} — because item 10's budget promises ">= 3 samples per 3 s
+ * window", and the shared TEST_SCRIPT's 1 s steps are a third of that. Only a
+ * 3 s window can measure the promise the budget actually makes.
+ */
+const CONTRACT_SCRIPT: SignalActionScript = {
+  repetitions: 2,
+  baselineMs: 3_000,
+  pressMs: 3_000,
+  holdMs: 0,
+  releaseMs: 3_000,
+  settleMs: 500,
+};
+const CONTRACT_TIMELINE = buildMetronomeTimeline(CONTRACT_SCRIPT);
+const CONTRACT_WINDOW_CATALOG: SignalTargetCatalog = {
+  ...TEST_CATALOG,
+  targets: TEST_CATALOG.targets.map((target) => ({ ...target, actionScript: CONTRACT_SCRIPT })),
+};
+
+describe('createSignalFinderController -- P4m-FIX2 (Y2 silent DIDs, Y5 stop during collection, Y6 bounded close)', () => {
+  it('Y2: one answering DID plus ten silent ones on the SAME ECU -- the silent ten are dropped and the budget refilled', async () => {
+    const sweepStore = createInMemoryDidSweepStore();
+    await seedRun(sweepStore, 'run-12', 0x12);
+    await sweepStore.upsertResponders(
+      'run-12',
+      [
+        { did: 0x4100, raw: bytes('00'), rttMs: 10 },
+        // 0x4101..0x410a: the ten silent neighbours the finding is about.
+        ...Array.from({ length: 10 }, (_v, i) => ({ did: 0x4101 + i, raw: bytes('00'), rttMs: 10 })),
+        // The refill pool sitting behind them.
+        ...Array.from({ length: 4 }, (_v, i) => ({ did: 0x4200 + i, raw: bytes('00'), rttMs: 10 })),
+      ],
+      '2026-08-29T17:33:00.000Z',
+    );
+    const pedal: PedalDouble = { pressed: false };
+    // The ECU itself is very much alive (its hypothesis and 0x4100 answer), so
+    // X2's ECU-level rule does nothing here -- only Y2's per-DID rule can help.
+    const harness = makeController(
+      (ecu, did) => {
+        if (ecu === 0x29) return 'nrc';
+        if (did === 0x58b7) return bytes(pedal.pressed ? '05' : '04');
+        if (did >= 0x4101 && did <= 0x410a) return null;
+        return bytes('00');
+      },
+      // The CONTRACT's own script (item 9: 3 s windows) -- the shared
+      // TEST_SCRIPT's 1 s steps are a third of the window the budget formula
+      // guarantees samples inside, so only this one measures the real promise.
+      { sweepStore, measuredReqPerSec: 15, requestTimeoutMs: 60, catalog: CONTRACT_WINDOW_CATALOG },
+    );
+    followMetronome(harness, pedal, CONTRACT_SCRIPT.settleMs);
+    await runFind(harness);
+    const snapshot = harness.controller.getSnapshot();
+
+    // The silent DIDs are named with THAT reason, and never polled by the script.
+    expect(snapshot.silentDids.length).toBeGreaterThan(0);
+    for (const entry of snapshot.silentDids) {
+      expect(entry.did).toBeGreaterThanOrEqual(0x4101);
+      expect(entry.did).toBeLessThanOrEqual(0x410a);
+      expect(snapshot.readDids).not.toContainEqual(entry);
+    }
+    // The budget freed by them was refilled from the pool behind them.
+    expect(snapshot.readDids.some((entry) => entry.did >= 0x4200)).toBe(true);
+    // The live hypothesis kept >= 3 samples in every evidence window.
+    const live = harness.controller.getSamples().filter((s) => s.ecu === 0x12 && s.did === 0x58b7);
+    const perWindow = CONTRACT_TIMELINE.steps.map(
+      (step) => live.filter((s) => s.tMs >= step.evidenceFromMs && s.tMs < step.evidenceToMs).length,
+    );
+    expect(Math.min(...perWindow)).toBeGreaterThanOrEqual(3);
+  });
+
+  it('Y5: stop() during POOL COLLECTION prevents the reservation and the transport entirely', async () => {
+    const reservation = createReservation();
+    const sweepStore = createInMemoryDidSweepStore();
+    await seedRun(sweepStore, 'run-12', 0x12);
+    let releaseCollection = (): void => {};
+    const blocked = new Promise<void>((resolve) => {
+      releaseCollection = resolve;
+    });
+    const slowStore: typeof sweepStore = {
+      ...sweepStore,
+      async listRuns() {
+        await blocked;
+        return sweepStore.listRuns();
+      },
+    };
+    const harness = makeController(() => bytes('00'), { sweepStore: slowStore, reservation });
+    const find = harness.controller.find('brakeSwitch');
+    await flush();
+    // The find is parked inside collectPools -- nothing has been acquired yet.
+    expect(reservation.holder()).toBeNull();
+    const stopped = harness.controller.stop();
+    releaseCollection();
+    await vi.advanceTimersByTimeAsync(500);
+    await stopped;
+    await find;
+    expect(harness.transports).toHaveLength(0);
+    expect(reservation.holder()).toBeNull();
+  });
+
+  it('Y6: a close() that never resolves is bounded -- stop() returns and the reservation is released', async () => {
+    const reservation = createReservation();
+    let destroyed = 0;
+    const harness = makeController(() => bytes('00'), {
+      reservation,
+      closeTimeoutMs: 200,
+      transportFactory: () => {
+        const transport = new MultiEcuFakeTransport({ answer: () => bytes('00') });
+        transport.close = (): Promise<void> => new Promise(() => {}); // never resolves.
+        (transport as unknown as { destroy?: () => void }).destroy = (): void => {
+          destroyed += 1;
+        };
+        return transport;
+      },
+    });
+    const find = harness.controller.find('brakeSwitch');
+    await vi.advanceTimersByTimeAsync(300);
+    expect(reservation.holder()).toBe('signalFinder');
+    const stopped = harness.controller.stop();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await stopped;
+    await find;
+    expect(reservation.holder()).toBeNull();
+    expect(destroyed).toBe(1);
+  });
+});

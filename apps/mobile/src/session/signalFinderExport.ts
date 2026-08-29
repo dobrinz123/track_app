@@ -1,7 +1,9 @@
 import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import {
+  findSignalTarget,
   resolveSignalTargetCatalog,
+  resolveSignalTargetLabel,
   type FinderRateSource,
   type MetronomeTimeline,
   type NextDiscoveryStep,
@@ -556,12 +558,23 @@ export function buildSignalFinderSummaryMarkdown(
   language: SignalFinderLanguage,
 ): string {
   const s = language === 'ro' ? RO : EN;
+  /**
+   * P4m-FIX2 Y7 (Codex P4m-REV2 finding 9): "the controller stores
+   * `target.label` in English and the export consumes it unchanged" — so an RO
+   * summary was titled "Brake switch". The `.md` is the file the driver
+   * FORWARDS, so its target name is resolved BY LANGUAGE from the catalog
+   * (data) at export time. `doc.session.targetLabel` stays the stable
+   * English/tooling name inside the JSON: one machine-readable identity, one
+   * human-readable rendering, neither pretending to be the other.
+   */
+  const target = findSignalTarget(resolveSignalTargetCatalog(doc.session.profileId), doc.session.targetId);
+  const targetLabel = target === null ? doc.session.targetLabel : resolveSignalTargetLabel(target, language);
   const engine = doc.session.engineRequirement === 'running' ? s.engineRunning : s.engineOff;
   const didCount = doc.passes.reduce((total, pass) => total + pass.didHex.length, 0);
   const found = doc.candidates.filter((c) => c.verdict === 'found');
 
   const lines: string[] = [];
-  lines.push(`# ${s.title(doc.session.targetLabel)}`);
+  lines.push(`# ${s.title(targetLabel)}`);
   lines.push('');
   lines.push(`**${found.length > 0 ? s.found : s.nothingFound}** — ${engine}`);
   lines.push('');
@@ -603,7 +616,10 @@ export function buildSignalFinderSummaryMarkdown(
   }
   lines.push('');
   if (doc.candidates.length > tabulated.length) {
-    lines.push(`_… ${doc.candidates.length - tabulated.length} × ${s.verdicts.unrelated} (+${doc.candidates.length - tabulated.length} more)_`);
+    // P4m-FIX2 Y7: the one list marker that still hard-coded English — every
+    // other section already went through `joinWithMoreMarker`'s `s.moreItems`.
+    const omitted = doc.candidates.length - tabulated.length;
+    lines.push(`_… ${omitted} × ${s.verdicts.unrelated} ${s.moreItems(omitted)}_`);
     lines.push('');
   }
   if (doc.noResponse.length > 0) {

@@ -11,8 +11,10 @@ vi.mock('expo-sharing', () => ({ isAvailableAsync: async () => false, shareAsync
 import {
   SIGNAL_FINDER_SCREEN_STRINGS,
   resolveSignalFinderScreenStrings,
+  signalFinderErrorMessage,
 } from '../../src/ui/screens/signalFinderStrings';
 import { SIGNAL_FINDER_SUMMARY_STRINGS } from '../../src/session/signalFinderExport';
+import { SIGNAL_TARGET_CATALOGS, resolveSignalTargetCatalogLabel } from '@circuit/core';
 
 /**
  * Ticket P4m-FIX1 X8 (Codex P4m-REV1 finding 9, MEDIUM): "Romanian mode still
@@ -114,5 +116,50 @@ describe('P4m-FIX1 X8 -- no English left in the screen', () => {
   it('reads its target names from the catalog resolver, never from `target.label`', () => {
     expect(code).toContain('resolveSignalTargetLabel(target, settings.language)');
     expect(code).not.toMatch(/\{target\.label\}/);
+  });
+});
+
+/**
+ * Ticket P4m-FIX2 Y7 (Codex P4m-REV2 finding 9): the remaining English in RO
+ * mode was NOT in the table — it was in the things that bypassed it: the
+ * vehicle-profile chip labels (catalog data) and the raw runtime/share error
+ * strings the screen rendered verbatim.
+ */
+describe('P4m-FIX2 Y7 -- profile labels and runtime errors are localized too', () => {
+  it('the screen table carries a localized message for every controller error code', () => {
+    for (const table of [SIGNAL_FINDER_SCREEN_STRINGS.en, SIGNAL_FINDER_SCREEN_STRINGS.ro]) {
+      expect(typeof table.errorAdapterBusy).toBe('string');
+      expect(typeof table.errorNoTarget).toBe('string');
+      expect(typeof table.errorUnknown).toBe('function');
+      expect(typeof table.bannerShareFailed).toBe('function');
+    }
+    // An unknown failure is a localized line PLUS the raw message in parentheses:
+    // the driver reads Romanian, the developer still gets the real text.
+    const ro = SIGNAL_FINDER_SCREEN_STRINGS.ro.errorUnknown('ECONNRESET');
+    expect(ro).toContain('ECONNRESET');
+    expect(ro).not.toBe('ECONNRESET');
+    expect(ro).not.toBe(SIGNAL_FINDER_SCREEN_STRINGS.en.errorUnknown('ECONNRESET'));
+  });
+
+  it('maps a controller error CODE to the table, never the raw English message', () => {
+    expect(signalFinderErrorMessage({ errorCode: 'adapter-busy', error: 'The adapter is in use' }, SIGNAL_FINDER_SCREEN_STRINGS.ro)).toBe(
+      SIGNAL_FINDER_SCREEN_STRINGS.ro.errorAdapterBusy,
+    );
+    expect(signalFinderErrorMessage({ errorCode: 'no-target', error: 'No target definition' }, SIGNAL_FINDER_SCREEN_STRINGS.ro)).toBe(
+      SIGNAL_FINDER_SCREEN_STRINGS.ro.errorNoTarget,
+    );
+    expect(signalFinderErrorMessage({ errorCode: 'run-failed', error: 'refused (test double)' }, SIGNAL_FINDER_SCREEN_STRINGS.ro)).toBe(
+      SIGNAL_FINDER_SCREEN_STRINGS.ro.errorUnknown('refused (test double)'),
+    );
+    expect(signalFinderErrorMessage({ errorCode: null, error: null }, SIGNAL_FINDER_SCREEN_STRINGS.ro)).toBeNull();
+  });
+
+  it('the vehicle-profile catalogs carry a Romanian label, resolved by language', () => {
+    for (const catalog of SIGNAL_TARGET_CATALOGS) {
+      expect(resolveSignalTargetCatalogLabel(catalog, 'ro'), `${catalog.profileId} has no RO label`).not.toBe(
+        resolveSignalTargetCatalogLabel(catalog, 'en'),
+      );
+      expect(resolveSignalTargetCatalogLabel(catalog, 'en')).toBe(catalog.label);
+    }
   });
 });

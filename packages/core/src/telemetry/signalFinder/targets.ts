@@ -144,7 +144,17 @@ export interface SignalTargetDefinition {
 export interface SignalTargetCatalog {
   /** Matches `data/vehicle-profiles/<profileId>.json`'s own `profileId`; `'generic'` for the no-profile catalog. */
   profileId: string;
+  /** English label — also the stable name the export carries. */
   label: string;
+  /**
+   * P4m-FIX2 Y7 (Codex P4m-REV2 finding 9): the same label in Romanian. The
+   * vehicle-profile chips were the last thing on the Signal Finder screen
+   * rendering English in RO mode, because a PROFILE NAME is catalog DATA and
+   * never belonged in the screen's string table. Read only through
+   * {@link resolveSignalTargetCatalogLabel}; absent falls back to
+   * {@link label}, never to a blank chip.
+   */
+  labelRo?: string;
   targets: readonly SignalTargetDefinition[];
 }
 
@@ -325,6 +335,7 @@ const LAT_G_VERBS: SignalActionVerbSet = {
 export const GENERIC_SIGNAL_TARGET_CATALOG: SignalTargetCatalog = {
   profileId: 'generic',
   label: 'Unknown vehicle (no profile)',
+  labelRo: 'Vehicul necunoscut (fără profil)',
   targets: [
     genericTarget('brakeSwitch', 'Brake switch', 'off-ok', 'boolean-edge', PEDAL_SCRIPT, BRAKE_VERBS),
     genericTarget('brakePressure', 'Brake pressure', 'off-ok', 'analog-monotone', PEDAL_SCRIPT, BRAKE_VERBS),
@@ -345,6 +356,7 @@ export const GENERIC_SIGNAL_TARGET_CATALOG: SignalTargetCatalog = {
 const SUPRA_B58_CATALOG: SignalTargetCatalog = {
   profileId: 'toyota-supra-b58',
   label: 'Toyota GR Supra (A90/J29), BMW B58',
+  labelRo: 'Toyota GR Supra (A90/J29), motor BMW B58',
   targets: [
     {
       id: 'brakeSwitch',
@@ -584,6 +596,21 @@ export function resolveSignalTargetLabel(
 ): string {
   if (language === 'ro') return target.labels?.ro ?? target.label;
   return target.labels?.en ?? target.label;
+}
+
+/**
+ * P4m-FIX2 Y7 (binding, Codex P4m-REV2 finding 9): the vehicle PROFILE's name
+ * in the app's own language. The screen's profile chips must call this — never
+ * `catalog.label`, which is the English/export name. A catalog without
+ * {@link SignalTargetCatalog.labelRo} falls back to it rather than rendering
+ * blank.
+ */
+export function resolveSignalTargetCatalogLabel(
+  catalog: SignalTargetCatalog,
+  language: SignalLanguage | null | undefined,
+): string {
+  if (language === 'ro') return catalog.labelRo ?? catalog.label;
+  return catalog.label;
 }
 
 /** P4m-FIX1 X8: the discovery range's note in the app's own language ({@link resolveSignalTargetLabel}'s own discipline). */

@@ -156,6 +156,7 @@ function snapshot(overrides: Partial<SignalFinderSnapshot> = {}): SignalFinderSn
     measuredReqPerSec: 15.8,
     rateSource: 'measured',
     error: null,
+    errorCode: null,
     ...overrides,
   };
 }
@@ -690,5 +691,50 @@ describe('buildSignalFinderSummaryMarkdown -- P4m M3 (rounds, not read, sparse)'
     expect(en).toContain('found (sparse)');
     expect(en).toContain('10/10');
     expect(buildSignalFinderSummaryMarkdown(doc, 'ro')).toContain('găsit (rar)');
+  });
+});
+
+/**
+ * Ticket P4m-FIX2 Y7 (Codex P4m-REV2 finding 9, MEDIUM — the PARTIAL half of
+ * P4m-FIX1 X8): "Romanian output can still contain English — the controller
+ * stores `target.label` in English and the export consumes it unchanged; the
+ * candidate truncation line still hard-codes `more`".
+ *
+ * The `.md` is the file the driver FORWARDS, so the target's name in it is
+ * resolved by LANGUAGE from the catalog (data), at export time — the JSON keeps
+ * `session.targetLabel` as the stable English/tooling name.
+ */
+describe('P4m-FIX2 Y7 -- the RO summary carries no English', () => {
+  it('titles the RO summary with the catalog s Romanian target name, never `Brake switch`', () => {
+    const doc = buildSignalFinderExportDocument(input());
+    const ro = buildSignalFinderSummaryMarkdown(doc, 'ro');
+    expect(ro).toContain('Contact de frână');
+    expect(ro).not.toContain('Brake switch');
+    // The machine-readable half is unchanged: tooling still reads one stable name.
+    expect(doc.session.targetLabel).toBe('Brake switch');
+    expect(buildSignalFinderSummaryMarkdown(doc, 'en')).toContain('Brake switch');
+  });
+
+  it('uses the localized truncation marker for the candidate tail, never the hard-coded `more`', () => {
+    const many = Array.from({ length: 30 }, (_v, i) => score({ did: 0x6000 + i, verdict: 'unrelated' }));
+    const doc = buildSignalFinderExportDocument(input({ scores: many }));
+    const ro = buildSignalFinderSummaryMarkdown(doc, 'ro');
+    expect(ro).not.toMatch(/\bmore\b/);
+    expect(ro).toContain('(+încă');
+  });
+
+  it('leaves no English word anywhere in a fully populated RO summary', () => {
+    const doc = buildSignalFinderExportDocument(
+      input({
+        notReadDids: [{ ecu: 0x12, did: 0x4100 }],
+        silentDids: [{ ecu: 0x29, did: 0x500b }],
+        silentEcus: [0x29],
+        scores: Array.from({ length: 30 }, (_v, i) => score({ did: 0x6000 + i, verdict: 'unrelated' })),
+      }),
+    );
+    const ro = buildSignalFinderSummaryMarkdown(doc, 'ro');
+    for (const english of ['Brake switch', 'more', 'Not read', 'No response', 'found']) {
+      expect(ro, `RO summary still contains "${english}"`).not.toContain(english);
+    }
   });
 });
