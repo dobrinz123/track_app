@@ -70,6 +70,10 @@ describe('signal target catalog (data)', () => {
     expect(findSignalTarget(catalog, 'steeringAngle')?.expectedShape).toBe('analog-bipolar');
     // Lateral acceleration cannot be produced in a stationary car.
     expect(findSignalTarget(catalog, 'latG')?.engineRequirement).toBe('running');
+    // Field facts 2026-08-29: no booster vacuum / EPS unpowered with the engine off.
+    expect(findSignalTarget(catalog, 'brakePressure')?.engineRequirement).toBe('running');
+    expect(findSignalTarget(catalog, 'steeringAngle')?.engineRequirement).toBe('running');
+    expect(findSignalTarget(catalog, 'brakeSwitch')?.engineRequirement).toBe('off-ok');
   });
 
   it('targetHypothesisEcus lists each ECU once, in ascending address order', () => {

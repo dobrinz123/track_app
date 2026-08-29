@@ -279,7 +279,10 @@ const SUPRA_B58_CATALOG: SignalTargetCatalog = {
     {
       id: 'brakePressure',
       label: 'Brake pressure',
-      engineRequirement: 'off-ok',
+      // Field fact (user, 2026-08-29): with the engine off the booster has no
+      // vacuum and hydraulic pressure barely builds -- pressure DIDs are only
+      // testable with the engine running.
+      engineRequirement: 'running',
       expectedShape: 'analog-monotone',
       actionScript: PEDAL_SCRIPT,
       verbs: BRAKE_VERBS,
@@ -318,7 +321,9 @@ const SUPRA_B58_CATALOG: SignalTargetCatalog = {
     {
       id: 'steeringAngle',
       label: 'Steering angle',
-      engineRequirement: 'off-ok',
+      // Field fact (user, 2026-08-29): the EPS is unpowered with the engine
+      // off -- the wheel cannot be turned, so steering needs the engine running.
+      engineRequirement: 'running',
       expectedShape: 'analog-bipolar',
       actionScript: STEERING_SCRIPT,
       verbs: STEERING_VERBS,
@@ -459,7 +464,11 @@ export function nextDiscoveryStep(
       toDid: range.toDid,
       didCount,
       estimatedMinutes: estimateSweepMinutes(didCount, measuredReqPerSec),
-      engineRequirement: target.engineRequirement,
+      // A discovery SWEEP needs no driver action, so it is always engine-off
+      // testable (field protocol 2026-08-29: sweep engine off, act with the
+      // engine running only once the shortlist exists) -- independent of the
+      // target's own action requirement.
+      engineRequirement: 'off-ok',
       note: range.note,
     };
   }
