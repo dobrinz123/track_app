@@ -1,5 +1,11 @@
 import type { SqlDatabase } from '@circuit/core';
-import { DEFAULT_SETTINGS, type AppSettings, type SettingsStore } from '../session/settingsStore';
+import {
+  DEFAULT_SETTINGS,
+  defaultLanguageForLocale,
+  readDeviceLocale,
+  type AppSettings,
+  type SettingsStore,
+} from '../session/settingsStore';
 import { repairPersistedEnetSettings } from '../session/enetSettingsValidation';
 
 const SETTINGS_KEY = 'app-settings';
@@ -62,6 +68,15 @@ export class SqlSettingsStore implements SettingsStore {
     // above handles the ENET fields.
     if (typeof initial.developerModeEnabled !== 'boolean') {
       initial = { ...initial, developerModeEnabled: false };
+    }
+    // Ticket P4l-FIX1 F2 (binding): the language DEFAULT comes from the
+    // device locale, applied here and only here -- when nothing valid was
+    // ever persisted. A user's own stored choice always wins (it is not
+    // re-derived on later launches), and a persisted value outside the
+    // two-value vocabulary is repaired the same defensive way
+    // `developerModeEnabled` above is.
+    if (initial.language !== 'ro' && initial.language !== 'en') {
+      initial = { ...initial, language: defaultLanguageForLocale(readDeviceLocale()) };
     }
     return new SqlSettingsStore(db, initial);
   }

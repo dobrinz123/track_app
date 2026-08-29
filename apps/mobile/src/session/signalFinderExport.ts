@@ -36,7 +36,7 @@ import type { SignalFinderEcuPass } from './signalFinderController';
 export const SIGNAL_FINDER_EXPORT_SCHEMA_VERSION = 1;
 export const SIGNAL_FINDER_EXPORT_KIND = 'trace-signal-finder';
 
-/** RO/EN, per contracts.md item 8. `apps/mobile`'s settings store has no language setting yet, so the screen passes `'en'` until one exists. */
+/** RO/EN, per contracts.md item 8. Ticket P4l-FIX1 F2 (binding): the screen now passes the app's `language` setting (`settingsStore.ts`'s `AppLanguage`, the same two values), defaulted from the device locale -- it no longer hard-codes `'en'`. */
 export type SignalFinderLanguage = 'en' | 'ro';
 
 export interface SignalFinderExportInput {

@@ -268,7 +268,7 @@ describe('createSignalFinderController -- metronome, haptics and lifecycle', () 
     const holders: (string | null)[] = [];
     reservation.subscribe((holder) => holders.push(holder));
     await runFind(harness);
-    expect(holders).toContain('sweep');
+    expect(holders).toContain('signalFinder');
     expect(reservation.holder()).toBeNull();
   });
 
@@ -305,7 +305,7 @@ describe('createSignalFinderController -- metronome, haptics and lifecycle', () 
     const harness = makeController(() => bytes('00'), { reservation });
     const done = harness.controller.find('brakeSwitch');
     await vi.advanceTimersByTimeAsync(300);
-    expect(reservation.holder()).toBe('sweep');
+    expect(reservation.holder()).toBe('signalFinder');
     const stopped = harness.controller.stop();
     await vi.advanceTimersByTimeAsync(500);
     await stopped;

@@ -14,6 +14,17 @@ export type TelemetryChannelId =
   | 'transOilC'    // transmission oil temp — NO standard mode-01 PID exists;
                    // user-configurable custom PID, decoded as last data byte - 40;
                    // unset -> channel absent
+  | 'brakeSwitch'  // brake pedal SWITCH, as a percentage so one consumer handles both brake
+                   // channels: exactly 0 (released) or 100 (pressed). Ticket P4l-FIX1 F1
+                   // (binding): no standard mode-01 PID exists -- it arrives ONLY from a
+                   // Signal-Finder-confirmed per-vehicle binding (`vehicle_profile_bindings`,
+                   // channel `brakeSwitch`), polled as that binding's own DID at that
+                   // binding's own ECU address, and decoded by the binding's own rule
+                   // ("anything off the recorded rest byte reads pressed").
+  | 'brakePct'     // brake PRESSURE as 0..100%, same binding path as `brakeSwitch` above
+                   // (`vehicle_profile_bindings` channel `brakePressure`), scaled from the
+                   // finder's own observed min..max. A real analog: it always wins over a
+                   // bare switch when the profile carries both.
   | 'latG' | 'longG'; // device accelerometer, NOT OBD; gravity isolated by low-pass,
                       // linear acceleration projected off gravity; portrait mount;
                       // unit g, recorded through the same TelemetrySample path

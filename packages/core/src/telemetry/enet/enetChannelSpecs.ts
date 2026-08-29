@@ -33,6 +33,13 @@ export const ENET_SPEC_CHANNELS: ReadonlySet<TelemetryChannelId> = new Set([
   'engineLoadPct',
   'engineOilC',
   'transOilC',
+  // Ticket P4l-FIX1 F1 (binding): the two brake channels. Both are `did`-only
+  // in practice (no standard mode-01 PID decodes into either -- `rejectionReason`
+  // below refuses `obd01` for them on exactly that ground), and both normally
+  // arrive as a spec BUILT from a Signal-Finder-confirmed binding rather than
+  // typed into the settings JSON by hand.
+  'brakeSwitch',
+  'brakePct',
 ]);
 
 /**
@@ -56,6 +63,11 @@ export const ENET_DEFAULT_CHANNEL_RATES_HZ: Readonly<Partial<Record<TelemetryCha
   transOilC: 0.5,
   intakeC: 1,
   engineLoadPct: 1,
+  // Ticket P4l-FIX1 F1 (binding): a brake application is the shortest-lived
+  // event this app measures -- polled at the same 5 Hz as speed/throttle, not
+  // the 1 Hz unknown-channel fallback, so a brake onset lands within ~200 ms.
+  brakeSwitch: 5,
+  brakePct: 5,
 };
 
 export interface EnetChannelDecodeSpec {
@@ -74,6 +86,21 @@ export interface EnetChannelSpec {
   targetAddress?: number;
   /** did only: how to decode the ReadDataByIdentifier response's data bytes. */
   decode?: EnetChannelDecodeSpec;
+  /**
+   * Ticket P4l-FIX1 F1 (binding): a decode rule that is NOT expressible as
+   * `decode`'s byte-slice x scale + offset -- today, exactly the brake rules
+   * a confirmed Signal Finder binding carries (`brakeSwitch`: "any byte other
+   * than the recorded rest byte reads pressed"; `brakePct`: the finder's
+   * observed min..max mapped onto 0..100). Returns `null` when THIS response
+   * cannot be decoded (e.g. it is shorter than the binding's own byte offset,
+   * because the ECU changed what it answers) -- the session then records a
+   * channel error instead of ever emitting a fabricated reading.
+   *
+   * Takes precedence over `decode` when both are present. Can only ever be
+   * set programmatically: specs parsed from the user's settings JSON come
+   * from `JSON.parse`, which cannot produce a function.
+   */
+  decodeValue?: (dataBytes: Uint8Array) => number | null;
   /** REQUIRED for did specs: where the DID/decode formula came from (no public DID table exists -- every did spec is a user-supplied empirical finding). */
   provenance: string;
 }
@@ -216,7 +243,10 @@ function rejectionReason(spec: EnetChannelSpec): string | null {
     return `did requestHex must be exactly 4 hex characters (one DID), got ${compact.length}`;
   }
   if (spec.decode === undefined) {
-    return 'did spec is missing a decode definition';
+    // P4l-FIX1 F1 (binding): a `decodeValue` function IS a decode definition
+    // -- the only kind that can express a brake binding's own rule. A did
+    // spec with NEITHER is still rejected, exactly as before.
+    return spec.decodeValue === undefined ? 'did spec is missing a decode definition' : provenanceRejection(spec);
   }
   if (!Number.isInteger(spec.decode.byteOffset) || spec.decode.byteOffset < 0) {
     return `did spec byteOffset must be a non-negative integer, got ${spec.decode.byteOffset}`;
@@ -227,10 +257,12 @@ function rejectionReason(spec: EnetChannelSpec): string | null {
   if (!Number.isFinite(spec.decode.scale) || !Number.isFinite(spec.decode.offset)) {
     return 'did spec scale/offset must be finite numbers';
   }
-  if (spec.provenance.trim() === '') {
-    return 'did spec is missing provenance';
-  }
-  return null;
+  return provenanceRejection(spec);
+}
+
+/** The last did-spec check, shared by both decode shapes: provenance is REQUIRED -- no public DID table exists, so every did spec is an empirical finding that must say where it came from. */
+function provenanceRejection(spec: EnetChannelSpec): string | null {
+  return spec.provenance.trim() === '' ? 'did spec is missing provenance' : null;
 }
 
 /**
@@ -247,6 +279,17 @@ export function decodeEnetChannelValue(spec: EnetChannelSpec, dataBytes: Uint8Ar
       throw new Error(`No mode-01 decoder for channel ${spec.channel}`);
     }
     return decodeObd01DataBytes(spec.channel, dataBytes);
+  }
+  // P4l-FIX1 F1 (binding): a binding's own decoder wins over the scale/offset
+  // block -- it is the only shape that can express the brake rules -- and its
+  // "I cannot decode this response" answer becomes a channel error upstream
+  // (`enetSession.pollChannel` catches this), never a fabricated reading.
+  if (spec.decodeValue !== undefined) {
+    const value = spec.decodeValue(dataBytes);
+    if (value === null) {
+      throw new Error(`Channel ${spec.channel}: its binding could not decode this ${dataBytes.length}-byte response`);
+    }
+    return value;
   }
   if (spec.decode === undefined) throw new Error(`Channel ${spec.channel} did spec has no decode definition`);
   return decodeDidBytes(dataBytes, spec.decode);

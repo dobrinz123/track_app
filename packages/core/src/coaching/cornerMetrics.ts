@@ -652,12 +652,23 @@ function detectLift(
  * the IMU (cross-checked against `dv/ds` -- a steady longitudinal bias with no
  * speed change is a tilted phone, not a brake application), then the GPS speed
  * derivative.
+ *
+ * Ticket P4l-FIX1 F4 (binding): a brake SWITCH counts as that brake channel
+ * too. It is the cheapest tier-1 brake signal a vehicle profile can carry (one
+ * confirmed DID whose byte flips when the pedal is touched -- see
+ * `brakeSwitch` in `telemetry/contracts.ts`), and its EDGE is a better brake
+ * onset than any estimate derived from motion: it fires the moment the pedal
+ * moves, before the car has slowed enough for the IMU or the GPS speed
+ * derivative to notice. A real pressure channel (`brakePct`) still wins when
+ * the car provides both -- it says how HARD, not just whether. The switch is
+ * read through the SAME `firstSustained` window as every other estimator, so
+ * a single spurious sample never becomes a brake point.
  */
 function detectBrake(
   series: LapSeries,
   run: Run,
   options: ResolvedOptions,
-): { index: number; source: 'brakePct' | 'longG' | 'gpsSpeed' } | null {
+): { index: number; source: 'brakePct' | 'brakeSwitch' | 'longG' | 'gpsSpeed' } | null {
   const brake = series.channels.get('brakePct');
   if (hasValue(brake, run) && brake !== undefined) {
     const found = firstSustained(series, run, options.sustainMs, (index) => {
@@ -665,6 +676,15 @@ function detectBrake(
       return value !== null && value !== undefined && value > BRAKE_ON_PCT;
     });
     if (found !== null) return { index: found, source: 'brakePct' };
+  }
+
+  const brakeSwitch = series.channels.get('brakeSwitch');
+  if (hasValue(brakeSwitch, run) && brakeSwitch !== undefined) {
+    const found = firstSustained(series, run, options.sustainMs, (index) => {
+      const value = brakeSwitch[index];
+      return value !== null && value !== undefined && value > BRAKE_ON_PCT;
+    });
+    if (found !== null) return { index: found, source: 'brakeSwitch' };
   }
 
   const longG = series.channels.get('longG');

@@ -21,6 +21,7 @@ import {
   type RunDiscoveryResult,
   type TelemetryChannelId,
   type TelemetrySample,
+  validateEnetChannelSpecs,
 } from '@circuit/core';
 import type { AdapterType, SettingsStore } from './settingsStore';
 import { TcpObdTransport } from './tcpObdTransport';
@@ -51,20 +52,26 @@ export const ENET_ADAPTER_RESERVED_BY_PROBE_DETAIL = 'adapter reserved by probe'
 // (mode-01 0x5A) stays the default binding."
 //
 // This is the LOOKUP half, pure and additive: it turns whatever the Signal
-// Finder confirmed into the concrete request/decode a poll would need. It is
-// deliberately the only Signal Finder code in this file -- every existing
-// spec-resolution path (`buildEnetConfig`, `resolveEnetChannelSpecs`, the
-// 0x5A/0x49 pedal fallback) is untouched.
+// Finder confirmed into the concrete request/decode a poll would need. Every
+// existing spec-resolution path (`resolveEnetChannelSpecs`, the 0x5A/0x49
+// pedal fallback) is untouched.
 //
-// LIMITATION, disclosed rather than papered over: `brakePct`/`brakeSwitch`
-// are NOT members of `@circuit/core`'s `TelemetryChannelId` union (which is
-// what `EnetChannelSpec.channel`, the poll plan, `TelemetrySample` and the
-// recorder are all typed by) -- they exist today only as `CoachingChannelId`
-// extras. Turning a resolved binding into a real POLL entry therefore
-// requires adding those two ids to that core union (and to the exhaustive
-// `Record<TelemetryChannelId, ...>` in `LapDetailScreen.tsx`), which is
-// outside ticket P4l's write set. Everything up to that boundary is
-// implemented and tested here.
+// Ticket P4l-FIX1 F1 (binding) closed the gap P4l disclosed here:
+// `brakeSwitch`/`brakePct` ARE `TelemetryChannelId` members now, so
+// `buildBrakeEnetChannelSpec` below turns a field-confirmed binding into a
+// real `did` poll entry (`buildEnetConfig`) whose samples flow through the
+// SAME `forwardTelemetrySample` path -- and therefore into the session
+// recording -- as every other channel.
+//
+// SECOND ECU, one channel (the ticket's "document which you chose"): the
+// brake binding usually lives on a DIFFERENT ECU (0x29 on the Supra) than
+// the DME target address in settings (0x12). No second socket and no second
+// reservation is opened for it: HSFZ carries the target address in every
+// frame, and `EnetChannelSpec.targetAddress` already overrides the session's
+// default per request (`enetSession.ts`'s `pollChannel`, which also matches
+// each response's SOURCE address back against the address it asked). The
+// adapter reservation therefore stays exactly as single-owner as before --
+// one socket, one holder, several addressed ECUs.
 // ---------------------------------------------------------------------------
 
 /** The telemetry channel a confirmed brake binding feeds: a switch is reported as a percentage (0 or 100) so a single consumer handles both. */
@@ -110,7 +117,7 @@ function parseBindingEvidence(evidenceJson: string): BindingEvidence {
 const BRAKE_BINDING_PREFERENCE: readonly string[] = ['brakePressure', 'brakeSwitch'];
 
 export function resolveBrakeBindingFromProfile(
-  bindings: readonly { channel: string; ecu: number; did: number; length: number | null; decode: string; status: string; evidenceJson: string }[],
+  bindings: readonly VehicleProfileBindingLike[],
 ): ResolvedBrakeBinding | null {
   for (const channel of BRAKE_BINDING_PREFERENCE) {
     const binding = bindings.find((candidate) => candidate.channel === channel && candidate.status === 'field-confirmed');
@@ -134,23 +141,80 @@ export function resolveBrakeBindingFromProfile(
 }
 
 /**
- * Decodes ONE response for `binding` into 0..100. `null` when the response is
- * too short for the binding's own byte offset (an ECU that changed what it
- * answers must never silently produce a fabricated brake reading).
+ * Ticket P4l-FIX1 H4 (binding, Codex review finding): the numeric series ONE
+ * response contributes, decoded the SAME way the Signal Finder's own scoring
+ * decodes it (`packages/core/src/telemetry/signalFinder/scoring.ts`'s private
+ * `decodeUnsigned` + its per-byte-offset block path) -- otherwise a binding
+ * the finder confirmed on one series would be read here as a different one.
+ * Mirrored rather than imported because that helper is module-private in
+ * core; the rule is two lines and pinned by this module's own tests.
+ *
+ * - 1-4 bytes: the WHOLE response as one unsigned big-endian scalar. The bug
+ *   this replaces read byte 0 only, so the 0x29/0x500B series (0x0002 at
+ *   rest, 0x0006 pressed) never appeared to change at all.
+ * - wider than 4 bytes (a block): the single byte at the offset the finder
+ *   selected, which is also the offset its evidence min/max describe.
+ */
+function brakeBindingSeriesValue(binding: ResolvedBrakeBinding, raw: Uint8Array): number | null {
+  if (raw.length >= 1 && raw.length <= 4) {
+    let value = 0;
+    for (const byte of raw) value = value * 256 + byte;
+    return value;
+  }
+  return raw[binding.byteOffset] ?? null;
+}
+
+/** The binding's rest-level response, as the same series value `brakeBindingSeriesValue` reads from a live response. `null` when the evidence hex is absent or unparseable. */
+function brakeBindingRestValue(binding: ResolvedBrakeBinding): number | null {
+  if (binding.restValueHex === null) return null;
+  const compact = binding.restValueHex.replace(/\s+/g, '');
+  if (compact.length === 0 || compact.length % 2 !== 0 || !/^[0-9A-Fa-f]+$/.test(compact)) return null;
+  const bytes = new Uint8Array(compact.length / 2);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Number.parseInt(compact.slice(index * 2, index * 2 + 2), 16);
+  }
+  return brakeBindingSeriesValue(binding, bytes);
+}
+
+/**
+ * Decodes ONE response for `binding` into 0..100. `null` when the response
+ * cannot be decoded for this binding at all -- empty, or (for a block
+ * binding) too short for the byte offset the finder confirmed, or with
+ * evidence too damaged to compare against. An ECU that changed what it
+ * answers must never silently produce a fabricated brake reading.
  */
 export function decodeBrakeBindingValue(binding: ResolvedBrakeBinding, raw: Uint8Array): number | null {
-  const value = raw[binding.byteOffset];
-  if (value === undefined) return null;
+  const value = brakeBindingSeriesValue(binding, raw);
+  if (value === null) return null;
   if (binding.decodeKind === 'boolean-0-100') {
-    if (binding.restValueHex === null) return null;
-    const restByte = Number.parseInt(binding.restValueHex.slice(binding.byteOffset * 2, binding.byteOffset * 2 + 2), 16);
-    if (!Number.isFinite(restByte)) return null;
-    return value === restByte ? 0 : 100;
+    const restValue = brakeBindingRestValue(binding);
+    if (restValue === null) return null;
+    return value === restValue ? 0 : 100;
   }
   const min = binding.observedMin;
   const max = binding.observedMax;
   if (min === null || max === null || max <= min) return null;
   return Math.min(100, Math.max(0, ((value - min) / (max - min)) * 100));
+}
+
+/**
+ * Ticket P4l-FIX1 F1 (binding): the confirmed binding as a REAL ENET poll
+ * spec -- its own DID, at its OWN ECU address (`targetAddress`, see this
+ * section's "second ECU, one channel" note), decoded by the binding's own
+ * rule via `decodeValue` (the boolean "anything off the rest value reads
+ * pressed" rule is not expressible as `EnetChannelSpec.decode`'s
+ * scale/offset). Pure and exported so the exact spec a given binding
+ * produces can be pinned by a test.
+ */
+export function buildBrakeEnetChannelSpec(binding: ResolvedBrakeBinding): EnetChannelSpec {
+  return {
+    channel: binding.channel,
+    mode: 'did',
+    requestHex: binding.requestHex,
+    targetAddress: binding.ecu,
+    decodeValue: (dataBytes) => decodeBrakeBindingValue(binding, dataBytes),
+    provenance: binding.provenance,
+  };
 }
 
 /**
@@ -347,6 +411,34 @@ export interface TelemetryProviderDeps {
    * slowly.
    */
   getNetworkInfo?: () => Promise<import('./networkInfo').NetworkInfo | null>;
+  /**
+   * Ticket P4l-FIX1 F1 (binding): the vehicle profile's channel bindings --
+   * what the Signal Finder confirmed (`vehicle_profile_bindings`, see
+   * `didSweepStore.ts`). Read SYNCHRONOUSLY, once per ENET session build
+   * (`buildEnetConfig`), the same "never trust a persisted value blindly,
+   * re-resolve on every start()" discipline `resolveEnetChannelSpecs` already
+   * follows -- so a binding confirmed mid-app-run is picked up by the next
+   * telemetry start without any restart. Production wires a cached snapshot
+   * of the store (SQLite reads are async; this seam is not); omitted means
+   * "no bindings", i.e. exactly the pre-P4l behaviour.
+   */
+  readVehicleProfileBindings?: () => readonly VehicleProfileBindingLike[];
+}
+
+/**
+ * The shape `resolveBrakeBindingFromProfile` needs from a persisted binding
+ * row -- structurally satisfied by `didSweepStore.ts`'s `VehicleProfileBinding`
+ * without this module importing (and thereby pulling a persistence module
+ * into) the telemetry path.
+ */
+export interface VehicleProfileBindingLike {
+  channel: string;
+  ecu: number;
+  did: number;
+  length: number | null;
+  decode: string;
+  status: string;
+  evidenceJson: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -538,6 +630,8 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   const isDev = deps.isDev ?? (typeof __DEV__ !== 'undefined' ? __DEV__ : false);
   const enetAdapterReservation = deps.enetAdapterReservation ?? sharedEnetAdapterReservation;
   const readNetworkInfo = deps.getNetworkInfo ?? getNetworkInfo;
+  /** P4l-FIX1 F1: "no bindings" by default -- a build that never wires the profile registry behaves exactly as it did before this ticket. */
+  const readVehicleProfileBindings = deps.readVehicleProfileBindings ?? ((): readonly VehicleProfileBindingLike[] => []);
   const sampleListeners = new Set<(s: TelemetrySample) => void>();
   const stateListeners = new Set<(state: Elm327State, detail?: string) => void>();
 
@@ -993,6 +1087,22 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
    */
   const ENET_UNKNOWN_CHANNEL_RATE_HZ = 1;
 
+  /**
+   * Ticket P4l-FIX1 F1 (binding): the brake binding this session should poll,
+   * re-read from the profile registry on every ENET (re)build. Never throws
+   * -- a registry read that fails degrades to "no binding", the same way
+   * every other startup read in this module degrades, because telemetry must
+   * never stop a session from starting.
+   */
+  function resolveBrakeBinding(): ResolvedBrakeBinding | null {
+    try {
+      return resolveBrakeBindingFromProfile(readVehicleProfileBindings());
+    } catch (error) {
+      console.warn(`[telemetryProvider] could not read vehicle profile bindings: ${errorMessage(error)}`);
+      return null;
+    }
+  }
+
   function buildEnetPollPlan(
     channelSpecs: readonly EnetChannelSpec[],
   ): Array<{ channel: TelemetryChannelId; hz: number }> {
@@ -1022,6 +1132,19 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     // proved NRC'd/unsupported, so there is no reason to poll it again.
     if (pedalPidSource === '49') {
       channelSpecs = [...channelSpecs.filter((spec) => spec.channel !== 'accelPedalPct'), ACCEL_PEDAL_FALLBACK_ENET_SPEC];
+    }
+    // Ticket P4l-FIX1 F1 (binding): a FIELD-CONFIRMED brake binding becomes a
+    // real poll entry (see this file's Signal Finder section). Appended LAST
+    // and only when the settings' own specs don't already name that channel,
+    // so an explicit user spec always wins over the discovered binding; the
+    // resulting spec goes through core's own `validateEnetChannelSpecs` like
+    // any other, so a malformed binding row is dropped with a warning rather
+    // than polled.
+    const brakeBinding = resolveBrakeBinding();
+    if (brakeBinding !== null && !channelSpecs.some((spec) => spec.channel === brakeBinding.channel)) {
+      const { valid, warnings } = validateEnetChannelSpecs([buildBrakeEnetChannelSpec(brakeBinding)]);
+      for (const warning of warnings) console.warn(`[telemetryProvider] ${warning}`);
+      channelSpecs = [...channelSpecs, ...valid];
     }
     return {
       channelSpecs,

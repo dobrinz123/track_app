@@ -40,6 +40,13 @@ const TELEMETRY_CHART_DISPLAY: Readonly<Record<TelemetryChannelId, { label: stri
     longG: { label: 'Longitudinal G', unit: 'g', color: colors.textSecondary },
     engineOilC: { label: 'Engine oil', unit: '°C', color: colors.warning },
     transOilC: { label: 'Trans oil', unit: '°C', color: colors.danger },
+    // Ticket P4l-FIX1 F1: the brake channels a Signal-Finder-confirmed
+    // vehicle binding produces. Charted like any other channel -- and, like
+    // every entry above, only when the lap actually carries samples for it.
+    // `brakeSwitch` is a 0/100 boolean-as-percent, so its sparkline reads as
+    // a square wave; `brakePct` is a real analog when the car has one.
+    brakeSwitch: { label: 'Brake switch', unit: '%', color: colors.slower },
+    brakePct: { label: 'Brake', unit: '%', color: colors.slower },
     // Non-chartable channels (never appear in `TELEMETRY_CHART_CHANNELS`, kept only so this Record's type stays exhaustive over the full `TelemetryChannelId` union).
     coolantC: { label: 'Coolant', unit: '°C', color: colors.textMuted },
     intakeC: { label: 'Intake air', unit: '°C', color: colors.textMuted },

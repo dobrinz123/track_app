@@ -4,13 +4,19 @@ import type { TelemetryChannelId } from '../telemetry/contracts';
  * Channels the deterministic analysis engine can consume.
  *
  * `TelemetryChannelId` covers everything the OBD/IMU pipeline records today.
- * `brakePct`, `steeringDeg` and `yawRateDps` are the tier-2 / gyro channels
+ * `steeringDeg` and `yawRateDps` are the tier-2 / gyro channels
  * `docs/architecture/analysis-engine.md` §1 names but that no shipped provider
- * emits yet (brake pressure and steering angle have no standard mode-01 PID --
- * they arrive per vehicle profile via a discovered DID). They are declared here
- * so every estimator can be written against the final matrix; when a provider
- * starts emitting them they move into `TelemetryChannelId` and this alias
- * collapses to it. Nothing in coaching ever fabricates a channel value.
+ * emits yet (steering angle has no standard mode-01 PID -- it arrives per
+ * vehicle profile via a discovered DID). They are declared here so every
+ * estimator can be written against the final matrix; when a provider starts
+ * emitting them they move into `TelemetryChannelId` and this alias collapses
+ * to it. Nothing in coaching ever fabricates a channel value.
+ *
+ * Ticket P4l-FIX1 F1/F4 (binding): `brakePct` -- and the new `brakeSwitch` --
+ * made exactly that move. Both are `TelemetryChannelId` members now (the ENET
+ * provider emits them from a Signal-Finder-confirmed binding), so they are no
+ * longer listed here; `brakePct` is kept in the union only so the alias stays
+ * explicit about what it adds, and TypeScript collapses the duplicate.
  */
 export type CoachingChannelId = TelemetryChannelId | 'brakePct' | 'steeringDeg' | 'yawRateDps';
 
@@ -24,6 +30,10 @@ export const ANALYSIS_CHANNELS: readonly CoachingChannelId[] = Object.freeze([
   'accelPedalPct',
   'throttlePct',
   'brakePct',
+  // Ticket P4l-FIX1 F4 (binding): the brake SWITCH, ranked directly after the
+  // brake pressure it stands in for -- a pressure channel is strictly more
+  // informative, so when a car provides both, `detectBrake` prefers it.
+  'brakeSwitch',
   'longG',
   'latG',
   'yawRateDps',
@@ -66,7 +76,7 @@ export interface CornerLapSample {
 /** Which estimator produced the lift point (never fabricated). */
 export type LiftSource = 'accelPedalPct' | 'throttlePct' | 'decelOnset';
 /** Which estimator produced the braking start. */
-export type BrakeSource = 'brakePct' | 'longG' | 'gpsSpeed';
+export type BrakeSource = 'brakePct' | 'brakeSwitch' | 'longG' | 'gpsSpeed';
 /** Which estimator produced the throttle-on point. */
 export type ThrottleOnSource = 'accelPedalPct' | 'throttlePct' | 'accelOnset';
 /** Which estimator produced the turn-in point. */

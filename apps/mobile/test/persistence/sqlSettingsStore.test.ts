@@ -1,7 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import { SqlSessionRepository } from '@circuit/core';
 import { SqlSettingsStore } from '../../src/persistence/sqlSettingsStore';
-import { DEFAULT_SETTINGS, type AppSettings } from '../../src/session/settingsStore';
+import {
+  DEFAULT_SETTINGS,
+  defaultLanguageForLocale,
+  readDeviceLocale,
+  type AppSettings,
+} from '../../src/session/settingsStore';
+
+/**
+ * Ticket P4l-FIX1 F2 (binding): with nothing persisted, hydration applies the
+ * DEVICE-LOCALE language default, so "the defaults" this suite compares
+ * against are `DEFAULT_SETTINGS` with that one field resolved -- pinned here
+ * rather than assuming the machine running the tests is English.
+ */
+const HYDRATED_DEFAULTS: AppSettings = {
+  ...DEFAULT_SETTINGS,
+  language: defaultLanguageForLocale(readDeviceLocale()),
+};
 import { createRawSqlJsDatabase, createSqlJsDatabase, wrapExistingSqlJsDatabase } from '../support/sqlJsDatabase';
 
 function flush(): Promise<void> {
@@ -13,7 +29,7 @@ describe('SqlSettingsStore (against sql.js)', () => {
     const db = await createSqlJsDatabase();
     await SqlSessionRepository.create(db); // runs the migration that creates the `settings` table
     const store = await SqlSettingsStore.create(db);
-    expect(store.getSettings()).toEqual(DEFAULT_SETTINGS);
+    expect(store.getSettings()).toEqual(HYDRATED_DEFAULTS);
   });
 
   it('update() applies a partial patch immediately and preserves untouched fields', async () => {
@@ -36,7 +52,7 @@ describe('SqlSettingsStore (against sql.js)', () => {
     const seen: AppSettings[] = [];
     const unsubscribe = store.subscribe((s) => seen.push(s));
     expect(seen).toHaveLength(1);
-    expect(seen[0]).toEqual(DEFAULT_SETTINGS);
+    expect(seen[0]).toEqual(HYDRATED_DEFAULTS);
 
     store.update({ units: 'mph' });
     expect(seen).toHaveLength(2);
@@ -111,7 +127,7 @@ describe('SqlSettingsStore (against sql.js)', () => {
     await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', ['app-settings', '{not valid json']);
 
     const store = await SqlSettingsStore.create(db);
-    expect(store.getSettings()).toEqual(DEFAULT_SETTINGS);
+    expect(store.getSettings()).toEqual(HYDRATED_DEFAULTS);
   });
 
   /**
@@ -250,5 +266,31 @@ describe('SqlSettingsStore (against sql.js)', () => {
     expect(store2.getSettings().enetHost).toBe('192.168.4.7');
     expect(store2.getSettings().enetHostProvenance).toBe('discovered 2026-08-27T00:00:00.000Z');
     expect(store2.getSettings().enetAutoDiscover).toBe(false);
+  });
+
+  /**
+   * Ticket P4l-FIX1 F2 (binding): the language default comes from the DEVICE
+   * LOCALE and is applied at hydration only -- a stored choice always wins,
+   * and a stored value outside the two-value vocabulary is repaired rather
+   * than accepted verbatim (same discipline as `developerModeEnabled`).
+   */
+  it('language: a persisted choice survives a restart; a missing/invalid one falls back to the device-locale default', async () => {
+    const raw = await createRawSqlJsDatabase();
+    const db1 = wrapExistingSqlJsDatabase(raw);
+    await SqlSessionRepository.create(db1);
+    const store1 = await SqlSettingsStore.create(db1);
+    expect(store1.getSettings().language).toBe(defaultLanguageForLocale(readDeviceLocale()));
+
+    store1.update({ language: 'ro' });
+    await flush();
+    const store2 = await SqlSettingsStore.create(wrapExistingSqlJsDatabase(raw));
+    expect(store2.getSettings().language).toBe('ro');
+
+    await db1.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'app-settings',
+      JSON.stringify({ language: 'klingon' }),
+    ]);
+    const store3 = await SqlSettingsStore.create(wrapExistingSqlJsDatabase(raw));
+    expect(store3.getSettings().language).toBe(defaultLanguageForLocale(readDeviceLocale()));
   });
 });

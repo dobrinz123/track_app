@@ -12,6 +12,47 @@ export type SpeedUnits = 'kmh' | 'mph';
  */
 export type AdapterType = 'elm327' | 'enet';
 
+/**
+ * Ticket P4l-FIX1 F2 (binding, the P4l worker's own concern 4): the app's ONE
+ * language. The exportable Signal Finder summary was already written in both
+ * RO and EN (`signalFinderExport.ts`), but the screen hard-coded `'en'`
+ * because no language setting existed. Same two-value vocabulary as
+ * `@circuit/core`'s coaching `ReportLanguage`, so one setting drives every
+ * user-facing text this app renders in more than one language.
+ */
+export type AppLanguage = 'ro' | 'en';
+
+/**
+ * The DEFAULT language for a device locale (BCP-47 tag or a legacy
+ * underscore form): Romanian for a `ro` PRIMARY subtag -- `ro`, `ro-RO`,
+ * `ro_RO`, `ro-MD` -- English for everything else, including an absent or
+ * unreadable locale. Matched on the primary subtag alone, never a prefix, so
+ * `roa`/`rom` (other languages that merely start with "ro") stay English,
+ * and `hu-RO` (Hungarian spoken in Romania) is Hungarian, not Romanian.
+ * Pure: takes the locale rather than reading one, so the rule can be pinned
+ * by a test without any native locale API.
+ */
+export function defaultLanguageForLocale(locale: string | null | undefined): AppLanguage {
+  if (typeof locale !== 'string') return 'en';
+  const primary = locale.trim().toLowerCase().split(/[-_]/)[0] ?? '';
+  return primary === 'ro' ? 'ro' : 'en';
+}
+
+/**
+ * The device's own locale, read through the `Intl` global (present in Hermes
+ * and in Node/vitest -- no new native dependency, and no `react-native`
+ * import, so this module stays directly importable by vitest). Any failure
+ * -- a runtime built without full ICU, a throwing resolver -- degrades to
+ * `null`, which `defaultLanguageForLocale` maps to `'en'`.
+ */
+export function readDeviceLocale(): string | null {
+  try {
+    return new Intl.DateTimeFormat().resolvedOptions().locale ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export interface CoverageBinsSetting {
   /** Fraction thresholds, ascending, in (0,1), used to bucket calibration coverage for display. */
   thresholds: readonly number[];
@@ -159,6 +200,16 @@ export interface AppSettings {
    * `__DEV__`-only regardless of this setting. Defaults to `false`.
    */
   developerModeEnabled: boolean;
+  /**
+   * Ticket P4l-FIX1 F2 (binding): the app language (`'ro' | 'en'`). The
+   * static default below is `'en'`; the DEVICE-LOCALE default
+   * (`defaultLanguageForLocale(readDeviceLocale())`) is applied once, at
+   * hydration, ONLY when nothing was ever persisted -- so a user who chose a
+   * language keeps it even when they travel, and an existing install with no
+   * stored value adopts its device's language on first launch after this
+   * ticket rather than being forced to English.
+   */
+  language: AppLanguage;
 }
 
 /**
@@ -226,6 +277,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   enetHostProvenance: '',
   enetAutoDiscover: true,
   developerModeEnabled: false,
+  language: 'en',
 };
 
 /**

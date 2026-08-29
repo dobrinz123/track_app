@@ -51,7 +51,16 @@
  * discovery detour first) -- it never uses the `'discovery'` owner, which is
  * reserved for the user-initiated Settings button.
  */
-export type EnetAdapterOwner = 'provider' | 'probe' | 'discovery' | 'sweep';
+/**
+ * Ticket P4l-FIX1 F3 (binding, the P4l worker's own concern 5): the Signal
+ * Finder used to acquire under the `'sweep'` owner, so any UI naming the
+ * current holder reported "DID sweep" while the Signal Finder was really the
+ * one holding the adapter. Its own owner kind. Behaviour is IDENTICAL --
+ * `tryAcquire` already refuses whenever ANYONE holds the reservation
+ * (including the same owner), so adding a kind can never change who wins;
+ * only the name `holder()` reports changes.
+ */
+export type EnetAdapterOwner = 'provider' | 'probe' | 'discovery' | 'sweep' | 'signalFinder';
 
 /** Opaque -- callers must not construct one, only store what `tryAcquire` returns and pass it back to `release`. */
 export type EnetAdapterToken = symbol;

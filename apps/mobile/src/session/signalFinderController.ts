@@ -430,13 +430,13 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         return;
       }
 
-      token = reservation.tryAcquire('sweep');
+      token = reservation.tryAcquire('signalFinder');
       if (token === null && reservation.isReleasePending()) {
         // A prior holder's close+release is already in flight -- wait it out
         // once rather than reporting a busy adapter (same discipline as the
         // sweep controller's own reacquire).
         await reservation.whenFree();
-        token = reservation.tryAcquire('sweep');
+        token = reservation.tryAcquire('signalFinder');
       }
       if (token === null) {
         emit({ phase: 'error', error: RESERVATION_BUSY_MESSAGE, step: null });

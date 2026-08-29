@@ -107,6 +107,7 @@ const CHANNEL_LABELS: Record<ReportLanguage, Partial<Record<CoachingChannelId, s
     accelPedalPct: 'pedala de accelerație',
     throttlePct: 'clapeta de accelerație',
     brakePct: 'frâna',
+    brakeSwitch: 'contactul de frână',
     longG: 'accelerație longitudinală (G)',
     latG: 'accelerație laterală (G)',
     yawRateDps: 'viteza de girație',
@@ -118,6 +119,7 @@ const CHANNEL_LABELS: Record<ReportLanguage, Partial<Record<CoachingChannelId, s
     accelPedalPct: 'accelerator pedal',
     throttlePct: 'throttle plate',
     brakePct: 'brake',
+    brakeSwitch: 'brake switch',
     longG: 'longitudinal G',
     latG: 'lateral G',
     yawRateDps: 'yaw rate',
@@ -132,11 +134,13 @@ const BRAKE_SOURCE_LABELS: Record<
 > = {
   ro: {
     brakePct: 'din canalul de frână',
+    brakeSwitch: 'din contactul de frână',
     longG: 'din accelerometru',
     gpsSpeed: 'estimat din viteza GPS',
   },
   en: {
     brakePct: 'from the brake channel',
+    brakeSwitch: 'from the brake switch',
     longG: 'from the accelerometer',
     gpsSpeed: 'estimated from GPS speed',
   },

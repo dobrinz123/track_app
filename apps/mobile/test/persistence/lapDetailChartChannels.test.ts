@@ -24,6 +24,10 @@ describe('TELEMETRY_CHART_CHANNELS order (channel revision, F5 fix)', () => {
       'longG',
       'engineOilC',
       'transOilC',
+      // Ticket P4l-FIX1 F1 (binding): appended -- the seven ids above keep
+      // their exact original order.
+      'brakeSwitch',
+      'brakePct',
     ]);
   });
 

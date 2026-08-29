@@ -45,9 +45,6 @@ type Props = NativeStackScreenProps<RootStackParamList, 'SignalFinder'>;
  * the user forwards").
  */
 
-/** No language setting exists in `settingsStore` yet (checked); the summary builder takes RO too, ready for one. */
-const SUMMARY_LANGUAGE = 'en';
-
 const VERDICT_COLOR: Readonly<Record<SignalCandidateScore['verdict'], string>> = {
   found: colors.success,
   probable: colors.warning,
@@ -175,7 +172,7 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
     setSummary(null);
     await ensureController().find(target.id);
     const doc = buildDocument();
-    if (doc !== null) setSummary(buildSignalFinderSummaryMarkdown(doc, SUMMARY_LANGUAGE));
+    if (doc !== null) setSummary(buildSignalFinderSummaryMarkdown(doc, settings.language));
   }
 
   async function handleConfirm(score: SignalCandidateScore): Promise<void> {
@@ -198,7 +195,7 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
     }
     setSharing(true);
     try {
-      const result = kind === 'summary' ? await shareSignalFinderExport(doc, SUMMARY_LANGUAGE) : await shareSignalFinderJson(doc);
+      const result = kind === 'summary' ? await shareSignalFinderExport(doc, settings.language) : await shareSignalFinderJson(doc);
       setBanner(
         result.shared
           ? kind === 'summary'

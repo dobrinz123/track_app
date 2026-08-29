@@ -41,6 +41,12 @@ export const TELEMETRY_CHART_CHANNELS: readonly TelemetryChannelId[] = [
   'longG',
   'engineOilC',
   'transOilC',
+  // Ticket P4l-FIX1 F1 (binding): the brake channels, APPENDED (the ids/order
+  // above are unchanged) -- a lap only charts them once a confirmed vehicle
+  // binding has actually produced samples, exactly like `transOilC` before
+  // its custom PID is configured.
+  'brakeSwitch',
+  'brakePct',
 ];
 
 interface TelemetrySampleDbRow {

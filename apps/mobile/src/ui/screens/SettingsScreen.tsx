@@ -16,7 +16,7 @@ import {
 } from '../../session/composition';
 import { useFacadeState } from '../hooks/useFacadeState';
 import { useSettings } from '../hooks/useSettings';
-import { registerDevTap, type AdapterType, type DevTapState, type SpeedUnits } from '../../session/settingsStore';
+import { registerDevTap, type AdapterType, type AppLanguage, type DevTapState, type SpeedUnits } from '../../session/settingsStore';
 import { validateCustomPidHex } from '../../session/customPidValidation';
 import {
   applyDiscoveryResult,
@@ -471,6 +471,25 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
         <Text style={styles.title} maxFontSizeMultiplier={1.3}>
           Settings
         </Text>
+
+        {/* Ticket P4l-FIX1 F2 (binding): the app language. Defaulted from the
+            device locale at first hydration (`sqlSettingsStore.ts`); this row
+            is where the user overrides it. Drives the Signal Finder's
+            exportable RO/EN summary today. */}
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
+            LANGUAGE
+          </Text>
+          <SegmentedControl<AppLanguage>
+            labelPrefix="Language"
+            value={settings.language}
+            onChange={(language) => settingsStore.update({ language })}
+            options={[
+              { label: 'Română', value: 'ro' },
+              { label: 'English', value: 'en' },
+            ]}
+          />
+        </View>
 
         <View style={styles.section}>
           <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>

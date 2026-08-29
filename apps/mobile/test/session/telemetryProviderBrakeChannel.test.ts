@@ -1,0 +1,192 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { TelemetrySample } from '@circuit/core';
+import { InMemorySettingsStore } from '../../src/session/settingsStore';
+import { createEnetAdapterReservation } from '../../src/session/enetAdapterReservation';
+import type { VehicleProfileBinding } from '../../src/persistence/didSweepStore';
+
+/**
+ * Ticket P4l-FIX1 F1 (binding, the P4l worker's own concern 1): the provider
+ * RESOLVED a field-confirmed brake binding but could not emit anything from
+ * it, because `brakeSwitch`/`brakePct` were not `TelemetryChannelId` members
+ * and therefore could never become a poll entry or a `TelemetrySample`.
+ *
+ * End-to-end proof, over a real HSFZ wire (the multi-ECU transport double the
+ * Signal Finder suite already uses -- it answers as whichever ECU the request
+ * was addressed to): a confirmed `brakeSwitch` binding at ECU 0x29 / DID
+ * 0x500C, whose byte flips 0x04 -> 0x05 when the pedal goes down, reaches the
+ * provider's sample stream as brakeSwitch 0 -> 100.
+ *
+ * `enetChannelSpecsJson: '[]'` (a deliberate, respected "zero configured
+ * channels" -- see `resolveEnetChannelSpecs`) is used so the ONLY poll entry
+ * in the plan is the one the BINDING produced: nothing else can be the source
+ * of the samples asserted below.
+ */
+
+const state = vi.hoisted(() => ({
+  instances: [] as Array<{ requests: Array<{ ecu: number; did: number; tMs: number }> }>,
+  /** What the 0x29/0x500C DID answers (1 byte) and what the 0x29/0x500B DID answers (2 bytes). */
+  brakeByte: 0x04,
+  brakeWord: 0x0002,
+}));
+
+vi.mock('../../src/session/enetTcpTransport', async () => {
+  const { MultiEcuFakeTransport } = await import('../support/signalFinderHarness');
+  return {
+    EnetTcpTransport: class extends MultiEcuFakeTransport {
+      constructor() {
+        super({
+          answer: (ecu: number, did: number) => {
+            if (ecu !== 0x29) return 'nrc';
+            if (did === 0x500c) return Uint8Array.from([state.brakeByte]);
+            if (did === 0x500b) return Uint8Array.from([(state.brakeWord >> 8) & 0xff, state.brakeWord & 0xff]);
+            return 'nrc';
+          },
+        });
+        state.instances.push(this);
+      }
+    },
+  };
+});
+
+import { createTelemetryProvider } from '../../src/session/telemetryProvider';
+
+const BRAKE_BINDING: VehicleProfileBinding = {
+  profileId: 'toyota-supra-b58',
+  channel: 'brakeSwitch',
+  ecu: 0x29,
+  did: 0x500c,
+  length: 1,
+  decode: 'bit0 (0x04 released -> 0x05 pressed)',
+  status: 'field-confirmed',
+  evidenceJson: JSON.stringify({ restValueHex: '04', min: 4, max: 5, byteOffset: 0 }),
+  updatedAtUtc: '2026-08-29T18:12:00.000Z',
+};
+
+function enetStore(): InMemorySettingsStore {
+  const store = new InMemorySettingsStore();
+  store.update({
+    telemetryEnabled: true,
+    telemetrySimulate: false,
+    adapterType: 'enet',
+    enetHost: '192.168.4.1',
+    enetAutoDiscover: false,
+    enetChannelSpecsJson: '[]',
+  });
+  return store;
+}
+
+async function waitFor(predicate: () => boolean, budgetMs = 4_000): Promise<void> {
+  const deadline = Date.now() + budgetMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('timed out waiting for the expected condition');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+describe('P4l-FIX1 F1: a confirmed brake binding becomes a real ENET poll entry and emits samples', () => {
+  beforeEach(() => {
+    state.instances.length = 0;
+    state.brakeByte = 0x04;
+    state.brakeWord = 0x0002;
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('polls 0x29/0x500C and emits brakeSwitch 0 then 100 as the byte flips 04 -> 05', async () => {
+    const store = enetStore();
+    const samples: TelemetrySample[] = [];
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: () => Date.now(),
+      isDev: true,
+      enetAdapterReservation: createEnetAdapterReservation(),
+      readVehicleProfileBindings: () => [BRAKE_BINDING],
+    });
+    provider.onSample((sample) => samples.push(sample));
+    provider.start();
+
+    await waitFor(() => samples.some((sample) => sample.channel === 'brakeSwitch'));
+    expect(samples.every((sample) => sample.channel === 'brakeSwitch')).toBe(true);
+    expect(samples[0]?.value).toBe(0);
+
+    state.brakeByte = 0x05;
+    await waitFor(() => samples.some((sample) => sample.channel === 'brakeSwitch' && sample.value === 100));
+
+    const values = samples.filter((sample) => sample.channel === 'brakeSwitch').map((sample) => sample.value);
+    expect(values[0]).toBe(0);
+    expect(values.at(-1)).toBe(100);
+    expect(new Set(values)).toEqual(new Set([0, 100]));
+
+    // The request really went to the BRAKE ECU, not the DME target address in settings.
+    const requests = state.instances[0]?.requests ?? [];
+    expect(requests.length).toBeGreaterThan(0);
+    expect(requests.every((request) => request.ecu === 0x29 && request.did === 0x500c)).toBe(true);
+    expect(store.getSettings().enetTargetAddress).toBe(0x12);
+
+    // The channel is reported as a supported ENET channel, like any other.
+    expect(provider.getDiagnostics().supportedChannels).toContain('brakeSwitch');
+
+    await provider.stop();
+  }, 15_000);
+
+  /**
+   * Ticket P4l-FIX1 H4 (binding, Codex review finding): the SAME end-to-end
+   * path over the 2-byte 0x29/0x500B series from field test 4. Before the
+   * fix the decoder read byte 0 only, so 0x0002 -> 0x0006 was invisible: the
+   * channel would have polled happily and emitted a flat 0 forever.
+   */
+  it('polls 0x29/0x500B (2-byte) and emits brakeSwitch 0 then 100 as the word flips 0002 -> 0006', async () => {
+    const store = enetStore();
+    const samples: TelemetrySample[] = [];
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: () => Date.now(),
+      isDev: true,
+      enetAdapterReservation: createEnetAdapterReservation(),
+      readVehicleProfileBindings: () => [
+        {
+          ...BRAKE_BINDING,
+          did: 0x500b,
+          length: 2,
+          evidenceJson: JSON.stringify({ restValueHex: '0002', min: 2, max: 6, byteOffset: null }),
+        },
+      ],
+    });
+    provider.onSample((sample) => samples.push(sample));
+    provider.start();
+
+    await waitFor(() => samples.length > 0);
+    expect(samples[0]?.channel).toBe('brakeSwitch');
+    expect(samples[0]?.value).toBe(0);
+
+    state.brakeWord = 0x0006;
+    await waitFor(() => samples.some((sample) => sample.value === 100));
+
+    const requests = state.instances[0]?.requests ?? [];
+    expect(requests.every((request) => request.ecu === 0x29 && request.did === 0x500b)).toBe(true);
+    expect(provider.getDiagnostics().errorCount).toBe(0);
+
+    await provider.stop();
+  }, 15_000);
+
+  it('emits nothing brake-shaped when the binding is only a hypothesis (never field-confirmed)', async () => {
+    const store = enetStore();
+    const samples: TelemetrySample[] = [];
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: () => Date.now(),
+      isDev: true,
+      enetAdapterReservation: createEnetAdapterReservation(),
+      readVehicleProfileBindings: () => [{ ...BRAKE_BINDING, status: 'hypothesis' }],
+    });
+    provider.onSample((sample) => samples.push(sample));
+    provider.start();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(samples).toEqual([]);
+    expect(state.instances[0]?.requests ?? []).toEqual([]);
+
+    await provider.stop();
+  }, 15_000);
+});

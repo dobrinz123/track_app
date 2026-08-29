@@ -169,6 +169,30 @@ describe('enetAdapterReservation (P4e-FIX3 H2 / P4e-FIX4 token model, binding: s
   });
 
   /**
+   * Ticket P4l-FIX1 F3 (binding): the Signal Finder used to acquire under
+   * the `'sweep'` owner, so a UI that names the current holder ("the DID
+   * sweep is using the adapter") lied whenever the Signal Finder was the one
+   * holding it. Its OWN owner kind -- behaviour otherwise identical: still
+   * exactly one holder at a time, mutually exclusive with every other kind.
+   */
+  it("'signalFinder' is its own owner kind, named by holder(), exclusive with every other owner", () => {
+    const reservation = createEnetAdapterReservation();
+    const finderToken = reservation.tryAcquire('signalFinder');
+    expect(finderToken).not.toBeNull();
+    expect(reservation.holder()).toBe('signalFinder');
+    expect(reservation.tryAcquire('provider')).toBeNull();
+    expect(reservation.tryAcquire('sweep')).toBeNull();
+    expect(reservation.tryAcquire('signalFinder')).toBeNull(); // no same-owner reacquire either.
+
+    reservation.release(finderToken!);
+    expect(reservation.holder()).toBeNull();
+    const sweepAfter = reservation.tryAcquire('sweep');
+    expect(sweepAfter).not.toBeNull();
+    expect(reservation.tryAcquire('signalFinder')).toBeNull();
+    reservation.release(sweepAfter!);
+  });
+
+  /**
    * Ticket P4j-FIX2 V2 (binding, after Codex P4j-REV2 MEDIUM #2 "the screen's
    * unmount cleanup still fire-and-forgets stop()"): `whenFree()` is the
    * reservation-level primitive `didSweepController.ts`'s `start()`/
