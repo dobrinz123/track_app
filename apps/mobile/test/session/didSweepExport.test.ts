@@ -149,6 +149,66 @@ describe('buildDidSweepExportDocument (binding, P4i)', () => {
     ]);
   });
 
+  /**
+   * Ticket P4j (binding): "Settings already has enetTargetAddress -- make
+   * sure ... the export's `run.targetAddress` is a hex string too."
+   */
+  it('run.targetAddress exports as a 2-hex-digit byte string, and null stays null (never a fabricated hex)', () => {
+    const docWithTarget = buildDidSweepExportDocument({ run: run({ targetAddress: 0x12 }), responders: [], nowIso: '2026-08-27T19:00:00.000Z' });
+    expect(docWithTarget.run.targetAddress).toBe('0x12');
+
+    const docWithHighByte = buildDidSweepExportDocument({ run: run({ targetAddress: 0x29 }), responders: [], nowIso: '2026-08-27T19:00:00.000Z' });
+    expect(docWithHighByte.run.targetAddress).toBe('0x29');
+
+    const docWithNull = buildDidSweepExportDocument({ run: run({ targetAddress: null }), responders: [], nowIso: '2026-08-27T19:00:00.000Z' });
+    expect(docWithNull.run.targetAddress).toBeNull();
+  });
+
+  /** Ticket P4j (binding, batched guided observation): "export includes `batchIndex`." */
+  it('observationSamples carrying a batchIndex export it on the per-(did,phase) series; a sample with none exports batchIndex: null', () => {
+    const doc = buildDidSweepExportDocument({
+      run: run(),
+      responders: [],
+      observationSamples: [
+        { did: 0x0001, phase: 'baseline', tMs: 0, raw: Uint8Array.from([0x10]), batchIndex: 3 },
+        { did: 0x0001, phase: 'baseline', tMs: 1_000, raw: Uint8Array.from([0x10]), batchIndex: 3 },
+        { did: 0x0002, phase: 'baseline', tMs: 0, raw: Uint8Array.from([0x20]) }, // no batchIndex -- legacy/focused run.
+      ],
+      nowIso: '2026-08-27T19:00:00.000Z',
+    });
+    const did1Series = doc.observationSeries.find((s) => s.didHex === '0x0001');
+    const did2Series = doc.observationSeries.find((s) => s.didHex === '0x0002');
+    expect(did1Series?.batchIndex).toBe(3);
+    expect(did2Series?.batchIndex).toBeNull();
+  });
+
+  /**
+   * Ticket P4j (binding): "Mid-size blocks (9-32 bytes) join the candidate
+   * pool with per-byte-offset diffing ... the export lists changed offsets."
+   */
+  it('blockCandidateSummaries are hex-DID-mapped verbatim into blockCandidates; omitted entirely exports []', () => {
+    const withNone = buildDidSweepExportDocument({ run: run(), responders: [], nowIso: '2026-08-27T19:00:00.000Z' });
+    expect(withNone.blockCandidates).toEqual([]);
+
+    const doc = buildDidSweepExportDocument({
+      run: run(),
+      responders: [],
+      blockCandidateSummaries: [
+        {
+          did: 0x40b5,
+          length: 10,
+          sampleCount: 8,
+          rank: 'brakeCandidate',
+          changedOffsetsByPhase: { baseline: [], brake: [4, 5], steering: [], throttle: [] },
+        },
+      ],
+      nowIso: '2026-08-27T19:00:00.000Z',
+    });
+    expect(doc.blockCandidates).toEqual([
+      { didHex: '0x40B5', length: 10, sampleCount: 8, rank: 'brakeCandidate', changedOffsetsByPhase: { baseline: [], brake: [4, 5], steering: [], throttle: [] } },
+    ]);
+  });
+
   it('observationSamples are grouped by (did, phase) into per-phase series, timestamps and raw hex preserved', () => {
     const doc = buildDidSweepExportDocument({
       run: run(),
@@ -251,6 +311,48 @@ describe('buildDidSweepExportForRun (binding, P4i-FIX1 F3): the screen/controlle
     expect(doc!.observationSeries.length).toBeGreaterThan(0);
     expect(doc!.candidates.length).toBeGreaterThan(0); // candidateSummaries also flow through.
   });
+
+  /**
+   * Ticket P4j (binding): "export includes `batchIndex`" and "the export's
+   * `run.targetAddress` is a hex string too" -- a REAL `startBatchedObservation()`
+   * run's samples/target address flow all the way through the handoff.
+   */
+  it('a real batched observation run\'s samples carry batchIndex through the export, and run.targetAddress is a hex string', async () => {
+    const store = createInMemoryDidSweepStore();
+    const controller = createDidSweepController({
+      transportFactory: () =>
+        new SimulatedEnetTransport({
+          monotonicNow: () => Date.now(),
+          scenario: DEFAULT_ENET_DID_SCENARIO,
+          testerAddress: TESTER_ADDRESS,
+          targetAddress: TARGET_ADDRESS,
+        }),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: { now: () => Date.now() },
+      store,
+    });
+
+    controller.start({ from: 0x1e1c, to: 0x1e24 });
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('sweepComplete');
+    const runId = controller.getCurrentRunId()!;
+
+    controller.startBatchedObservation({ batchSize: 1, minSamplesPerPhase: 1 });
+    for (let i = 0; i < 100 && controller.getSnapshot().phase === 'observing'; i += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flush();
+    }
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+
+    const doc = await buildDidSweepExportForRun(controller, store, runId, '2026-08-27T19:00:00.000Z');
+    expect(doc).not.toBeNull();
+    expect(doc!.run.targetAddress).toBe('0x12');
+    expect(doc!.observationSeries.length).toBeGreaterThan(0);
+    // Every series has a real (non-null) batchIndex -- a batched run always tags its samples.
+    expect(doc!.observationSeries.every((s) => s.batchIndex !== null)).toBe(true);
+  }, 20_000);
 
   /**
    * R2 (P4i-FIX2, binding, after Codex P4hrev3 NEW MEDIUM "guided export

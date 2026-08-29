@@ -71,6 +71,32 @@ export function filterSweepCandidates(
   );
 }
 
+/**
+ * Ticket P4j (binding): "Mid-size blocks (9-32 bytes) join the candidate pool
+ * with per-byte-offset diffing ... ASCII-like blocks still excluded." This is
+ * the WIDENED candidate pool `filterSweepCandidates` (still 1-8 bytes,
+ * unchanged, kept for every existing caller) does not cover: the SAME
+ * length-floor and ASCII exclusion, just with the ceiling raised from 8 to
+ * `midSizeMaxLen` (default 32) so a mid-size block (e.g. a 10-byte struct
+ * with a couple of live byte offsets) is no longer dropped outright. Ranking
+ * a mid-size candidate's OWN offsets is `didObservationPhases.ts`'s
+ * `computeDidBlockCandidateSummaries`' job -- this function only decides
+ * which responders are worth observing at all.
+ */
+export interface FilterCandidatePoolOptions extends FilterSweepCandidatesOptions {
+  /** Default 32 (ticket: "Mid-size blocks (9-32 bytes)"). */
+  midSizeMaxLen?: number;
+}
+
+const DEFAULT_MID_SIZE_MAX_LEN = 32;
+
+export function filterCandidatePool(
+  responders: readonly DidSweepResponder[],
+  options: FilterCandidatePoolOptions = {},
+): DidSweepResponder[] {
+  return filterSweepCandidates(responders, { ...options, maxLen: options.midSizeMaxLen ?? DEFAULT_MID_SIZE_MAX_LEN });
+}
+
 /** One DID's two-sample "changing values" pre-pass input (addendum: "each candidate read twice ~2s apart while the user blips the throttle/steers"). */
 export interface DidChangeSamplePair {
   did: number;

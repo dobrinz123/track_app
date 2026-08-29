@@ -6,7 +6,7 @@ import {
   SimulatedEnetTransport,
   DEFAULT_ENET_DID_SCENARIO,
   DID_OBSERVATION_PHASES,
-  filterSweepCandidates,
+  filterCandidatePool,
   type DidCandidateSummary,
   type ObdTransport,
   type TelemetryChannelId,
@@ -43,6 +43,49 @@ function formatBytesHex(bytes: Uint8Array): string {
 }
 
 /**
+ * Ticket P4j (binding): "UI shows '0x40B5 · bytes 4-5 changed (brake)'."
+ * Collapses a sorted list of changed byte offsets into contiguous ranges
+ * (`[4, 5, 9]` -> `"4-5, 9"`) so a wide block's change report reads as ranges
+ * rather than a long list of individual offsets.
+ */
+function formatOffsetRanges(offsets: readonly number[]): string {
+  if (offsets.length === 0) return '';
+  const sorted = [...offsets].sort((a, b) => a - b);
+  const ranges: string[] = [];
+  let start = sorted[0]!;
+  let prev = sorted[0]!;
+  for (let i = 1; i <= sorted.length; i += 1) {
+    const current = sorted[i];
+    if (current === undefined || current !== prev + 1) {
+      ranges.push(start === prev ? `${start}` : `${start}-${prev}`);
+      if (current !== undefined) {
+        start = current;
+        prev = current;
+      }
+    } else {
+      prev = current;
+    }
+  }
+  return ranges.join(', ');
+}
+
+/**
+ * Ticket P4j (binding): "the user can tick candidates (or type DIDs)."
+ * Parses a comma/whitespace-separated list of hex DIDs (each with an
+ * optional `0x` prefix) -- invalid tokens are simply skipped (never blocks
+ * the valid ones).
+ */
+function parseTypedDidList(text: string): number[] {
+  const out: number[] = [];
+  for (const token of text.split(/[\s,]+/)) {
+    if (token.trim().length === 0) continue;
+    const parsed = parseHexRange(token);
+    if (parsed !== null) out.push(parsed);
+  }
+  return out;
+}
+
+/**
  * Dev-only tool, hidden by default (field revision, 2026-08-27, binding: the
  * ROUTE is registered in every build, release included -- only its
  * `SettingsScreen.tsx` entry point is gated on `developerModeEnabled`/
@@ -76,6 +119,12 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   // "responders collapsed with count + expand".
   const [respondersExpanded, setRespondersExpanded] = React.useState(false);
   const [staticExpanded, setStaticExpanded] = React.useState(false);
+  // Ticket P4j (binding): "FOCUSED observation: the user can tick candidates
+  // (or type DIDs) -> one long guided cycle on the shortlist only." Ticked
+  // candidates (DID -> selected) plus a free-text typed-DID field; either
+  // (or both) source the shortlist `startFocusedObservation` runs.
+  const [selectedDids, setSelectedDids] = React.useState<ReadonlySet<number>>(new Set());
+  const [focusedDidsDraft, setFocusedDidsDraft] = React.useState('');
   const [shareBanner, setShareBanner] = React.useState<string | null>(null);
   const [sharing, setSharing] = React.useState(false);
   // R1 fix (P4i-FIX2, binding, after Codex P4hrev3 H3 PARTIAL): "public
@@ -300,15 +349,38 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   }
 
   // DID sweep — guided candidate observation addendum (2026-08-27, binding —
-  // Phase 4i, user clarification): the visible, guided, repeated re-read
-  // (baseline -> brake -> steering -> throttle) over the FILTERED candidate
-  // set.
+  // Phase 4i, user clarification), superseded by ticket P4j's BATCHED guided
+  // flow: the same visible, guided, repeated re-read (baseline -> brake ->
+  // steering -> throttle) but batch by batch over the WIDENED candidate pool
+  // (1-32 bytes -- mid-size blocks join numeric candidates), sized from the
+  // sweep's own measured req/s so every DID gets >= 5 samples/phase (field
+  // evidence: a single pass over 128 candidates gave only 1-2/phase, which
+  // is why 0x4522's ordinary jitter (297 -> 305 -> 295) looked like a brake
+  // signal before this fix).
   function handleStartGuidedObservation(): void {
-    controllerRef.current?.startGuidedObservation();
+    controllerRef.current?.startBatchedObservation();
   }
 
   function handleStopGuidedObservationEarly(): void {
     controllerRef.current?.stopGuidedObservationEarly();
+  }
+
+  // Ticket P4j (binding): "the user can tick candidates (or type DIDs) -> one
+  // long guided cycle on the shortlist only." The shortlist is the UNION of
+  // ticked candidates and typed DIDs -- either source alone is enough.
+  function toggleSelectedDid(did: number): void {
+    setSelectedDids((prev) => {
+      const next = new Set(prev);
+      if (next.has(did)) next.delete(did);
+      else next.add(did);
+      return next;
+    });
+  }
+
+  function handleStartFocusedObservation(): void {
+    const shortlist = new Set<number>(selectedDids);
+    for (const did of parseTypedDidList(focusedDidsDraft)) shortlist.add(did);
+    controllerRef.current?.startFocusedObservation([...shortlist]);
   }
 
   async function handleShareResults(): Promise<void> {
@@ -371,7 +443,10 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   // candidate set and shows 'N candidates of M responders'" -- computed here
   // (pure, deterministic) purely for DISPLAY; the controller applies the
   // SAME filter internally when it actually builds its own poll list.
-  const candidateDids = snapshot === null ? [] : filterSweepCandidates(snapshot.responders);
+  // Ticket P4j (binding): "Mid-size blocks (9-32 bytes) join the candidate
+  // pool" -- the WIDENED pool (1-32 bytes), vs. the legacy 1-8-byte
+  // `filterSweepCandidates` `startGuidedObservation()` used before batching.
+  const candidateDids = snapshot === null ? [] : filterCandidatePool(snapshot.responders);
   // F6 fix (P4i-FIX1, binding): the single most-recent RESUMABLE run, or
   // `null` if none qualifies -- see `selectResumableRun`'s own doc comment.
   const resumableRun = selectResumableRun(resumableRuns);
@@ -379,6 +454,16 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
   const rankedCandidates = snapshot?.candidateSummaries ?? [];
   const activeCandidates = rankedCandidates.filter((c) => c.rank !== 'static');
   const staticCandidates = rankedCandidates.filter((c) => c.rank === 'static');
+  // Ticket P4j (binding): mid-size block candidates, shown alongside the
+  // numeric ones -- static blocks are just as uninteresting as static
+  // numeric candidates, so they are collapsed the same way.
+  const blockCandidates = snapshot?.blockCandidateSummaries ?? [];
+  const activeBlockCandidates = blockCandidates.filter((b) => b.rank !== 'static');
+  // Ticket P4j (binding): "make sure the sweep screen shows the active
+  // target" -- e.g. "Target 0x12". Formatted the same way the export's own
+  // `run.targetAddress` is (a 2-hex-digit byte), never a hard-coded ECU name
+  // (vehicle-agnostic contract, 2026-08-28, binding).
+  const targetAddressHex = `0x${formatHexByte(settings.enetTargetAddress)}`;
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -528,6 +613,16 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
 
         {snapshot === null ? null : (
           <View style={styles.card}>
+            {/* Ticket P4j (binding): "make sure the sweep screen shows the
+                active target" (e.g. "DME 0x12" / "0x29"). */}
+            <View style={styles.progressRow}>
+              <Text style={styles.progressLabel} maxFontSizeMultiplier={1.3}>
+                Target
+              </Text>
+              <Text style={styles.progressValue} maxFontSizeMultiplier={1.3}>
+                {targetAddressHex}
+              </Text>
+            </View>
             <View style={styles.progressRow}>
               <Text style={styles.progressLabel} maxFontSizeMultiplier={1.3}>
                 {phase.toUpperCase()}
@@ -539,6 +634,18 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
                 </Text>
               )}
             </View>
+            {/* Ticket P4j (binding): "progress 'Batch 3/8'" -- shown only
+                during a BATCHED guided observation run. */}
+            {snapshot.batchIndex === null || snapshot.batchTotal === null ? null : (
+              <View style={styles.progressRow}>
+                <Text style={styles.progressLabel} maxFontSizeMultiplier={1.3}>
+                  Batch
+                </Text>
+                <Text style={styles.progressValue} maxFontSizeMultiplier={1.3}>
+                  {snapshot.batchIndex + 1}/{snapshot.batchTotal}
+                </Text>
+              </View>
+            )}
             <View style={styles.progressRow}>
               <Text style={styles.progressLabel} maxFontSizeMultiplier={1.3}>
                 Responders
@@ -575,7 +682,7 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
             </Pressable>
             <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
               {candidateDids.length} candidate{candidateDids.length === 1 ? '' : 's'} of {snapshot.responders.length} responders
-              (length 1-8 bytes, not an ASCII string).
+              (length 1-32 bytes, not an ASCII string -- mid-size 9-32 byte blocks join numeric 1-8 byte candidates).
             </Text>
             {respondersExpanded
               ? snapshot.responders.map((responder) => (
@@ -612,12 +719,15 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
               </Pressable>
             ) : null}
             {/* Guided candidate observation addendum (binding, P4i, user
-                clarification): the visible, guided, repeated re-read across
-                baseline/brake/steering/throttle. */}
+                clarification), BATCHED per ticket P4j: the visible, guided,
+                repeated re-read across baseline/brake/steering/throttle,
+                batch by batch over the whole candidate pool -- fixes the
+                noise a single pass over a large candidate set produced
+                (field evidence: 1-2 samples/DID/phase was not enough). */}
             {(phase === 'sweepComplete' || phase === 'stopped' || phase === 'observationComplete') && !observing ? (
-              <Pressable style={styles.button} onPress={handleStartGuidedObservation} accessibilityRole="button" accessibilityLabel="Start guided observation">
+              <Pressable style={styles.button} onPress={handleStartGuidedObservation} accessibilityRole="button" accessibilityLabel="Start batched guided observation">
                 <Text style={styles.buttonText} maxFontSizeMultiplier={1.3}>
-                  Start guided observation (baseline → brake → steering → throttle)
+                  Start guided observation (baseline → brake → steering → throttle, batch by batch)
                 </Text>
               </Pressable>
             ) : null}
@@ -706,6 +816,18 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
                   · {candidate.sampleCount} samples
                   {candidate.min !== null && candidate.max !== null ? ` · range ${candidate.min}-${candidate.max}` : ''}
                 </Text>
+                {/* Ticket P4j (binding): "the user can tick candidates ...
+                    -> one long guided cycle on the shortlist only." */}
+                <Pressable
+                  style={styles.presetChip}
+                  onPress={() => toggleSelectedDid(candidate.did)}
+                  accessibilityRole="button"
+                  accessibilityLabel={selectedDids.has(candidate.did) ? `Deselect ${formatHexDid(candidate.did)} from the focused shortlist` : `Select ${formatHexDid(candidate.did)} for the focused shortlist`}
+                >
+                  <Text style={styles.presetChipText} maxFontSizeMultiplier={1.3}>
+                    {selectedDids.has(candidate.did) ? '☑ Selected' : '☐ Select'}
+                  </Text>
+                </Pressable>
                 {tagPickerDid === candidate.did ? (
                   <View style={styles.channelPickerRow}>
                     {ENET_TAG_CHANNELS.map((channel) => (
@@ -760,6 +882,93 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
                   : null}
               </>
             )}
+          </View>
+        )}
+
+        {/* Ticket P4j (binding): "Mid-size blocks (9-32 bytes) join the
+            candidate pool with per-byte-offset diffing ... UI shows '0x40B5
+            · bytes 4-5 changed (brake)'." */}
+        {activeBlockCandidates.length === 0 ? null : (
+          <View style={styles.card}>
+            <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
+              BLOCK CANDIDATES ({activeBlockCandidates.length})
+            </Text>
+            {activeBlockCandidates.map((block) => {
+              const changedPhase = (['brake', 'steering', 'throttle'] as const).find((p) => block.changedOffsetsByPhase[p].length > 0);
+              const label =
+                block.rank === 'brakeCandidate'
+                  ? 'BRAKE?'
+                  : block.rank === 'steeringCandidate'
+                    ? 'STEERING?'
+                    : block.rank === 'throttleCandidate'
+                      ? 'THROTTLE?'
+                      : 'changed (several)';
+              return (
+                <View key={block.did} style={styles.suggestionRow}>
+                  <Text style={styles.responderDid} maxFontSizeMultiplier={1.3}>
+                    {formatHexDid(block.did)} · {block.length} bytes — {label}
+                  </Text>
+                  <Text style={styles.rationaleText} maxFontSizeMultiplier={1.3}>
+                    {changedPhase === undefined
+                      ? 'changed offsets in several phases'
+                      : `bytes ${formatOffsetRanges(block.changedOffsetsByPhase[changedPhase])} changed (${changedPhase})`}{' '}
+                    · {block.sampleCount} samples
+                  </Text>
+                  <Pressable
+                    style={styles.presetChip}
+                    onPress={() => toggleSelectedDid(block.did)}
+                    accessibilityRole="button"
+                    accessibilityLabel={selectedDids.has(block.did) ? `Deselect ${formatHexDid(block.did)} from the focused shortlist` : `Select ${formatHexDid(block.did)} for the focused shortlist`}
+                  >
+                    <Text style={styles.presetChipText} maxFontSizeMultiplier={1.3}>
+                      {selectedDids.has(block.did) ? '☑ Selected' : '☐ Select'}
+                    </Text>
+                  </Pressable>
+                </View>
+              );
+            })}
+          </View>
+        )}
+
+        {/* Ticket P4j (binding): "FOCUSED observation: the user can tick
+            candidates (or type DIDs) -> one long guided cycle on the
+            shortlist only (>= 10 samples per phase)." */}
+        {snapshot === null || snapshot.responders.length === 0 ? null : (
+          <View style={styles.card}>
+            <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
+              FOCUSED OBSERVATION
+            </Text>
+            <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+              {selectedDids.size} selected. Type extra DIDs (hex, comma/space-separated) to add them even if not discovered yet.
+            </Text>
+            <View style={styles.fieldRow}>
+              <Text style={styles.fieldLabel} maxFontSizeMultiplier={1.3}>
+                DIDs (hex)
+              </Text>
+              <TextInput
+                style={styles.fieldInput}
+                value={focusedDidsDraft}
+                onChangeText={setFocusedDidsDraft}
+                editable={!observing}
+                autoCapitalize="characters"
+                autoCorrect={false}
+                keyboardType="numbers-and-punctuation"
+                accessibilityLabel="Typed DIDs for focused observation, hex, comma or space separated"
+              />
+            </View>
+            {(phase === 'sweepComplete' || phase === 'stopped' || phase === 'observationComplete') && !observing ? (
+              <Pressable
+                style={styles.buttonSecondary}
+                onPress={handleStartFocusedObservation}
+                disabled={selectedDids.size === 0 && parseTypedDidList(focusedDidsDraft).length === 0}
+                accessibilityRole="button"
+                accessibilityLabel="Start focused observation on the shortlist"
+              >
+                <Text style={styles.buttonSecondaryText} maxFontSizeMultiplier={1.3}>
+                  Start focused observation on shortlist (≥10 samples/phase)
+                </Text>
+              </Pressable>
+            ) : null}
           </View>
         )}
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ASSUMED_GUIDED_REQ_PER_SEC,
   computeChangingValuePrePassDurationMs,
+  computeDidBlockCandidateSummaries,
   computeDidCandidateSummaries,
   computeGuidedPhaseDurationMs,
   DID_OBSERVATION_PHASES,
@@ -277,5 +278,236 @@ describe('computeChangingValuePrePassDurationMs (binding, P4i-FIX2 R6)', () => {
 
   it('a zero-candidate set still returns twice the (unscaled) base round plus the gap', () => {
     expect(computeChangingValuePrePassDurationMs(0, 2_000, 2_000, 15)).toBe(6_000);
+  });
+});
+
+/**
+ * Ticket P4j (binding): "ranking per DID uses >= 5 samples (a change counts
+ * only if the value range in an active phase exceeds the baseline range by a
+ * margin, e.g. > 2x baseline spread or > 3 raw units)". Field evidence: with
+ * batching, every candidate now gets >= 5 samples/phase (see
+ * `didObservationBatches.test.ts`) -- these tests use the ticket's own
+ * literal 0x4522 noise example to prove the margin rule filters it while
+ * still ranking a genuine brake signal.
+ */
+describe('computeDidCandidateSummaries -- margin-based ranking (ticket P4j, binding, opt-in via useMarginRule)', () => {
+  it('useMarginRule defaults to false -- naive distinctness, byte-identical to the pre-ticket behaviour, when omitted', () => {
+    const samples: DidPhaseSample[] = [
+      sample(0x2010, 'baseline', 0, [0x00]),
+      sample(0x2010, 'brake', 0, [0x00]),
+      sample(0x2010, 'brake', 1_000, [0x01]), // a tiny 1-unit wobble -- naive rule still flags it "changed".
+    ];
+    const [summary] = computeDidCandidateSummaries(samples);
+    expect(summary?.changedInPhase.brake).toBe(true);
+    expect(summary?.rank).toBe('brakeCandidate');
+  });
+
+  it('0x4522-shaped noise (297 -> 305 -> 295 during brake, similar spread at baseline): the margin rule filters it -- NOT a candidate', () => {
+    const samples: DidPhaseSample[] = [
+      // baseline: 5 samples, range 10 (298..308) -- ordinary sensor jitter at rest.
+      sample(0x4522, 'baseline', 0, [0x01, 0x2a]), // 298
+      sample(0x4522, 'baseline', 100, [0x01, 0x30]), // 304
+      sample(0x4522, 'baseline', 200, [0x01, 0x2c]), // 300
+      sample(0x4522, 'baseline', 300, [0x01, 0x34]), // 308
+      sample(0x4522, 'baseline', 400, [0x01, 0x2e]), // 302
+      // brake: 5 samples, range 10 (295..305) -- the ticket's own literal example, no wider than baseline's own jitter.
+      sample(0x4522, 'brake', 0, [0x01, 0x29]), // 297
+      sample(0x4522, 'brake', 100, [0x01, 0x31]), // 305
+      sample(0x4522, 'brake', 200, [0x01, 0x27]), // 295
+      sample(0x4522, 'brake', 300, [0x01, 0x2c]), // 300
+      sample(0x4522, 'brake', 400, [0x01, 0x2e]), // 302
+    ];
+    const [summary] = computeDidCandidateSummaries(samples, { useMarginRule: true, minSamplesPerPhase: 5 });
+    expect(summary?.changedInPhase.brake).toBe(false);
+    expect(summary?.rank).toBe('static');
+  });
+
+  it('a genuine brake signal (baseline dead still, brake swings well past the margin): ranked "brakeCandidate"', () => {
+    const samples: DidPhaseSample[] = [
+      sample(0x4600, 'baseline', 0, [10]),
+      sample(0x4600, 'baseline', 100, [10]),
+      sample(0x4600, 'baseline', 200, [10]),
+      sample(0x4600, 'baseline', 300, [10]),
+      sample(0x4600, 'baseline', 400, [10]),
+      sample(0x4600, 'brake', 0, [10]),
+      sample(0x4600, 'brake', 100, [200]),
+      sample(0x4600, 'brake', 200, [50]),
+      sample(0x4600, 'brake', 300, [180]),
+      sample(0x4600, 'brake', 400, [20]),
+    ];
+    const [summary] = computeDidCandidateSummaries(samples, { useMarginRule: true, minSamplesPerPhase: 5 });
+    expect(summary?.changedInPhase.brake).toBe(true);
+    expect(summary?.rank).toBe('brakeCandidate');
+  });
+
+  it('below minSamplesPerPhase, the margin rule does not apply -- falls back to naive distinctness', () => {
+    const samples: DidPhaseSample[] = [
+      sample(0x4700, 'baseline', 0, [100]),
+      sample(0x4700, 'brake', 0, [100]),
+      sample(0x4700, 'brake', 100, [101]), // only 2 samples -- below minSamplesPerPhase: 5, so the naive rule (any distinctness) still applies.
+    ];
+    const [summary] = computeDidCandidateSummaries(samples, { useMarginRule: true, minSamplesPerPhase: 5 });
+    expect(summary?.changedInPhase.brake).toBe(true);
+    expect(summary?.rank).toBe('brakeCandidate');
+  });
+
+  it('a phase that does not decode cleanly (mixed lengths) falls back to naive distinctness rather than reporting "unchanged"', () => {
+    const samples: DidPhaseSample[] = [
+      sample(0x4800, 'baseline', 0, [1, 2, 3]),
+      sample(0x4800, 'baseline', 100, [1, 2, 3]),
+      sample(0x4800, 'brake', 0, [1, 2, 3]),
+      sample(0x4800, 'brake', 100, [9, 9, 9]),
+    ];
+    const [summary] = computeDidCandidateSummaries(samples, { useMarginRule: true, minSamplesPerPhase: 1 });
+    expect(summary?.changedInPhase.brake).toBe(true); // naive fallback: the 3-byte hex actually differs.
+    expect(summary?.rank).toBe('brakeCandidate');
+  });
+
+  it('the marginRawUnits floor still catches a real signal even when the baseline is perfectly still (range 0)', () => {
+    const samples: DidPhaseSample[] = [
+      sample(0x4900, 'baseline', 0, [50]),
+      sample(0x4900, 'baseline', 100, [50]),
+      sample(0x4900, 'baseline', 200, [50]),
+      sample(0x4900, 'baseline', 300, [50]),
+      sample(0x4900, 'baseline', 400, [50]),
+      sample(0x4900, 'brake', 0, [50]),
+      sample(0x4900, 'brake', 100, [50]),
+      sample(0x4900, 'brake', 200, [50]),
+      sample(0x4900, 'brake', 300, [50]),
+      sample(0x4900, 'brake', 400, [55]), // range 5 -- exceeds the default marginRawUnits (3) even though 2x baseline range (0) is 0.
+    ];
+    const [summary] = computeDidCandidateSummaries(samples, { useMarginRule: true, minSamplesPerPhase: 5 });
+    expect(summary?.changedInPhase.brake).toBe(true);
+    expect(summary?.rank).toBe('brakeCandidate');
+  });
+});
+
+/**
+ * Ticket P4j (binding): "Mid-size blocks (9-32 bytes) join the candidate pool
+ * with per-byte-offset diffing: a block is 'changed in phase' if any byte
+ * offset changes beyond baseline; the export lists changed offsets."
+ */
+describe('computeDidBlockCandidateSummaries (ticket P4j, binding: mid-size block per-byte-offset diffing)', () => {
+  function blockSample(did: number, phase: DidPhaseSample['phase'], tMs: number, raw: number[]): DidPhaseSample {
+    return { did, phase, tMs, raw: Uint8Array.from(raw) };
+  }
+
+  function block(fill: number, len = 10): number[] {
+    return new Array(len).fill(fill);
+  }
+
+  it('0x40B5-shaped: a 10-byte block, static everywhere except offsets 4-5 during brake -> ranked "brakeCandidate", changed offsets listed', () => {
+    const baseline1 = block(0x00);
+    const baseline2 = block(0x00);
+    const brake1 = [...block(0x00)];
+    brake1[4] = 0x10;
+    brake1[5] = 0x20;
+    const brake2 = [...block(0x00)];
+    brake2[4] = 0x50;
+    brake2[5] = 0x60;
+    const samples: DidPhaseSample[] = [
+      blockSample(0x40b5, 'baseline', 0, baseline1),
+      blockSample(0x40b5, 'baseline', 100, baseline2),
+      blockSample(0x40b5, 'brake', 0, brake1),
+      blockSample(0x40b5, 'brake', 100, brake2),
+      blockSample(0x40b5, 'steering', 0, block(0x00)),
+      blockSample(0x40b5, 'steering', 100, block(0x00)),
+      blockSample(0x40b5, 'throttle', 0, block(0x00)),
+      blockSample(0x40b5, 'throttle', 100, block(0x00)),
+    ];
+    const [summary] = computeDidBlockCandidateSummaries(samples);
+    expect(summary).toMatchObject({ did: 0x40b5, length: 10, rank: 'brakeCandidate' });
+    expect(summary?.changedOffsetsByPhase.brake).toEqual([4, 5]);
+    expect(summary?.changedOffsetsByPhase.steering).toEqual([]);
+    expect(summary?.changedOffsetsByPhase.throttle).toEqual([]);
+    expect(summary?.changedOffsetsByPhase.baseline).toEqual([]);
+  });
+
+  it('a block that changes in two active phases is ranked "changedInSeveral"', () => {
+    const brakeChanged = [...block(0x00)];
+    brakeChanged[2] = 0xff;
+    const throttleChanged = [...block(0x00)];
+    throttleChanged[7] = 0xff;
+    const samples: DidPhaseSample[] = [
+      blockSample(0x40c0, 'baseline', 0, block(0x00)),
+      blockSample(0x40c0, 'brake', 0, block(0x00)),
+      blockSample(0x40c0, 'brake', 100, brakeChanged),
+      blockSample(0x40c0, 'steering', 0, block(0x00)),
+      blockSample(0x40c0, 'throttle', 0, block(0x00)),
+      blockSample(0x40c0, 'throttle', 100, throttleChanged),
+    ];
+    const [summary] = computeDidBlockCandidateSummaries(samples);
+    expect(summary?.rank).toBe('changedInSeveral');
+  });
+
+  it('a block static in every phase (or only jittering within the baseline margin) is ranked "static"', () => {
+    const samples: DidPhaseSample[] = [
+      blockSample(0x40d0, 'baseline', 0, block(0x59)),
+      blockSample(0x40d0, 'brake', 0, block(0x59)),
+      blockSample(0x40d0, 'steering', 0, block(0x59)),
+      blockSample(0x40d0, 'throttle', 0, block(0x59)),
+    ];
+    const [summary] = computeDidBlockCandidateSummaries(samples);
+    expect(summary?.rank).toBe('static');
+    expect(Object.values(summary!.changedOffsetsByPhase).every((offsets) => offsets.length === 0)).toBe(true);
+  });
+
+  it('a DID outside the 9-32 byte window (e.g. a 6-byte numeric candidate, or a 200-byte blob) is EXCLUDED entirely', () => {
+    const shortSamples: DidPhaseSample[] = [
+      blockSample(0x1002, 'baseline', 0, [0, 1, 2, 3, 4, 5]),
+      blockSample(0x1002, 'brake', 0, [9, 1, 2, 3, 4, 5]),
+    ];
+    expect(computeDidBlockCandidateSummaries(shortSamples)).toEqual([]);
+
+    const bigBlob = new Array(200).fill(0);
+    const bigSamples: DidPhaseSample[] = [
+      blockSample(0x4097, 'baseline', 0, bigBlob),
+      blockSample(0x4097, 'brake', 0, bigBlob),
+    ];
+    expect(computeDidBlockCandidateSummaries(bigSamples)).toEqual([]);
+  });
+
+  it('a DID whose samples disagree on length is excluded entirely (no consistent per-offset comparison is possible)', () => {
+    const samples: DidPhaseSample[] = [
+      blockSample(0x4200, 'baseline', 0, block(0x00, 10)),
+      blockSample(0x4200, 'brake', 0, block(0x00, 12)), // different length -- offsets would be meaningless.
+    ];
+    expect(computeDidBlockCandidateSummaries(samples)).toEqual([]);
+  });
+
+  it('below minSamplesPerPhase, a phase reports no changed offsets at all (not enough evidence)', () => {
+    const brakeChanged = [...block(0x00)];
+    brakeChanged[3] = 0xff;
+    const samples: DidPhaseSample[] = [
+      blockSample(0x4300, 'baseline', 0, block(0x00)),
+      blockSample(0x4300, 'brake', 0, block(0x00)),
+      blockSample(0x4300, 'brake', 100, brakeChanged),
+    ];
+    const [summary] = computeDidBlockCandidateSummaries(samples, { minSamplesPerPhase: 5 });
+    expect(summary?.changedOffsetsByPhase.brake).toEqual([]);
+    expect(summary?.rank).toBe('static');
+  });
+
+  it('an empty sample log returns an empty list', () => {
+    expect(computeDidBlockCandidateSummaries([])).toEqual([]);
+  });
+
+  it('sorts single-phase candidates first, then changedInSeveral, then static -- ties broken by ascending DID', () => {
+    const changed = [...block(0x00)];
+    changed[0] = 0xff;
+    const staticDid: DidPhaseSample[] = [blockSample(0x4b00, 'baseline', 0, block(0x00)), blockSample(0x4b00, 'brake', 0, block(0x00))];
+    const brakeDidA: DidPhaseSample[] = [
+      blockSample(0x4a20, 'baseline', 0, block(0x00)),
+      blockSample(0x4a20, 'brake', 0, block(0x00)),
+      blockSample(0x4a20, 'brake', 100, changed),
+    ];
+    const brakeDidB: DidPhaseSample[] = [
+      blockSample(0x4a10, 'baseline', 0, block(0x00)),
+      blockSample(0x4a10, 'brake', 0, block(0x00)),
+      blockSample(0x4a10, 'brake', 100, changed),
+    ];
+    const summaries = computeDidBlockCandidateSummaries([...staticDid, ...brakeDidA, ...brakeDidB]);
+    expect(summaries.map((s) => s.did)).toEqual([0x4a10, 0x4a20, 0x4b00]);
+    expect(summaries.map((s) => s.rank)).toEqual(['brakeCandidate', 'brakeCandidate', 'static']);
   });
 });

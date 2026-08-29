@@ -8,3 +8,4 @@ export * from './didSweep';
 export * from './didHeuristics';
 export * from './didCandidates';
 export * from './didObservationPhases';
+export * from './didObservationBatches';

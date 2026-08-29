@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  filterCandidatePool,
   filterSweepCandidates,
   isAsciiLike,
   selectChangingCandidates,
@@ -84,6 +85,45 @@ describe('filterSweepCandidates (Field revision, binding, P4i)', () => {
     const responders = [responder(0x1002, Uint8Array.from([1, 2, 3, 4, 5]))];
     expect(filterSweepCandidates(responders, { maxLen: 4 })).toEqual([]);
     expect(filterSweepCandidates(responders, { maxLen: 5 })).toEqual(responders);
+  });
+});
+
+/**
+ * Ticket P4j (binding): "Mid-size blocks (9-32 bytes) join the candidate pool
+ * with per-byte-offset diffing ... ASCII-like blocks still excluded."
+ */
+describe('filterCandidatePool (ticket P4j, binding: mid-size blocks join the candidate pool)', () => {
+  it('a 10-byte non-ASCII mid-size block is KEPT by filterCandidatePool, but EXCLUDED by the legacy filterSweepCandidates (still 1-8 bytes)', () => {
+    const bytes = Uint8Array.from([0x00, 0x1a, 0x2b, 0x00, 0x59, 0x00, 0x10, 0x20, 0x30, 0x40]);
+    const responders = [responder(0x40b5, bytes)];
+    expect(filterCandidatePool(responders)).toEqual(responders);
+    expect(filterSweepCandidates(responders)).toEqual([]);
+  });
+
+  it('a 32-byte non-ASCII block is KEPT (at the ceiling); 33 bytes is excluded', () => {
+    const at32 = new Uint8Array(32);
+    for (let i = 0; i < 32; i += 1) at32[i] = i % 256;
+    const at33 = new Uint8Array(33);
+    for (let i = 0; i < 33; i += 1) at33[i] = i % 256;
+    expect(filterCandidatePool([responder(0x4001, at32)])).toEqual([responder(0x4001, at32)]);
+    expect(filterCandidatePool([responder(0x4002, at33)])).toEqual([]);
+  });
+
+  it('0x4098 (ASCII software ID blob) is still EXCLUDED -- ASCII-like blocks stay excluded even at mid-size length', () => {
+    const bytes = ascii('SW1.2.34-ID'); // 11 printable chars.
+    expect(filterCandidatePool([responder(0x4098, bytes)])).toEqual([]);
+  });
+
+  it('the ORIGINAL 1-8 byte candidates are still kept -- the pool is widened, not replaced', () => {
+    const bytes = Uint8Array.from([0x00, 0x1a, 0x2b, 0x00, 0x59, 0x00]);
+    const responders = [responder(0x1002, bytes)];
+    expect(filterCandidatePool(responders)).toEqual(responders);
+  });
+
+  it('a custom midSizeMaxLen is honored', () => {
+    const bytes = new Uint8Array(20);
+    expect(filterCandidatePool([responder(0x4003, bytes)], { midSizeMaxLen: 16 })).toEqual([]);
+    expect(filterCandidatePool([responder(0x4003, bytes)], { midSizeMaxLen: 20 })).toEqual([responder(0x4003, bytes)]);
   });
 });
 

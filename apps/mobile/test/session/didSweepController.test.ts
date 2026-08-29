@@ -3000,3 +3000,279 @@ describe('didSweepController: Y2 -- failed retry slices are a LIST -- two indepe
     await flush();
   });
 });
+
+/**
+ * Ticket P4j (binding): "batched guided observation ... runs batch after
+ * batch (progress 'Batch 3/8'), repeating the on-screen prompts per batch;
+ * pause/stop-safe; export includes `batchIndex` and >= 5 samples per DID per
+ * phase; keep-alive continuous across batches." Field evidence: a single
+ * 128-candidate phase at ~9 req/s gave every DID only 1-2 samples/phase.
+ */
+describe('didSweepController: startBatchedObservation (ticket P4j, binding)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('runs batch by batch ("Batch index/total" progress), tags every sample with its own batchIndex, and reaches observationComplete with candidateSummaries populated', async () => {
+    const did1 = 0x0001;
+    const did2 = 0x0002;
+    const responsesFor = (did: number) => Array.from({ length: 80 }, (_, i) => positivePdu(did, [i % 2 === 0 ? 0x10 : 0x20]));
+    const script = new Map<number, ScriptEntry>([
+      [did1, { responses: responsesFor(did1), mode: 'oneFramePerSend', delayMs: 5 }],
+      [did2, { responses: responsesFor(did2), mode: 'oneFramePerSend', delayMs: 5 }],
+    ]);
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+
+    controller.start({ from: did1, to: did2 });
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().responders).toHaveLength(2);
+
+    const batchIndicesSeen: number[] = [];
+    controller.subscribe((s) => {
+      if (s.batchIndex !== null && batchIndicesSeen[batchIndicesSeen.length - 1] !== s.batchIndex) batchIndicesSeen.push(s.batchIndex);
+    });
+
+    // batchSize: 1 -> 2 batches (one DID each); minSamplesPerPhase: 1 keeps
+    // the scripted transport's per-phase duration small so the test finishes
+    // in bounded fake-timer steps.
+    controller.startBatchedObservation({ batchSize: 1, minSamplesPerPhase: 1 });
+    expect(controller.getSnapshot().phase).toBe('observing');
+    expect(controller.getSnapshot().batchTotal).toBe(2);
+    expect(controller.getSnapshot().batchIndex).toBe(0);
+
+    for (let i = 0; i < 100 && controller.getSnapshot().phase === 'observing'; i += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flush();
+    }
+
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+    // Ticket: "runs batch after batch" -- BOTH batches actually ran, in order.
+    expect(batchIndicesSeen).toEqual([0, 1]);
+    // Reset once the whole batched run finishes.
+    expect(controller.getSnapshot().batchIndex).toBeNull();
+    expect(controller.getSnapshot().batchTotal).toBeNull();
+
+    const samples = controller.getGuidedSamples();
+    expect(samples.length).toBeGreaterThan(0);
+    // Ticket: "export includes batchIndex" -- every sample is tagged with the
+    // batch its OWN DID belonged to (did1 -> batch 0, did2 -> batch 1).
+    expect(samples.filter((s) => s.did === did1).every((s) => s.batchIndex === 0)).toBe(true);
+    expect(samples.filter((s) => s.did === did2).every((s) => s.batchIndex === 1)).toBe(true);
+
+    expect(controller.getSnapshot().candidateSummaries.map((c) => c.did).sort()).toEqual([did1, did2]);
+  }, 20_000);
+
+  it('is pause/stop-safe: stopGuidedObservationEarly ends the batched run early and still computes candidateSummaries from whatever was sampled', async () => {
+    const did1 = 0x0001;
+    const did2 = 0x0002;
+    const responsesFor = (did: number) => Array.from({ length: 80 }, (_, i) => positivePdu(did, [i % 2 === 0 ? 0x10 : 0x20]));
+    const script = new Map<number, ScriptEntry>([
+      [did1, { responses: responsesFor(did1), mode: 'oneFramePerSend', delayMs: 5 }],
+      [did2, { responses: responsesFor(did2), mode: 'oneFramePerSend', delayMs: 5 }],
+    ]);
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+
+    controller.start({ from: did1, to: did2 });
+    await vi.runAllTimersAsync();
+    await flush();
+
+    controller.startBatchedObservation({ batchSize: 1, minSamplesPerPhase: 1 });
+    // Let the FIRST batch's baseline phase run a little, then cut the whole
+    // sequence short -- the SECOND batch must never run.
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('observing');
+    expect(controller.getSnapshot().batchIndex).toBe(0);
+
+    controller.stopGuidedObservationEarly();
+    await vi.runAllTimersAsync();
+    await flush();
+
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+    expect(controller.getSnapshot().batchIndex).toBeNull();
+    // Only did1 (batch 0) ever ran -- batch 1 (did2) never started.
+    const samples = controller.getGuidedSamples();
+    expect(samples.length).toBeGreaterThan(0);
+    expect(samples.every((s) => s.did === did1)).toBe(true);
+  });
+
+  it('a full stop() during a batched run tears down cleanly (H1/H2 lifecycle unchanged)', async () => {
+    const did1 = 0x0001;
+    const responses = Array.from({ length: 40 }, (_, i) => positivePdu(did1, [i % 2 === 0 ? 0x10 : 0x20]));
+    const script = new Map<number, ScriptEntry>([[did1, { responses, mode: 'oneFramePerSend', delayMs: 5 }]]);
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+
+    controller.start({ from: did1, to: did1 });
+    await vi.runAllTimersAsync();
+    await flush();
+
+    controller.startBatchedObservation({ batchSize: 1, minSamplesPerPhase: 1 });
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('observing');
+
+    await controller.stop();
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('stopped');
+  });
+
+  it('is a no-op with no candidates after filtering (e.g. every responder is ASCII-like)', async () => {
+    const asciiBytes = Uint8Array.from('SW1.2.34'.split('').map((c) => c.charCodeAt(0)));
+    const store = createInMemoryDidSweepStore();
+    await store.createRun({
+      runId: 'run-ascii-only',
+      adapterType: 'enet',
+      targetAddress: TARGET_ADDRESS,
+      rangeFrom: 0x4098,
+      rangeTo: 0x4098,
+      lastDid: 0x4098,
+      startedAtUtc: '2026-08-29T10:00:00.000Z',
+      updatedAtUtc: '2026-08-29T10:00:00.000Z',
+      status: 'stopped',
+      visitedCount: 1,
+      timeoutCount: 0,
+      unmatchedCount: 0,
+      errorCount: 0,
+      nrcCounts: {},
+    });
+    await store.upsertResponders('run-ascii-only', [{ did: 0x4098, raw: asciiBytes, rttMs: 10 }], '2026-08-29T10:00:01.000Z');
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(new Map()),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+      store,
+    });
+    await controller.resumePersistedRun('run-ascii-only');
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('sweepComplete');
+
+    controller.startBatchedObservation();
+    expect(controller.getSnapshot().phase).toBe('sweepComplete'); // unchanged -- no-op.
+  });
+
+  it('is a no-op with no responders at all', () => {
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(new Map()),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+    controller.startBatchedObservation();
+    expect(controller.getSnapshot().phase).toBe('idle');
+  });
+});
+
+/**
+ * Ticket P4j (binding): "FOCUSED observation: the user can tick candidates
+ * (or type DIDs) -> one long guided cycle on the shortlist only (>= 10
+ * samples per phase)."
+ */
+describe('didSweepController: startFocusedObservation (ticket P4j, binding)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('is refused from idle (same precondition as startGuidedObservation) -- a typed DID alone is not enough without a prior sweep', () => {
+    const did = 0x2222;
+    const responses = Array.from({ length: 80 }, (_, i) => positivePdu(did, [i % 2 === 0 ? 0x10 : 0x20]));
+    const script = new Map<number, ScriptEntry>([[did, { responses, mode: 'oneFramePerSend', delayMs: 5 }]]);
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+    expect(controller.getSnapshot().phase).toBe('idle');
+    controller.startFocusedObservation([did]);
+    expect(controller.getSnapshot().phase).toBe('idle');
+  });
+
+  it('runs over a shortlist from a completed sweep, tagging no batchIndex, and reaching observationComplete with candidateSummaries', async () => {
+    const did1 = 0x3001;
+    const did2 = 0x3002;
+    const responsesFor = (d: number) => Array.from({ length: 80 }, (_, i) => positivePdu(d, [i % 2 === 0 ? 0x10 : 0x20]));
+    const script = new Map<number, ScriptEntry>([
+      [did1, { responses: responsesFor(did1), mode: 'oneFramePerSend', delayMs: 5 }],
+      [did2, { responses: responsesFor(did2), mode: 'oneFramePerSend', delayMs: 5 }],
+    ]);
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+
+    controller.start({ from: did1, to: did2 });
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('sweepComplete');
+
+    // The user ticks only did1 (the shortlist) -- did2 is deliberately
+    // excluded, even though it's a valid responder.
+    controller.startFocusedObservation([did1]);
+    expect(controller.getSnapshot().phase).toBe('observing');
+    expect(controller.getSnapshot().batchIndex).toBeNull();
+    expect(controller.getSnapshot().batchTotal).toBeNull();
+
+    for (let i = 0; i < 60 && controller.getSnapshot().phase === 'observing'; i += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flush();
+    }
+    expect(controller.getSnapshot().phase).toBe('observationComplete');
+
+    const samples = controller.getGuidedSamples();
+    expect(samples.length).toBeGreaterThan(0);
+    expect(samples.every((s) => s.did === did1)).toBe(true); // did2 never sampled -- it wasn't on the shortlist.
+    expect(samples.every((s) => s.batchIndex === undefined)).toBe(true); // focused observation never batches.
+    expect(controller.getSnapshot().candidateSummaries.map((c) => c.did)).toEqual([did1]);
+  }, 20_000);
+
+  it('deduplicates and validates typed DIDs -- invalid values (negative, > 0xFFFF, non-integer) are dropped; an all-invalid list is a no-op', async () => {
+    const did1 = 0x3001;
+    const script = new Map<number, ScriptEntry>([[did1, { responses: [positivePdu(did1, [0x10])], mode: 'oneFramePerSend', delayMs: 5 }]]);
+    const controller = createDidSweepController({
+      transportFactory: () => new FakeSweepTransport(script),
+      testerAddress: TESTER_ADDRESS,
+      targetAddress: TARGET_ADDRESS,
+      clock: monotonicCounter(),
+    });
+    controller.start({ from: did1, to: did1 });
+    await vi.runAllTimersAsync();
+    await flush();
+    expect(controller.getSnapshot().phase).toBe('sweepComplete');
+
+    controller.startFocusedObservation([-1, 0x10000, 1.5]);
+    expect(controller.getSnapshot().phase).toBe('sweepComplete'); // unchanged -- every value was invalid, so this is a no-op.
+
+    controller.startFocusedObservation([did1, did1, did1]); // deduplicated to one DID.
+    expect(controller.getSnapshot().phase).toBe('observing');
+    controller.stopGuidedObservationEarly();
+    await vi.runAllTimersAsync();
+    await flush();
+  });
+});

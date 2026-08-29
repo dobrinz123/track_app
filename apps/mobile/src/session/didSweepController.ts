@@ -53,19 +53,23 @@ import {
   buildTesterPresentRequest,
   classifyResponders,
   computeChangingValuePrePassDurationMs,
+  computeDidBlockCandidateSummaries,
   computeDidCandidateSummaries,
   computeGuidedPhaseDurationMs,
   createDidSweepAccumulator,
   createDidSweepPlan,
+  DEFAULT_MIN_SAMPLES_PER_PHASE,
   DID_OBSERVATION_PHASES,
   encodeFrame,
-  filterSweepCandidates,
+  filterCandidatePool,
   enetSpecsFromSuggestion,
+  planObservationBatches,
   selectChangingCandidates,
   HSFZ_CONTROL,
   HsfzFrameParser,
   runDidObservation,
   runDidSweep,
+  type DidBlockCandidateSummary,
   type DidCandidateSummary,
   type DidChangeSamplePair,
   type DidHeuristicContext,
@@ -81,6 +85,7 @@ import {
   type EnetChannelSpec,
   type MonotonicClock,
   type ObdTransport,
+  type ObservationBatch,
   type SweepTransport,
   type TelemetryChannelId,
 } from '@circuit/core';
@@ -252,6 +257,25 @@ export interface DidSweepSnapshot {
   /** Live-updated (per sample, and finalized once the guided run ends) ranked candidate summaries -- see `didObservationPhases.ts`'s `computeDidCandidateSummaries`. `[]` before a guided observation has ever run. */
   candidateSummaries: readonly DidCandidateSummary[];
   /**
+   * Ticket P4j (binding): mid-size (9-32 byte) block candidates, ranked by
+   * WHICH byte offsets changed per phase (`didObservationPhases.ts`'s
+   * `computeDidBlockCandidateSummaries`) -- populated alongside
+   * `candidateSummaries` once a batched or focused guided run finishes (the
+   * ORIGINAL single-pass `startGuidedObservation()` never populates this;
+   * mid-size blocks simply are not ranked there). `[]` before either flow has
+   * ever run.
+   */
+  blockCandidateSummaries: readonly DidBlockCandidateSummary[];
+  /**
+   * Ticket P4j (binding, batched guided observation): "progress 'Batch 3/8'".
+   * The 0-based index of the batch currently running (`startBatchedObservation()`),
+   * and the total batch count -- both `null` outside a batched run (idle, a
+   * legacy single-pass guided run, or a focused-shortlist run, none of which
+   * batch).
+   */
+  batchIndex: number | null;
+  batchTotal: number | null;
+  /**
    * X1 fix (P4i-FIX3, binding, after Codex P4irev3 R1 PARTIAL): non-null
    * exactly when the MOST RECENT terminal persistence checkpoint (the forced
    * flush at pause/stop/natural-completion) failed to commit -- the sweep's
@@ -293,6 +317,9 @@ const INITIAL_SNAPSHOT: DidSweepSnapshot = {
   guidedPhaseElapsedMs: 0,
   guidedPhaseDurationMs: 0,
   candidateSummaries: [],
+  blockCandidateSummaries: [],
+  batchIndex: null,
+  batchTotal: null,
   persistError: null,
   persisting: false,
 };
@@ -427,6 +454,30 @@ export interface DidSweepController {
   /** Ends the CURRENT (and every remaining) guided phase early, computing candidate summaries from whatever was sampled so far -- same semantics as `stopObservationEarly()`. */
   stopGuidedObservationEarly(): void;
   /**
+   * Ticket P4j (binding): runs the SAME fixed 4-phase guided re-read
+   * batch-by-batch over the WIDENED candidate pool (`filterCandidatePool`:
+   * 1-32 bytes, so mid-size blocks join numeric candidates), instead of one
+   * pass over every candidate at once -- each batch (default 16 DIDs) gets
+   * its own phase duration sized from the run's OWN measured req/s so every
+   * DID gets >= `minSamplesPerPhase` (default 5) samples/phase, fixing the
+   * noise the old single-pass-over-everything flow produced when the
+   * candidate set was large (field evidence: 128 candidates -> 1-2
+   * samples/phase). Progress exposes `batchIndex`/`batchTotal` ("Batch
+   * 3/8"); ONE continuous connection + keep-alive ticker spans every batch.
+   * Same preconditions as `startGuidedObservation()`; no-op with no
+   * candidates after filtering.
+   */
+  startBatchedObservation(options?: { batchSize?: number; minSamplesPerPhase?: number }): void;
+  /**
+   * Ticket P4j (binding): "the user can tick candidates (or type DIDs) -> one
+   * long guided cycle on the shortlist only (>= 10 samples per phase)." Runs
+   * the SAME 4-phase cycle over EXACTLY `dids` (deduplicated, no candidate
+   * filtering -- a typed DID need not even be a discovered responder), sized
+   * for >= 10 samples/phase at the run's measured req/s. Same preconditions
+   * as `startGuidedObservation()`; no-op with an empty/invalid `dids` list.
+   */
+  startFocusedObservation(dids: readonly number[]): void;
+  /**
    * DID sweep — results persistence, export & candidate filtering addendum
    * (2026-08-27, binding — Phase 4i): resumes a run persisted by an earlier
    * (possibly app-killed) `start()`, continuing from its `lastDid` with the
@@ -470,6 +521,8 @@ export interface DidSweepController {
 }
 
 const DEFAULT_OBSERVATION_WINDOW_MS = 60_000;
+/** Ticket P4j (binding): "FOCUSED observation ... one long guided cycle on the shortlist only (>= 10 samples per phase)." */
+const FOCUSED_MIN_SAMPLES_PER_PHASE = 10;
 
 type SweepOutcome = 'complete' | 'paused' | 'stopped';
 
@@ -499,6 +552,16 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
   let observationControl: DidSweepControl = { paused: false, stopped: false };
   let startedAtMs = 0;
   let requestsIssued = 0;
+  /**
+   * Ticket P4j (binding): "phase duration per batch from the MEASURED rate of
+   * the sweep run (not the assumed 15)" -- the sweep's own last-observed
+   * req/s (mirrors `snapshot.progress.reqPerSec`, updated at every sweep
+   * `onProgress` tick), fed to `planObservationBatches` as the measured rate.
+   * Falls back to `ASSUMED_GUIDED_REQ_PER_SEC` (via `planObservationBatches`'
+   * own default) when no sweep has run yet in this controller instance
+   * (e.g. an observation started straight from a resumed/persisted run).
+   */
+  let lastMeasuredReqPerSec = 0;
   /** Bumped on `stop()` and on every fresh `start()`/observation-from-terminal-state -- a superseded async continuation checks this before touching shared state (transport/reservation/snapshot). */
   let generation = 0;
   let activeTransport: ObdTransport | null = null;
@@ -880,12 +943,17 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
         if (myGeneration !== generation) return;
         requestsIssued += 1;
         const elapsedS = Math.max(0.001, (deps.clock.now() - startedAtMs) / 1_000);
+        const reqPerSec = requestsIssued / elapsedS;
+        // Ticket P4j (binding): the LATEST measured sweep rate -- fed to
+        // `planObservationBatches` for the batched guided flow, rather than
+        // its own assumed fallback.
+        lastMeasuredReqPerSec = reqPerSec;
         emit({
           responders: accumulator!.responders,
           nrcCounts: accumulator!.nrcCounts,
           timeouts: accumulator!.timeouts,
           unmatched: accumulator!.unmatched,
-          progress: { did: progress.did, index: progress.index, total: progress.total, reqPerSec: requestsIssued / elapsedS },
+          progress: { did: progress.did, index: progress.index, total: progress.total, reqPerSec },
         });
         maybeFlushPersistence(false, 'running');
       },
@@ -1314,16 +1382,34 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
     nextResponderIndex: number;
   }
 
+  /**
+   * Ticket P4j (binding): `durationMs`/`batchIndex` let the BATCHED
+   * (`startBatchedObservation`) and FOCUSED (`startFocusedObservation`)
+   * flows reuse this SAME per-phase runner instead of re-implementing the
+   * ticker/keep-alive/sample-tagging plumbing -- `durationMs` overrides the
+   * legacy auto-raise-from-candidate-count sizing (the caller already sized
+   * it, from a batch plan or a focused-shortlist calculation); `batchIndex`
+   * (when given) tags every sample this phase collects, so the export can
+   * report which batch a DID's series belongs to.
+   */
+  interface RunGuidedPhaseOptions {
+    durationMs?: number;
+    batchIndex?: number;
+  }
+
   async function runGuidedPhase(
     myGeneration: number,
     channel: SweepTransport,
     phase: (typeof DID_OBSERVATION_PHASES)[number],
     responders: readonly number[],
+    options: RunGuidedPhaseOptions = {},
   ): Promise<GuidedPhaseRunResult> {
     // F2 fix (binding): "if the [candidate] set is larger than
     // ~rate×phaseSeconds, raise the phase length automatically (show it) so
-    // every candidate is sampled ≥ 2× per phase."
-    const durationMs = computeGuidedPhaseDurationMs(responders.length, phase.durationMs);
+    // every candidate is sampled ≥ 2× per phase." Ticket P4j: a caller that
+    // already sized this phase itself (a batch plan, a focused-shortlist
+    // calculation) passes `options.durationMs` and skips this auto-raise.
+    const durationMs = options.durationMs ?? computeGuidedPhaseDurationMs(responders.length, phase.durationMs);
     emit({ guidedPhase: phase.id, guidedPhaseElapsedMs: 0, guidedPhaseDurationMs: durationMs });
     if (responders.length === 0) return { nextResponderIndex: 0 };
     // X3 fix (P4i-FIX3, binding, after Codex P4irev3 R6 PARTIAL): same
@@ -1354,7 +1440,11 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
         },
         onSample: (did, raw, tMs) => {
           if (myGeneration !== generation) return;
-          guidedSamples.push({ did, phase: phase.id, tMs, raw });
+          guidedSamples.push(
+            options.batchIndex === undefined
+              ? { did, phase: phase.id, tMs, raw }
+              : { did, phase: phase.id, tMs, raw, batchIndex: options.batchIndex },
+          );
           const advanced = tMs > highestElapsedMs;
           if (advanced) highestElapsedMs = tMs;
           emit({
@@ -1417,6 +1507,141 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       startGuidedKeepAliveTicker(myGeneration, channel);
       try {
         await runGuidedObservationOnChannel(myGeneration, channel);
+      } finally {
+        stopGuidedKeepAliveTicker();
+      }
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // Batched guided observation (ticket P4j, binding). Field evidence: a
+  // single 128-candidate phase at the measured ~9 req/s gave every DID only
+  // 1-2 samples -- not enough to tell a real brake/steering signal from
+  // ordinary sensor jitter (0x4522: 297 -> 305 -> 295). `planObservationBatches`
+  // splits the candidate pool into small fixed-size batches and sizes each
+  // batch's own phase duration from the run's OWN measured req/s so every DID
+  // gets >= `minSamplesPerPhase` samples/phase -- this runs the SAME
+  // baseline -> brake -> steering -> throttle cycle batch after batch, on ONE
+  // connection for the whole sequence (keep-alive ticker spans every batch,
+  // never restarted between them), reporting "Batch index+1/total" progress.
+  // -------------------------------------------------------------------
+
+  /** A numeric (1-8 byte) candidate's samples feed `computeDidCandidateSummaries`; a mid-size (9-32 byte) block's feed `computeDidBlockCandidateSummaries` -- a sample outside BOTH windows (should not occur: `filterCandidatePool` already excludes anything > 32 bytes) is simply not ranked by either. */
+  function splitSamplesByCandidateKind(samplesToSplit: readonly DidPhaseSample[]): { numeric: DidPhaseSample[]; block: DidPhaseSample[] } {
+    const numeric: DidPhaseSample[] = [];
+    const block: DidPhaseSample[] = [];
+    for (const sample of samplesToSplit) {
+      if (sample.raw.length >= 1 && sample.raw.length <= 8) numeric.push(sample);
+      else if (sample.raw.length >= 9 && sample.raw.length <= 32) block.push(sample);
+    }
+    return { numeric, block };
+  }
+
+  async function runBatchedObservationOnChannel(
+    myGeneration: number,
+    channel: SweepTransport,
+    batches: readonly ObservationBatch[],
+    minSamplesPerPhase: number,
+  ): Promise<void> {
+    resetGuidedSamples();
+    for (const batch of batches) {
+      if (myGeneration !== generation || observationControl.stopped) break;
+      emit({ batchIndex: batch.index, batchTotal: batch.total });
+      let responderOrder: readonly number[] = batch.dids;
+      for (const phase of DID_OBSERVATION_PHASES) {
+        if (myGeneration !== generation || observationControl.stopped) break;
+        const result = await runGuidedPhase(myGeneration, channel, phase, responderOrder, {
+          durationMs: batch.phaseDurationMs,
+          batchIndex: batch.index,
+        });
+        if (responderOrder.length > 0) {
+          const next = ((result.nextResponderIndex % responderOrder.length) + responderOrder.length) % responderOrder.length;
+          responderOrder = [...responderOrder.slice(next), ...responderOrder.slice(0, next)];
+        }
+      }
+    }
+    if (myGeneration !== generation) return; // a full stop() already handled teardown/release + the final phase itself.
+    await teardownActiveTransport();
+    if (myGeneration !== generation) return; // stop() raced in while close was settling -- it owns the final phase.
+    const { numeric, block } = splitSamplesByCandidateKind(guidedSamples);
+    emit({
+      phase: 'observationComplete',
+      guidedPhase: null,
+      batchIndex: null,
+      batchTotal: null,
+      // Ticket P4j (binding): the margin-based ranking rule -- opted in here
+      // (never on the legacy single-pass `startGuidedObservation`, which
+      // keeps its pre-ticket naive-distinctness behaviour byte-identical)
+      // because batching is specifically what guarantees the
+      // `minSamplesPerPhase` this rule needs to be meaningful.
+      candidateSummaries: computeDidCandidateSummaries(numeric, { useMarginRule: true, minSamplesPerPhase }),
+      blockCandidateSummaries: computeDidBlockCandidateSummaries(block, { minSamplesPerPhase }),
+    });
+    releaseReservation();
+  }
+
+  /** Same lifecycle discipline as `openTransportAndGuidedObserve` -- one connection, one continuous keep-alive ticker, for the WHOLE batched sequence. */
+  async function openTransportAndBatchedObserve(myGeneration: number, batches: readonly ObservationBatch[], minSamplesPerPhase: number): Promise<void> {
+    await runGuarded(myGeneration, async () => {
+      const transport = deps.transportFactory();
+      activeTransport = transport;
+      await transport.connect();
+      if (myGeneration !== generation) return;
+      const channel = createRawUdsChannel(transport, deps.testerAddress, deps.targetAddress);
+      activeChannel = channel;
+      startGuidedKeepAliveTicker(myGeneration, channel);
+      try {
+        await runBatchedObservationOnChannel(myGeneration, channel, batches, minSamplesPerPhase);
+      } finally {
+        stopGuidedKeepAliveTicker();
+      }
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // Focused observation (ticket P4j, binding): "the user can tick candidates
+  // (or type DIDs) -> one long guided cycle on the shortlist only (>= 10
+  // samples per phase)." A single (unbatched) run over EXACTLY the DIDs the
+  // user chose -- typed DIDs need not even be in the current responder set
+  // (the user is deliberately probing something specific).
+  // -------------------------------------------------------------------
+
+  async function runFocusedObservationOnChannel(myGeneration: number, channel: SweepTransport, dids: readonly number[], minSamplesPerPhase: number): Promise<void> {
+    resetGuidedSamples();
+    const phaseDurationMs = computeGuidedPhaseDurationMs(dids.length, DID_OBSERVATION_PHASES[0]!.durationMs, lastMeasuredReqPerSec || undefined, minSamplesPerPhase);
+    let responderOrder: readonly number[] = dids;
+    for (const phase of DID_OBSERVATION_PHASES) {
+      if (myGeneration !== generation || observationControl.stopped) break;
+      const result = await runGuidedPhase(myGeneration, channel, phase, responderOrder, { durationMs: phaseDurationMs });
+      if (responderOrder.length > 0) {
+        const next = ((result.nextResponderIndex % responderOrder.length) + responderOrder.length) % responderOrder.length;
+        responderOrder = [...responderOrder.slice(next), ...responderOrder.slice(0, next)];
+      }
+    }
+    if (myGeneration !== generation) return;
+    await teardownActiveTransport();
+    if (myGeneration !== generation) return;
+    const { numeric, block } = splitSamplesByCandidateKind(guidedSamples);
+    emit({
+      phase: 'observationComplete',
+      guidedPhase: null,
+      candidateSummaries: computeDidCandidateSummaries(numeric, { useMarginRule: true, minSamplesPerPhase }),
+      blockCandidateSummaries: computeDidBlockCandidateSummaries(block, { minSamplesPerPhase }),
+    });
+    releaseReservation();
+  }
+
+  async function openTransportAndFocusedObserve(myGeneration: number, dids: readonly number[], minSamplesPerPhase: number): Promise<void> {
+    await runGuarded(myGeneration, async () => {
+      const transport = deps.transportFactory();
+      activeTransport = transport;
+      await transport.connect();
+      if (myGeneration !== generation) return;
+      const channel = createRawUdsChannel(transport, deps.testerAddress, deps.targetAddress);
+      activeChannel = channel;
+      startGuidedKeepAliveTicker(myGeneration, channel);
+      try {
+        await runFocusedObservationOnChannel(myGeneration, channel, dids, minSamplesPerPhase);
       } finally {
         stopGuidedKeepAliveTicker();
       }
@@ -1614,7 +1839,7 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
         const myGeneration = generation; // SAME generation/token/transport.
         const channel = activeChannel;
         // Addendum (binding, P4i): "the observation phase uses the filtered candidate set" -- length 1-8 bytes, not ASCII-looking (see `didCandidates.ts`).
-        observationResponderDids = filterSweepCandidates(snapshot.responders).map((r) => r.did);
+        observationResponderDids = filterCandidatePool(snapshot.responders).map((r) => r.did);
         emit({ phase: 'observing', observationElapsedMs: 0, observationCadenceDegraded: false, observationAnchorWallClockMs: null, error: null });
         void runGuarded(myGeneration, () => runObservationOnChannel(myGeneration, channel, windowMs));
         return;
@@ -1632,7 +1857,7 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       token = acquired;
       observationControl = { paused: false, stopped: false };
       // Addendum (binding, P4i): "the observation phase uses the filtered candidate set" -- length 1-8 bytes, not ASCII-looking (see `didCandidates.ts`).
-      observationResponderDids = filterSweepCandidates(snapshot.responders).map((r) => r.did);
+      observationResponderDids = filterCandidatePool(snapshot.responders).map((r) => r.did);
       emit({ phase: 'observing', observationElapsedMs: 0, observationCadenceDegraded: false, observationAnchorWallClockMs: null, error: null });
       void openTransportAndObserve(myGeneration, windowMs);
     },
@@ -1673,9 +1898,19 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       token = acquired;
       observationControl = { paused: false, stopped: false };
       // Addendum (binding, P4i): "the observation phase uses the filtered candidate set" -- length 1-8 bytes, not ASCII-looking (see `didCandidates.ts`).
-      observationResponderDids = filterSweepCandidates(snapshot.responders).map((r) => r.did);
+      observationResponderDids = filterCandidatePool(snapshot.responders).map((r) => r.did);
       resetGuidedSamples();
-      emit({ phase: 'observing', guidedPhase: null, guidedPhaseElapsedMs: 0, guidedPhaseDurationMs: 0, candidateSummaries: [], error: null });
+      emit({
+        phase: 'observing',
+        guidedPhase: null,
+        guidedPhaseElapsedMs: 0,
+        guidedPhaseDurationMs: 0,
+        candidateSummaries: [],
+        blockCandidateSummaries: [],
+        batchIndex: null,
+        batchTotal: null,
+        error: null,
+      });
       void openTransportAndGuidedObserve(myGeneration);
     },
 
@@ -1686,7 +1921,90 @@ export function createDidSweepController(deps: DidSweepControllerDeps): DidSweep
       // `generation` -- `runGuidedObservationOnChannel`'s own per-phase loop
       // check (`observationControl.stopped`) is what then skips every
       // REMAINING phase too, still reaching the classify-and-release tail.
+      // Ticket P4j: the SAME flag drives the batched/focused loops' own
+      // per-phase-and-per-batch checks -- this one flip cuts short whichever
+      // of the three guided flows is currently running.
       observationControl.stopped = true;
+    },
+
+    startBatchedObservation(options = {}): void {
+      if (snapshot.phase !== 'sweepComplete' && snapshot.phase !== 'stopped' && snapshot.phase !== 'observationComplete') {
+        return;
+      }
+      if (snapshot.responders.length === 0) return;
+      // Ticket P4j: the WIDENED pool -- 1-32 bytes, mid-size blocks join
+      // numeric candidates (`filterCandidatePool`, vs. the legacy 1-8-byte
+      // `filterSweepCandidates` `startGuidedObservation()` still uses).
+      const candidateDids = filterCandidatePool(snapshot.responders).map((r) => r.did);
+      if (candidateDids.length === 0) return;
+      const acquired = reservation.tryAcquire('sweep');
+      if (acquired === null) {
+        emit({ error: RESERVATION_BUSY_MESSAGE });
+        return;
+      }
+      generation += 1;
+      const myGeneration = generation;
+      token = acquired;
+      observationControl = { paused: false, stopped: false };
+      observationResponderDids = candidateDids;
+      const minSamplesPerPhase = options.minSamplesPerPhase ?? DEFAULT_MIN_SAMPLES_PER_PHASE;
+      const batches = planObservationBatches(candidateDids, {
+        batchSize: options.batchSize,
+        minSamplesPerPhase,
+        // Ticket P4j: "phase duration per batch from the MEASURED rate of the
+        // sweep run (not the assumed 15)" -- falls back to
+        // `planObservationBatches`' own assumed default when nothing has been
+        // measured yet in this controller instance (`lastMeasuredReqPerSec`
+        // starts at 0, which `planObservationBatches` treats as "not measured").
+        measuredReqPerSec: lastMeasuredReqPerSec,
+      });
+      resetGuidedSamples();
+      emit({
+        phase: 'observing',
+        guidedPhase: null,
+        guidedPhaseElapsedMs: 0,
+        guidedPhaseDurationMs: 0,
+        candidateSummaries: [],
+        blockCandidateSummaries: [],
+        batchIndex: batches.length > 0 ? 0 : null,
+        batchTotal: batches.length > 0 ? batches.length : null,
+        error: null,
+      });
+      void openTransportAndBatchedObserve(myGeneration, batches, minSamplesPerPhase);
+    },
+
+    startFocusedObservation(dids: readonly number[]): void {
+      if (snapshot.phase !== 'sweepComplete' && snapshot.phase !== 'stopped' && snapshot.phase !== 'observationComplete') {
+        return;
+      }
+      // Ticket P4j: "the user can tick candidates (or type DIDs)" -- typed
+      // DIDs need not be discovered responders at all, only valid DID values
+      // (deduplicated, in the caller's own order).
+      const uniqueDids = Array.from(new Set(dids)).filter((did) => Number.isInteger(did) && did >= 0 && did <= 0xffff);
+      if (uniqueDids.length === 0) return;
+      const acquired = reservation.tryAcquire('sweep');
+      if (acquired === null) {
+        emit({ error: RESERVATION_BUSY_MESSAGE });
+        return;
+      }
+      generation += 1;
+      const myGeneration = generation;
+      token = acquired;
+      observationControl = { paused: false, stopped: false };
+      observationResponderDids = uniqueDids;
+      resetGuidedSamples();
+      emit({
+        phase: 'observing',
+        guidedPhase: null,
+        guidedPhaseElapsedMs: 0,
+        guidedPhaseDurationMs: 0,
+        candidateSummaries: [],
+        blockCandidateSummaries: [],
+        batchIndex: null,
+        batchTotal: null,
+        error: null,
+      });
+      void openTransportAndFocusedObserve(myGeneration, uniqueDids, FOCUSED_MIN_SAMPLES_PER_PHASE);
     },
 
     async resumePersistedRun(runId: string): Promise<void> {

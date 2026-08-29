@@ -1,6 +1,6 @@
 import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
-import type { DidCandidateSummary, DidHeuristicSuggestion, DidObservationPhaseId, DidPhaseSample } from '@circuit/core';
+import type { DidBlockCandidateSummary, DidCandidateSummary, DidHeuristicSuggestion, DidObservationPhaseId, DidPhaseSample } from '@circuit/core';
 import type { DidSweepStore, DidSweepResponderRecord, DidSweepRunRecord } from '../persistence/didSweepStore';
 import type { DidSweepController } from './didSweepController';
 
@@ -61,6 +61,18 @@ export interface DidSweepExportCandidate {
   changedInPhase: Record<DidObservationPhaseId, boolean>;
 }
 
+/**
+ * Ticket P4j (binding): "Mid-size blocks (9-32 bytes) join the candidate pool
+ * with per-byte-offset diffing: ... the export lists changed offsets."
+ */
+export interface DidSweepExportBlockCandidate {
+  didHex: string;
+  length: number;
+  sampleCount: number;
+  rank: DidBlockCandidateSummary['rank'];
+  changedOffsetsByPhase: Record<DidObservationPhaseId, number[]>;
+}
+
 export interface DidSweepExportPhaseSample {
   tMs: number;
   rawHex: string;
@@ -69,6 +81,16 @@ export interface DidSweepExportPhaseSample {
 export interface DidSweepExportPhaseSeries {
   didHex: string;
   phase: DidObservationPhaseId;
+  /**
+   * Ticket P4j (binding, batched guided observation): "export includes
+   * `batchIndex`" -- the 0-based batch (`planObservationBatches`' own
+   * `index`) this DID's samples were collected in, or `null` for a guided run
+   * that never batched its candidates (the legacy single-pass
+   * `startGuidedObservation()`, or a focused-shortlist run). Constant across
+   * every sample in `samples` below (a DID never moves between batches
+   * mid-run).
+   */
+  batchIndex: number | null;
   samples: DidSweepExportPhaseSample[];
 }
 
@@ -88,7 +110,12 @@ export interface DidSweepExportDocument {
   run: {
     runId: string;
     adapterType: string;
-    targetAddress: number | null;
+    /**
+     * Ticket P4j (binding): "the export's `run.targetAddress` is a hex
+     * string too" -- e.g. `"0x12"` (2-hex-digit byte), `null` when the run
+     * has no target address recorded.
+     */
+    targetAddress: string | null;
     rangeFromHex: string;
     rangeToHex: string;
     lastDidHex: string | null;
@@ -109,6 +136,8 @@ export interface DidSweepExportDocument {
   responders: DidSweepExportResponder[];
   /** The RANKED, filtered candidate set (`didObservationPhases.ts`'s `computeDidCandidateSummaries`) -- `[]` if no guided observation has run yet. */
   candidates: DidSweepExportCandidate[];
+  /** Ticket P4j (binding): the RANKED mid-size (9-32 byte) block candidates (`didObservationPhases.ts`'s `computeDidBlockCandidateSummaries`) -- `[]` if no batched/focused guided run has ever populated one. */
+  blockCandidates: DidSweepExportBlockCandidate[];
   /** Per-DID, per-phase raw sample series, relative timestamps (addendum: "observation series if any") -- `[]` if no guided observation has run yet. */
   observationSeries: DidSweepExportPhaseSeries[];
   /** `classifyResponders`-derived heuristic suggestions, if any single-window observation has run. */
@@ -119,11 +148,18 @@ function didHex(did: number): string {
   return `0x${did.toString(16).toUpperCase().padStart(4, '0')}`;
 }
 
-/** Builds the FULL export document (pure -- no I/O). `run`/`responders` normally come straight from `DidSweepStore`; `candidateSummaries`/`observationSamples`/`suggestions` are optional (a run that never reached a guided/heuristic observation still exports its sweep results). */
+/** Ticket P4j (binding): "the export's `run.targetAddress` is a hex string too" -- a 2-hex-digit byte (e.g. `"0x12"`), same convention as `enetSettingsValidation.ts`'s `formatHexByte` (kept independent -- this module never imports mobile-only session helpers). */
+function hexByte(value: number): string {
+  return `0x${value.toString(16).toUpperCase().padStart(2, '0')}`;
+}
+
+/** Builds the FULL export document (pure -- no I/O). `run`/`responders` normally come straight from `DidSweepStore`; `candidateSummaries`/`blockCandidateSummaries`/`observationSamples`/`suggestions` are optional (a run that never reached a guided/heuristic observation still exports its sweep results). */
 export function buildDidSweepExportDocument(input: {
   run: DidSweepRunRecord;
   responders: readonly DidSweepResponderRecord[];
   candidateSummaries?: readonly DidCandidateSummary[];
+  /** Ticket P4j (binding): mid-size (9-32 byte) block candidates -- `[]`/omitted when no batched/focused guided run has ranked any. */
+  blockCandidateSummaries?: readonly DidBlockCandidateSummary[];
   observationSamples?: readonly DidPhaseSample[];
   suggestions?: readonly DidHeuristicSuggestion[];
   nowIso: string;
@@ -134,7 +170,10 @@ export function buildDidSweepExportDocument(input: {
     const key = `${sample.did}:${sample.phase}`;
     let series = seriesByKey.get(key);
     if (series === undefined) {
-      series = { didHex: didHex(sample.did), phase: sample.phase, samples: [] };
+      // Ticket P4j (binding): "export includes batchIndex" -- constant per
+      // (did, phase) series (a DID never moves between batches mid-run), so
+      // it is set once, from the FIRST sample seen for this key.
+      series = { didHex: didHex(sample.did), phase: sample.phase, batchIndex: sample.batchIndex ?? null, samples: [] };
       seriesByKey.set(key, series);
     }
     series.samples.push({ tMs: sample.tMs, rawHex: bytesToHex(sample.raw) });
@@ -147,7 +186,7 @@ export function buildDidSweepExportDocument(input: {
     run: {
       runId: input.run.runId,
       adapterType: input.run.adapterType,
-      targetAddress: input.run.targetAddress,
+      targetAddress: input.run.targetAddress === null ? null : hexByte(input.run.targetAddress),
       rangeFromHex: didHex(input.run.rangeFrom),
       rangeToHex: didHex(input.run.rangeTo),
       lastDidHex: input.run.lastDid === null ? null : didHex(input.run.lastDid),
@@ -182,6 +221,13 @@ export function buildDidSweepExportDocument(input: {
       max: c.max,
       distinctValueCount: c.distinctValueCount,
       changedInPhase: c.changedInPhase,
+    })),
+    blockCandidates: (input.blockCandidateSummaries ?? []).map((b) => ({
+      didHex: didHex(b.did),
+      length: b.length,
+      sampleCount: b.sampleCount,
+      rank: b.rank,
+      changedOffsetsByPhase: b.changedOffsetsByPhase,
     })),
     observationSeries: [...seriesByKey.values()],
     suggestions: (input.suggestions ?? []).map((s) => ({
@@ -224,6 +270,7 @@ export async function buildDidSweepExportForRun(
     run,
     responders,
     candidateSummaries: snapshot.candidateSummaries,
+    blockCandidateSummaries: snapshot.blockCandidateSummaries,
     observationSamples: controller.getGuidedSamples(),
     suggestions: snapshot.suggestions,
     nowIso,
