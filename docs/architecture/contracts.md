@@ -839,3 +839,19 @@ candidates that changed → brake found; then the next missing signal".
 8. **Exportable reports (user requirement, binding for 4l and 5b)**: every result screen (Signal Finder session, post-session
    corner analysis) shares with one tap a full JSON plus a ≤ 1-page human-readable summary (`.md`, RO/EN), named
    `trace-<kind>-<date>-<subject>`; the summary is what the user forwards, the JSON is for tooling.
+
+### Signal Finder REVISION (2026-08-29, after field test 5 — binding, supersedes items 2–3 where they conflict)
+User: "inhuman to press that many times; the tests are robotic". Build 5 ran one metronome per ≤16-DID pass and queued hypotheses last.
+9. **One metronome per FIND.** A Find = exactly one human-paced script: baseline 3 s, then `repetitions` (default 3, max 5) ×
+   {press 3 s, release 3 s} ≈ 21 s. Never a second script without an explicit tap.
+10. **Budget, not passes.** The DIDs read during that script are chosen up front from the measured request rate so every DID gets
+    ≥ 3 samples per 3 s window: `budget = floor(rate × 3 / 3)` clamped to [4, 12]. Priority: (a) hypotheses of the target on
+    every ECU; (b) DIDs that CHANGED in earlier observations/finder runs (any rank other than static, from the sweep/finder
+    stores); (c) other cached responders of the target's ECUs. All ECUs are polled in the SAME session (per-entry target
+    address). Whatever does not fit is listed as **"not read (N) — Next round"** with the button; each round is one more full script.
+11. **Sparse-but-consistent = found.** A DID whose every press window and every release window contains ≥ 1 sample, whose matched
+    edges ≥ 80 % of expected, with 0 extra transitions and 0 baseline changes, is `found` (flagged `sparse`); `insufficient`
+    only when some window has 0 samples or the whole DID has < 2 samples per window on average.
+12. **Honesty.** DIDs never polled are "not read", never "no response". The result header states reads/ECUs/rounds actually done.
+13. Field fixtures (binding regression inputs): data/field/signal-finder/2026-08-29-brakeSwitch.json → 0x12/0x4002 `found`
+    (brake), 0x12/0x1701 unrelated; …-accelPedal.json → 0x12/0x4007 `found` (accel idle flag, bit0), 0x4659 unrelated/static.
