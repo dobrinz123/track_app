@@ -795,3 +795,62 @@ describe('P4m-FIX3 Z1/Z7 -- the export diagnostics section', () => {
     expect(ro).toContain('fără răspuns la sondaj sau la reîncercare');
   });
 });
+
+/**
+ * Ticket P4m-FIX4 W4 (Codex P4m-REV4 finding 4, MEDIUM): "schema 4 exports
+ * arbitrary underlying error text without redaction ... transport/platform
+ * errors can contain addresses, paths, identifiers, or credentials". The
+ * diagnostics section is the one place a raw message travels, and this is what
+ * it may carry: the error's own name/code, its first 120 characters, and no
+ * address, host:port, path or token whatsoever.
+ */
+describe('P4m-FIX4 W4 -- the export redacts diagnostics.rawError', () => {
+  it('replaces the IP, the file path and the long hex token, and keeps the error name', () => {
+    const raw =
+      String.raw`Error: connect ETIMEDOUT 192.168.1.42:6801 while reading D:\CODE\APLICTIE_Circuit\apps\mobile\src\session\enet.ts token=a3f19c7d5b0e4482a3f19c7d5b0e4482`;
+    const doc = buildSignalFinderExportDocument(input({ diagnostics: { rawError: raw, timeoutInclusiveReqPerSec: 1.8, adapterTeardownPending: false } }));
+    const redacted = doc.diagnostics.rawError!;
+    expect(redacted).toContain('Error: connect ETIMEDOUT');
+    expect(redacted).toContain('‹redacted›');
+    expect(redacted).not.toContain('192.168.1.42');
+    expect(redacted).not.toContain('6801');
+    expect(redacted).not.toContain('APLICTIE_Circuit');
+    expect(redacted).not.toContain('a3f19c7d5b0e4482');
+    expect(redacted.length).toBeLessThanOrEqual(121); // 120 chars, plus the ellipsis that says it was cut.
+  });
+
+  it('leaves an ordinary message alone, and passes null through', () => {
+    // The two messages the controller itself installs must survive verbatim --
+    // an eager pattern that mangled them would make the diagnostics useless.
+    for (const message of [
+      'The adapter is in use (telemetry, the DID probe or a sweep) -- stop it first.',
+      'The previous transport close() has not settled yet -- the adapter is not free.',
+    ]) {
+      expect(
+        buildSignalFinderExportDocument(
+          input({ diagnostics: { rawError: message, timeoutInclusiveReqPerSec: null, adapterTeardownPending: false } }),
+        ).diagnostics.rawError,
+      ).toBe(message);
+    }
+    expect(
+      buildSignalFinderExportDocument(input({ diagnostics: { rawError: 'socket hang up', timeoutInclusiveReqPerSec: null, adapterTeardownPending: false } }))
+        .diagnostics.rawError,
+    ).toBe('socket hang up');
+    expect(buildSignalFinderExportDocument(input()).diagnostics.rawError).toBeNull();
+  });
+
+  it('redacts an IPv6 address and a bare host:port too', () => {
+    const doc = buildSignalFinderExportDocument(
+      input({
+        diagnostics: {
+          rawError: 'EHOSTUNREACH fe80::1c2d:3e4f:5a6b:7c8d and adapter.local:6801',
+          timeoutInclusiveReqPerSec: null,
+          adapterTeardownPending: false,
+        },
+      }),
+    );
+    expect(doc.diagnostics.rawError).toContain('EHOSTUNREACH');
+    expect(doc.diagnostics.rawError).not.toContain('fe80');
+    expect(doc.diagnostics.rawError).not.toContain('adapter.local');
+  });
+});

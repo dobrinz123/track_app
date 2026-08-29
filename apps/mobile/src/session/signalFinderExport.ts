@@ -101,7 +101,11 @@ export interface SignalFinderExportInput {
  * the JSON) needs in order to see the real failure.
  */
 export interface SignalFinderExportDiagnostics {
-  /** The controller's raw `error` text — English/underlying, never rendered in the UI. */
+  /**
+   * The controller's raw `error` text — English/underlying, never rendered in
+   * the UI, and REDACTED on its way into the document
+   * ({@link redactDiagnosticError}, P4m-FIX4 W4).
+   */
   rawError: string | null;
   /** P4m-FIX3 Z1: what the PROBE as a whole achieved, the timeouts of the entries it then dropped included. */
   timeoutInclusiveReqPerSec: number | null;
@@ -270,6 +274,50 @@ export function signalFinderExportInputFromSnapshot(
   };
 }
 
+/** What replaces anything that could identify a machine, a network or a secret. */
+export const DIAGNOSTICS_REDACTION = '‹redacted›';
+
+/** How much of the (already redacted) message survives — enough for the error's name and its first clause. */
+const DIAGNOSTICS_MAX_CHARS = 120;
+
+/**
+ * P4m-FIX4 W4 (Codex P4m-REV4 finding 4, MEDIUM): "schema 4 exports arbitrary
+ * underlying error text without redaction ... transport/platform errors can
+ * contain addresses, paths, identifiers, or credentials", and this document is
+ * one the user is invited to SHARE.
+ *
+ * What survives is what a developer actually debugs from: the error's own
+ * name/code and the first {@link DIAGNOSTICS_MAX_CHARS} characters of what it
+ * said. What never leaves the phone: URLs, IPv4/IPv6 addresses, host:port
+ * pairs, file paths, and anything long enough to be a token (hex or base64).
+ * The patterns are deliberately eager — a redacted timestamp costs nothing,
+ * a leaked address costs the user.
+ */
+export function redactDiagnosticError(raw: string | null): string | null {
+  if (raw === null) return null;
+  const patterns: RegExp[] = [
+    /\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, // any URL (scheme://host/path)
+    /\b[A-Za-z]:[\\/][^\s"']*/g, // Windows path
+    /(?:^|[\s"'(])[\\/][^\s"')]{2,}/g, // POSIX path
+    /\b\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?\b/g, // IPv4, with or without a port
+    /\b[0-9A-Fa-f]{0,4}(?::{1,2}[0-9A-Fa-f]{1,4}){2,7}\b/g, // IPv6, compressed forms included
+    /\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?::\d{1,5})?\b/g, // host name, with or without a port
+    /\b[A-Za-z][A-Za-z0-9_-]+:\d{2,5}\b/g, // bare host:port
+    /\b[0-9A-Fa-f]{16,}\b/g, // hex token
+    /\b[A-Za-z0-9+/_-]{24,}={0,2}\b/g, // base64-ish token
+  ];
+  let text = raw;
+  for (const pattern of patterns) {
+    text = text.replace(pattern, (match) => {
+      // The POSIX-path pattern eats its leading separator character: keep it.
+      const lead = /^[\s"'(]/.test(match) ? match[0] : '';
+      return `${lead}${DIAGNOSTICS_REDACTION}`;
+    });
+  }
+  text = text.replace(/\s+/g, ' ').trim();
+  return text.length > DIAGNOSTICS_MAX_CHARS ? `${text.slice(0, DIAGNOSTICS_MAX_CHARS)}…` : text;
+}
+
 /** Builds the FULL export document (pure — no I/O). */
 export function buildSignalFinderExportDocument(input: SignalFinderExportInput): SignalFinderExportDocument {
   const timeline = input.timeline;
@@ -374,7 +422,9 @@ export function buildSignalFinderExportDocument(input: SignalFinderExportInput):
             toDidHex: didHex(input.nextStep.toDid),
           },
     diagnostics: {
-      rawError: input.diagnostics.rawError,
+      // W4: the ONE place the raw text is written out is the one place it is
+      // redacted -- whatever built the input, and however it got here.
+      rawError: redactDiagnosticError(input.diagnostics.rawError),
       timeoutInclusiveReqPerSec: input.diagnostics.timeoutInclusiveReqPerSec,
       adapterTeardownPending: input.diagnostics.adapterTeardownPending,
     },

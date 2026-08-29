@@ -78,8 +78,15 @@ export const FINDER_PROBE_DURATION_MS = 2_000;
  * rather than imported so `runner.ts` keeps no dependency on the planner.
  */
 export const FINDER_BACKOFF_WINDOW_MS = 3_000;
-/** Bounded 0x78 responsePending extensions inside one exchange (a stalling DME still answers). */
-const DEFAULT_MAX_RESPONSE_PENDING_EXTENSIONS = 2;
+/**
+ * Bounded 0x78 responsePending extensions inside one exchange (a stalling DME
+ * still answers).
+ *
+ * P4m-FIX4 W3 (Codex P4m-REV4 finding 3, MEDIUM) exported it: the screen's
+ * "up to N s" line has to be computed from the SAME number the exchange loop
+ * obeys — see {@link finderProbeBoundMs}.
+ */
+export const FINDER_MAX_RESPONSE_PENDING_EXTENSIONS = 2;
 /** Bounded stray/unmatched replies tolerated inside one exchange's own window. */
 const MAX_UNMATCHED_REPLIES = 3;
 const DEFAULT_KEEPALIVE_INTERVAL_MS = 2_000;
@@ -171,6 +178,82 @@ export interface FinderRoundResult {
 
 function keyOf(ref: SignalFinderTargetRef): string {
   return `${ref.ecu}:${ref.did}`;
+}
+
+/**
+ * P4m-FIX4 W3 (Codex P4m-REV4 finding 3, MEDIUM): "the displayed probe bound is
+ * not an upper bound". The screen said `entries × 300 ms`, but ONE exchange can
+ * legitimately spend a full timeout waiting for `send()` to resolve
+ * ({@link guarded}), a second one on its own response window, and one more per
+ * allowed `0x78` extension — `4 × 300 ms` at the defaults, four times what the
+ * driver was told.
+ *
+ * So the bound is computed HERE, from the same three constants the exchange
+ * loop obeys, and the screen states what it returns:
+ * `entries × requestTimeout × (2 + extensions)`.
+ */
+export function finderProbeBoundMs(entryCount: number, requestTimeoutMs: number = FINDER_REQUEST_TIMEOUT_MS): number {
+  const entries = Number.isFinite(entryCount) && entryCount > 0 ? Math.floor(entryCount) : 0;
+  const timeoutMs =
+    Number.isFinite(requestTimeoutMs) && requestTimeoutMs > 0 ? requestTimeoutMs : FINDER_REQUEST_TIMEOUT_MS;
+  return entries * timeoutMs * (2 + FINDER_MAX_RESPONSE_PENDING_EXTENSIONS);
+}
+
+/**
+ * P4m-FIX4 W1/W2 (Codex P4m-REV4 findings 1 and 2, both HIGH): the explicit
+ * retry round is PART OF THE MEASUREMENT, not an afterthought.
+ *
+ * Build 9 summarised the probe, then retried the silent hypotheses, then
+ * planned from the summary the retry had just invalidated: a hypothesis that
+ * answered its retry was retained at a rate measured without its exchange
+ * (over-budgeting the script, finding 1), and an ECU whose every probe entry
+ * missed was already "silent" before its retry was even considered (finding 2).
+ *
+ * The fix is one function, not a second code path: the two rounds are MERGED
+ * and {@link summarizeFinderProbe} runs once over the result. Liveness (per ECU
+ * and per DID) and the retained-entry rate then both rest on probe + retry.
+ *
+ * `second`'s samples are re-based onto `first`'s anchor, so the merged result
+ * keeps ONE origin like any single round.
+ */
+export function mergeFinderRounds(first: FinderRoundResult, second: FinderRoundResult): FinderRoundResult {
+  const offsetMs = second.startedAtMs - first.startedAtMs;
+  const attempted = [...first.attempted];
+  const attemptedKeys = new Set(attempted.map(keyOf));
+  for (const ref of second.attempted) {
+    if (attemptedKeys.has(keyOf(ref))) continue;
+    attemptedKeys.add(keyOf(ref));
+    attempted.push({ ecu: ref.ecu, did: ref.did });
+  }
+  const answered = [...first.answered];
+  const answeredKeys = new Set(answered.map(keyOf));
+  for (const ref of second.answered) {
+    if (answeredKeys.has(keyOf(ref))) continue;
+    answeredKeys.add(keyOf(ref));
+    answered.push({ ecu: ref.ecu, did: ref.did });
+  }
+  const backedOff = [...first.backedOff];
+  const backedOffKeys = new Set(backedOff.map(keyOf));
+  for (const ref of second.backedOff) {
+    if (backedOffKeys.has(keyOf(ref))) continue;
+    backedOffKeys.add(keyOf(ref));
+    backedOff.push({ ecu: ref.ecu, did: ref.did });
+  }
+  return {
+    startedAtMs: first.startedAtMs,
+    elapsedMs: first.elapsedMs + second.elapsedMs,
+    samples: [
+      ...first.samples,
+      ...second.samples.map((sample) => ({ ...sample, tMs: Math.max(0, sample.tMs + offsetMs) })),
+    ],
+    attempted,
+    answered,
+    requestCount: first.requestCount + second.requestCount,
+    answeredCount: first.answeredCount + second.answeredCount,
+    answeredElapsedMs: first.answeredElapsedMs + second.answeredElapsedMs,
+    respondingEcus: [...new Set([...first.respondingEcus, ...second.respondingEcus])].sort((a, b) => a - b),
+    backedOff,
+  };
 }
 
 function waitMs(ms: number): Promise<void> {
@@ -422,7 +505,7 @@ export async function runFinderRound(input: RunFinderRoundInput): Promise<Finder
 
       polledThisPass += 1;
       const sentAtMs = input.clock.now();
-      const outcome = await exchange(channel, entry.did, input.clock, requestTimeoutMs, DEFAULT_MAX_RESPONSE_PENDING_EXTENSIONS);
+      const outcome = await exchange(channel, entry.did, input.clock, requestTimeoutMs, FINDER_MAX_RESPONSE_PENDING_EXTENSIONS);
       const elapsedMs = Math.max(0, input.clock.now() - sentAtMs);
 
       // Y4 (Codex P4m-REV2 finding 14): a key becomes "attempted" -- and a

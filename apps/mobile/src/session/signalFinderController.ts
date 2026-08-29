@@ -52,8 +52,10 @@ import {
   FINDER_REQUEST_TIMEOUT_MS,
   buildMetronomeTimeline,
   computeFinderDidBudget,
+  finderProbeBoundMs,
   findSignalTarget,
   isAsciiLike,
+  mergeFinderRounds,
   metronomeCountdownMs,
   metronomeStepAt,
   nextDiscoveryStep,
@@ -151,7 +153,12 @@ export type SignalFinderPhase = 'idle' | 'preparing' | 'probing' | 'running' | '
 export interface SignalFinderProbeProgress {
   probed: number;
   total: number;
-  /** `total × requestTimeoutMs` — the worst case the screen states ("up to 4 s"). */
+  /**
+   * The worst case the screen states ("up to N s"), from `@circuit/core`'s
+   * own {@link finderProbeBoundMs}: `total × (send timeout + response window +
+   * 0x78 extension budget)`. P4m-FIX4 W3 — `total × requestTimeoutMs` was a
+   * quarter of what one exchange may really cost.
+   */
   boundMs: number;
 }
 
@@ -590,7 +597,22 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     void closed.then(() => {
       if (pendingClose !== closed) return;
       pendingClose = null;
-      emit({ adapterTeardownPending: false });
+      /**
+       * P4m-FIX4 W5 (Codex P4m-REV4 finding 5, LOW): the flag was cleared and
+       * the ERROR it installed was not, so a driver who had tapped Find while
+       * the close was outstanding kept reading "the adapter is still shutting
+       * down" after it had shut down — an error with nothing left behind it.
+       * The adapter confirming its own teardown is the end of that refusal:
+       * the message goes with the flag, and the screen leaves the error phase
+       * unless something else put it there.
+       */
+      const stale = snapshot.errorCode === 'adapter-teardown-pending';
+      emit({
+        adapterTeardownPending: false,
+        ...(stale
+          ? { error: null, errorCode: null, phase: snapshot.phase === 'error' ? ('idle' as const) : snapshot.phase }
+          : {}),
+      });
     });
   }
 
@@ -813,10 +835,15 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
       }
 
       // Z5: the probe is a phase of its own, and it counts out loud.
+      // P4m-FIX4 W3: the bound it states is the RUNNER's own exchange bound
+      // (`finderProbeBoundMs`) — one exchange can spend a timeout in `send()`,
+      // another on its response window and one more per allowed 0x78, so
+      // `entries × 300 ms` was a quarter of the truth.
+      const probeTotal = provisional.dids.length;
       const probeProgress = {
         probed: 0,
-        total: provisional.dids.length,
-        boundMs: provisional.dids.length * requestTimeoutMs,
+        total: probeTotal,
+        boundMs: finderProbeBoundMs(probeTotal, requestTimeoutMs),
       };
       emit({ phase: 'probing', probeProgress });
 
@@ -851,10 +878,9 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
           // metronome is something the driver can watch instead of guess at.
           onProgress: (probed, total) => {
             if (myGeneration !== generation) return;
-            emit({ probeProgress: { probed, total, boundMs: total * requestTimeoutMs } });
+            emit({ probeProgress: { probed, total, boundMs: finderProbeBoundMs(total, requestTimeoutMs) } });
           },
         });
-        const summary = summarizeFinderProbe(probe, provisional.dids, assumedReqPerSec);
         if (myGeneration !== generation || control.stopped) return;
 
         /**
@@ -864,10 +890,31 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
          * starts pressing anything. Build 8 instead kept the hypothesis in the
          * round, where the runner spent three misses on it and one more in
          * every evidence window, out of the script's own 21 seconds.
+         *
+         * P4m-FIX4 W1/W2 (Codex P4m-REV4 findings 1 and 2, both HIGH) settled
+         * WHICH hypotheses get it and WHEN the probe is summarised. Build 9
+         * summarised first and retried afterwards, so:
+         *
+         *  - the candidates came from `summary.silentDids`, which by
+         *    construction holds only misses on ECUs that are ALREADY alive: a
+         *    hypothesis on a wholly silent ECU — and, when nothing answered at
+         *    all, EVERY hypothesis — never got the retry it was promised, and
+         *    the ECU was declared silent without it;
+         *  - a hypothesis recovered by the retry was then kept in a round whose
+         *    budget rested on a rate measured WITHOUT its exchange.
+         *
+         * So the candidates are the attempted-but-unanswered HYPOTHESES of the
+         * probe itself, and the retry is MERGED into the probe
+         * (`mergeFinderRounds`) before anything is summarised. One summary over
+         * probe + retry decides the rate, the silent ECUs and the silent DIDs
+         * alike.
          */
         const hypothesisKeys = new Set(currentPools.hypotheses.map(keyOf));
-        const silentHypotheses = summary.silentDids.filter((entry) => hypothesisKeys.has(keyOf(entry)));
-        let silentDids: readonly SignalFinderTargetRef[] = summary.silentDids;
+        const probeAnswered = new Set(probe.answered.map(keyOf));
+        const silentHypotheses = probe.attempted.filter(
+          (entry) => hypothesisKeys.has(keyOf(entry)) && !probeAnswered.has(keyOf(entry)),
+        );
+        let measured = probe;
         if (silentHypotheses.length > 0) {
           const retry = await runFinderRound({
             entries: silentHypotheses,
@@ -878,11 +925,25 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
             requestTimeoutMs,
             maxPasses: 1,
             completePass: true,
+            // W3: the retry is part of the probe the driver is watching — its
+            // entries are counted into the same n/N (and the same bound), so
+            // the line keeps moving and reaches N/N instead of freezing.
+            onProgress: (probed, total) => {
+              if (myGeneration !== generation) return;
+              emit({
+                probeProgress: {
+                  probed: probeTotal + probed,
+                  total: probeTotal + total,
+                  boundMs: finderProbeBoundMs(probeTotal + total, requestTimeoutMs),
+                },
+              });
+            },
           });
-          const recovered = new Set(retry.answered.map(keyOf));
-          silentDids = summary.silentDids.filter((entry) => !recovered.has(keyOf(entry)));
           if (myGeneration !== generation || control.stopped) return;
+          measured = mergeFinderRounds(probe, retry);
         }
+        const summary = summarizeFinderProbe(measured, provisional.dids, assumedReqPerSec);
+        const silentDids: readonly SignalFinderTargetRef[] = summary.silentDids;
 
         // Z1 (the LEAD's E2E defect): the budget and every estimate are sized
         // from the RETAINED entries' own rate; the probe's overall figure, the

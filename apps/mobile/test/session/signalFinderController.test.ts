@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildMetronomeTimeline, type SignalActionScript, type SignalTargetCatalog } from '@circuit/core';
+import {
+  FINDER_REQUEST_TIMEOUT_MS,
+  buildMetronomeTimeline,
+  finderProbeBoundMs,
+  type SignalActionScript,
+  type SignalTargetCatalog,
+} from '@circuit/core';
 import { createEnetAdapterReservation as createReservation } from '../../src/session/enetAdapterReservation';
 import { createSignalFinderController, type SignalFinderControllerDeps } from '../../src/session/signalFinderController';
 import { createInMemoryDidSweepStore, createInMemoryVehicleProfileBindingStore } from '../../src/persistence/didSweepStore';
@@ -864,5 +870,133 @@ describe('createSignalFinderController -- P4m-FIX3 (retained rate, one hypothesi
     expect(snapshot.phase).toBe('error');
     expect(snapshot.errorCode).toBe('adapter-teardown-pending');
     expect(harness.transports).toHaveLength(transportsBefore);
+  });
+});
+
+/**
+ * Ticket P4m-FIX4 (Codex P4m-REV4 findings 1, 2, 3, 5).
+ *
+ *  W1 (H1) The explicit retry round is part of the MEASUREMENT: a hypothesis
+ *      recovered by it is retained at a rate its own exchange counted towards.
+ *  W2 (H2) EVERY probe-silent hypothesis gets that one retry -- the ones on
+ *      wholly silent ECUs and the zero-answer case included. An ECU is
+ *      declared silent only AFTER it.
+ *  W3 (M3) The probe's stated bound is what one exchange can really cost, and
+ *      its progress line covers the retry round as well.
+ *  W5 (L5) A late close settling clears the pending flag AND the error it
+ *      installed.
+ */
+describe('createSignalFinderController -- P4m-FIX4 (retry inside the measurement, honest bound, cleared teardown error)', () => {
+  /** Answers `null` to the FIRST request for a key, then `answer` -- one dropped frame per DID, no more. */
+  function silentOnce(answer: (ecu: number, did: number) => DidAnswer): (ecu: number, did: number) => DidAnswer {
+    const asks = new Map<string, number>();
+    return (ecu, did) => {
+      const key = `${ecu}:${did}`;
+      const n = (asks.get(key) ?? 0) + 1;
+      asks.set(key, n);
+      return n === 1 ? null : answer(ecu, did);
+    };
+  }
+
+  it('W1: NOTHING answers the probe, one hypothesis answers its retry -- it is retained and the rate is MEASURED', async () => {
+    // The zero-answer case (finding 2) and the rate case (finding 1) in one
+    // run: build 9 retried nothing here (`silentDids` is empty when no ECU is
+    // live), so both ECUs were declared silent and the rate stayed ASSUMED.
+    const harness = makeController(
+      silentOnce((ecu) => (ecu === 0x29 ? bytes('00') : null)),
+      { measuredReqPerSec: 15 },
+    );
+    await runFind(harness);
+    const snapshot = harness.controller.getSnapshot();
+    // The retry's own exchange IS the measurement.
+    expect(snapshot.rateSource).toBe('measured');
+    expect(snapshot.measuredReqPerSec).toBeGreaterThan(0);
+    // ... and the hypothesis it recovered is in the round the driver performed.
+    expect(snapshot.readDids).toContainEqual({ ecu: 0x29, did: 0x500c });
+    expect(snapshot.round).toBe(1);
+    // 0x12 never answered either attempt, so it -- and only it -- is silent.
+    expect(snapshot.silentEcus).toEqual([0x12]);
+  });
+
+  it('W2: an ECU wholly silent in the PROBE is retried, and answering it is neither silent nor dropped', async () => {
+    const harness = makeController(
+      // 0x29 misses its probe attempt and answers everything after it; 0x12 is alive throughout.
+      silentOnce(() => bytes('00')),
+      { measuredReqPerSec: 15 },
+    );
+    await runFind(harness);
+    const snapshot = harness.controller.getSnapshot();
+    expect(snapshot.silentEcus).toEqual([]);
+    expect(snapshot.silentDids).toEqual([]);
+    expect(snapshot.readDids).toContainEqual({ ecu: 0x29, did: 0x500c });
+  });
+
+  it('W2: an ECU silent in the probe AND in its one retry is dropped -- asked exactly twice, and reported as silent', async () => {
+    const harness = makeController((ecu) => (ecu === 0x29 ? null : bytes('00')), { measuredReqPerSec: 15 });
+    await runFind(harness);
+    const snapshot = harness.controller.getSnapshot();
+    // Its single hypothesis: the probe's attempt plus the ONE retry, and
+    // nothing during the driver's own script.
+    expect(harness.transports[0]!.requests.filter((r) => r.ecu === 0x29)).toHaveLength(2);
+    expect(snapshot.silentEcus).toEqual([0x29]);
+    expect(snapshot.silentDids).toContainEqual({ ecu: 0x29, did: 0x500c });
+    expect(snapshot.notReadDids).not.toContainEqual({ ecu: 0x29, did: 0x500c });
+    expect(snapshot.noResponseDids).not.toContainEqual({ ecu: 0x29, did: 0x500c });
+  });
+
+  it('W3: the bound is the runner s own exchange bound, and the progress line counts the retry round to N/N', async () => {
+    const progress: Array<{ probed: number; total: number; boundMs: number }> = [];
+    const harness = makeController(silentOnce(() => bytes('00')), { measuredReqPerSec: 15 });
+    harness.controller.subscribe((snapshot) => {
+      if (snapshot.probeProgress !== null) progress.push({ ...snapshot.probeProgress });
+    });
+    await runFind(harness);
+    const first = progress[0]!;
+    const last = progress[progress.length - 1]!;
+    // Two planned entries in the probe, both silent on their first attempt --
+    // so both are retried, and the line says 4, not 2.
+    expect(first.total).toBe(2);
+    expect(last.total).toBe(4);
+    expect(last.probed).toBe(4); // it reaches N/N instead of freezing at 2/2.
+    // The stated bound is entries x (send + response + 0x78 budget), not entries x 300 ms.
+    expect(first.boundMs).toBe(finderProbeBoundMs(2, FINDER_REQUEST_TIMEOUT_MS));
+    expect(last.boundMs).toBe(finderProbeBoundMs(4, FINDER_REQUEST_TIMEOUT_MS));
+    expect(last.boundMs).toBeGreaterThan(4 * FINDER_REQUEST_TIMEOUT_MS);
+  });
+
+  it('W5: when the late close finally settles, the pending flag AND its error are cleared', async () => {
+    let settleClose = (): void => {};
+    const harness = makeController(() => bytes('00'), {
+      closeTimeoutMs: 200,
+      teardownTimeoutMs: 500,
+      transportFactory: () => {
+        const transport = new MultiEcuFakeTransport({ answer: () => bytes('00') });
+        transport.close = (): Promise<void> =>
+          new Promise((resolve) => {
+            settleClose = (): void => resolve();
+          });
+        return transport;
+      },
+    });
+    const find = harness.controller.find('brakeSwitch');
+    await vi.advanceTimersByTimeAsync(300);
+    const stopped = harness.controller.stop();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await stopped;
+    await find;
+    expect(harness.controller.getSnapshot().adapterTeardownPending).toBe(true);
+
+    // The refusal the driver sees while that close is outstanding.
+    await runFind(harness);
+    expect(harness.controller.getSnapshot().errorCode).toBe('adapter-teardown-pending');
+
+    // The adapter finally confirms: the refusal has no reason to survive it.
+    settleClose();
+    await vi.advanceTimersByTimeAsync(10);
+    await flush();
+    const snapshot = harness.controller.getSnapshot();
+    expect(snapshot.adapterTeardownPending).toBe(false);
+    expect(snapshot.error).toBeNull();
+    expect(snapshot.errorCode).toBeNull();
   });
 });

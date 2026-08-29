@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  FINDER_MAX_RESPONSE_PENDING_EXTENSIONS,
   FINDER_MISSES_BEFORE_BACKOFF,
   FINDER_REQUEST_TIMEOUT_MS,
+  finderProbeBoundMs,
+  mergeFinderRounds,
   runFinderRound,
   summarizeFinderProbe,
   type FinderRoundResult,
@@ -598,5 +601,107 @@ describe('runFinderRound / summarizeFinderProbe -- P4m-FIX3 (retained rate, per-
       [2, 3],
       [3, 3],
     ]);
+  });
+});
+
+/**
+ * Ticket P4m-FIX4 (Codex P4m-REV4 findings 1, 2, 3).
+ *
+ *  W1/W2 (H1/H2) The explicit retry round is PART OF THE MEASUREMENT: its
+ *      answers count towards the retained-entry rate, and liveness (per ECU
+ *      and per DID) is decided only AFTER it. {@link mergeFinderRounds} is the
+ *      whole mechanism — one summary over probe + retry.
+ *  W3 (M3) The probe's advertised upper bound is what ONE exchange can really
+ *      cost: the send timeout, the response window, and the 0x78 extension
+ *      budget — {@link finderProbeBoundMs}, from the runner's own constants.
+ */
+describe('P4m-FIX4 -- finderProbeBoundMs (W3) and mergeFinderRounds (W1/W2)', () => {
+  it('W3: the bound is entries x (send + response + 0x78 extensions), from the runner s own constants', () => {
+    expect(FINDER_MAX_RESPONSE_PENDING_EXTENSIONS).toBe(2);
+    // One exchange: the send's own timeout, the response window, and one more
+    // window per allowed 0x78 extension.
+    expect(finderProbeBoundMs(1, 300)).toBe(300 * (2 + FINDER_MAX_RESPONSE_PENDING_EXTENSIONS));
+    expect(finderProbeBoundMs(12, 300)).toBe(12 * 1_200);
+    // Defaults to the runner's own per-DID timeout.
+    expect(finderProbeBoundMs(4)).toBe(4 * FINDER_REQUEST_TIMEOUT_MS * (2 + FINDER_MAX_RESPONSE_PENDING_EXTENSIONS));
+    expect(finderProbeBoundMs(0, 300)).toBe(0);
+  });
+
+  it('W3: a REAL worst-case exchange (slow send + two 0x78 extensions + silence) stays inside that bound', async () => {
+    const timeoutMs = 60;
+    let pending = 0;
+    /** Send resolves just before its own timeout, then two 0x78s, then silence. */
+    const channel: SweepTransport = {
+      send(): Promise<void> {
+        return new Promise((resolve) => setTimeout(resolve, timeoutMs * 0.9));
+      },
+      nextResponse(waitMs: number): Promise<Uint8Array | 'timeout'> {
+        if (pending < 2) {
+          pending += 1;
+          return new Promise((resolve) =>
+            setTimeout(() => resolve(Uint8Array.from([0x7f, 0x22, 0x78])), Math.max(0, waitMs * 0.9)),
+          );
+        }
+        return new Promise((resolve) => setTimeout(() => resolve('timeout'), Math.max(0, waitMs)));
+      },
+      async keepAlive(): Promise<void> {},
+    };
+    const startedAtMs = Date.now();
+    const result = await runFinderRound({
+      entries: [{ ecu: 0x12, did: 0x4002 }],
+      channels: new Map([[0x12, channel]]),
+      clock: CLOCK,
+      control: { paused: false, stopped: false },
+      durationMs: 10,
+      requestTimeoutMs: timeoutMs,
+      maxPasses: 1,
+      completePass: true,
+    });
+    const elapsedMs = Date.now() - startedAtMs;
+    expect(result.answered).toEqual([]); // it never answered -- it only stalled.
+    expect(elapsedMs).toBeGreaterThan(timeoutMs * 2); // the old bound (1 x timeout) was not one.
+    expect(elapsedMs).toBeLessThanOrEqual(finderProbeBoundMs(1, timeoutMs) + 100);
+  });
+
+  it('W1/W2: the retry s answers are part of the measurement -- merged, the recovered ECU is live and its exchange counts', async () => {
+    let alive = false;
+    const { channels } = harness((ecu) => (ecu === 0x29 && !alive ? 'silent' : Uint8Array.from([0x01])), [0x12, 0x29]);
+    const entries = [
+      { ecu: 0x12, did: 0x4002 },
+      { ecu: 0x29, did: 0x500c },
+    ];
+    const round = {
+      channels,
+      clock: CLOCK,
+      control: { paused: false, stopped: false },
+      durationMs: 10,
+      requestTimeoutMs: REQUEST_TIMEOUT_MS,
+      maxPasses: 1,
+      completePass: true,
+    } as const;
+    const probe = await runFinderRound({ entries, ...round });
+    expect(summarizeFinderProbe(probe, entries, 15.8).silentEcus).toEqual([0x29]);
+
+    alive = true; // the one explicit retry, and it answers.
+    const retry = await runFinderRound({ entries: [{ ecu: 0x29, did: 0x500c }], ...round });
+    const merged = mergeFinderRounds(probe, retry);
+    expect(merged.startedAtMs).toBe(probe.startedAtMs);
+    expect(merged.attempted).toEqual(entries);
+    expect(merged.answered).toEqual([
+      { ecu: 0x12, did: 0x4002 },
+      { ecu: 0x29, did: 0x500c },
+    ]);
+    expect(merged.answeredCount).toBe(probe.answeredCount + retry.answeredCount);
+    expect(merged.requestCount).toBe(probe.requestCount + retry.requestCount);
+    expect(merged.respondingEcus).toEqual([0x12, 0x29]);
+    // Samples keep ONE origin: the retry's are re-based onto the probe's anchor.
+    expect(merged.samples.every((sample) => sample.tMs >= 0)).toBe(true);
+
+    const summary = summarizeFinderProbe(merged, entries, 15.8);
+    expect(summary.silentEcus).toEqual([]); // declared silent only AFTER the retry.
+    expect(summary.silentDids).toEqual([]);
+    expect(summary.liveEcus).toEqual([0x12, 0x29]);
+    // The rate is measured over BOTH exchanges, not the probe's alone.
+    expect(summary.reqPerSec).toBe((merged.answeredCount * 1_000) / Math.max(merged.answeredElapsedMs, merged.answeredCount));
   });
 });
