@@ -1229,6 +1229,13 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         // with nothing armed — an armed replace belongs to the SCORE ROW that
         // armed it, and that row is gone the moment a new script runs.
         pendingReplace: null,
+        // Ticket P4o-FIX1 V2 (Codex P4o-REV1 finding 3, MEDIUM): `replaced[]`
+        // is documented as "every binding a confirm in THIS session replaced"
+        // (`signalFinderExport.ts`) — a fresh find is a NEW session (a fresh
+        // `sessionId`, below), so it must start with nothing replaced either,
+        // never carrying a previous session's replacements into this one's
+        // export.
+        replacedBindings: [],
         error: null,
         errorCode: null,
         // X1: a fresh find has measured NOTHING yet -- it says so until its
@@ -1287,6 +1294,12 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
       generation += 1;
       const myGeneration = generation;
       control = { paused: false, stopped: false };
+      // Ticket P4o-FIX1 V4 (Codex P4o-REV1 finding 5, LOW): a fresh script is
+      // read against a RE-SORTED score list (a new round's samples can change
+      // every row's rank) — row identity no longer guarantees an armed
+      // replace still names the row the driver actually saw it on, so a
+      // pending replace does not survive into another round.
+      emit({ pendingReplace: null });
       const run = doRound(myGeneration, target, snapshot.round + 1);
       activeRun = run;
       await run;
@@ -1298,6 +1311,12 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
       const run = activeRun;
       if (run !== null) await run.catch(() => undefined);
       stopTicker();
+      // Ticket P4o-FIX1 V4 (Codex P4o-REV1 finding 5, LOW): `find()` already
+      // resets `pendingReplace`, but a driver who stops mid-run and then just
+      // taps Confirm again (never a fresh find) used to keep whatever was
+      // armed from before the stop — a tap the screen shows as a plain
+      // confirm could silently commit as a REPLACE instead.
+      if (snapshot.pendingReplace !== null) emit({ pendingReplace: null });
     },
 
     getSamples(): readonly SignalFinderSample[] {

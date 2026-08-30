@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildMetronomeTimeline,
+  countDistinctLevels,
   scoreSignalCandidates,
   type MetronomeTimeline,
   type SignalActionScript,
@@ -1054,5 +1055,45 @@ describe('scoreSignalCandidates -- P4o O2 (two-level analog series capped at pro
       declaredFlagDids: [{ ecu: ECU_12, did: 0x4007 }],
     });
     expect(score).toMatchObject({ verdict: 'found', verdictCapReason: null, flagBit: 0 });
+  });
+});
+
+/**
+ * Ticket P4o-FIX1 V1 (binding, Codex P4o-REV1 finding 1 HIGH + finding 2
+ * MEDIUM): the two-level cap's own level-counting must be robust to a noisy
+ * outlier AND must not collapse a genuine staircase. Tested directly on
+ * `countDistinctLevels` -- the exact function both findings named -- rather
+ * than through the whole scorer, so the clustering rule stands on its own.
+ */
+describe('countDistinctLevels -- P4o-FIX1 V1 (diameter-bound clusters, support-gated)', () => {
+  it('(a) a noisy two-state series -- one stray outlier is UNSUPPORTED, not a third level', () => {
+    // [0 x10, 10 x8, 14 x1], floor 3: single-linkage used to count 0, 10 and
+    // 14 as three SEPARATE clusters (neither gap is <= 3) and let the lone 14
+    // escape the cap entirely. Diameter-bound clustering agrees they are
+    // three distinct clusters -- but the 14 cluster's support (1 sample) is
+    // below the floor (max(2, 10% of 19) = 2), so it does not count.
+    const values = [...Array(10).fill(0), ...Array(8).fill(10), ...Array(1).fill(14)];
+    expect(countDistinctLevels(values, 3)).toBe(2);
+  });
+
+  it('(b) a genuine staircase (0..12, floor 3) resolves to >= 3 clusters -- never collapses to one', () => {
+    // Single-linkage chained this into ONE cluster (every ADJACENT gap is
+    // <= 3, even though 0 and 12 are 12 apart) and wrongly capped a graded
+    // reading as switch-like. Diameter-bound clustering (a new cluster once a
+    // value is more than `floor` from the CURRENT cluster's FIRST value)
+    // instead yields [0-3], [4-7], [8-11], [12] -- the last dropped for thin
+    // support (1 sample < the 2-sample floor), leaving >= 3 supported.
+    const values = Array.from({ length: 13 }, (_, v) => v); // 0, 1, ..., 12
+    expect(countDistinctLevels(values, 3)).toBeGreaterThanOrEqual(3);
+  });
+
+  it('a flat series (one level) and an empty series are unaffected', () => {
+    expect(countDistinctLevels([5, 5, 5, 5], 3)).toBe(1);
+    expect(countDistinctLevels([], 3)).toBe(0);
+  });
+
+  it('a clean two-level series (field: DME 0x4002, 0x83/0x9B) is exactly 2 -- still capped', () => {
+    const values = [...Array(25).fill(0x83), ...Array(25).fill(0x9b)];
+    expect(countDistinctLevels(values, 3)).toBe(2);
   });
 });

@@ -110,18 +110,41 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
    * `engineNotDetectedRunning` already reads as "not detected running".
    * Never touches `telemetryProvider.ts` itself: this is a plain
    * `onSample` subscriber, same discipline as the Telemetry monitor's own.
+   *
+   * Ticket P4o-FIX1 V3 (binding, Codex P4o-REV1 finding 4, MEDIUM): "accept
+   * RPM only while telemetry is active and the sample is fresh". Two
+   * changes over O5's own version:
+   *
+   *  - `tMonoMs` is retained (the sample's own monotonic stamp), so the
+   *    predicate can judge its AGE rather than trust it forever;
+   *  - the reading is cleared the moment telemetry stops being an ACTIVE
+   *    session (`onStateChange` -> anything other than `'polling'`), so a
+   *    stopped/failed session reads as "no sample" immediately rather than
+   *    waiting out the 5 s staleness window on a value that can no longer
+   *    arrive a fresher one to replace it.
    */
-  const [lastRpmSample, setLastRpmSample] = React.useState<{ rpm: number | null } | null>(null);
-  React.useEffect(
-    () =>
-      telemetryProvider.onSample((sample) => {
-        if (sample.channel === 'rpm') setLastRpmSample({ rpm: sample.value });
-      }),
-    [],
-  );
+  const [lastRpmSample, setLastRpmSample] = React.useState<{ rpm: number | null; tMonoMs: number } | null>(null);
+  const telemetryActiveRef = React.useRef(telemetryProvider.getDiagnostics().state === 'polling');
+  React.useEffect(() => {
+    const unsubscribeState = telemetryProvider.onStateChange((state) => {
+      telemetryActiveRef.current = state === 'polling';
+      if (state !== 'polling') setLastRpmSample(null);
+    });
+    const unsubscribeSample = telemetryProvider.onSample((sample) => {
+      if (sample.channel === 'rpm' && telemetryActiveRef.current) {
+        setLastRpmSample({ rpm: sample.value, tMonoMs: sample.tMonoMs });
+      }
+    });
+    return () => {
+      unsubscribeState();
+      unsubscribeSample();
+    };
+  }, []);
   /** P4o O5: armed replace tracking lives on the CONTROLLER (testable without rendering) — this is just a render helper. */
   const engineWarning = (engineRequirement: SignalEngineRequirement): boolean =>
-    engineNotDetectedRunning(engineRequirement, lastRpmSample);
+    // V3: the SAME monotonic clock basis `TelemetrySample.tMonoMs` is stamped
+    // from (`platform/clock.ts`'s `PerformanceNowClock`) — never `Date.now()`.
+    engineNotDetectedRunning(engineRequirement, lastRpmSample, performance.now());
 
   const sweepStoreRef = React.useRef(createDidSweepStore(getTelemetryReadDb()));
   const bindingStoreRef = React.useRef(createVehicleProfileBindingStore(getTelemetryReadDb()));

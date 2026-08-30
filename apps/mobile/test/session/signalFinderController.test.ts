@@ -1338,3 +1338,120 @@ describe('confirmBinding -- P4o O3 (replacing a confirmed binding needs an expli
     expect(harness.controller.getSnapshot().pendingReplace).toBeNull();
   });
 });
+
+/**
+ * Ticket P4o-FIX1 V2 (binding, Codex P4o-REV1 finding 3, MEDIUM): "a fresh
+ * find() resets `pendingReplace` but not `replacedBindings`, so schema-5
+ * `replaced[]` leaks actual replacements from earlier sessions." The export
+ * documents `replaced[]` as "every binding a confirm in THIS session
+ * replaced" -- a fresh find is a fresh session (a fresh `sessionId`), so it
+ * must start with nothing replaced either.
+ */
+describe('createSignalFinderController -- P4o-FIX1 V2 (find() resets replacedBindings)', () => {
+  it('a SECOND find() starts with replacedBindings: [] even though the first session actually replaced something', async () => {
+    const bindingStore = createInMemoryVehicleProfileBindingStore();
+    await bindingStore.upsertBinding({
+      profileId: 'test-profile',
+      channel: 'brakeSwitch',
+      ecu: 0x12,
+      did: 0x58b7,
+      length: 1,
+      decode: 'existing (test fixture)',
+      status: 'field-confirmed',
+      evidenceJson: '{}',
+      updatedAtUtc: '2026-08-29T10:00:00.000Z',
+    });
+    const pedal: PedalDouble = { pressed: false };
+    const harness = makeController(
+      (ecu, did) => (ecu === 0x29 && did === 0x500c ? bytes(pedal.pressed ? '05' : '04') : 'nrc'),
+      { bindingStore, profileId: 'test-profile' },
+    );
+    followMetronome(harness, pedal);
+    await runFind(harness);
+    const winner = harness.controller.getSnapshot().scores.find((s) => s.verdict === 'found')!; // 0x29/0x500c
+    await harness.controller.confirmBinding('brakeSwitch', winner); // arms
+    await harness.controller.confirmBinding('brakeSwitch', winner); // commits -- actually replaces 0x58b7
+    expect(harness.controller.getSnapshot().replacedBindings).toHaveLength(1);
+    const firstSessionId = harness.controller.getSnapshot().sessionId;
+
+    // A fresh find (same target, same controller) is a NEW session.
+    await runFind(harness);
+    const second = harness.controller.getSnapshot();
+    expect(second.sessionId).not.toBe(firstSessionId);
+    expect(second.replacedBindings).toEqual([]);
+  });
+});
+
+/**
+ * Ticket P4o-FIX1 V4 (binding, Codex P4o-REV1 finding 5, LOW): "`stop()` does
+ * not clear `pendingReplace`; new `find()` does ... row identity prevents a
+ * re-sort from replacing a different row." A round's own re-scoring can
+ * change which row sits where; an armed replace that survives past its own
+ * round could otherwise commit against a DIFFERENT (ecu, did) than the one
+ * the driver actually saw the "Replace ..." label on.
+ */
+describe('createSignalFinderController -- P4o-FIX1 V4 (stop()/nextRound() clear pendingReplace)', () => {
+  it('stop() clears an armed pendingReplace', async () => {
+    const bindingStore = createInMemoryVehicleProfileBindingStore();
+    await bindingStore.upsertBinding({
+      profileId: 'test-profile',
+      channel: 'brakeSwitch',
+      ecu: 0x12,
+      did: 0x58b7,
+      length: 1,
+      decode: 'existing (test fixture)',
+      status: 'field-confirmed',
+      evidenceJson: '{}',
+      updatedAtUtc: '2026-08-29T10:00:00.000Z',
+    });
+    const pedal: PedalDouble = { pressed: false };
+    const harness = makeController(
+      (ecu, did) => (ecu === 0x29 && did === 0x500c ? bytes(pedal.pressed ? '05' : '04') : 'nrc'),
+      { bindingStore, profileId: 'test-profile' },
+    );
+    followMetronome(harness, pedal);
+    await runFind(harness);
+    const winner = harness.controller.getSnapshot().scores.find((s) => s.verdict === 'found')!;
+    await harness.controller.confirmBinding('brakeSwitch', winner); // arms (0x58b7 -> 0x500c)
+    expect(harness.controller.getSnapshot().pendingReplace).not.toBeNull();
+
+    await harness.controller.stop();
+    expect(harness.controller.getSnapshot().pendingReplace).toBeNull();
+  });
+
+  it('nextRound() clears an armed pendingReplace -- a re-sorted list must not replace a different row', async () => {
+    const sweepStore = createInMemoryDidSweepStore();
+    await seedRun(sweepStore, 'run-29', 0x29);
+    await sweepStore.upsertResponders(
+      'run-29',
+      Array.from({ length: 30 }, (_v, i) => ({ did: 0x5100 + i, raw: bytes('00'), rttMs: 10 })),
+      '2026-08-29T17:33:00.000Z',
+    );
+    const bindingStore = createInMemoryVehicleProfileBindingStore();
+    await bindingStore.upsertBinding({
+      profileId: 'test-profile',
+      channel: 'brakeSwitch',
+      ecu: 0x40,
+      did: 0x9999,
+      length: 1,
+      decode: 'existing (test fixture)',
+      status: 'field-confirmed',
+      evidenceJson: '{}',
+      updatedAtUtc: '2026-08-29T10:00:00.000Z',
+    });
+    const harness = makeController(() => bytes('00'), {
+      sweepStore,
+      bindingStore,
+      profileId: 'test-profile',
+      measuredReqPerSec: 15,
+    });
+    await runFind(harness);
+    expect(harness.controller.getSnapshot().notReadCount).toBeGreaterThan(0); // a nextRound must actually run.
+    const row = harness.controller.getSnapshot().scores.find((s) => !(s.ecu === 0x40 && s.did === 0x9999))!;
+    await harness.controller.confirmBinding('brakeSwitch', row); // arms (differs from the existing 0x40/0x9999)
+    expect(harness.controller.getSnapshot().pendingReplace).not.toBeNull();
+
+    await runNextRound(harness);
+    expect(harness.controller.getSnapshot().pendingReplace).toBeNull();
+  });
+});

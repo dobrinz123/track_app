@@ -310,23 +310,69 @@ function deriveActiveValueHex(
 }
 
 /**
- * Ticket P4o O2 (binding): the number of distinct LEVELS `values` visits,
- * merging any two values whose gap is <= `floor` into the same level
- * (single-linkage over the distinct values, ascending) -- the same noise
- * floor `scoreSeries` already uses to decide "away from rest" for an analog
- * series. A graded reading (field: DME 0x58B7, 26–64 with many intermediate
- * values inside the press windows) resolves to several levels; a switch
- * dressed up as an analog reading (field: DME 0x4002, 0x83 rest / 0x9B
- * pressed, nothing between) resolves to exactly 2.
+ * Ticket P4o O2 (binding), reworked by ticket P4o-FIX1 V1 (Codex P4o-REV1
+ * finding 1 HIGH + finding 2 MEDIUM): the number of distinct LEVELS `values`
+ * visits, over the WHOLE run -- the same noise floor `scoreSeries` already
+ * uses to decide "away from rest" for an analog series. A graded reading
+ * (field: DME 0x58B7, 26–64 with many intermediate values inside the press
+ * windows) resolves to several levels; a switch dressed up as an analog
+ * reading (field: DME 0x4002, 0x83 rest / 0x9B pressed, nothing between)
+ * resolves to exactly 2.
+ *
+ * Two independent fixes over the original single-linkage version:
+ *
+ *  1. (finding 2, MEDIUM) Clustering is bounded by DIAMETER around a
+ *     representative, never by CHAINING adjacent gaps: a new cluster starts
+ *     the moment a sorted value is more than `floor` away from the CURRENT
+ *     CLUSTER'S FIRST value. Single-linkage used to walk a genuine staircase
+ *     (`0, 1, 2, ..., 12` at floor 3) into ONE cluster end to end, because
+ *     every ADJACENT gap was <= 3 even though 0 and 12 are 12 apart --
+ *     wrongly capping a graded reading as switch-like.
+ *  2. (finding 1, HIGH) A cluster only counts as a real level when its
+ *     SUPPORT (samples, not distinct values) clears a floor of its own: at
+ *     least 2 samples, or 10 % of the run's DISTINCT values, whichever is
+ *     larger. A two-state series with one stray outlier (`[0 x10, 10 x8,
+ *     14 x1]`) used to count that lone 14 as a THIRD level and escape the cap
+ *     entirely -- "more distinct clusters" is not the same claim as "more
+ *     states the series actually rests in".
+ *
+ *     The 10 % is taken over DISTINCT values rather than raw sample count
+ *     deliberately: a field run samples far faster than the driver's own
+ *     press/release cadence, so a genuinely graded reading (0x58B7: 16
+ *     distinct raw bytes across only ~45 in-window samples) can visit most of
+ *     its levels once or twice each. Sizing the floor off the raw sample
+ *     count would then demand more support than a real intermediate level
+ *     ever gets and re-introduce finding 2's own bug from the other
+ *     direction — collapsing a graded reading down to its single dominant
+ *     (rest) cluster. Distinct-value count stays near the flat "2" floor for
+ *     the ordinary case (a handful of levels) and only asks for more once a
+ *     series carries dozens of them, which is exactly where one truly noisy
+ *     value among many is worth discounting.
  */
-function countDistinctLevels(values: readonly number[], floor: number): number {
-  const distinctSorted = [...new Set(values)].sort((a, b) => a - b);
-  if (distinctSorted.length === 0) return 0;
-  let levels = 1;
+export function countDistinctLevels(values: readonly number[], floor: number): number {
+  if (values.length === 0) return 0;
+  const counts = new Map<number, number>();
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+  const distinctSorted = [...counts.keys()].sort((a, b) => a - b);
+  const minSupport = Math.max(2, Math.ceil(distinctSorted.length * 0.1));
+  let supportedClusters = 0;
+  let clusterFirst = distinctSorted[0] as number;
+  let clusterSupport = counts.get(clusterFirst) ?? 0;
+  const closeCluster = (): void => {
+    if (clusterSupport >= minSupport) supportedClusters += 1;
+  };
   for (let i = 1; i < distinctSorted.length; i += 1) {
-    if ((distinctSorted[i] as number) - (distinctSorted[i - 1] as number) > floor) levels += 1;
+    const value = distinctSorted[i] as number;
+    if (value - clusterFirst <= floor) {
+      clusterSupport += counts.get(value) ?? 0;
+      continue;
+    }
+    closeCluster();
+    clusterFirst = value;
+    clusterSupport = counts.get(value) ?? 0;
   }
-  return levels;
+  closeCluster();
+  return supportedClusters;
 }
 
 /** The most frequent value, ties broken by first appearance (deterministic). */

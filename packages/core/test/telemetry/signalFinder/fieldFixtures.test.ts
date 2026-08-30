@@ -201,3 +201,44 @@ describe('field test 5 replay -- accelerator run (2026-08-29-accelPedal.json)', 
     expect(found.map((s) => [s.ecu, s.did])).toEqual([[0x12, 0x4007]]);
   });
 });
+
+/**
+ * Ticket P4o-FIX1 V5 (binding, Codex P4o-REV1 finding 6, LOW): the 2026-08-30
+ * captures were the field test 8 exports the whole ticket's fixes (V1's
+ * two-level cap, item 3's ordinary scoring) were written against, but neither
+ * was ever REPLAYED here -- only synthetic fixtures covered them. Pinned
+ * exactly as the ticket states: 0x12/0x58B7 (analog `brakePressure`) `found`,
+ * 0x12/0x4002 (same analog target) capped `two-level`, and — from a THIRD,
+ * separate export (a different find, engine off) — 0x29/0x500C (boolean
+ * `brakeSwitch`) `found`, never capped.
+ */
+describe('field test 8 replay -- brake pressure, graded (2026-08-30-brakePressure.json)', () => {
+  const scores = scoreField('2026-08-30-brakePressure.json', 'analog-monotone', 'brakePressure');
+
+  it('DME 0x12 DID 0x58B7 (26-64 hPa, many intermediate levels across the press windows) is FOUND -- a graded reading, never capped', () => {
+    const score = scores.get(`${0x12}:${0x58b7}`);
+    expect(score).toBeDefined();
+    expect(score).toMatchObject({ verdict: 'found', verdictCapReason: null });
+  });
+});
+
+describe('field test 8 replay -- brake pressure, two-level (2026-08-30-brakePressure-2.json)', () => {
+  const scores = scoreField('2026-08-30-brakePressure-2.json', 'analog-monotone', 'brakePressure');
+
+  it('DME 0x12 DID 0x4002 (0x83 rest / 0x9B pressed, nothing between) is capped at PROBABLE -- switch-like, not analog', () => {
+    const score = scores.get(`${0x12}:${0x4002}`);
+    expect(score).toBeDefined();
+    expect(score).toMatchObject({ verdictCapReason: 'two-level' });
+    expect(score!.verdict).not.toBe('found');
+  });
+});
+
+describe('field test 8 replay -- brake switch (2026-08-30-brakeSwitch.json)', () => {
+  const scores = scoreField('2026-08-30-brakeSwitch.json', 'boolean-edge', 'brakeSwitch');
+
+  it('0x29 DID 0x500C (0x04 released -> 0x05 pressed) is FOUND -- a boolean target is NEVER capped by the two-level rule', () => {
+    const score = scores.get(`${0x29}:${0x500c}`);
+    expect(score).toBeDefined();
+    expect(score).toMatchObject({ verdict: 'found', verdictCapReason: null, restValueHex: '04' });
+  });
+});

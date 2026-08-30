@@ -668,27 +668,64 @@ export function estimateSweepMinutes(didCount: number, reqPerSec: number): numbe
   return didCount / rate / 60;
 }
 
-/** Ticket P4o O5 (binding): the ONE fact the soft engine check needs about the app's most recent telemetry reading — never the whole `TelemetrySample`/provider shape (this module has no I/O and must stay pure). */
+/**
+ * Ticket P4o O5 (binding): the ONE fact the soft engine check needs about the
+ * app's most recent telemetry reading — never the whole `TelemetrySample`/
+ * provider shape (this module has no I/O and must stay pure).
+ *
+ * Ticket P4o-FIX1 V3 (binding, Codex P4o-REV1 finding 4, MEDIUM): `tMonoMs`
+ * added — the SAME monotonic stamp `TelemetrySample.tMonoMs` already carries.
+ * Without an age, a reading taken once (the engine running, or briefly
+ * stalled at a light) kept suppressing or raising the warning forever after
+ * telemetry actually stopped or the engine's state actually changed.
+ */
 export interface SignalRecentEngineSample {
   /** `null` when the app has never seen an rpm sample at all. */
   rpm: number | null;
+  /** The monotonic clock reading at which THIS sample arrived. */
+  tMonoMs: number;
 }
 
 /**
- * Ticket P4o O5 (binding, field test 8): a SOFT check — never a hard block,
- * because this app has no lap-timing-grade tachometer reading of its own,
- * only whatever telemetry happens to be live. True when `engineRequirement`
- * is `'running'` and the most recent rpm reading says otherwise: no reading
- * at all (`recentSample === null`, or one whose `rpm` is `null`), or an rpm
- * of exactly 0. An `'off-ok'` target is never flagged, however stale or
- * absent the reading is — the engine's state is simply irrelevant to it.
+ * Ticket P4o-FIX1 V3 (binding, Codex P4o-REV1 finding 4, MEDIUM): a reading
+ * older than this is as good as none — telemetry may simply have stopped
+ * (the app backgrounded, the adapter dropped, the driver left the Telemetry
+ * screen), and an rpm sample from before that is not evidence about the
+ * engine's state RIGHT NOW. 5 s comfortably exceeds any channel's normal poll
+ * interval (the fastest channels poll at 5 Hz -- `telemetryProvider.ts`'s
+ * `buildPollPlan`) while still catching a session that has actually gone
+ * quiet.
+ */
+export const ENGINE_SAMPLE_MAX_AGE_MS = 5_000;
+
+/**
+ * Ticket P4o O5 (binding, field test 8), aged by ticket P4o-FIX1 V3 (Codex
+ * P4o-REV1 finding 4, MEDIUM): a SOFT check — never a hard block, because
+ * this app has no lap-timing-grade tachometer reading of its own, only
+ * whatever telemetry happens to be live. True when `engineRequirement` is
+ * `'running'` and the most recent rpm reading says otherwise:
+ *
+ *  - no reading at all (`recentSample === null`, or one whose `rpm` is
+ *    `null`) -- telemetry has never reported one, ever or this session;
+ *  - a reading older than {@link ENGINE_SAMPLE_MAX_AGE_MS} by the monotonic
+ *    clock (`nowMs - recentSample.tMonoMs`) -- STALE, read exactly like no
+ *    reading: an old POSITIVE rpm must not go on suppressing the warning
+ *    once telemetry has actually stopped, and an old ZERO must not go on
+ *    raising it once the engine has actually started;
+ *  - an rpm of exactly 0, when fresh.
+ *
+ * An `'off-ok'` target is never flagged, however stale or absent the reading
+ * is — the engine's state is simply irrelevant to it.
  */
 export function engineNotDetectedRunning(
   engineRequirement: SignalEngineRequirement,
   recentSample: SignalRecentEngineSample | null,
+  nowMs: number,
 ): boolean {
   if (engineRequirement !== 'running') return false;
   if (recentSample === null || recentSample.rpm === null) return true;
+  const ageMs = nowMs - recentSample.tMonoMs;
+  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > ENGINE_SAMPLE_MAX_AGE_MS) return true;
   return recentSample.rpm === 0;
 }
 

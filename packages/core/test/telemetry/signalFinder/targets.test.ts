@@ -12,6 +12,7 @@ import {
   resolveSignalActionVerbs,
   resolveSignalTargetLabel,
   resolveDiscoveryRangeNote,
+  type SignalRecentEngineSample,
 } from '../../../src/telemetry/signalFinder';
 
 /**
@@ -246,29 +247,58 @@ describe('Supra catalog after field test 5 (P4m M5)', () => {
  * all, the result header and the Find row show 'engine not detected running
  * — results may be meaningless' (no hard block)." Pure predicate — no clock,
  * no telemetry provider, no UI.
+ *
+ * Ticket P4o-FIX1 V3 (binding, Codex P4o-REV1 finding 4, MEDIUM): "an old
+ * positive rpm must not suppress the warning" — `recentSample` now carries
+ * its own monotonic timestamp, and the predicate takes `nowMs` to judge its
+ * age against {@link ENGINE_SAMPLE_MAX_AGE_MS} (5 s).
  */
 describe('engineNotDetectedRunning (O5, pure predicate)', () => {
+  const NOW = 100_000;
+  /** A reading taken exactly `ageMs` before `NOW`. */
+  const sampleAge = (rpm: number | null, ageMs: number): SignalRecentEngineSample => ({ rpm, tMonoMs: NOW - ageMs });
+
   it('never flags an off-ok target, whatever the reading (or its absence)', () => {
-    expect(engineNotDetectedRunning('off-ok', null)).toBe(false);
-    expect(engineNotDetectedRunning('off-ok', { rpm: null })).toBe(false);
-    expect(engineNotDetectedRunning('off-ok', { rpm: 0 })).toBe(false);
-    expect(engineNotDetectedRunning('off-ok', { rpm: 850 })).toBe(false);
+    expect(engineNotDetectedRunning('off-ok', null, NOW)).toBe(false);
+    expect(engineNotDetectedRunning('off-ok', sampleAge(null, 1_000), NOW)).toBe(false);
+    expect(engineNotDetectedRunning('off-ok', sampleAge(0, 1_000), NOW)).toBe(false);
+    expect(engineNotDetectedRunning('off-ok', sampleAge(850, 1_000), NOW)).toBe(false);
+    // Even a wildly stale off-ok reading is irrelevant to it.
+    expect(engineNotDetectedRunning('off-ok', sampleAge(850, 10_000), NOW)).toBe(false);
   });
 
   it('flags a running target with no reading at all', () => {
-    expect(engineNotDetectedRunning('running', null)).toBe(true);
+    expect(engineNotDetectedRunning('running', null, NOW)).toBe(true);
   });
 
   it('flags a running target with a reading that carries no rpm', () => {
-    expect(engineNotDetectedRunning('running', { rpm: null })).toBe(true);
+    expect(engineNotDetectedRunning('running', sampleAge(null, 1_000), NOW)).toBe(true);
   });
 
-  it('flags a running target reading exactly rpm 0', () => {
-    expect(engineNotDetectedRunning('running', { rpm: 0 })).toBe(true);
+  it('flags a running target reading exactly rpm 0, when fresh', () => {
+    expect(engineNotDetectedRunning('running', sampleAge(0, 1_000), NOW)).toBe(true);
   });
 
-  it('does NOT flag a running target with a positive rpm reading', () => {
-    expect(engineNotDetectedRunning('running', { rpm: 850 })).toBe(false);
-    expect(engineNotDetectedRunning('running', { rpm: 1 })).toBe(false);
+  it('does NOT flag a running target with a FRESH (1 s old) positive rpm reading', () => {
+    expect(engineNotDetectedRunning('running', sampleAge(850, 1_000), NOW)).toBe(false);
+    expect(engineNotDetectedRunning('running', sampleAge(1, 1_000), NOW)).toBe(false);
+  });
+
+  /**
+   * The exact regression Codex found: an old POSITIVE rpm sitting in state
+   * after telemetry stopped used to suppress the warning forever. A 10 s old
+   * reading is well past {@link ENGINE_SAMPLE_MAX_AGE_MS} (5 s).
+   */
+  it('DOES flag a running target whose only rpm reading is STALE (10 s old), even though it was positive', () => {
+    expect(engineNotDetectedRunning('running', sampleAge(850, 10_000), NOW)).toBe(true);
+  });
+
+  it('a reading exactly at the 5 s boundary is still fresh; just past it is stale', () => {
+    expect(engineNotDetectedRunning('running', sampleAge(850, 5_000), NOW)).toBe(false);
+    expect(engineNotDetectedRunning('running', sampleAge(850, 5_001), NOW)).toBe(true);
+  });
+
+  it('a reading from the future (clock skew) is never trusted as fresh', () => {
+    expect(engineNotDetectedRunning('running', sampleAge(850, -1), NOW)).toBe(true);
   });
 });
