@@ -17,3 +17,12 @@ F2 (secțiunea 6 raport / P5b UI) — RAPORTUL TREBUIE SĂ FIE INTERACTIV, NU TE
   stinturi" = post-sesiune rapid (compatibil); sfaturi în timpul condusului rămân excluse; de clarificat cu userul dacă
   vrea să activăm sugestiile (V2) acum, cu limitele existente (10 m / +3 km/h / 1 schimbare per viraj, doar în anvelopa
   demonstrată).
+F3 (precizare la F2, decizia userului pe flow-ul live) — ÎN TIMPUL CONDUSULUI: FĂRĂ SFATURI, dar app-ul POATE ACTUALIZA
+  brake point-urile / lift point-urile (cue-urile de coaching de pe dashboard/voce). ÎN PIT: sfaturi, INTERACTIVE —
+  pilotul vede ce a greșit în tururile trecute și unde a pierdut secunde, ca să intre pe circuit știind pe ce se
+  concentrează.
+  Notă LEAD pentru rezolvare: actualizarea cue-urilor ÎN MERS e o revizuire a contractului de siguranță (azi: schimbări
+  doar post-sesiune). Propunerea de reconciliere, de validat cu userul la final: actualizările în mers rămân STRICT în
+  anvelopa demonstrată pe tururi curate din ACEEAȘI ieșire (niciodată mai agresive decât ce a făcut deja pilotul),
+  cu limitele 10 m / +3 km/h / 1 schimbare per viraj per stint; orice sugestie dincolo de demonstrat = doar în pit,
+  interactiv, opt-in.
