@@ -26,9 +26,17 @@ import type { StoredSession } from './mockHistory';
  * missing (which is exactly what they are).
  */
 
+/**
+ * A stored session as this module reads it. `StoredSession` itself carries no
+ * layout VERSION today (`SqlSessionHistoryStore` filters on it instead of
+ * projecting it), so it is read structurally: when a store does carry one it is
+ * checked, and when it does not there is simply nothing to contradict.
+ */
+export type StoredSessionForAnalysis = StoredSession & { layoutVersion?: number };
+
 export interface AnalysisSessionLoaderDeps {
   /** The stored session, or `null` when it is no longer on the device. */
-  getSession: (sessionId: string) => StoredSession | null;
+  getSession: (sessionId: string) => StoredSessionForAnalysis | null;
   /** The bundled catalog entry for a circuit id, or `null` when it is unknown. */
   getCircuit: (circuitId: string) => BundledCircuit | null;
   /** The lap's stored GNSS trace. */
@@ -56,6 +64,22 @@ export function createAnalysisSessionLoader(
     if (session === null) return null;
     const circuit = deps.getCircuit(session.circuitId);
     if (circuit === null) return { unavailable: 'circuit-not-in-catalog' };
+
+    // Ticket P5b-FIX1 C3 (binding, Codex P5b-REV1 finding 3): the circuit id
+    // alone does not pin the GEOMETRY. Laps recorded on another layout of the
+    // same circuit -- or on an older version of this one -- project onto corner
+    // positions they were never driven against, which would silently produce
+    // corner metrics for corners the driver did not drive. That is a NAMED
+    // dead end, never a quiet projection.
+    if (session.layoutId !== circuit.profile.layoutId) {
+      return { unavailable: 'layout-incompatible' };
+    }
+    if (
+      session.layoutVersion !== undefined &&
+      session.layoutVersion !== circuit.profile.layoutVersion
+    ) {
+      return { unavailable: 'layout-incompatible' };
+    }
 
     let channelsByLap: ReadonlyMap<number, TelemetrySample[]>;
     try {

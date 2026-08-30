@@ -18,6 +18,9 @@ import { LapDetailScreen } from '../screens/LapDetailScreen';
 // fixtures, so shipping it always costs a release bundle nothing beyond the
 // screen itself.
 import { AnalysisScreen } from '../screens/AnalysisScreen';
+import { resolveAnalysisScreenStrings } from '../screens/analysisStrings';
+import { useSettings } from '../hooks/useSettings';
+import { settingsStore } from '../../session/composition';
 import { PersonalBestScreen } from '../screens/PersonalBestScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
 import { TelemetryScreen } from '../screens/TelemetryScreen';
@@ -44,6 +47,10 @@ const Stack = createNativeStackNavigator<RootStackParamList>();
 
 /** The app's single navigator (S1–S13). Screen options keep chrome minimal and dark. */
 export function RootNavigator(): React.JSX.Element {
+  // P5b-FIX1 C9: the app's language, live, so the Analysis header follows the
+  // language its report is written in.
+  const settings = useSettings(settingsStore);
+  const analysisStrings = resolveAnalysisScreenStrings(settings.language);
   return (
     <Stack.Navigator
       initialRouteName="CircuitSelection"
@@ -79,7 +86,16 @@ export function RootNavigator(): React.JSX.Element {
       <Stack.Screen name="SessionResults" component={SessionResultsScreen} options={{ title: 'Results', headerBackVisible: false }} />
       <Stack.Screen name="SessionHistory" component={SessionHistoryScreen} options={{ title: 'History' }} />
       <Stack.Screen name="LapDetail" component={LapDetailScreen} options={{ title: 'Lap Detail' }} />
-      <Stack.Screen name="Analysis" component={AnalysisScreen} options={{ title: 'Analysis' }} />
+      {
+        // P5b-FIX1 C9 (Codex P5b-REV1 finding 11): the header title comes from
+        // the SAME RO/EN table the screen's own chrome does -- a Romanian
+        // report under an English navigator title was half-translated.
+      }
+      <Stack.Screen
+        name="Analysis"
+        component={AnalysisScreen}
+        options={{ title: analysisStrings.screenTitle }}
+      />
       <Stack.Screen name="PersonalBest" component={PersonalBestScreen} options={{ title: 'Personal Best' }} />
       <Stack.Screen name="Settings" component={SettingsScreen} options={{ title: 'Settings' }} />
       <Stack.Screen name="Telemetry" component={TelemetryScreen} options={{ title: 'Telemetry' }} />

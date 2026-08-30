@@ -50,6 +50,9 @@ import { createVehicleProfileBindingStore } from '../persistence/didSweepStore';
 import { createGForceProvider, type GForceProvider } from './gforceProvider';
 import { TelemetryRecorder } from '../persistence/telemetryRecorder';
 import { PASSTHROUGH_WRITE_GATE, type SqlWriteGate } from '../persistence/sqlWriteGate';
+import { createAnalysisRunner, sessionIsActive, type AnalysisRunner } from './analysisViewModel';
+import { createAnalysisSessionLoader } from './analysisSessionLoader';
+import { loadSessionTelemetryByLap } from '../persistence/telemetryRead';
 
 const DB_NAME = 'circuit-timer.db';
 /** Single-user local app -- no auth/account system exists (MVP scope, ADR-0001/0004). Stable so `sessionId` (`${userId}--<random>`) and stored data survive across launches. */
@@ -2617,4 +2620,47 @@ export function getSessionRepository(): LocalSessionRepository | null {
  */
 export function getMostRecentSessionId(): string | null {
   return mostRecentSessionId;
+}
+
+/**
+ * Ticket P5b-FIX1 C6 (binding, Codex P5b-REV1 finding 6): ONE analysis runner
+ * -- and therefore one cache -- for the whole app.
+ *
+ * The first cut built a runner inside `AnalysisScreen`, so leaving the screen
+ * mid-run and coming back started a SECOND engine pass over the same session
+ * while the abandoned one kept running. Hoisted here, re-entering the screen
+ * joins the in-flight run (`createAnalysisRunner` de-duplicates by session id)
+ * and a finished analysis is instant.
+ *
+ * Built lazily, because its dependencies (`repository`, `db`) only exist after
+ * bootstrap -- and read on demand at every call, so a runner created before
+ * bootstrap still reads the real rows afterwards.
+ */
+let analysisRunner: AnalysisRunner | null = null;
+
+export function getAnalysisRunner(): AnalysisRunner {
+  if (analysisRunner !== null) return analysisRunner;
+  analysisRunner = createAnalysisRunner({
+    // The live session state, snapshotted per call: `subscribe()` always calls
+    // back synchronously with the current state (the `SessionFacade` contract).
+    isSessionActive: () => {
+      let snapshot: FacadeState | undefined;
+      const unsubscribe = facade.subscribe((s) => {
+        snapshot = s;
+      });
+      unsubscribe();
+      return snapshot === undefined ? false : sessionIsActive(snapshot.sessionState);
+    },
+    loadSession: createAnalysisSessionLoader({
+      getSession: (id) => sessionHistoryStore.getSession(id),
+      getCircuit: (id) => circuitCatalog.get(id),
+      loadLapGnss: async (id, lapNumber) =>
+        (await getSessionRepository()?.loadTelemetry(id, lapNumber)) ?? [],
+      loadSessionChannels: async (id) => {
+        const readDb = getTelemetryReadDb();
+        return readDb === null ? new Map() : await loadSessionTelemetryByLap(readDb, id);
+      },
+    }),
+  });
+  return analysisRunner;
 }

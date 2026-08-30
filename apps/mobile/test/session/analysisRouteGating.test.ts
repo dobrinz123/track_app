@@ -71,10 +71,33 @@ describe('AnalysisScreen source constraints', () => {
 
   it('keeps its logic in the view model -- it neither analyses nor writes report text', () => {
     expect(source).not.toMatch(/analyzeSession|buildReport\(/);
-    expect(source).toMatch(/createAnalysisRunner|buildAnalysisScreenState/);
+    expect(source).toMatch(/buildAnalysisScreenState/);
   });
 
-  it('refuses to analyse while a session is live (the runner is told, not trusted)', () => {
-    expect(source).toMatch(/isSessionActive/);
+  it('P5b-FIX1 C6: joins the SHARED runner from composition instead of creating its own', () => {
+    expect(source).toMatch(/getAnalysisRunner/);
+    expect(source).not.toMatch(/createAnalysisRunner\(/);
+  });
+
+  it('P5b-FIX1 C1: watches the facade session state through the view model controller', () => {
+    expect(source).toMatch(/createAnalysisController/);
+    expect(source).toMatch(/subscribeSessionState/);
+  });
+});
+
+describe('P5b-FIX1 C6/C9 -- the shared runner and the localised route title', () => {
+  it('composition owns one analysis runner and cache for the whole app', () => {
+    const source = readSource('../../src/session/composition.ts');
+    expect(source).toMatch(/export function getAnalysisRunner\(\)/);
+    expect(source).toMatch(/createAnalysisRunner\(/);
+  });
+
+  it('the Analysis route title comes from the RO/EN string table, not an English literal', () => {
+    const source = readSource('../../src/ui/navigation/RootNavigator.tsx');
+    const match = /<Stack\.Screen\s+name="Analysis"[\s\S]*?\/>/.exec(source);
+    expect(match).not.toBeNull();
+    expect(match![0]).not.toMatch(/title:\s*'Analysis'/);
+    expect(match![0]).toMatch(/screenTitle/);
+    expect(source).toMatch(/resolveAnalysisScreenStrings/);
   });
 });

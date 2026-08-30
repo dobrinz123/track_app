@@ -72,14 +72,15 @@ describe('P5b B4 -- the exported analysis report', () => {
     );
   });
 
-  it('is schemaVersion 1 of trace-analysis-report and carries the engine outputs', async () => {
+  it('is the current schema version of trace-analysis-report and carries the engine outputs', async () => {
     const state = await readyState(0, 'en');
     const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT });
 
     expect(doc.kind).toBe(ANALYSIS_EXPORT_KIND);
     expect(ANALYSIS_EXPORT_KIND).toBe('trace-analysis-report');
     expect(doc.schemaVersion).toBe(ANALYSIS_EXPORT_SCHEMA_VERSION);
-    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(1);
+    // P5b-FIX1 C7: the standalone DTO (see `analysisExportV2.test.ts`).
+    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(2);
     expect(doc.observationsOnly).toBe(true);
     expect(doc.generatedAtUtc).toBe(GENERATED_AT);
 
@@ -88,12 +89,12 @@ describe('P5b B4 -- the exported analysis report', () => {
     expect(doc.session.cleanLapCount).toBe(state.insights.cleanLapCount);
     expect(doc.session.geometryValidated).toBe(state.insights.geometryValidated);
 
-    // The whole engine output, not a lossy re-shaping of it.
-    expect(doc.insights.corners).toHaveLength(state.insights.corners.length);
-    expect(doc.insights.limitations).toEqual(state.insights.limitations);
-    expect(doc.insights.availability).toEqual(state.insights.availability);
-    expect(doc.insights.envelope).toEqual(state.insights.envelope);
-    expect(doc.insights.timeLossRanking).toEqual(state.insights.timeLossRanking);
+    // Every engine finding, mapped explicitly into the export's OWN shape.
+    expect(doc.analysis.corners).toHaveLength(state.insights.corners.length);
+    expect(doc.analysis.limitations).toEqual(state.insights.limitations);
+    expect(doc.analysis.availability).toEqual(state.insights.availability);
+    expect(doc.analysis.envelope).toEqual(state.insights.envelope);
+    expect(doc.analysis.timeLossRanking).toEqual(state.insights.timeLossRanking);
 
     // ... and what the recording itself could and could not support.
     expect(doc.recording.usedChannels).toEqual(state.assembled.usedChannels);

@@ -65,12 +65,19 @@ export interface AnalysisLapRecording {
 }
 
 /**
- * Fraction of a session's projected samples a decoded channel must appear on
- * before the analysis is allowed to treat it as a channel of that session.
- * Half: a channel polled at 1 Hz against a 5-10 Hz GNSS stream still covers
- * essentially every sample (values are carried at most one second by
- * `joinTelemetryChannels`), so anything below this is a handful of rows, not a
- * signal -- and the exact percentage is reported either way.
+ * Fraction of a LAP's projected samples a decoded channel must EXCEED before
+ * the analysis is allowed to treat it as a channel of that lap. Half: a channel
+ * polled at 1 Hz against a 5-10 Hz GNSS stream still covers essentially every
+ * sample (values are carried at most one second by `joinTelemetryChannels`), so
+ * anything at or below this is a handful of rows, not a signal -- and the exact
+ * percentage is reported either way.
+ *
+ * Ticket P5b-FIX1 C2 (binding, Codex P5b-REV1 finding 2): the gate is applied
+ * PER LAP, not over the session, and the boundary is conservative -- EXACTLY
+ * half is not enough. A channel that covered lap 1 and not lap 2 must not enter
+ * lap 2's metrics, because the estimators would then silently mix a measured
+ * lap with a fallback-estimated one and the comparison between them would be
+ * between two different measurements.
  */
 export const ANALYSIS_MIN_CHANNEL_COVERAGE = 0.5;
 
@@ -80,6 +87,26 @@ export interface AnalysisChannelCoverage {
   fraction: number;
   /** How many samples carried it. */
   sampleCount: number;
+}
+
+/** One analysed lap's own channel coverage, and what that lap therefore lost. */
+export interface AnalysisLapChannelCoverage {
+  lapNumber: number;
+  coverage: AnalysisChannelCoverage[];
+  /** Channels stripped from THIS lap's samples, in `ANALYSIS_CHANNELS` order. */
+  excluded: CoachingChannelId[];
+}
+
+/**
+ * A channel the session carried somewhere but that at least one ANALYSED lap
+ * lacked. The session-wide `fraction`/`sampleCount` stay (that is what the
+ * screen quotes), plus the laps it could not be used on.
+ */
+export interface AnalysisExcludedChannel extends AnalysisChannelCoverage {
+  /** Analysed laps this channel was stripped from, ascending. */
+  excludedLapNumbers: number[];
+  /** How many laps were analysed at all -- so "some" and "all" stay different statements. */
+  analysedLapCount: number;
 }
 
 export interface SkippedLap {
@@ -92,11 +119,13 @@ export interface AssembledAnalysis {
   laps: SessionLapInput[];
   corners: readonly Corner[];
   context: SessionAnalysisContext;
-  /** Every decoded channel the recording carried, with its coverage. */
+  /** Every decoded channel the recording carried, with its session-wide coverage. */
   coverage: AnalysisChannelCoverage[];
-  /** Channels present but below {@link ANALYSIS_MIN_CHANNEL_COVERAGE} -- removed, and reported. */
-  lowCoverageChannels: AnalysisChannelCoverage[];
-  /** The decoded channels actually handed to the engine, in `ANALYSIS_CHANNELS` order. */
+  /** Per analysed lap: that lap's own coverage, and what it lost (P5b-FIX1 C2). */
+  perLapCoverage: AnalysisLapChannelCoverage[];
+  /** Channels at or below {@link ANALYSIS_MIN_CHANNEL_COVERAGE} on at least one analysed lap. */
+  lowCoverageChannels: AnalysisExcludedChannel[];
+  /** The decoded channels handed to the engine on at least one lap, in `ANALYSIS_CHANNELS` order. */
   usedChannels: CoachingChannelId[];
   /** Laps that carried no analysable trace, with why. */
   skippedLaps: SkippedLap[];
@@ -160,6 +189,20 @@ function stripChannels(
   });
 }
 
+/**
+ * Channels whose coverage over `samples` is at or below `minCoverage` -- the
+ * conservative boundary of P5b-FIX1 C2: exactly half is NOT enough. Exported so
+ * the boundary itself is testable without driving a whole session.
+ */
+export function excludedChannelsForSamples(
+  samples: readonly CornerLapSample[],
+  minCoverage: number = ANALYSIS_MIN_CHANNEL_COVERAGE,
+): CoachingChannelId[] {
+  return channelCoverage(samples)
+    .filter((entry) => entry.fraction <= minCoverage)
+    .map((entry) => entry.channel);
+}
+
 export interface AssembleOptions {
   /** How old a decoded value may be and still attach to a GNSS sample. Default 1000 ms. */
   maxChannelStalenessMs?: number;
@@ -167,55 +210,93 @@ export interface AssembleOptions {
   minChannelCoverage?: number;
 }
 
-/**
- * Builds the engine input for one finished session on one catalog circuit.
- * Deterministic and side-effect free.
- */
-export function assembleSessionAnalysis(
+interface JoinedLap {
+  lap: ClassifiableLap;
+  samples: CornerLapSample[];
+  sectorTimes?: readonly { sectorIndex: number; durationMs: number }[];
+}
+
+/** The per-lap half of the pass: project one stored lap, join its channels. */
+function projectRecording(
   circuit: BundledCircuit,
-  recordings: readonly AnalysisLapRecording[],
-  options: AssembleOptions = {},
+  recording: AnalysisLapRecording,
+  options: AssembleOptions,
+): { joined: JoinedLap } | { skipped: SkippedLap } {
+  if (recording.locationSamples.length === 0) {
+    return { skipped: { lapNumber: recording.lap.lapNumber, reason: 'no-samples' } };
+  }
+  const projected = projectLapSamples(circuit.runtime, recording.locationSamples);
+  if (projected.samples.length === 0) {
+    return { skipped: { lapNumber: recording.lap.lapNumber, reason: 'unprojectable' } };
+  }
+  const withChannels =
+    recording.telemetry.length === 0
+      ? projected.samples
+      : joinTelemetryChannels(projected.samples, recording.telemetry, {
+          maxStalenessMs: options.maxChannelStalenessMs ?? 1_000,
+        });
+  return {
+    joined: {
+      lap: recording.lap,
+      samples: withChannels,
+      ...(recording.sectorTimes === undefined ? {} : { sectorTimes: recording.sectorTimes }),
+    },
+  };
+}
+
+/**
+ * The session half: the per-lap coverage gate (C2), the engine input, and the
+ * context. Pure, and shared by the synchronous and the chunked entry points so
+ * the two can never drift apart.
+ */
+function finishAssembly(
+  circuit: BundledCircuit,
+  joined: readonly JoinedLap[],
+  skippedLaps: SkippedLap[],
+  options: AssembleOptions,
 ): AssembledAnalysis {
   const totalLengthM = polylineLength(circuit.runtime.centerline);
   const minCoverage = options.minChannelCoverage ?? ANALYSIS_MIN_CHANNEL_COVERAGE;
 
-  const skippedLaps: SkippedLap[] = [];
-  const joined: { lap: ClassifiableLap; samples: CornerLapSample[]; sectorTimes?: readonly { sectorIndex: number; durationMs: number }[] }[] = [];
-
-  for (const recording of [...recordings].sort((a, b) => a.lap.lapNumber - b.lap.lapNumber)) {
-    if (recording.locationSamples.length === 0) {
-      skippedLaps.push({ lapNumber: recording.lap.lapNumber, reason: 'no-samples' });
-      continue;
-    }
-    const projected = projectLapSamples(circuit.runtime, recording.locationSamples);
-    if (projected.samples.length === 0) {
-      skippedLaps.push({ lapNumber: recording.lap.lapNumber, reason: 'unprojectable' });
-      continue;
-    }
-    const withChannels =
-      recording.telemetry.length === 0
-        ? projected.samples
-        : joinTelemetryChannels(projected.samples, recording.telemetry, {
-            maxStalenessMs: options.maxChannelStalenessMs ?? 1_000,
-          });
-    joined.push({
-      lap: recording.lap,
-      samples: withChannels,
-      ...(recording.sectorTimes === undefined ? {} : { sectorTimes: recording.sectorTimes }),
-    });
-  }
-
   const allSamples = joined.flatMap((entry) => entry.samples);
   const coverage = channelCoverage(allSamples);
-  const lowCoverageChannels = coverage.filter((entry) => entry.fraction < minCoverage);
-  const drop = new Set(lowCoverageChannels.map((entry) => entry.channel));
+
+  // The gate, lap by lap: a channel enters a lap's inputs only if it covered
+  // THAT lap. `excludedOn` then names, per channel, the laps that lacked it --
+  // which is exactly what the report has to state.
+  const perLapCoverage: AnalysisLapChannelCoverage[] = [];
+  const excludedOn = new Map<CoachingChannelId, number[]>();
+  const perLapDrops: ReadonlySet<CoachingChannelId>[] = [];
+  for (const entry of joined) {
+    const lapCoverage = channelCoverage(entry.samples);
+    const excluded: CoachingChannelId[] = [];
+    for (const row of coverage) {
+      // A channel the session carried but this lap did not is coverage 0 here.
+      const lapFraction = lapCoverage.find((it) => it.channel === row.channel)?.fraction ?? 0;
+      if (lapFraction > minCoverage) continue;
+      excluded.push(row.channel);
+      const laps = excludedOn.get(row.channel) ?? [];
+      laps.push(entry.lap.lapNumber);
+      excludedOn.set(row.channel, laps);
+    }
+    perLapDrops.push(new Set(excluded));
+    perLapCoverage.push({ lapNumber: entry.lap.lapNumber, coverage: lapCoverage, excluded });
+  }
+
+  const lowCoverageChannels: AnalysisExcludedChannel[] = coverage
+    .filter((entry) => (excludedOn.get(entry.channel)?.length ?? 0) > 0)
+    .map((entry) => ({
+      ...entry,
+      excludedLapNumbers: [...(excludedOn.get(entry.channel) ?? [])].sort((a, b) => a - b),
+      analysedLapCount: joined.length,
+    }));
   const usedChannels = coverage
-    .filter((entry) => !drop.has(entry.channel))
+    .filter((entry) => (excludedOn.get(entry.channel)?.length ?? 0) < joined.length)
     .map((entry) => entry.channel);
 
-  const laps: SessionLapInput[] = joined.map((entry) => ({
+  const laps: SessionLapInput[] = joined.map((entry, index) => ({
     lap: entry.lap,
-    samples: stripChannels(entry.samples, drop),
+    samples: stripChannels(entry.samples, perLapDrops[index] ?? new Set()),
     ...(entry.sectorTimes === undefined ? {} : { sectorTimes: entry.sectorTimes }),
   }));
 
@@ -237,11 +318,62 @@ export function assembleSessionAnalysis(
     corners: circuit.corners,
     context,
     coverage,
+    perLapCoverage,
     lowCoverageChannels,
     usedChannels,
     skippedLaps,
     sampleCount: allSamples.length,
   };
+}
+
+/**
+ * Builds the engine input for one finished session on one catalog circuit.
+ * Deterministic and side-effect free.
+ */
+export function assembleSessionAnalysis(
+  circuit: BundledCircuit,
+  recordings: readonly AnalysisLapRecording[],
+  options: AssembleOptions = {},
+): AssembledAnalysis {
+  const skippedLaps: SkippedLap[] = [];
+  const joined: JoinedLap[] = [];
+  for (const recording of ordered(recordings)) {
+    const result = projectRecording(circuit, recording, options);
+    if ('skipped' in result) skippedLaps.push(result.skipped);
+    else joined.push(result.joined);
+  }
+  return finishAssembly(circuit, joined, skippedLaps, options);
+}
+
+/**
+ * The SAME assembly, one lap at a time, handing the JS thread back between
+ * laps (ticket P5b-FIX1 C5, Codex P5b-REV1 finding 5): a single yield before
+ * the pass only paints the spinner -- a twenty-lap projection then still froze
+ * the UI for the whole run. The engine's own `analyzeSession` stays
+ * synchronous; this splits the part that is per-lap, which is the part that
+ * grows with the session.
+ */
+export async function assembleSessionAnalysisChunked(
+  circuit: BundledCircuit,
+  recordings: readonly AnalysisLapRecording[],
+  options: AssembleOptions = {},
+  yieldToUi: () => Promise<void> = async () => undefined,
+): Promise<AssembledAnalysis> {
+  const skippedLaps: SkippedLap[] = [];
+  const joined: JoinedLap[] = [];
+  for (const recording of ordered(recordings)) {
+    await yieldToUi();
+    const result = projectRecording(circuit, recording, options);
+    if ('skipped' in result) skippedLaps.push(result.skipped);
+    else joined.push(result.joined);
+  }
+  await yieldToUi();
+  return finishAssembly(circuit, joined, skippedLaps, options);
+}
+
+/** Stored laps in lap order -- the order every downstream list is reported in. */
+function ordered(recordings: readonly AnalysisLapRecording[]): AnalysisLapRecording[] {
+  return [...recordings].sort((a, b) => a.lap.lapNumber - b.lap.lapNumber);
 }
 
 /** Runs the deterministic engine over an assembled session. Pure. */

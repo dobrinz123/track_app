@@ -59,7 +59,9 @@ describe('P5b B3 -- the analysis screen state', () => {
         );
         expect(en.view.corners[0]!.heading).toMatch(/^Corner 1 \((left|right)\)$/);
         expect(ro.view.corners[0]!.heading).toMatch(/^Virajul 1 \((stânga|dreapta)\)$/);
-        for (const row of en.view.corners) expect(row.lines.length).toBeGreaterThan(0);
+        for (const row of en.view.corners) {
+          expect(row.detail.observations.length).toBeGreaterThan(0);
+        }
         expect(en.view.title).not.toBe(ro.view.title);
       });
 
@@ -83,7 +85,8 @@ describe('P5b B3 -- the analysis screen state', () => {
             ...state.view.limitations,
             ...state.view.timeLoss,
             ...state.view.consistency,
-            ...state.view.corners.flatMap((row) => row.lines),
+            ...state.view.corners.flatMap((row) => row.detail.observations),
+            ...state.view.corners.flatMap((row) => row.badges),
           ].join('\n');
           expect(prose).not.toMatch(
             /brake later|lift later|carry more speed|you should|try to|frânează|ridică piciorul mai|ar trebui|încearcă să/i,

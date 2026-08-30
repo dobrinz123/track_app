@@ -6,83 +6,62 @@ import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
 import { resolveAnalysisScreenStrings } from './analysisStrings';
 import { useSettings } from '../hooks/useSettings';
-import { useFacadeState } from '../hooks/useFacadeState';
 import {
   buildAnalysisScreenState,
-  createAnalysisRunner,
-  sessionIsActive,
+  createAnalysisController,
+  type AnalysisCornerRow,
   type AnalysisRunResult,
 } from '../../session/analysisViewModel';
-import { createAnalysisSessionLoader } from '../../session/analysisSessionLoader';
 import { buildAnalysisExportDocument, shareAnalysisExport, shareAnalysisJson } from '../../session/analysisExport';
-import { circuitCatalog } from '../../session/circuitCatalog';
-import {
-  facade,
-  getSessionRepository,
-  getTelemetryReadDb,
-  sessionHistoryStore,
-  settingsStore,
-} from '../../session/composition';
-import { loadSessionTelemetryByLap } from '../../persistence/telemetryRead';
+import { facade, getAnalysisRunner, settingsStore } from '../../session/composition';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Analysis'>;
 
 /**
- * S14 — post-session corner analysis (ticket P5b, contracts.md "Phase 5
- * REVISION"): the deterministic on-device engine's report for ONE finished
- * session, in the app's language, observations only.
+ * S14 — post-session corner analysis (ticket P5b, revised by P5b-FIX1 for
+ * contracts.md "Phase 5 REVISION 2" R2-2): the deterministic on-device
+ * engine's findings for ONE finished session, in the app's language,
+ * observations only, as an INTERACTIVE report — a corner list of names and
+ * badges whose rows expand into that corner's per-lap numbers, demonstrated
+ * envelope and the engine's own sentence. The long prose exists only in the
+ * exported report.
  *
  * This file is a renderer and nothing else. Every decision — what to load, what
  * the engine may be asked, what the driver is told when it cannot be asked,
- * how a corner row reads — lives in `session/analysisViewModel.ts` and
- * `session/analysisAssembly.ts`, which vitest imports directly; every visible
- * string is either the ENGINE's own localized report text or a chrome label
- * from `analysisStrings.ts`. Nothing about driving is written here.
+ * what a row and its detail contain — lives in `session/analysisViewModel.ts`
+ * and `session/analysisAssembly.ts`, which vitest imports directly; every
+ * visible string is either the ENGINE's own localized report text or a chrome
+ * label from `analysisStrings.ts`. Nothing about driving is written here.
  */
 export function AnalysisScreen({ route }: Props): React.JSX.Element {
   const { sessionId } = route.params;
   const settings = useSettings(settingsStore);
   const strings = resolveAnalysisScreenStrings(settings.language);
-  const facadeState = useFacadeState(facade);
 
-  // The runner is asked at RUN time whether a session is live, so a screen left
-  // open when a new session starts cannot analyse over it.
-  const sessionStateRef = React.useRef(facadeState.sessionState);
-  sessionStateRef.current = facadeState.sessionState;
-
-  const runner = React.useMemo(
+  // P5b-FIX1 C1/C6: ONE shared runner (composition), and a controller that
+  // watches the facade so a session starting hides this analysis and a session
+  // ending brings it back without leaving the screen.
+  const controller = React.useMemo(
     () =>
-      createAnalysisRunner({
-        isSessionActive: () => sessionIsActive(sessionStateRef.current),
-        loadSession: createAnalysisSessionLoader({
-          getSession: (id) => sessionHistoryStore.getSession(id),
-          getCircuit: (id) => circuitCatalog.get(id),
-          loadLapGnss: async (id, lapNumber) =>
-            (await getSessionRepository()?.loadTelemetry(id, lapNumber)) ?? [],
-          loadSessionChannels: async (id) => {
-            const db = getTelemetryReadDb();
-            return db === null ? new Map() : await loadSessionTelemetryByLap(db, id);
-          },
-        }),
+      createAnalysisController({
+        runner: getAnalysisRunner(),
+        sessionId,
+        subscribeSessionState: (listener) => facade.subscribe((state) => listener(state.sessionState)),
       }),
-    [],
+    [sessionId],
   );
+  React.useEffect(() => {
+    return () => {
+      controller.dispose();
+    };
+  }, [controller]);
 
   const [result, setResult] = React.useState<AnalysisRunResult | null>(null);
-  const [attempt, setAttempt] = React.useState(0);
+  const [expanded, setExpanded] = React.useState<number | null>(null);
   const [shareNote, setShareNote] = React.useState<string | null>(null);
   const [sharing, setSharing] = React.useState(false);
 
-  React.useEffect(() => {
-    let cancelled = false;
-    setResult(null);
-    void runner.run(sessionId).then((next) => {
-      if (!cancelled) setResult(next);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [runner, sessionId, attempt]);
+  React.useEffect(() => controller.subscribe(setResult), [controller]);
 
   const state = React.useMemo(
     () =>
@@ -135,7 +114,7 @@ export function AnalysisScreen({ route }: Props): React.JSX.Element {
           {state.status === 'error' ? (
             <Pressable
               style={[styles.button, styles.secondaryButton]}
-              onPress={() => setAttempt((value) => value + 1)}
+              onPress={() => controller.retry()}
               accessibilityRole="button"
               accessibilityLabel={strings.retryA11y}
             >
@@ -159,44 +138,62 @@ export function AnalysisScreen({ route }: Props): React.JSX.Element {
         <Text style={styles.header} maxFontSizeMultiplier={1.3}>
           {view.header}
         </Text>
-        <Text style={styles.muted} maxFontSizeMultiplier={1.3}>
-          {view.subtitle}
-        </Text>
+        <View style={styles.chipRow}>
+          {view.summaryChips.map((chip) => (
+            <Chip key={chip} label={chip} />
+          ))}
+        </View>
         <View style={styles.badge}>
           <Text style={styles.badgeText} maxFontSizeMultiplier={1.3}>
             {view.observationsOnly}
           </Text>
         </View>
 
-        <Section lines={view.overview} />
-        <Section lines={view.limitations} tone="warning" />
-        <Section lines={view.notes} tone="warning" />
-        <Section lines={view.timeLoss} />
-        <Section lines={view.consistency} />
-        <Section lines={view.sectors} />
-
         <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
           {strings.cornersHeading}
         </Text>
         {view.corners.map((corner) => (
-          <View key={corner.cornerId} style={styles.cornerCard}>
-            <View style={styles.cornerHeaderRow}>
-              <Text style={styles.cornerHeading} maxFontSizeMultiplier={1.3}>
-                {corner.heading}
-              </Text>
-              {corner.timeLossLabel === null ? null : (
-                <Text style={styles.cornerBadge} maxFontSizeMultiplier={1.3}>
-                  {corner.timeLossLabel}
-                </Text>
-              )}
+          <CornerCard
+            key={corner.cornerId}
+            corner={corner}
+            expanded={expanded === corner.cornerId}
+            onToggle={() =>
+              setExpanded((current) => (current === corner.cornerId ? null : corner.cornerId))
+            }
+            expandLabel={
+              expanded === corner.cornerId
+                ? strings.collapseCornerA11y(corner.heading)
+                : strings.expandCornerA11y(corner.heading)
+            }
+            cleanMark={strings.cleanLapMark}
+          />
+        ))}
+
+        {view.limitationChips.length === 0 ? null : (
+          <>
+            <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
+              {strings.limitationsHeading}
+            </Text>
+            <View style={styles.chipRow}>
+              {view.limitationChips.map((chip) => (
+                <Chip key={chip} label={chip} tone="warning" />
+              ))}
             </View>
-            {corner.lines.map((line, index) => (
-              <Text key={index} style={styles.line} maxFontSizeMultiplier={1.3}>
-                {line}
+          </>
+        )}
+
+        {view.notes.length === 0 ? null : (
+          <>
+            <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
+              {strings.notesHeading}
+            </Text>
+            {view.notes.map((note, index) => (
+              <Text key={index} style={[styles.line, styles.lineWarning]} maxFontSizeMultiplier={1.3}>
+                {note}
               </Text>
             ))}
-          </View>
-        ))}
+          </>
+        )}
 
         <Text style={styles.disclaimer} maxFontSizeMultiplier={1.3}>
           {view.disclaimer}
@@ -234,21 +231,117 @@ export function AnalysisScreen({ route }: Props): React.JSX.Element {
   );
 }
 
-/** One block of the engine's own lines; renders nothing when the engine had none. */
-function Section({ lines, tone }: { lines: string[]; tone?: 'warning' }): React.JSX.Element | null {
-  if (lines.length === 0) return null;
+/** One compact label. Every chip's text comes from the view model. */
+function Chip({ label, tone }: { label: string; tone?: 'warning' }): React.JSX.Element {
   return (
-    <View style={styles.sectionCard}>
-      {lines.map((line, index) => (
-        <Text
-          key={index}
-          style={[styles.line, tone === 'warning' && styles.lineWarning]}
-          maxFontSizeMultiplier={1.3}
-        >
-          {line}
-        </Text>
-      ))}
+    <View style={[styles.chip, tone === 'warning' && styles.chipWarning]}>
+      <Text style={styles.chipText} maxFontSizeMultiplier={1.3}>
+        {label}
+      </Text>
     </View>
+  );
+}
+
+/**
+ * A corner row: the engine's name plus the view model's badges. Tapping it
+ * reveals that corner's per-lap numbers, its demonstrated envelope and the
+ * engine's own sentences (contracts.md R2-2).
+ */
+function CornerCard({
+  corner,
+  expanded,
+  onToggle,
+  expandLabel,
+  cleanMark,
+}: {
+  corner: AnalysisCornerRow;
+  expanded: boolean;
+  onToggle: () => void;
+  expandLabel: string;
+  cleanMark: string;
+}): React.JSX.Element {
+  const columns = corner.detail.columns;
+  return (
+    <Pressable
+      style={styles.cornerCard}
+      onPress={onToggle}
+      accessibilityRole="button"
+      accessibilityLabel={expandLabel}
+      accessibilityState={{ expanded }}
+    >
+      <View style={styles.cornerHeaderRow}>
+        <Text style={styles.cornerHeading} maxFontSizeMultiplier={1.3}>
+          {corner.heading}
+        </Text>
+      </View>
+      <View style={styles.chipRow}>
+        {corner.badges.map((badge) => (
+          <Chip key={badge} label={badge} />
+        ))}
+      </View>
+      {!expanded ? null : (
+        <View style={styles.detail}>
+          <View style={styles.detailRow}>
+            <Text style={[styles.detailCell, styles.detailHead]} maxFontSizeMultiplier={1.3}>
+              {columns.lap}
+            </Text>
+            <Text style={[styles.detailCell, styles.detailHead]} maxFontSizeMultiplier={1.3}>
+              {columns.brake}
+            </Text>
+            <Text style={[styles.detailCell, styles.detailHead]} maxFontSizeMultiplier={1.3}>
+              {columns.lift}
+            </Text>
+            <Text style={[styles.detailCell, styles.detailHead]} maxFontSizeMultiplier={1.3}>
+              {columns.minSpeed}
+            </Text>
+            <Text style={[styles.detailCell, styles.detailHead]} maxFontSizeMultiplier={1.3}>
+              {columns.exit}
+            </Text>
+            <Text style={[styles.detailCell, styles.detailHead]} maxFontSizeMultiplier={1.3}>
+              {columns.peakDecel}
+            </Text>
+            <Text style={[styles.detailCell, styles.detailHead]} maxFontSizeMultiplier={1.3}>
+              {columns.latG}
+            </Text>
+          </View>
+          {corner.detail.perLap.map((lap) => (
+            <View key={lap.lapNumber} style={styles.detailRow}>
+              <Text style={styles.detailCell} maxFontSizeMultiplier={1.3}>
+                {lap.clean ? `${lap.lapNumber} · ${cleanMark}` : String(lap.lapNumber)}
+              </Text>
+              <Text style={styles.detailCell} maxFontSizeMultiplier={1.3}>
+                {lap.brake}
+              </Text>
+              <Text style={styles.detailCell} maxFontSizeMultiplier={1.3}>
+                {lap.lift}
+              </Text>
+              <Text style={styles.detailCell} maxFontSizeMultiplier={1.3}>
+                {lap.minSpeed}
+              </Text>
+              <Text style={styles.detailCell} maxFontSizeMultiplier={1.3}>
+                {lap.exit}
+              </Text>
+              <Text style={styles.detailCell} maxFontSizeMultiplier={1.3}>
+                {lap.peakDecel}
+              </Text>
+              <Text style={styles.detailCell} maxFontSizeMultiplier={1.3}>
+                {lap.latG}
+              </Text>
+            </View>
+          ))}
+          {corner.detail.envelopeLine === null ? null : (
+            <Text style={styles.envelope} maxFontSizeMultiplier={1.3}>
+              {corner.detail.envelopeLine}
+            </Text>
+          )}
+          {corner.detail.observations.map((line, index) => (
+            <Text key={index} style={styles.line} maxFontSizeMultiplier={1.3}>
+              {line}
+            </Text>
+          ))}
+        </View>
+      )}
+    </Pressable>
   );
 }
 
@@ -269,14 +362,17 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.xs,
   },
   badgeText: { ...typography.caption, color: colors.textSecondary },
-  sectionCard: {
-    backgroundColor: colors.surface,
-    borderRadius: radii.md,
-    borderWidth: 1,
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs },
+  chip: {
+    backgroundColor: colors.surfaceRaised,
     borderColor: colors.border,
-    padding: spacing.md,
-    gap: spacing.xs,
+    borderWidth: 1,
+    borderRadius: radii.pill,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
   },
+  chipWarning: { borderColor: colors.warning },
+  chipText: { ...typography.caption, color: colors.textSecondary },
   sectionLabel: { ...typography.label, color: colors.textMuted, marginTop: spacing.sm },
   line: { ...typography.body, color: colors.textSecondary },
   lineWarning: { color: colors.warning },
@@ -290,7 +386,11 @@ const styles = StyleSheet.create({
   },
   cornerHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   cornerHeading: { ...typography.subtitle, color: colors.textPrimary, fontFamily: fontFamily.bodySemibold },
-  cornerBadge: { ...typography.caption, color: colors.slower },
+  detail: { marginTop: spacing.sm, gap: spacing.xs },
+  detailRow: { flexDirection: 'row', gap: spacing.xs },
+  detailCell: { ...typography.caption, color: colors.textSecondary, flex: 1 },
+  detailHead: { color: colors.textMuted },
+  envelope: { ...typography.caption, color: colors.textPrimary },
   disclaimer: { ...typography.caption, color: colors.textMuted, marginTop: spacing.sm },
   button: { borderRadius: radii.lg, paddingVertical: spacing.md, alignItems: 'center' },
   buttonBusy: { opacity: 0.6 },
