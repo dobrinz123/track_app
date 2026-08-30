@@ -856,3 +856,23 @@ User: "inhuman to press that many times; the tests are robotic". Build 5 ran one
 13. Field fixtures (binding regression inputs): data/field/signal-finder/2026-08-29-brakeSwitch.json → 0x12/0x4002 `found`
     (brake), 0x12/0x1701 unrelated; …-accelPedal.json → 0x12/0x4007 `found` (accel idle flag, bit0, declared boolean-edge in the catalog), 0x4659 NOT found (`insufficient`: its first press window holds no sample — P4m-FIX1 keeps `unrelated` only for DIDs with complete action-window coverage). Export schemaVersion is 5 as of P4o (3: rateSource, silent ECUs, notRead; 4: diagnostics{rawError,timeoutInclusiveReqPerSec,adapterTeardownPending}; 5: replaced[] bindings + confirmedDidHex per pass).
 14. **Teardown is bounded, and the residual is stated.** The 5 s hard release exists so a `close()` that never settles cannot hold the shared adapter reservation forever; the residual — a close that settles after the release — is accepted, flagged while it lasts (`adapterTeardownPending`, a find refused with `adapter-teardown-pending`), and cleared, message included, the moment it settles (P4m-FIX4 W5/W6).
+
+## Phase 5 REVISION 2 (2026-08-31, user decisions after reading the published algorithm page — binding; supersedes conflicting earlier text)
+User findings F1–F3 (.foreman/scratch/user-report-findings.md), all three ratified by the user.
+R2-1 **Lap classification**: a lap is ANOMALOUS only for (a) incomplete lap, (b) off-track (outside the corridor), (c) weak
+  GPS / missing data (accuracy worse than threshold > 5 % of the lap, or a sample gap > 1.5 s). Heavy braking (any |longG|),
+  ABS-like oscillation and yaw/slide signatures ("rotation") are NORMAL circuit driving: they become informative LABELS on
+  the lap (shown in the report), never exclusion. Clean = not anomalous. The reference lap and the demonstrated envelope use
+  clean laps under THIS definition.
+R2-2 **In-app report is interactive**: corner list with badges (time lost/gained, consistency, v_min/exit), tap a corner →
+  visual details (per-lap values, marks); minimal prose on screen. The long prose report exists only as the exported final
+  report (.md/JSON) — unchanged engine text.
+R2-3 **Trackday flow (user-ratified revision of the V1-suggestions-off rule)**:
+  (a) WHILE DRIVING: no advice, no text. The existing brake/lift coaching cues MAY be auto-updated between laps, but only
+      within the envelope the driver has DEMONSTRATED on clean laps of the SAME outing, never beyond it, and bounded by
+      MAX_BRAKE_LATER_M = 10, MAX_MIN_SPEED_GAIN_KPH = 3, at most ONE change per corner per stint. A cue never moves to a
+      point the driver has not already achieved.
+  (b) IN THE PITS: interactive advice — per-corner "what went wrong / where seconds were lost" with concrete suggestions;
+      suggestions beyond the demonstrated envelope stay capped by the same bounds and are presented, not applied.
+  (c) The final exported report stays observations + the pit suggestions that were shown.
+  Honesty gates unchanged (insufficient data → nothing is suggested and the report says why).
