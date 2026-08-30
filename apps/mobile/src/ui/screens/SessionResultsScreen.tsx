@@ -6,8 +6,11 @@ import type { LapRecord } from '@circuit/core';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
 import { TimeDisplay } from '../components/TimeDisplay';
-import { facade, settingsStore } from '../../session/composition';
+import { facade, getMostRecentSessionId, settingsStore } from '../../session/composition';
 import { useFacadeState } from '../hooks/useFacadeState';
+import { useSettings } from '../hooks/useSettings';
+import { resolveAnalysisScreenStrings } from './analysisStrings';
+import { formatDateUtc } from '../format';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'SessionResults'>;
 
@@ -42,6 +45,12 @@ export function SessionResultsScreen({ navigation }: Props): React.JSX.Element {
   const bestLapMs = validLaps.length > 0 ? Math.min(...validLaps.map((l) => l.durationMs)) : null;
   const isNewPb = bestLapMs !== null && state.pbMs === bestLapMs;
   const bests = sectorBests(laps);
+  // Ticket P5b B1 (binding): the post-session analysis entry point. Ordinary
+  // product surface -- no developer gate. Offered only once the session that
+  // just ended actually has stored laps to analyse.
+  const settings = useSettings(settingsStore);
+  const analysisStrings = resolveAnalysisScreenStrings(settings.language);
+  const analysableSessionId = laps.length > 0 ? getMostRecentSessionId() : null;
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -113,13 +122,25 @@ export function SessionResultsScreen({ navigation }: Props): React.JSX.Element {
           })
         )}
 
+        {analysableSessionId === null ? null : (
+          <Pressable
+            style={[styles.button, styles.primaryButton]}
+            onPress={() => navigation.navigate('Analysis', { sessionId: analysableSessionId })}
+            accessibilityRole="button"
+            accessibilityLabel={analysisStrings.entryButtonA11y(formatDateUtc(new Date().toISOString()))}
+          >
+            <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.3}>
+              {analysisStrings.entryButton}
+            </Text>
+          </Pressable>
+        )}
         <Pressable
-          style={[styles.button, styles.primaryButton]}
+          style={[styles.button, styles.secondaryButton]}
           onPress={() => navigation.navigate('SessionHistory')}
           accessibilityRole="button"
           accessibilityLabel="View session history"
         >
-          <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.3}>
+          <Text style={styles.secondaryButtonText} maxFontSizeMultiplier={1.3}>
             Session History
           </Text>
         </Pressable>

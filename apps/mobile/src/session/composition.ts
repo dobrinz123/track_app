@@ -1019,6 +1019,15 @@ let historyStore: SqlSessionHistoryStore | null = null;
 /** The bundled circuitId `controller` (the production one) was last BUILT for -- ticket CN-W3's preflight-gate rebuild-on-circuit-change trigger compares this against `settingsStore.getSettings().selectedCircuitId`. Set by `createProductionController()`, read by the gate below and by `resumeRecovery()`'s defensive rebuild guard. */
 let productionControllerCircuitId: string | null = null;
 /**
+ * Ticket P5b B1: the id of the session most recently STARTED on this launch --
+ * what `SessionResultsScreen`'s "Analysis" button needs, since `FacadeState`
+ * carries lap records but no session id. Written by `onSessionStarted` (the one
+ * place the id is known the moment it exists) and deliberately NOT cleared by
+ * `onSessionEnded`: the post-session results screen is shown precisely after
+ * the session ended, and that is exactly the session it must be able to analyse.
+ */
+let mostRecentSessionId: string | null = null;
+/**
  * The `SessionController` currently backing `facade` -- the production one,
  * or (in `__DEV__`) `startDevReplaySession`'s replay controller. Tracked
  * separately from `controller` (which stays the production instance for its
@@ -1207,6 +1216,8 @@ function productionFacadeCallbacks(circuitId: string): RealSessionFacadeCallback
   return {
     onSessionStarted: (sessionId) => {
       if (db !== null) void setActiveSession(db, { sessionId, circuitId });
+      // Ticket P5b B1: remembered for the post-session Analysis entry point.
+      mostRecentSessionId = sessionId;
       startTelemetryRecording(sessionId);
     },
     onSessionEnded: () => {
@@ -2587,4 +2598,23 @@ export function estimateObservedRateHz(histogram: GnssDiagnostics['sampleInterva
  */
 export function getTelemetryReadDb(): SqlDatabase | null {
   return db;
+}
+
+/**
+ * Ticket P5b B2: the shared session repository, so the post-session analysis
+ * can read a lap's stored GNSS trace (`loadTelemetry`) -- the same read-only,
+ * read-on-demand accessor shape as `getTelemetryReadDb()` immediately above.
+ * `null` before bootstrap has built one.
+ */
+export function getSessionRepository(): LocalSessionRepository | null {
+  return repository;
+}
+
+/**
+ * Ticket P5b B1: the session most recently started on this launch, or `null`
+ * when none has been. `SessionResultsScreen` needs it to open the analysis of
+ * the session that just finished (`FacadeState` has laps but no id).
+ */
+export function getMostRecentSessionId(): string | null {
+  return mostRecentSessionId;
 }

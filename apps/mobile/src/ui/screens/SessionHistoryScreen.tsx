@@ -10,6 +10,7 @@ import { sessionHistoryStore, settingsStore } from '../../session/composition';
 import { resolveSelectedCircuit } from '../../session/circuitCatalog';
 import { layoutLabel } from '../data/circuit';
 import { useSettings } from '../hooks/useSettings';
+import { resolveAnalysisScreenStrings } from './analysisStrings';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'SessionHistory'>;
 
@@ -19,6 +20,9 @@ export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
   const pb = sessionHistoryStore.getPersonalBest();
   const settings = useSettings(settingsStore);
   const selected = resolveSelectedCircuit(settings);
+  // Ticket P5b B1 (binding): every stored session -- of EITHER circuit -- can be
+  // analysed from here. Ordinary product surface, no developer gate.
+  const analysisStrings = resolveAnalysisScreenStrings(settings.language);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -79,6 +83,16 @@ export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
                     </Pressable>
                   ))}
                 </View>
+                <Pressable
+                  style={styles.analysisButton}
+                  onPress={() => navigation.navigate('Analysis', { sessionId: session.sessionId })}
+                  accessibilityRole="button"
+                  accessibilityLabel={analysisStrings.entryButtonA11y(formatDateUtc(session.displayDateUtc))}
+                >
+                  <Text style={styles.analysisButtonText} maxFontSizeMultiplier={1.3}>
+                    {analysisStrings.entryButton}
+                  </Text>
+                </Pressable>
               </View>
             );
           })
@@ -129,6 +143,16 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.xs,
   },
   lapChipInvalid: { borderColor: colors.danger },
+  analysisButton: {
+    alignSelf: 'flex-start',
+    backgroundColor: colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: colors.accent,
+    borderRadius: radii.pill,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  analysisButtonText: { ...typography.caption, color: colors.accent },
   lapChipText: { ...typography.caption, color: colors.textPrimary },
   inlineTime: { fontSize: 13 },
 });

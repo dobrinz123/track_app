@@ -1,4 +1,4 @@
-import type { SqlDatabase, TelemetryChannelId } from '@circuit/core';
+import type { SqlDatabase, TelemetryChannelId, TelemetrySample } from '@circuit/core';
 
 /**
  * Recorded-telemetry read API (Telemetry addendum — P4b amendments, binding).
@@ -188,4 +188,63 @@ export function bucketTelemetry(
   }
 
   return { buckets, min, max };
+}
+
+/**
+ * Ticket P5b B2 (binding): every decoded channel row of a WHOLE session,
+ * grouped by lap number and ordered by time inside each lap -- one query for
+ * the post-session analysis instead of one per lap (a 20-lap session would
+ * otherwise cost 20 round trips before the screen can draw anything).
+ *
+ * Exactly the same row discipline as {@link readLapTelemetry} above:
+ * parameterized (`session_id` is a bound value, never interpolated), and
+ * NULL-lap rows -- samples recorded before the first lap started, or whenever
+ * the current lap was not known -- belong to no lap and are excluded by the
+ * explicit `lap_number IS NOT NULL` (this query has no `lap_number = ?`
+ * comparison to exclude them implicitly).
+ *
+ * The rows come back as `TelemetrySample`s, the shape `@circuit/core`'s
+ * `joinTelemetryChannels` consumes, so the caller never re-maps them.
+ */
+export async function readSessionTelemetryByLap(
+  db: SqlDatabase,
+  sessionId: string,
+): Promise<Map<number, TelemetrySample[]>> {
+  const rows = await db.getAllAsync<TelemetrySampleDbRow & { lap_number: number }>(
+    'SELECT lap_number, t_mono_ms, channel, value FROM telemetry_samples WHERE session_id = ? AND lap_number IS NOT NULL ORDER BY lap_number, t_mono_ms',
+    [sessionId],
+  );
+  const byLap = new Map<number, TelemetrySample[]>();
+  for (const row of rows) {
+    const lap = byLap.get(row.lap_number);
+    const sample: TelemetrySample = {
+      channel: row.channel,
+      value: row.value,
+      tMonoMs: row.t_mono_ms,
+    };
+    if (lap === undefined) byLap.set(row.lap_number, [sample]);
+    else lap.push(sample);
+  }
+  return byLap;
+}
+
+/**
+ * {@link readSessionTelemetryByLap} with the same never-rejects contract
+ * {@link loadLapTelemetry} has: a failed SQLite read is reported ONCE and
+ * resolves to an EMPTY map. The analysis then runs on the GPS trace alone and
+ * the engine reports the channels as missing -- which is what they are --
+ * instead of the whole screen failing over a secondary read.
+ */
+export async function loadSessionTelemetryByLap(
+  db: SqlDatabase,
+  sessionId: string,
+  onError: (error: unknown) => void = (error) =>
+    console.warn('[telemetryRead] readSessionTelemetryByLap failed', error),
+): Promise<Map<number, TelemetrySample[]>> {
+  try {
+    return await readSessionTelemetryByLap(db, sessionId);
+  } catch (error) {
+    onError(error);
+    return new Map();
+  }
 }

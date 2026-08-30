@@ -12,6 +12,12 @@ import { ActiveDashboardScreen } from '../screens/ActiveDashboardScreen';
 import { SessionResultsScreen } from '../screens/SessionResultsScreen';
 import { SessionHistoryScreen } from '../screens/SessionHistoryScreen';
 import { LapDetailScreen } from '../screens/LapDetailScreen';
+// Ticket P5b B1 (binding): the post-session analysis is an ORDINARY product
+// screen -- registered in every build and reachable from the results and
+// history screens with no developer gate of any kind. It imports no DevReplay
+// fixtures, so shipping it always costs a release bundle nothing beyond the
+// screen itself.
+import { AnalysisScreen } from '../screens/AnalysisScreen';
 import { PersonalBestScreen } from '../screens/PersonalBestScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
 import { TelemetryScreen } from '../screens/TelemetryScreen';
@@ -73,6 +79,7 @@ export function RootNavigator(): React.JSX.Element {
       <Stack.Screen name="SessionResults" component={SessionResultsScreen} options={{ title: 'Results', headerBackVisible: false }} />
       <Stack.Screen name="SessionHistory" component={SessionHistoryScreen} options={{ title: 'History' }} />
       <Stack.Screen name="LapDetail" component={LapDetailScreen} options={{ title: 'Lap Detail' }} />
+      <Stack.Screen name="Analysis" component={AnalysisScreen} options={{ title: 'Analysis' }} />
       <Stack.Screen name="PersonalBest" component={PersonalBestScreen} options={{ title: 'Personal Best' }} />
       <Stack.Screen name="Settings" component={SettingsScreen} options={{ title: 'Settings' }} />
       <Stack.Screen name="Telemetry" component={TelemetryScreen} options={{ title: 'Telemetry' }} />

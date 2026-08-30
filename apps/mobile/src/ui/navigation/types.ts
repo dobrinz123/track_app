@@ -9,6 +9,8 @@ export type RootStackParamList = {
   SessionResults: undefined;
   SessionHistory: undefined;
   LapDetail: { sessionId: string; lapNumber: number };
+  /** Ticket P5b B1: the post-session corner analysis of ONE stored session. */
+  Analysis: { sessionId: string };
   PersonalBest: undefined;
   Settings: undefined;
   Telemetry: undefined;
