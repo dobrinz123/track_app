@@ -408,18 +408,29 @@ interface AbsEvaluation {
 }
 
 /**
- * Direction-reversal ("zig-zag") count over a series: how many times the
- * signal changes direction by at least `minSwing`, tracking each qualifying
- * reversal from the last one so small back-and-forth noise near a genuine
- * turning point cannot be counted twice. Used only to detect the REPEATED
- * brake-release-reapply pattern of ABS, never a single spike.
+ * Direction-reversal ("zig-zag") count over a contiguous slice `[from, to]` of
+ * `values` (inclusive both ends): how many times the signal changes direction
+ * by at least `minSwing`, tracking each qualifying reversal from the last one
+ * so small back-and-forth noise near a genuine turning point cannot be
+ * counted twice. Used only to detect the REPEATED brake-release-reapply
+ * pattern of ABS, never a single spike.
+ *
+ * Stops as soon as `minCycles` qualifying reversals are found (the caller
+ * only ever asks "did this window reach `minCycles`?", never the exact
+ * count), so a genuine oscillation is confirmed in O(1) reversals rather than
+ * scanning the rest of the window for nothing.
  */
-function countSwings(values: readonly number[], minSwing: number): number {
-  if (values.length === 0) return 0;
+function countSwings(
+  values: readonly number[],
+  from: number,
+  to: number,
+  minSwing: number,
+  minCycles: number,
+): number {
   let cycles = 0;
-  let lastExtreme = values[0] ?? 0;
+  let lastExtreme = values[from] ?? 0;
   let direction: -1 | 0 | 1 = 0;
-  for (let index = 1; index < values.length; index += 1) {
+  for (let index = from + 1; index <= to; index += 1) {
     const previous = values[index - 1] ?? 0;
     const current = values[index] ?? 0;
     const delta = current - previous;
@@ -432,6 +443,7 @@ function countSwings(values: readonly number[], minSwing: number): number {
       if (swing >= minSwing) {
         cycles += 1;
         lastExtreme = previous;
+        if (cycles >= minCycles) return cycles;
       }
     }
     direction = dir;
@@ -448,6 +460,17 @@ function countSwings(values: readonly number[], minSwing: number): number {
  * produces the INFORMATIONAL `ABS_SUSPECTED` label: it never anomalizes a lap,
  * and with no accelerometer evidence it simply stays `available: false` --
  * never fabricating a detection either way.
+ *
+ * Single-pass streaming window (ticket P5-FIX-ABS, Codex P5-REV finding 13):
+ * the OLD version re-derived `end` from `start` and re-sliced/re-reduced the
+ * window on every outer step, worst-case O(n^2) when many samples land within
+ * one `windowMs` of each other. `end` is a monotonic two-pointer here instead
+ * -- as `start` advances the window's own earliest timestamp only grows, so
+ * the largest valid `end` can only grow too, and is never re-derived from
+ * scratch -- and the window's average is an O(1) prefix-sum lookup rather
+ * than a per-window `reduce`. Both changes preserve the exact per-window
+ * verdict (avgG, then `countSwings` over the same index range) the OLD
+ * from-scratch scan computed; only the redundant re-work is removed.
  */
 function evaluateAbsOscillation(
   samples: readonly CornerLapSample[],
@@ -456,32 +479,45 @@ function evaluateAbsOscillation(
   windowMs: number,
   minAvgDecelG: number,
 ): AbsEvaluation {
-  const series: { tMonoMs: number; g: number }[] = [];
+  const tMonoMs: number[] = [];
+  const gValues: number[] = [];
   for (const sample of samples) {
     const g = sample.channels?.longG;
-    if (finite(g)) series.push({ tMonoMs: sample.tMonoMs, g });
+    if (finite(g)) {
+      tMonoMs.push(sample.tMonoMs);
+      gValues.push(g);
+    }
   }
   // Needs enough accelerometer evidence to resolve a multi-cycle pulse train
   // at all; a channel present but too sparse could never show a swing.
-  if (series.length < minCycles + 2) return { available: false, detected: false };
+  if (gValues.length < minCycles + 2) return { available: false, detected: false };
 
-  for (let start = 0; start < series.length; start += 1) {
-    let end = start;
-    const startEntry = series[start];
-    if (startEntry === undefined) continue;
-    while (end + 1 < series.length && (series[end + 1]?.tMonoMs ?? 0) - startEntry.tMonoMs <= windowMs) {
+  // Prefix sums of g -> O(1) average for any window, instead of a per-window
+  // `reduce`. prefixSum[i] = sum of gValues[0..i-1].
+  const prefixSum = new Array<number>(gValues.length + 1);
+  prefixSum[0] = 0;
+  for (let index = 0; index < gValues.length; index += 1) {
+    prefixSum[index + 1] = (prefixSum[index] ?? 0) + (gValues[index] ?? 0);
+  }
+
+  // Monotonic two-pointer: `end` only ever advances, across the WHOLE outer
+  // loop, never resets to `start`. Timestamps are non-decreasing (the samples
+  // are one time-ordered lap), so the largest `end` still within `windowMs` of
+  // a later `start` can only be >= the largest `end` for an earlier `start`.
+  let end = 0;
+  for (let start = 0; start < gValues.length; start += 1) {
+    const startTMs = tMonoMs[start] ?? 0;
+    if (end < start) end = start;
+    while (end + 1 < gValues.length && (tMonoMs[end + 1] ?? 0) - startTMs <= windowMs) {
       end += 1;
     }
     if (end === start) continue;
-    const windowValues = series.slice(start, end + 1);
-    const avgG = windowValues.reduce((sum, entry) => sum + entry.g, 0) / windowValues.length;
+    const count = end - start + 1;
+    const avgG = ((prefixSum[end + 1] ?? 0) - (prefixSum[start] ?? 0)) / count;
     // Braking is longG < 0 in this codebase's convention (see cornerMetrics).
     // A window that is not itself braking by at least this much cannot be ABS.
     if (avgG > -minAvgDecelG) continue;
-    const cycles = countSwings(
-      windowValues.map((entry) => entry.g),
-      swingG,
-    );
+    const cycles = countSwings(gValues, start, end, swingG, minCycles);
     if (cycles >= minCycles) return { available: true, detected: true };
   }
   return { available: true, detected: false };

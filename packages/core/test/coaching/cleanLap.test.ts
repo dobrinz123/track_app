@@ -1,3 +1,4 @@
+import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 
 import { GRAVITY_MPS2, classifyLap } from '../../src/coaching';
@@ -482,5 +483,181 @@ describe('classifyLap: ABS-like oscillation (R2-1)', () => {
     const result = classifyLap(LAP, samples, OPTIONS);
     expect(result.labels).not.toContain('ABS_SUSPECTED');
     expect(result.absOscillationDetected).toBe(false);
+  });
+});
+
+/**
+ * Ticket P5-FIX-ABS (Codex P5-REV finding 13): `evaluateAbsOscillation` /
+ * `countSwings` were rewritten as a single-pass monotonic two-pointer /
+ * streaming window (persisted `end`, O(1) prefix-sum average, no per-window
+ * slice/map allocation, early exit at `minCycles`) instead of the OLD version,
+ * which re-derived `end` from `start` and re-sliced/re-reduced the window on
+ * every outer step -- worst-case O(n^2) when many samples land within one
+ * `absWindowMs` of each other.
+ *
+ * The OLD implementation is ported here VERBATIM (renamed) as an oracle: it
+ * is deliberately kept exactly as it was, including its own quadratic cost,
+ * so the property test below can assert the two versions agree on the
+ * VERDICT (`absOscillationDetected`) across random series without asserting
+ * anything about the old version's performance.
+ */
+function oldCountSwings(values: readonly number[], minSwing: number): number {
+  if (values.length === 0) return 0;
+  let cycles = 0;
+  let lastExtreme = values[0] ?? 0;
+  let direction: -1 | 0 | 1 = 0;
+  for (let index = 1; index < values.length; index += 1) {
+    const previous = values[index - 1] ?? 0;
+    const current = values[index] ?? 0;
+    const delta = current - previous;
+    if (delta === 0) continue;
+    const dir: 1 | -1 = delta > 0 ? 1 : -1;
+    if (direction === 0) {
+      lastExtreme = previous;
+    } else if (dir !== direction) {
+      const swing = Math.abs(previous - lastExtreme);
+      if (swing >= minSwing) {
+        cycles += 1;
+        lastExtreme = previous;
+      }
+    }
+    direction = dir;
+  }
+  return cycles;
+}
+
+function oldFinite(value: number | undefined): value is number {
+  return value !== undefined && Number.isFinite(value);
+}
+
+function oldEvaluateAbsOscillation(
+  samples: readonly CornerLapSample[],
+  swingG: number,
+  minCycles: number,
+  windowMs: number,
+  minAvgDecelG: number,
+): { available: boolean; detected: boolean } {
+  const series: { tMonoMs: number; g: number }[] = [];
+  for (const sample of samples) {
+    const g = sample.channels?.longG;
+    if (oldFinite(g)) series.push({ tMonoMs: sample.tMonoMs, g });
+  }
+  if (series.length < minCycles + 2) return { available: false, detected: false };
+
+  for (let start = 0; start < series.length; start += 1) {
+    let end = start;
+    const startEntry = series[start];
+    if (startEntry === undefined) continue;
+    while (end + 1 < series.length && (series[end + 1]?.tMonoMs ?? 0) - startEntry.tMonoMs <= windowMs) {
+      end += 1;
+    }
+    if (end === start) continue;
+    const windowValues = series.slice(start, end + 1);
+    const avgG = windowValues.reduce((sum, entry) => sum + entry.g, 0) / windowValues.length;
+    if (avgG > -minAvgDecelG) continue;
+    const cycles = oldCountSwings(
+      windowValues.map((entry) => entry.g),
+      swingG,
+    );
+    if (cycles >= minCycles) return { available: true, detected: true };
+  }
+  return { available: true, detected: false };
+}
+
+describe('classifyLap: ABS oscillation streaming rewrite (P5-FIX-ABS, property + perf)', () => {
+  const rawSampleArb = fc.record({
+    dtMs: fc.integer({ min: 0, max: 400 }),
+    g: fc.double({ min: Math.fround(-3), max: Math.fround(3), noNaN: true }),
+    present: fc.boolean(),
+  });
+
+  const absParamsArb = fc.record({
+    absSwingG: fc.double({ min: Math.fround(0.05), max: Math.fround(1), noNaN: true }),
+    absMinCycles: fc.integer({ min: 1, max: 6 }),
+    absWindowMs: fc.integer({ min: 20, max: 2_000 }),
+    absMinAvgDecelG: fc.double({ min: 0, max: Math.fround(1), noNaN: true }),
+  });
+
+  function buildSamples(spec: readonly { dtMs: number; g: number; present: boolean }[]): CornerLapSample[] {
+    let tMonoMs = 0;
+    return spec.map((entry, index) => {
+      tMonoMs += entry.dtMs;
+      return {
+        tMonoMs,
+        distanceM: index,
+        ...(entry.present ? { channels: { longG: entry.g } } : {}),
+      };
+    });
+  }
+
+  it('matches the OLD from-scratch implementation on random series (property, oracle)', () => {
+    fc.assert(
+      fc.property(
+        fc.array(rawSampleArb, { minLength: 0, maxLength: 250 }),
+        absParamsArb,
+        (spec, params) => {
+          const samples = buildSamples(spec);
+          const oracle = oldEvaluateAbsOscillation(
+            samples,
+            params.absSwingG,
+            params.absMinCycles,
+            params.absWindowMs,
+            params.absMinAvgDecelG,
+          );
+          const result = classifyLap(
+            LAP,
+            samples,
+            { totalLengthM: Math.max(1, samples.length), ...params },
+          );
+          expect(result.absOscillationDetected).toBe(oracle.detected);
+          expect(result.labels.includes('ABS_SUSPECTED')).toBe(oracle.detected);
+        },
+      ),
+      { numRuns: 300 },
+    );
+  });
+
+  it('handles 50 000 samples of realistic, ABS-pulsing telemetry in well under 2 s', () => {
+    const n = 50_000;
+    const samples: CornerLapSample[] = new Array(n);
+    // 200 Hz (5 ms apart) -- a realistic high-rate accelerometer feed -- with
+    // a sustained ~5 Hz brake-release-reapply pulse throughout, so genuine
+    // detections are found (and the swing scan can early-exit) rather than
+    // scanning every window to exhaustion.
+    for (let index = 0; index < n; index += 1) {
+      const tMonoMs = index * 5;
+      const cyclePos = (index % 40) / 40; // ~5 Hz worth of pulses at 200 Hz
+      const g = cyclePos < 0.5 ? -1.4 * GRAVITY_MPS2 : -0.3 * GRAVITY_MPS2;
+      samples[index] = { tMonoMs, distanceM: index, channels: { longG: g } };
+    }
+    const start = Date.now();
+    const result = classifyLap(LAP, samples, { totalLengthM: n });
+    const elapsedMs = Date.now() - start;
+    expect(result.absOscillationDetected).toBe(true);
+    expect(elapsedMs).toBeLessThan(2_000);
+  });
+
+  it('handles 50 000 samples clustered within one window (the exact worst case the rewrite targets) in well under 2 s', () => {
+    // Every sample sits within `absWindowMs` (700 ms default) of every other
+    // one, at a CONSTANT (non-braking) g -- the pathological input where the
+    // OLD implementation re-derived and re-scanned an ~n-sized window from
+    // scratch for every one of the n starting points (O(n^2)). The average
+    // guard fails immediately here, so this isolates the two-pointer +
+    // prefix-sum fix (the window-boundary/average side of the rewrite) from
+    // the swing-scan side.
+    const n = 50_000;
+    const samples: CornerLapSample[] = new Array(n);
+    // Strictly increasing (monotonic, as real telemetry always is) but the
+    // WHOLE 50 000-sample span is under 700 ms, so every start's window
+    // reaches all the way to the end -- the exact shape that made the OLD
+    // per-start `end = start; while (...) end += 1` re-derivation quadratic.
+    for (let index = 0; index < n; index += 1) {
+      samples[index] = { tMonoMs: index * 0.01, distanceM: index, channels: { longG: 0 } };
+    }
+    const start = Date.now();
+    const result = classifyLap(LAP, samples, { totalLengthM: n });
+    const elapsedMs = Date.now() - start;
+    expect(result.absOscillationDetected).toBe(false);
+    expect(elapsedMs).toBeLessThan(2_000);
   });
 });
