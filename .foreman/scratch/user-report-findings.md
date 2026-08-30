@@ -7,3 +7,13 @@ F1 (secțiunea 3, tur curat/anomal) — REGULILE DE ANOMALIE SUNT PREA AGRESIVE 
   REGULA CERUTĂ DE USER: un tur e anulabil DOAR dacă (a) e incomplet, (b) ieși în decor (off-track), (c) GPS slab / lipsă informații.
   Implicație de design: pragurile de g/yaw/ABS pot rămâne cel mult ca ETICHETE informative pe tur (nu excludere din referință/envelope) —
   de decis la implementare; envelope-ul de siguranță V2 poate folosi separat doar tururi fără off-track.
+F2 (secțiunea 6 raport / P5b UI) — RAPORTUL TREBUIE SĂ FIE INTERACTIV, NU TEXT MULT:
+  - lumea nu citește paragrafe; propozițiile lungi gen exemplul T3 sunt OK doar ca RAPORT FINAL extras (export .md/JSON)
+    la sfârșitul trackday-ului;
+  - în aplicație: viraje pe care le atingi → detalii vizuale (cifre, badge-uri, bare/sparkline), scris minim;
+  - ÎN TIMPUL trackday-ului userul vrea evoluție "live": algoritmul să ofere HINTURI ȘI SFATURI între stinturi
+    (rapid, imediat după fiecare ieșire), nu doar la final.
+  Notă LEAD de rezolvat la implementare: contractul de siguranță spune sugestii doar post-sesiune și opt-in — "live între
+  stinturi" = post-sesiune rapid (compatibil); sfaturi în timpul condusului rămân excluse; de clarificat cu userul dacă
+  vrea să activăm sugestiile (V2) acum, cu limitele existente (10 m / +3 km/h / 1 schimbare per viraj, doar în anvelopa
+  demonstrată).
