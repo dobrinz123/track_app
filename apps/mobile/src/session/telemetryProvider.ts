@@ -336,9 +336,17 @@ export function decodeBrakeBindingValue(binding: ResolvedBrakeBinding, raw: Uint
     // (a) flagBit: read the bit, relative to the rest level's OWN bit -- a
     // flag that clears when actuated (rest bit 1) reads pressed exactly as
     // correctly as one that sets (rest bit 0).
+    //
+    // Ticket P4n-FIX1 R4 (binding, Codex re-review HIGH): a missing/unparseable
+    // restValueHex used to fall back to "assume rest bit 0" -- which fabricates
+    // a reading the moment that assumption is wrong (a flag that is actually 1
+    // at rest would then read every rest sample as pressed). Invalid rest
+    // evidence is exactly the same "cannot judge this level" case (b) and (c)
+    // already refuse to guess through: no sample, never a guess.
     if (binding.flagBit !== null) {
       const restValue = brakeBindingRestValue(binding);
-      const restBit = restValue === null ? 0 : (restValue >>> binding.flagBit) & 1;
+      if (restValue === null) return null;
+      const restBit = (restValue >>> binding.flagBit) & 1;
       const bit = (value >>> binding.flagBit) & 1;
       return bit === restBit ? 0 : 100;
     }

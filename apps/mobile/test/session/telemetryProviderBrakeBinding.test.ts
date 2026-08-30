@@ -364,6 +364,33 @@ describe('P4n-FIX1 Q1: boolean decode precedence (flagBit > activeValueHex > coa
     });
   });
 
+  /**
+   * Ticket P4n-FIX1 R4 (binding, Codex re-review HIGH): a missing/unparseable
+   * `restValueHex` used to make the flagBit rule ASSUME rest bit 0 -- so a
+   * flag that is actually 1 at rest would read every rest sample as pressed.
+   * Invalid rest evidence must refuse to judge, exactly like (b)/(c) already do.
+   */
+  describe('(a) flagBit with invalid/missing rest evidence -- refuses to guess, never fabricates', () => {
+    it('restValueHex missing (null) -> no sample, for either bit value', () => {
+      const noRest = resolveOne([
+        binding({ evidenceJson: JSON.stringify({ min: 4, max: 5, byteOffset: null, flagBit: 0, activeValueHex: '05' }) }),
+      ]) as ResolvedBrakeBinding;
+      expect(noRest.flagBit).toBe(0);
+      expect(decodeBrakeBindingValue(noRest, Uint8Array.from([0x04]))).toBeNull();
+      expect(decodeBrakeBindingValue(noRest, Uint8Array.from([0x05]))).toBeNull();
+    });
+
+    it('restValueHex garbage (unparseable hex) -> no sample', () => {
+      const garbageRest = resolveOne([
+        binding({
+          evidenceJson: JSON.stringify({ restValueHex: 'zz', min: 4, max: 5, byteOffset: null, flagBit: 0, activeValueHex: '05' }),
+        }),
+      ]) as ResolvedBrakeBinding;
+      expect(decodeBrakeBindingValue(garbageRest, Uint8Array.from([0x04]))).toBeNull();
+      expect(decodeBrakeBindingValue(garbageRest, Uint8Array.from([0x05]))).toBeNull();
+    });
+  });
+
   it('(a) flagBit direction follows the REST level\'s own bit, not "bit set = active"', () => {
     // A flag that CLEARS when actuated (DME 0x4007-shaped: rest 0x9001 bit0=1,
     // active 0x9000 bit0=0) must read "pressed" just as correctly as one that

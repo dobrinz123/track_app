@@ -856,3 +856,79 @@ describe('scoreSignalCandidates -- P4m item 11 (sparse but consistent)', () => {
     expect(score!.verdict).not.toBe('found');
   });
 });
+
+/**
+ * Ticket P4n-FIX1 R5 (binding, Codex re-review MEDIUM): `activeValueHex` is
+ * derived from the samples the scorer ACTUALLY observed as "active" (a
+ * press/hold-window sample away from the rest level), never inferred after
+ * the fact from `min`/`max` -- which cannot prove a two-level series, and
+ * has no answer at all for a block series (whose `min`/`max` describe one
+ * BYTE, not the whole multi-byte response `restValueHex` carries).
+ */
+describe('scoreSignalCandidates -- P4n-FIX1 R5 (activeValueHex)', () => {
+  const timeline = buildMetronomeTimeline(SCRIPT);
+
+  it('0x500C (0x04 released -> 0x05 pressed): activeValueHex is "05"', () => {
+    const samples = layOnTimeline(
+      timeline,
+      ECU_29,
+      0x500c,
+      cycles(
+        ['04', '04'],
+        [
+          [['05', '05'], ['04', '04']],
+          [['05', '05'], ['04', '04']],
+          [['05', '05'], ['04', '04']],
+          [['05', '05'], ['04', '04']],
+          [['05', '05'], ['04', '04']],
+        ],
+      ),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'boolean-edge' });
+    expect(score!.activeValueHex).toBe('05');
+  });
+
+  it('a block series (byteOffset 4): activeValueHex is the WHOLE response, and the selected byte reads the active level', () => {
+    // Same fixture as "G3: a block reports the SELECTED offset min/max,
+    // never null" above -- byte 4 moves 04 -> 05, the rest of the 5-byte
+    // response never changes.
+    const rest = ['0001020304', '0001020304'];
+    const pressed = ['0001020305', '0001020305'];
+    const samples = layOnTimeline(
+      timeline,
+      ECU_29,
+      0x5101,
+      cycles(rest, [
+        [pressed, rest],
+        [pressed, rest],
+        [pressed, rest],
+        [pressed, rest],
+        [pressed, rest],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'boolean-edge' });
+    expect(score!.byteOffset).toBe(4);
+    expect(score!.activeValueHex).toBe('0001020305');
+    // The selected byte's own active value, read out of the whole-response hex.
+    const activeByte = score!.activeValueHex!.slice(score!.byteOffset! * 2, score!.byteOffset! * 2 + 2);
+    expect(activeByte).toBe('05');
+  });
+
+  it('an analog reading has no single "active level" -- activeValueHex is undefined', () => {
+    const samples = layOnTimeline(
+      timeline,
+      ECU_12,
+      0x58b7,
+      cycles(['00'], [
+        [['20'], ['00']],
+        [['20'], ['00']],
+        [['20'], ['00']],
+        [['20'], ['00']],
+        [['20'], ['00']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'analog-monotone' });
+    expect(score!.verdict).toBe('found');
+    expect(score!.activeValueHex).toBeUndefined();
+  });
+});

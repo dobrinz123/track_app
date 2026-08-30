@@ -155,6 +155,18 @@ export interface SignalCandidateScore {
    * the transition-based count.
    */
   windowMatchedEdges?: number;
+  /**
+   * Ticket P4n-FIX1 R5 (binding): for a boolean/flag DID (`flagBit` set, or
+   * the target's own `expectedShape` is `boolean-edge`) — the WHOLE-RESPONSE
+   * hex of a sample actually observed "active" (a press/hold-window sample
+   * whose scored series differed from the rest level) during THIS session,
+   * in the SAME whole-response representation `restValueHex` already uses.
+   * The modal (most frequent) such hex, so one stray misread does not decide
+   * it. `undefined` for an analog DID (no single "active level" to name --
+   * only a direction), and for a boolean/flag DID with no rest level to
+   * compare against or no active sample ever observed.
+   */
+  activeValueHex?: string;
 }
 
 export interface SignalScoringOptions {
@@ -248,6 +260,43 @@ function singleBitFlag(values: readonly number[]): number | null {
   return Math.round(Math.log2(xor));
 }
 
+/**
+ * Ticket P4n-FIX1 R5 (binding, Codex re-review MEDIUM): the confirm path used
+ * to INFER a binding's active level from `min`/`max` after the fact, which
+ * cannot prove a two-level series (a wider excursion looks identical) and
+ * has no answer at all for a block series (`min`/`max` there is a single
+ * BYTE's range, not a whole response). The scorer already knows exactly
+ * which samples were "active" -- this returns the modal WHOLE-RESPONSE hex
+ * (the SAME representation `restValueHex` uses) among the press/hold-window
+ * samples that read away from `restScalar` at `byteOffset` (`null` = the
+ * whole response is the series). `undefined` when there is no rest level to
+ * compare against, or no such sample was ever observed.
+ */
+function deriveActiveValueHex(
+  entries: readonly { raw: Uint8Array; step: MetronomeStep | null }[],
+  byteOffset: number | null,
+  restScalar: number | null,
+): string | undefined {
+  if (restScalar === null) return undefined;
+  const counts = new Map<string, number>();
+  for (const entry of entries) {
+    if (entry.step === null || (entry.step.kind !== 'press' && entry.step.kind !== 'hold')) continue;
+    const value = byteOffset === null ? decodeUnsigned(entry.raw) : (entry.raw[byteOffset] ?? null);
+    if (value === null || value === restScalar) continue;
+    const hex = bytesToHex(entry.raw);
+    counts.set(hex, (counts.get(hex) ?? 0) + 1);
+  }
+  let bestHex: string | undefined;
+  let bestCount = 0;
+  for (const [hex, count] of counts) {
+    if (count > bestCount) {
+      bestHex = hex;
+      bestCount = count;
+    }
+  }
+  return bestHex;
+}
+
 /** The most frequent value, ties broken by first appearance (deterministic). */
 function modeOf(values: readonly number[]): number | null {
   if (values.length === 0) return null;
@@ -296,6 +345,23 @@ interface SeriesScore {
   flagBit: number | null;
   /** P4m (item 11): everything the sparse-but-consistent rule can decide from THIS series alone (window coverage is a per-DID fact, applied by the caller). */
   sparseConsistent: boolean;
+  /**
+   * Ticket P4n-FIX1 R5 (binding): whether THIS series was read as boolean/flag
+   * (`shape === 'boolean-edge'` or a detected `flagBit`) -- the DID-level loop
+   * only derives {@link SignalCandidateScore.activeValueHex} for such a
+   * series, never for a plain analog reading (which has no single "active
+   * level", only a direction).
+   */
+  booleanLike: boolean;
+  /**
+   * Ticket P4n-FIX1 R5 (binding): the exact rest level THIS series compared
+   * every sample against (`modeOf` for boolean/flag, `meanOf` for analog) --
+   * exposed so the DID-level loop can classify a press/hold sample as
+   * "active" using the SAME criterion the series itself used, rather than
+   * re-deriving (and potentially disagreeing with) it. `null` only when there
+   * was no baseline evidence at all for a boolean/flag series.
+   */
+  restScalar: number | null;
 }
 
 type ScoringThresholds = Required<Omit<SignalScoringOptions, 'minSamplesPerWindow'>>;
@@ -496,6 +562,8 @@ function scoreSeries(
     windowMatchedEdges,
     flagBit,
     sparseConsistent,
+    booleanLike: boolean,
+    restScalar: restValue,
   };
 }
 
@@ -865,6 +933,9 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
       sparse: finalVerdict === 'found' && windowsBelowMinimum > 0,
       insufficientReason: insufficient ? 'undersampled' : null,
       verdictCapReason: insufficient || finalVerdict === 'found' ? null : verdictCapReason,
+      // Ticket P4n-FIX1 R5 (binding): only for a boolean/flag series -- an
+      // analog reading has no single "active level" to name.
+      activeValueHex: best.booleanLike ? deriveActiveValueHex(group.entries, best.byteOffset, best.restScalar) : undefined,
     });
   }
 
