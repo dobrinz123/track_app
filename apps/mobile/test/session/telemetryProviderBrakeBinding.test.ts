@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   decodeBrakeBindingValue,
-  resolveBrakeBindingFromProfile,
+  resolveBrakeBindingsFromProfile,
   type ResolvedBrakeBinding,
 } from '../../src/session/telemetryProvider';
 import type { VehicleProfileBinding } from '../../src/persistence/didSweepStore';
@@ -12,7 +12,21 @@ import type { VehicleProfileBinding } from '../../src/persistence/didSweepStore'
  * (data, not code)" — `brakePct`/`brakeSwitch` resolve from the binding the
  * Signal Finder confirmed, if there is one. Existing `accelPedalPct`
  * (mode-01 0x5A) stays the default binding, untouched.
+ *
+ * Ticket P4n N1 (binding, field test 7 2026-08-30): the provider used to
+ * resolve ONE brake binding (preference `brakePressure` > `brakeSwitch`), so
+ * confirming a pressure binding silently DROPPED an already-working switch
+ * binding from the poll plan. `resolveBrakeBindingsFromProfile` now resolves
+ * BOTH field-confirmed bindings independently -- each is its own channel
+ * (`brakeSwitch` and/or `brakePct`), never a preference between them.
  */
+
+/** Single-binding convenience for the tests below that only care about one channel resolving (or not). */
+function resolveOne(bindings: readonly VehicleProfileBinding[]): ResolvedBrakeBinding | null {
+  const resolved = resolveBrakeBindingsFromProfile(bindings);
+  expect(resolved.length).toBeLessThanOrEqual(1);
+  return resolved[0] ?? null;
+}
 
 function binding(overrides: Partial<VehicleProfileBinding> = {}): VehicleProfileBinding {
   return {
@@ -29,14 +43,14 @@ function binding(overrides: Partial<VehicleProfileBinding> = {}): VehicleProfile
   };
 }
 
-describe('resolveBrakeBindingFromProfile', () => {
+describe('resolveBrakeBindingsFromProfile', () => {
   it('returns null when the profile carries no brake binding at all', () => {
-    expect(resolveBrakeBindingFromProfile([])).toBeNull();
-    expect(resolveBrakeBindingFromProfile([binding({ channel: 'accelPedal' })])).toBeNull();
+    expect(resolveOne([])).toBeNull();
+    expect(resolveOne([binding({ channel: 'accelPedal' })])).toBeNull();
   });
 
   it('resolves a confirmed brakeSwitch binding into a DID request for its own ECU', () => {
-    const resolved = resolveBrakeBindingFromProfile([binding()]);
+    const resolved = resolveOne([binding()]);
     expect(resolved).toMatchObject({
       channel: 'brakeSwitch',
       ecu: 0x29,
@@ -47,8 +61,13 @@ describe('resolveBrakeBindingFromProfile', () => {
     expect(resolved!.provenance).toContain('Signal Finder');
   });
 
-  it('prefers a brakePressure binding (a real analog) over a bare switch', () => {
-    const resolved = resolveBrakeBindingFromProfile([
+  /**
+   * Ticket P4n N1 (field test 7, 2026-08-30): "the user confirmed brakeSwitch
+   * = 0x29/0x500C AND brakePressure = 0x12/0x58B7" -- BOTH must resolve, each
+   * as its own channel, never one dropping the other.
+   */
+  it('resolves BOTH a confirmed brakeSwitch and a confirmed brakePressure binding, independently', () => {
+    const resolved = resolveBrakeBindingsFromProfile([
       binding(),
       binding({
         channel: 'brakePressure',
@@ -59,23 +78,42 @@ describe('resolveBrakeBindingFromProfile', () => {
         evidenceJson: JSON.stringify({ restValueHex: '00', min: 0, max: 200, byteOffset: null }),
       }),
     ]);
-    expect(resolved).toMatchObject({ channel: 'brakePct', ecu: 0x12, requestHex: '58B7', decodeKind: 'scaled-0-100' });
+    expect(resolved).toHaveLength(2);
+    const bySwitch = resolved.find((r) => r.channel === 'brakeSwitch');
+    const byPct = resolved.find((r) => r.channel === 'brakePct');
+    expect(bySwitch).toMatchObject({ ecu: 0x29, requestHex: '500C', decodeKind: 'boolean-0-100' });
+    expect(byPct).toMatchObject({ ecu: 0x12, requestHex: '58B7', decodeKind: 'scaled-0-100' });
+  });
+
+  it('resolves only brakePct when only a brakePressure binding is confirmed (no switch to drop, none to fabricate)', () => {
+    const resolved = resolveBrakeBindingsFromProfile([
+      binding({
+        channel: 'brakePressure',
+        ecu: 0x12,
+        did: 0x58b7,
+        length: 1,
+        decode: 'u8 hPa',
+        evidenceJson: JSON.stringify({ restValueHex: '00', min: 0, max: 200, byteOffset: null }),
+      }),
+    ]);
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]).toMatchObject({ channel: 'brakePct', ecu: 0x12, requestHex: '58B7' });
   });
 
   it('ignores a binding that never reached field-confirmed', () => {
-    expect(resolveBrakeBindingFromProfile([binding({ status: 'hypothesis' })])).toBeNull();
-    expect(resolveBrakeBindingFromProfile([binding({ status: 'weak' })])).toBeNull();
+    expect(resolveOne([binding({ status: 'hypothesis' })])).toBeNull();
+    expect(resolveOne([binding({ status: 'weak' })])).toBeNull();
   });
 
   it('survives a corrupt evidence blob rather than throwing', () => {
-    const resolved = resolveBrakeBindingFromProfile([binding({ evidenceJson: 'not json{' })]);
+    const resolved = resolveOne([binding({ evidenceJson: 'not json{' })]);
     expect(resolved).not.toBeNull();
     expect(resolved!.restValueHex).toBeNull();
   });
 });
 
 describe('decodeBrakeBindingValue', () => {
-  const brakeSwitch = resolveBrakeBindingFromProfile([binding()]) as ResolvedBrakeBinding;
+  const brakeSwitch = resolveOne([binding()]) as ResolvedBrakeBinding;
 
   it('a boolean channel reads 0 at rest and 100 when it leaves the rest level', () => {
     expect(decodeBrakeBindingValue(brakeSwitch, Uint8Array.from([0x04]))).toBe(0);
@@ -83,7 +121,7 @@ describe('decodeBrakeBindingValue', () => {
   });
 
   it('an analog channel scales its observed range onto 0..100 and clamps outside it', () => {
-    const pressure = resolveBrakeBindingFromProfile([
+    const pressure = resolveOne([
       binding({
         channel: 'brakePressure',
         did: 0x58b7,
@@ -96,7 +134,7 @@ describe('decodeBrakeBindingValue', () => {
   });
 
   it('reads the confirmed BYTE OFFSET of a block response', () => {
-    const block = resolveBrakeBindingFromProfile([
+    const block = resolveOne([
       binding({
         did: 0x4000,
         length: 12,
@@ -122,7 +160,7 @@ describe('decodeBrakeBindingValue', () => {
    * boolean rule compares that WHOLE value against the rest value.
    */
   describe('H4: multi-byte bindings decode as one big-endian scalar', () => {
-    const twoByteSwitch = resolveBrakeBindingFromProfile([
+    const twoByteSwitch = resolveOne([
       binding({
         did: 0x500b,
         length: 2,
@@ -140,7 +178,7 @@ describe('decodeBrakeBindingValue', () => {
     });
 
     it('a multi-byte analog scales the full value, not one byte, against the observed range', () => {
-      const pressure = resolveBrakeBindingFromProfile([
+      const pressure = resolveOne([
         binding({
           channel: 'brakePressure',
           did: 0x500b,
@@ -154,7 +192,7 @@ describe('decodeBrakeBindingValue', () => {
     });
 
     it('a response WIDER than 4 bytes still reads the confirmed byte offset (block bindings unchanged)', () => {
-      const block = resolveBrakeBindingFromProfile([
+      const block = resolveOne([
         binding({
           did: 0x4000,
           length: 12,
@@ -171,7 +209,7 @@ describe('decodeBrakeBindingValue', () => {
     });
 
     it('an unreadable rest value never fabricates a reading', () => {
-      const broken = resolveBrakeBindingFromProfile([
+      const broken = resolveOne([
         binding({ evidenceJson: JSON.stringify({ restValueHex: 'zz', min: null, max: null, byteOffset: null }) }),
       ]) as ResolvedBrakeBinding;
       expect(decodeBrakeBindingValue(broken, Uint8Array.from([0x05]))).toBeNull();
@@ -190,7 +228,7 @@ describe('decodeBrakeBindingValue', () => {
  * is not this signal, so it produces no sample at all.
  */
 describe('P4l-FIX4 N4: a live response must match the confirmed binding length', () => {
-  const twoByte = resolveBrakeBindingFromProfile([
+  const twoByte = resolveOne([
     binding({
       did: 0x500b,
       length: 2,
@@ -214,7 +252,7 @@ describe('P4l-FIX4 N4: a live response must match the confirmed binding length',
   });
 
   it('applies to an analog binding too (no fabricated pressure from a mis-sized frame)', () => {
-    const pressure = resolveBrakeBindingFromProfile([
+    const pressure = resolveOne([
       binding({
         channel: 'brakePressure',
         did: 0x500b,
@@ -228,7 +266,7 @@ describe('P4l-FIX4 N4: a live response must match the confirmed binding length',
   });
 
   it('a block binding is length-checked the same way', () => {
-    const block = resolveBrakeBindingFromProfile([
+    const block = resolveOne([
       binding({
         did: 0x4000,
         length: 12,
@@ -263,13 +301,13 @@ describe('the DME brake binding of field test 5 (0x12 0x4002, 0x01 rest / 0x19 a
   });
 
   it('resolves to a DID request on the DME s own address', () => {
-    const resolved = resolveBrakeBindingFromProfile([dmeBinding]);
+    const resolved = resolveOne([dmeBinding]);
     expect(resolved).toMatchObject({ channel: 'brakeSwitch', ecu: 0x12, requestHex: '4002', decodeKind: 'boolean-0-100', length: 1 });
     expect(resolved!.restValueHex).toBe('01');
   });
 
   it('reads 0 at 0x01 and 100 at 0x19 -- the rest level is what defines "pressed", not a bit', () => {
-    const resolved = resolveBrakeBindingFromProfile([dmeBinding]) as ResolvedBrakeBinding;
+    const resolved = resolveOne([dmeBinding]) as ResolvedBrakeBinding;
     expect(decodeBrakeBindingValue(resolved, Uint8Array.from([0x01]))).toBe(0);
     expect(decodeBrakeBindingValue(resolved, Uint8Array.from([0x19]))).toBe(100);
     // Any other level is off-rest too -- honest for a switch whose ECU

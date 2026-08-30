@@ -126,19 +126,31 @@ describe('next concrete step (honesty, item 4)', () => {
 describe('Supra catalog after field test 5 (P4m M5)', () => {
   const catalog = resolveSignalTargetCatalog('toyota-supra-b58');
 
-  it('the brake leads with the DME 0x4002 boolean (0x01 rest -> 0x19 pressed), keeping 0x29 0x500C/0x500B behind it', () => {
+  /**
+   * Ticket P4n N5 (binding, field test 7 2026-08-30): the DME's 0x12/0x4002
+   * rest byte moves with the ENGINE (0x01 off / 0x83 running, bit7 = engine
+   * flag) -- it is not a pure switch, so it no longer leads the brake's own
+   * hypothesis list and is annotated `analog-monotone` rather than left to
+   * inherit the target's `boolean-edge` shape. The real switch, 0x29/0x500C
+   * (user-confirmed in the field), leads instead.
+   */
+  it('the brake leads with 0x29 0x500C (field-confirmed), 0x12 0x4002 demoted to an analog "brake pedal travel" reading', () => {
     const brake = findSignalTarget(catalog, 'brakeSwitch')!;
     expect(brake.hypotheses.map((h) => [h.ecu, h.did])).toEqual([
-      [0x12, 0x4002],
       [0x29, 0x500c],
       [0x29, 0x500b],
+      [0x12, 0x4002],
     ]);
-    const dme = brake.hypotheses[0]!;
-    expect(dme).toMatchObject({ length: 1, status: 'field-observed' });
-    expect(dme.decode).toContain('0x01');
-    expect(dme.decode).toContain('0x19');
-    expect(dme.provenance).toMatch(/field test 5/i);
-    expect(dme.provenance).toContain('2026-08-29-brakeSwitch.json');
+    const dme = brake.hypotheses.find((h) => h.ecu === 0x12 && h.did === 0x4002)!;
+    expect(dme).toMatchObject({ length: 1, status: 'field-observed', expectedShape: 'analog-monotone' });
+    expect(dme.decode.toLowerCase()).toContain('brake pedal travel');
+    expect(dme.decode).toContain('0x83');
+    expect(dme.decode.toLowerCase()).toContain('engine');
+    expect(dme.provenance).toMatch(/field test 7/i);
+    expect(dme.provenance).toContain('2026-08-30');
+    // The 0x29 switch is still the boolean-edge target's own hypothesis (no override).
+    const switchHyp = brake.hypotheses.find((h) => h.ecu === 0x29 && h.did === 0x500c)!;
+    expect(switchHyp.expectedShape).toBeUndefined();
   });
 
   it('the accelerator leads with the DME 0x4007 idle flag (bit0), and 0x4659 is downgraded to weak (engine-running only)', () => {

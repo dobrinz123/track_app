@@ -113,31 +113,75 @@ function parseBindingEvidence(evidenceJson: string): BindingEvidence {
   }
 }
 
-/** A brake PRESSURE binding is a real analog and always wins over a bare switch; only `field-confirmed` bindings are ever used to drive telemetry. */
-const BRAKE_BINDING_PREFERENCE: readonly string[] = ['brakePressure', 'brakeSwitch'];
+/**
+ * Ticket P4n N1 (binding, field test 7 2026-08-30): the two brake channels
+ * this module knows how to build a poll entry for, and the persisted profile
+ * `channel` string / decode rule each maps to. NOT a preference order any
+ * more (P4l-FIX1's original design) -- field test 7 found the user had
+ * confirmed BOTH `brakeSwitch` (0x29/0x500C) and `brakePressure`
+ * (0x12/0x58B7) on the same car, and the old "pressure wins, switch is
+ * dropped" rule silently removed the working switch channel from the poll
+ * plan the moment pressure was confirmed. Each channel below is resolved
+ * independently; either, both, or neither may come back.
+ */
+const BRAKE_BINDING_CHANNELS: ReadonlyArray<{ profileChannel: string; channel: BrakeBindingChannel; decodeKind: ResolvedBrakeBinding['decodeKind'] }> = [
+  { profileChannel: 'brakeSwitch', channel: 'brakeSwitch', decodeKind: 'boolean-0-100' },
+  { profileChannel: 'brakePressure', channel: 'brakePct', decodeKind: 'scaled-0-100' },
+];
 
-export function resolveBrakeBindingFromProfile(
+function resolveOneBrakeBinding(
   bindings: readonly VehicleProfileBindingLike[],
+  entry: (typeof BRAKE_BINDING_CHANNELS)[number],
 ): ResolvedBrakeBinding | null {
-  for (const channel of BRAKE_BINDING_PREFERENCE) {
-    const binding = bindings.find((candidate) => candidate.channel === channel && candidate.status === 'field-confirmed');
-    if (binding === undefined) continue;
-    const evidence = parseBindingEvidence(binding.evidenceJson);
-    const byteOffset = typeof evidence.byteOffset === 'number' && evidence.byteOffset >= 0 ? Math.floor(evidence.byteOffset) : 0;
-    return {
-      channel: channel === 'brakePressure' ? 'brakePct' : 'brakeSwitch',
-      ecu: binding.ecu,
-      requestHex: binding.did.toString(16).toUpperCase().padStart(4, '0'),
-      length: binding.length,
-      decodeKind: channel === 'brakePressure' ? 'scaled-0-100' : 'boolean-0-100',
-      byteOffset,
-      restValueHex: typeof evidence.restValueHex === 'string' ? evidence.restValueHex : null,
-      observedMin: typeof evidence.min === 'number' ? evidence.min : null,
-      observedMax: typeof evidence.max === 'number' ? evidence.max : null,
-      provenance: `Signal Finder field-confirmed binding (${binding.decode})`,
-    };
+  const binding = bindings.find((candidate) => candidate.channel === entry.profileChannel && candidate.status === 'field-confirmed');
+  if (binding === undefined) return null;
+  const evidence = parseBindingEvidence(binding.evidenceJson);
+  const byteOffset = typeof evidence.byteOffset === 'number' && evidence.byteOffset >= 0 ? Math.floor(evidence.byteOffset) : 0;
+  return {
+    channel: entry.channel,
+    ecu: binding.ecu,
+    requestHex: binding.did.toString(16).toUpperCase().padStart(4, '0'),
+    length: binding.length,
+    decodeKind: entry.decodeKind,
+    byteOffset,
+    restValueHex: typeof evidence.restValueHex === 'string' ? evidence.restValueHex : null,
+    observedMin: typeof evidence.min === 'number' ? evidence.min : null,
+    observedMax: typeof evidence.max === 'number' ? evidence.max : null,
+    provenance: `Signal Finder field-confirmed binding (${binding.decode})`,
+  };
+}
+
+/**
+ * Every field-confirmed brake binding the profile carries, each resolved
+ * independently (see {@link BRAKE_BINDING_CHANNELS}'s own doc comment) --
+ * `[]`, one, or both of `brakeSwitch`/`brakePct`. Order: `brakeSwitch` first
+ * when both are present (stable, does not affect polling -- each becomes its
+ * own poll entry regardless of order).
+ */
+export function resolveBrakeBindingsFromProfile(
+  bindings: readonly VehicleProfileBindingLike[],
+): ResolvedBrakeBinding[] {
+  const resolved: ResolvedBrakeBinding[] = [];
+  for (const entry of BRAKE_BINDING_CHANNELS) {
+    const binding = resolveOneBrakeBinding(bindings, entry);
+    if (binding !== null) resolved.push(binding);
   }
-  return null;
+  return resolved;
+}
+
+/**
+ * Ticket P4n N3 (binding): a stable, order-independent signature of which
+ * brake bindings are resolved -- used ONLY to detect "the set of confirmed
+ * brake bindings changed since this session's poll plan was built" (see
+ * `activeBrakeBindingsSignature`'s own doc comment). Two resolutions of the
+ * SAME bindings always produce the same signature regardless of array order;
+ * any change to channel/ecu/DID changes it.
+ */
+export function brakeBindingsSignature(bindings: readonly ResolvedBrakeBinding[]): string {
+  return [...bindings]
+    .map((binding) => `${binding.channel}:${binding.ecu.toString(16)}:${binding.requestHex}`)
+    .sort()
+    .join('|');
 }
 
 /**
@@ -283,6 +327,36 @@ export function summarizeGForceSamples(
   if (lastAt === undefined || nowMs - lastAt > staleMs) return { hz: 0, running: false };
   const recentCount = sampleTimesMs.filter((t) => nowMs - t <= windowMs).length;
   return { hz: recentCount / (windowMs / 1_000), running: true };
+}
+
+/** The monitor's own placeholder for "no sample yet" (`TelemetryScreen.tsx`'s existing convention -- matched here, not redefined, so a brake row's dash looks identical to every other channel's). */
+export const TELEMETRY_NO_VALUE_PLACEHOLDER = '—';
+
+/**
+ * Ticket P4n N2 (binding): the monitor's "ON"/"OFF" display for a
+ * `brakeSwitch` sample (`decodeBrakeBindingValue`'s own `boolean-0-100` rule
+ * always emits exactly 0 or 100 -- this reads that back for a human,
+ * without repeating the raw number). `undefined` (no sample has arrived yet
+ * this generation) reads as the monitor's own dash placeholder, matching
+ * every other channel. Pure -- unit-tested directly, no react-native import.
+ */
+export function formatBrakeSwitchDisplay(value: number | undefined): string {
+  if (value === undefined) return TELEMETRY_NO_VALUE_PLACEHOLDER;
+  return value >= 50 ? 'ON' : 'OFF';
+}
+
+/**
+ * Ticket P4n N2 (binding): the monitor's small "raw 37 / 64" text under the
+ * `brakePct` row -- the RAW response value `TelemetryProviderDiagnostics.brakePctRaw`
+ * carries, next to the observed max it is scaled against (the field-confirmed
+ * evidence's own `max`, e.g. 64 for the Supra's 0x12/0x58B7). `null` when
+ * there is nothing to show yet (no raw sample captured this generation), or
+ * when the binding never carried an observed max (an honest "raw 12" alone,
+ * with no "/ N" to compare it against). Pure -- unit-tested directly.
+ */
+export function formatBrakePctRawDisplay(raw: { raw: number; observedMax: number | null } | undefined): string | null {
+  if (raw === undefined) return null;
+  return raw.observedMax === null ? `raw ${raw.raw}` : `raw ${raw.raw} / ${raw.observedMax}`;
 }
 
 /**
@@ -434,7 +508,7 @@ export interface TelemetryProviderDeps {
 }
 
 /**
- * The shape `resolveBrakeBindingFromProfile` needs from a persisted binding
+ * The shape `resolveBrakeBindingsFromProfile` needs from a persisted binding
  * row -- structurally satisfied by `didSweepStore.ts`'s `VehicleProfileBinding`
  * without this module importing (and thereby pulling a persistence module
  * into) the telemetry path.
@@ -572,6 +646,22 @@ export interface TelemetryProviderDiagnostics {
    * raw 0x49 percentage, and the monitor label says so.
    */
   pedalSource: PedalSourceDiagnostic;
+  /**
+   * Ticket P4n N3 (binding): ENET-only, present once an ENET session's poll
+   * plan has been built at least once. `true` exactly when the profile
+   * registry's field-confirmed brake bindings have changed (a confirm
+   * happened) since the CURRENT poll plan was built -- there is no live way
+   * to rebuild it in place, so the monitor shows "Stop -> Start to apply"
+   * while this is true.
+   */
+  brakeBindingsChangedSincePoll?: boolean;
+  /**
+   * Ticket P4n N2 (binding): the last decoded `brakePct` sample's raw value
+   * and the observed max it is scaled against -- the monitor's "raw 37 / 64"
+   * line. ENET-only; absent until a `brakePct` binding has produced at least
+   * one sample this generation.
+   */
+  brakePctRaw?: { raw: number; observedMax: number | null };
 }
 
 /** See {@link TelemetryProviderDiagnostics.pedalSource}. */
@@ -732,6 +822,27 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   let activeTransport: ObdTransport | null = null;
   /** The config fingerprint the ACTIVE generation (`current`) was actually launched from -- set at the top of every `launchSession()` call, read by `start()`'s re-entry check and `scheduleRetry`'s fire-time abort check. `null` when no generation has ever launched (fresh provider, or after a full `stop()`). */
   let activeFingerprint: ConfigFingerprint | null = null;
+  /**
+   * Ticket P4n N3 (binding): a stable signature of whichever brake bindings
+   * THIS ENET session's poll plan was actually built from (`buildEnetConfig()`,
+   * set every time it runs) -- `null` before any ENET config has ever been
+   * built. `getDiagnostics()` compares this against a FRESH read of the
+   * profile registry to tell "a binding confirmed after this session started"
+   * apart from "nothing changed" -- there is no live way to rebuild a running
+   * `EnetSession`'s poll plan in place (its config is fixed at construction,
+   * `@circuit/core`'s `createEnetSession`), so this is the hint mechanism the
+   * monitor/Signal Finder screens use to tell the driver to Stop -> Start.
+   */
+  let activeBrakeBindingsSignature: string | null = null;
+  /**
+   * Ticket P4n N2 (binding): the last decoded `brakePct` sample's RAW value
+   * (the whole-response scalar / confirmed byte, before scaling) plus the
+   * observed max it is scaled against -- the monitor's own "raw 37 / 64"
+   * line. Populated by `buildEnetConfig()`'s decode wrapper on every
+   * successful `brakePct` decode; `null` before any such sample has arrived
+   * this generation, so a fresh session never shows a stale reading.
+   */
+  let lastBrakePctRaw: { raw: number; observedMax: number | null } | null = null;
   /** Surfaced via `getDiagnostics()`'s `lastError` chain when the settings-change watcher (below) stops a live generation -- cleared at the top of every fresh `launchSession()`, same reset discipline as `reservationBlockedDetail`/`autoDiscoveryFailureDetail`. */
   let settingsChangedDetail: string | undefined;
   /**
@@ -1096,19 +1207,48 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   const ENET_UNKNOWN_CHANNEL_RATE_HZ = 1;
 
   /**
-   * Ticket P4l-FIX1 F1 (binding): the brake binding this session should poll,
+   * Ticket P4l-FIX1 F1 (binding), extended by P4n N1: EVERY field-confirmed
+   * brake binding this session should poll (0, 1, or 2 -- `brakeSwitch` and
+   * `brakePct` are resolved independently, never one dropping the other),
    * re-read from the profile registry on every ENET (re)build. Never throws
-   * -- a registry read that fails degrades to "no binding", the same way
+   * -- a registry read that fails degrades to "no bindings", the same way
    * every other startup read in this module degrades, because telemetry must
    * never stop a session from starting.
    */
-  function resolveBrakeBinding(): ResolvedBrakeBinding | null {
+  function resolveBrakeBindings(): ResolvedBrakeBinding[] {
     try {
-      return resolveBrakeBindingFromProfile(readVehicleProfileBindings());
+      return resolveBrakeBindingsFromProfile(readVehicleProfileBindings());
     } catch (error) {
       console.warn(`[telemetryProvider] could not read vehicle profile bindings: ${errorMessage(error)}`);
-      return null;
+      return [];
     }
+  }
+
+  /**
+   * Ticket P4n N2 (binding): wraps `buildBrakeEnetChannelSpec`'s own
+   * `decodeValue` so a successful `brakePct` decode also stashes its RAW
+   * value (+ the observed max it was scaled against) into
+   * `lastBrakePctRaw` -- the monitor's "raw 37 / 64" line
+   * (`brakePctRawDisplay`). `buildBrakeEnetChannelSpec` itself stays pure and
+   * untested-for-side-effects (its own unit tests pin the spec it returns);
+   * this wrapper is the ONE place a side effect is added, and only for
+   * `brakePct` -- `brakeSwitch` has no raw display, so its spec passes
+   * through untouched.
+   */
+  function wrapBrakeSpecWithRawCapture(binding: ResolvedBrakeBinding): EnetChannelSpec {
+    const spec = buildBrakeEnetChannelSpec(binding);
+    if (binding.channel !== 'brakePct') return spec;
+    return {
+      ...spec,
+      decodeValue: (dataBytes) => {
+        const decoded = spec.decodeValue === undefined ? null : spec.decodeValue(dataBytes);
+        if (decoded !== null) {
+          const raw = brakeBindingSeriesValue(binding, dataBytes);
+          if (raw !== null) lastBrakePctRaw = { raw, observedMax: binding.observedMax };
+        }
+        return decoded;
+      },
+    };
   }
 
   function buildEnetPollPlan(
@@ -1141,16 +1281,20 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     if (pedalPidSource === '49') {
       channelSpecs = [...channelSpecs.filter((spec) => spec.channel !== 'accelPedalPct'), ACCEL_PEDAL_FALLBACK_ENET_SPEC];
     }
-    // Ticket P4l-FIX1 F1 (binding): a FIELD-CONFIRMED brake binding becomes a
-    // real poll entry (see this file's Signal Finder section). Appended LAST
-    // and only when the settings' own specs don't already name that channel,
-    // so an explicit user spec always wins over the discovered binding; the
-    // resulting spec goes through core's own `validateEnetChannelSpecs` like
-    // any other, so a malformed binding row is dropped with a warning rather
-    // than polled.
-    const brakeBinding = resolveBrakeBinding();
-    if (brakeBinding !== null && !channelSpecs.some((spec) => spec.channel === brakeBinding.channel)) {
-      const { valid, warnings } = validateEnetChannelSpecs([buildBrakeEnetChannelSpec(brakeBinding)]);
+    // Ticket P4l-FIX1 F1 (binding), extended by P4n N1: EVERY field-confirmed
+    // brake binding becomes its own real poll entry (see this file's Signal
+    // Finder section) -- `brakeSwitch` AND `brakePct` independently, never
+    // one dropping the other (field test 7's own defect). Each is appended
+    // LAST and only when the settings' own specs don't already name that
+    // channel, so an explicit user spec always wins over the discovered
+    // binding; the resulting spec goes through core's own
+    // `validateEnetChannelSpecs` like any other, so a malformed binding row
+    // is dropped with a warning rather than polled.
+    const brakeBindings = resolveBrakeBindings();
+    activeBrakeBindingsSignature = brakeBindingsSignature(brakeBindings);
+    for (const brakeBinding of brakeBindings) {
+      if (channelSpecs.some((spec) => spec.channel === brakeBinding.channel)) continue;
+      const { valid, warnings } = validateEnetChannelSpecs([wrapBrakeSpecWithRawCapture(brakeBinding)]);
       for (const warning of warnings) console.warn(`[telemetryProvider] ${warning}`);
       channelSpecs = [...channelSpecs, ...valid];
     }
@@ -1715,6 +1859,12 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   async function doStop(): Promise<void> {
     running = false;
     reservationBlockedDetail = undefined;
+    // Ticket P4n N3/N2: a stopped session's poll plan is gone -- neither the
+    // "stale bindings" hint nor a lingering raw-value display should survive
+    // into whatever comes next (idle, or a fresh ENET session that rebuilds
+    // both from scratch).
+    activeBrakeBindingsSignature = null;
+    lastBrakePctRaw = null;
     if (retryTimer !== null) {
       clearTimeout(retryTimer);
       retryTimer = null;
@@ -2048,6 +2198,16 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       // has.
       if (current !== null && current.kind === 'enet') {
         const diag = current.session.getDiagnostics();
+        // Ticket P4n N3 (binding): a fresh read of the profile registry,
+        // compared against the signature THIS session's poll plan was built
+        // from -- true exactly when a binding was confirmed (and the
+        // composition-level cache refreshed) AFTER this session started, so
+        // its poll plan is now stale. There is no live way to rebuild an
+        // `EnetSession`'s poll plan in place, so this is a HINT: the
+        // Telemetry monitor and Signal Finder screens tell the driver to
+        // Stop -> Start rather than silently keeping the old plan.
+        const brakeBindingsChangedSincePoll =
+          activeBrakeBindingsSignature !== null && brakeBindingsSignature(resolveBrakeBindings()) !== activeBrakeBindingsSignature;
         return {
           state: currentState,
           retriesUsed,
@@ -2065,6 +2225,8 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
           ...(diag.ackLatencyMsP95 === undefined ? {} : { ackLatencyMsP95: diag.ackLatencyMsP95 }),
           ...(diag.lastRawFrameHex === undefined ? {} : { lastRawFrameHex: diag.lastRawFrameHex }),
           pedalSource: pedalSourceDiagnostic(),
+          brakeBindingsChangedSincePoll,
+          ...(lastBrakePctRaw === null ? {} : { brakePctRaw: lastBrakePctRaw }),
         };
       }
       const base = current?.session.getDiagnostics() ?? { observedHzByChannel: {}, errorCount: 0 };

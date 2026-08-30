@@ -368,29 +368,17 @@ const SUPRA_B58_CATALOG: SignalTargetCatalog = {
       verbs: BRAKE_VERBS,
       hypotheses: [
         {
-          // FIELD TEST 5 (2026-08-29, engine off / ignition on): the DME's own
-          // brake pedal. Read 22 times across the run, 0x01 in every baseline
-          // and release window, 0x19 in EVERY press window, 0 baseline
-          // changes, 0 extra transitions — and flat 0x01 through the whole
-          // accelerator run of the same evening. First because it is on the
-          // DME (0x12), the ECU everything else is already read from: no
-          // second address is needed to get a brake signal at all.
-          ecu: 0x12,
-          did: 0x4002,
-          length: 1,
-          decode: 'boolean: 0x01 at rest → 0x19 while the brake pedal is pressed',
-          status: 'field-observed',
-          provenance:
-            'field test 5 2026-08-29 (Signal Finder, engine off, ignition on): data/field/signal-finder/2026-08-29-brakeSwitch.json — 0x01→0x19 in all 5 press windows, 0x01 in all release windows; flat 0x01 in 2026-08-29-accelPedal.json',
-        },
-        {
+          // Leads the list (ticket P4n N5, field test 7 2026-08-30): the REAL
+          // switch, user-confirmed on the actual car (Signal Finder v2,
+          // engine off) — data/field/signal-finder/2026-08-30-brakeSwitch.json,
+          // found 6/6.
           ecu: 0x29,
           did: 0x500c,
           length: 1,
           decode: 'bit0 (0x04 released → 0x05 pressed)',
           status: 'field-observed',
           provenance:
-            'test 4 2026-08-29 (engine off, ignition on, batched observation 5 samples/phase): 0x04 in baseline/throttle, 0x05 in 3/5 brake-phase samples; 2026-08-29-test4-ecu29-0x5000-0x58F2.json',
+            'test 4 2026-08-29 (engine off, ignition on, batched observation 5 samples/phase): 0x04 in baseline/throttle, 0x05 in 3/5 brake-phase samples; 2026-08-29-test4-ecu29-0x5000-0x58F2.json. Field test 7 2026-08-30 (Signal Finder v2, engine off): found 6/6, user-confirmed.',
         },
         {
           ecu: 0x29,
@@ -400,6 +388,27 @@ const SUPRA_B58_CATALOG: SignalTargetCatalog = {
           status: 'weak',
           provenance:
             'test 4 2026-08-29: single 0x0006 sample out of 5 in the brake phase, never elsewhere — plausible "firm press" / brake-light bit',
+        },
+        {
+          // Demoted (ticket P4n N5): field test 7 (2026-08-30, engine
+          // RUNNING) found the rest byte itself moves with the ENGINE --
+          // 0x01 idle-off, 0x83 idle-running (131..155 while pressed) -- bit7
+          // is an engine-running flag, not part of the pedal reading at all.
+          // Field test 5 only ever ran this DID with the engine off, where
+          // that flag never toggled, so the 0x01->0x19 pair LOOKED like a
+          // clean boolean edge; it is not one. Reclassified as the pedal's
+          // own analog travel (low bits), never a pure switch -- a boolean
+          // reading here would fabricate FULL BRAKE the moment the engine
+          // starts and the rest byte jumps to 0x83.
+          ecu: 0x12,
+          did: 0x4002,
+          length: 1,
+          decode:
+            'analog (brake pedal travel), NOT a boolean switch: bit7 = engine-running flag (0x01 engine off / 0x83 engine running at rest), low bits rise with pedal travel (131..155 observed while pressed, engine running)',
+          status: 'field-observed',
+          expectedShape: 'analog-monotone',
+          provenance:
+            'field test 5 2026-08-29 (Signal Finder, engine off, ignition on): data/field/signal-finder/2026-08-29-brakeSwitch.json — 0x01→0x19 in all 5 press windows, 0x01 in all release windows; flat 0x01 in 2026-08-29-accelPedal.json. Field test 7 2026-08-30 (Signal Finder v2, engine running): data/field/signal-finder/2026-08-30-brakePressure.json — rest reinterpreted as 0x83, 131..155 while pressed; bit7 tracks engine state, not the pedal.',
         },
       ],
       discoveryRanges: [

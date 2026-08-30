@@ -13,7 +13,12 @@ import {
   telemetryProvider,
 } from '../../session/composition';
 import { useSettings } from '../hooks/useSettings';
-import { summarizeGForceSamples, type TelemetryProviderDiagnostics } from '../../session/telemetryProvider';
+import {
+  formatBrakePctRawDisplay,
+  formatBrakeSwitchDisplay,
+  summarizeGForceSamples,
+  type TelemetryProviderDiagnostics,
+} from '../../session/telemetryProvider';
 import { formatHexByte, resolveEnetChannelSpecs } from '../../session/enetSettingsValidation';
 import { getNetworkInfo, type NetworkInfo } from '../../session/networkInfo';
 
@@ -51,8 +56,23 @@ const ENET_EXTRA_CHANNELS: readonly Channel[] = [
   { id: 'engineLoadPct', label: 'Engine load', unit: '%', decimals: 0 },
 ];
 
+/**
+ * Ticket P4n N2 (binding, field test 7): the two field-confirmed brake
+ * channels the ENET binding path (`telemetryProvider.ts`'s
+ * `resolveBrakeBindingsFromProfile`) can add to the poll plan -- never in
+ * `BASE_CHANNELS` (they are discovered per-vehicle, not built-in), but they
+ * still need a real label rather than falling back to the raw channel id.
+ * `unit`/`decimals` are unused for these two -- their VALUE cell is rendered
+ * specially below (ON/OFF, and % + a raw-value line) rather than through the
+ * generic `value.toFixed(decimals) unit` path.
+ */
+const BRAKE_CHANNELS: readonly Channel[] = [
+  { id: 'brakeSwitch', label: 'Brake switch', unit: 'on/off', decimals: 0 },
+  { id: 'brakePct', label: 'Brake pressure', unit: '%', decimals: 0 },
+];
+
 const CHANNEL_META: ReadonlyMap<TelemetryChannelId, Channel> = new Map(
-  [...BASE_CHANNELS, TRANS_OIL_CHANNEL, ...ENET_EXTRA_CHANNELS].map((channel) => [channel.id, channel]),
+  [...BASE_CHANNELS, TRANS_OIL_CHANNEL, ...ENET_EXTRA_CHANNELS, ...BRAKE_CHANNELS].map((channel) => [channel.id, channel]),
 );
 
 function channelMeta(id: TelemetryChannelId): Channel {
@@ -329,6 +349,12 @@ export function TelemetryScreen(_props: Props): React.JSX.Element {
                 // rest offset learned is NOT normalized, and the monitor must
                 // not claim it is.
                 const label = id === 'accelPedalPct' ? `${channel.label} ${PEDAL_SOURCE_LABEL[diagnostics.pedalSource]}` : channel.label;
+                // Ticket P4n N2 (binding): "Brake switch" reads ON/OFF, never
+                // the raw 100/0; "Brake pressure" keeps its normal %
+                // reading, plus the raw response value in small text (e.g.
+                // "raw 37 / 64") -- pure formatting, pinned by
+                // `telemetryProviderBrakeDisplay.test.ts`.
+                const brakePctRawText = id === 'brakePct' ? formatBrakePctRawDisplay(diagnostics.brakePctRaw) : null;
                 return (
                   <View key={id} style={styles.channelRow}>
                     <Text style={styles.channelLabel} maxFontSizeMultiplier={1.3}>
@@ -338,6 +364,31 @@ export function TelemetryScreen(_props: Props): React.JSX.Element {
                       <Text style={styles.channelUnsupported} maxFontSizeMultiplier={1.3}>
                         UNSUPPORTED{nrc === undefined ? '' : ` (NRC ${formatNrc(nrc)})`}
                       </Text>
+                    ) : id === 'brakeSwitch' ? (
+                      <>
+                        <Text style={styles.channelValue} maxFontSizeMultiplier={1.3}>
+                          {formatBrakeSwitchDisplay(value)}
+                        </Text>
+                        <Text style={styles.channelHz} maxFontSizeMultiplier={1.3}>
+                          {hz === undefined || hz === 0 ? '— Hz' : `${hz.toFixed(1)} Hz`}
+                        </Text>
+                      </>
+                    ) : id === 'brakePct' ? (
+                      <View style={styles.brakePctValueColumn}>
+                        <View style={styles.brakePctValueRow}>
+                          <Text style={styles.channelValue} maxFontSizeMultiplier={1.3}>
+                            {value === undefined ? '—' : `${value.toFixed(channel.decimals)} ${channel.unit}`}
+                          </Text>
+                          <Text style={styles.channelHz} maxFontSizeMultiplier={1.3}>
+                            {hz === undefined || hz === 0 ? '— Hz' : `${hz.toFixed(1)} Hz`}
+                          </Text>
+                        </View>
+                        {brakePctRawText === null ? null : (
+                          <Text style={styles.channelRawText} maxFontSizeMultiplier={1.3}>
+                            {brakePctRawText}
+                          </Text>
+                        )}
+                      </View>
                     ) : (
                       <>
                         <Text style={styles.channelValue} maxFontSizeMultiplier={1.3}>
@@ -352,6 +403,12 @@ export function TelemetryScreen(_props: Props): React.JSX.Element {
                 );
               })}
             </View>
+
+            {isEnet && diagnostics.brakeBindingsChangedSincePoll === true ? (
+              <Text style={styles.hintText} maxFontSizeMultiplier={1.3}>
+                New binding confirmed — Stop → Start to apply
+              </Text>
+            ) : null}
 
             {gForceRunning ? (
               <View style={styles.card} accessibilityLabel="G-force (phone accelerometer)">
@@ -452,6 +509,13 @@ const styles = StyleSheet.create({
   },
   channelHz: { ...typography.caption, color: colors.textMuted, minWidth: 56, textAlign: 'right' },
   channelUnsupported: { ...typography.caption, color: colors.warning, textAlign: 'right', flexShrink: 1 },
+  // Ticket P4n N2: the brakePct row's value+Hz stay a row, but with a second,
+  // small "raw N / M" line stacked below -- this column is what stacks them.
+  brakePctValueColumn: { alignItems: 'flex-end' },
+  brakePctValueRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  channelRawText: { ...typography.caption, color: colors.textMuted, textAlign: 'right' },
+  // Ticket P4n N3: "New binding confirmed -- Stop -> Start to apply".
+  hintText: { ...typography.caption, color: colors.warning },
   button: {
     borderRadius: radii.lg,
     borderWidth: 1,

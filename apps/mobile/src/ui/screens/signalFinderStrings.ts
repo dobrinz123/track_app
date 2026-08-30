@@ -89,6 +89,8 @@ export interface SignalFinderScreenStrings {
   summaryHeading: string;
   bannerNoProfileStorage: string;
   bannerConfirmed: (channel: string, ecu: string, did: string) => string;
+  /** P4n N3 (binding): appended to `bannerConfirmed` when a telemetry session is ALREADY running -- its poll plan cannot pick this confirm up live (`telemetryProvider.ts`'s ENET config is fixed at construction). */
+  bannerConfirmedRestartHint: string;
   bannerRunFindFirst: string;
   bannerSummaryShared: string;
   bannerJsonShared: string;
@@ -175,6 +177,7 @@ const EN: SignalFinderScreenStrings = {
   summaryHeading: 'Summary (this is what gets shared)',
   bannerNoProfileStorage: 'No profile storage on this platform — nothing was written.',
   bannerConfirmed: (channel, ecu, did) => `Confirmed ${channel} = ${ecu} ${did}`,
+  bannerConfirmedRestartHint: 'Restart Telemetry (Stop → Start) to apply.',
   bannerRunFindFirst: 'Run a find first — there is nothing to share yet.',
   bannerSummaryShared: 'Summary shared. Tap "Share JSON" for the full session file.',
   bannerJsonShared: 'JSON shared.',
@@ -251,6 +254,7 @@ const RO: SignalFinderScreenStrings = {
   summaryHeading: 'Rezumat (exact ce se partajează)',
   bannerNoProfileStorage: 'Platforma nu are stocare de profil — nu s-a scris nimic.',
   bannerConfirmed: (channel, ecu, did) => `Confirmat ${channel} = ${ecu} ${did}`,
+  bannerConfirmedRestartHint: 'Repornește Telemetria (Oprește → Pornește) pentru a aplica.',
   bannerRunFindFirst: 'Rulează întâi o căutare — nu există încă nimic de partajat.',
   bannerSummaryShared: 'Rezumat partajat. Apasă „Partajează JSON" pentru fișierul complet al sesiunii.',
   bannerJsonShared: 'JSON partajat.',

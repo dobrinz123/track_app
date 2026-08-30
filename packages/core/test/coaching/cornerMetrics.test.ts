@@ -393,6 +393,28 @@ describe('computeCornerMetrics: tier-2 channels', () => {
     expect(metric.brakeStartM ?? 0).toBeLessThan(235);
   });
 
+  /**
+   * Ticket P4n N4 (binding): the provider now polls BOTH field-confirmed
+   * brake bindings at once (`brakeSwitch` AND `brakePct`), so a real
+   * recording can carry both channels on the same lap. `brakePct` (the real
+   * analog pressure) must still win over `brakeSwitch` (a coarse on/off) --
+   * pinning the existing preference order against a fixture where BOTH
+   * channels are actually present together, not just one or the other.
+   */
+  it('prefers brakePct over brakeSwitch when both channels are present on the same lap (N4)', () => {
+    const samples = syntheticLap({ channels: 'brake' }).map((sample) => ({
+      ...sample,
+      channels: {
+        ...sample.channels,
+        brakeSwitch: (sample.channels?.brakePct ?? 0) > 0 ? 100 : 0,
+      },
+    }));
+    const metric = metricsFor(samples);
+    expect(metric.brakeSource).toBe('brakePct');
+    expect(metric.brakeStartM ?? 0).toBeGreaterThan(205);
+    expect(metric.brakeStartM ?? 0).toBeLessThan(235);
+  });
+
   it('reports the turn-in point, steering smoothness and correction count', () => {
     const metric = metricsFor(syntheticLap({ channels: 'steering' }));
     expect(metric.turnInSource).toBe('steeringDeg');

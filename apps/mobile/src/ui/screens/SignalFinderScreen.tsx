@@ -16,7 +16,7 @@ import {
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
-import { getTelemetryReadDb, refreshVehicleProfileBindingsCache, settingsStore } from '../../session/composition';
+import { getTelemetryReadDb, refreshVehicleProfileBindingsCache, settingsStore, telemetryProvider } from '../../session/composition';
 import { useSettings } from '../hooks/useSettings';
 import { EnetTcpTransport } from '../../session/enetTcpTransport';
 import { createDidSweepStore, createVehicleProfileBindingStore, type VehicleProfileBinding } from '../../persistence/didSweepStore';
@@ -258,11 +258,19 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
   async function handleConfirm(score: SignalCandidateScore): Promise<void> {
     const controller = controllerRef.current;
     if (controller === null || snapshot === null || snapshot.targetId === null) return;
+    // Ticket P4n N3 (binding): read BEFORE the confirm write -- a telemetry
+    // session already polling right now is exactly the case whose poll plan
+    // this confirm cannot reach live (`telemetryProvider.ts`'s ENET config is
+    // fixed at session construction; see `activeBrakeBindingsSignature`'s own
+    // doc comment).
+    const telemetryRunning = !['idle', 'stopped', 'failed'].includes(telemetryProvider.getDiagnostics().state);
     const written = await controller.confirmBinding(snapshot.targetId, score);
     setBanner(
       written === null
         ? strings.bannerNoProfileStorage
-        : strings.bannerConfirmed(written.channel, ecuHex(written.ecu), didHex(written.did)),
+        : telemetryRunning
+          ? `${strings.bannerConfirmed(written.channel, ecuHex(written.ecu), didHex(written.did))} ${strings.bannerConfirmedRestartHint}`
+          : strings.bannerConfirmed(written.channel, ecuHex(written.ecu), didHex(written.did)),
     );
     setBindings(await bindingStoreRef.current.listBindings(profileId));
     // P4l-FIX3 J5 (binding): a confirmed channel must reach live telemetry
