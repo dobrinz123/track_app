@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { classifyLap } from '../../src/coaching';
+import { GRAVITY_MPS2, classifyLap } from '../../src/coaching';
 import type { ClassifiableLap, CornerLapSample } from '../../src/coaching';
 
 import { SYNTHETIC_TOTAL_LENGTH_M, syntheticLap } from './syntheticLap';
@@ -104,23 +104,64 @@ describe('classifyLap', () => {
     expect(result.reasons).toContain('offTrack');
   });
 
-  it('detects a yaw spike (a real rotation far beyond what the corner implies)', () => {
+  // R2-1 (contracts.md "Phase 5 REVISION 2", ticket P4c-A): a slide/rotation is
+  // normal circuit driving, never an anomaly -- it becomes the informative
+  // SLIDE_ROTATION label instead, and the lap stays clean.
+  it('labels a yaw spike as SLIDE_ROTATION instead of anomalizing the lap (R2-1)', () => {
     // The car keeps rotating at ~400 deg/s past the apex: a spin, not a corner.
     const samples = syntheticLap({
       headingDeg: (distanceM, index) => (distanceM > 640 ? (index * 40) % 360 : 10),
     });
     const result = classifyLap(LAP, samples, OPTIONS);
-    expect(result.clean).toBe(false);
-    expect(result.reasons).toContain('yawSpike');
+    expect(result.clean).toBe(true);
+    expect(result.reasons).not.toContain('offTrack');
+    expect(result.labels).toContain('SLIDE_ROTATION');
+    expect(result.yawExcessDps).not.toBeNull();
   });
 
-  it('detects an implausible deceleration spike', () => {
+  // R2-1: heavy braking (any |longG|, the user has done 1.3 g on a GR86 and
+  // cars reach 1.3-1.5 g on a circuit) is normal, never an anomaly -- it
+  // becomes the informative HEAVY_BRAKING label instead.
+  it('labels an implausible-looking deceleration as HEAVY_BRAKING instead of anomalizing the lap (R2-1)', () => {
     const samples: CornerLapSample[] = syntheticLap().map((sample, index) =>
       index === 120 ? { ...sample, speedKph: 5 } : sample,
     );
     const result = classifyLap(LAP, samples, OPTIONS);
-    expect(result.clean).toBe(false);
-    expect(result.reasons).toContain('decelSpike');
+    expect(result.clean).toBe(true);
+    expect(result.labels).toContain('HEAVY_BRAKING');
+    expect(result.peakDecelG).not.toBeNull();
+    expect(result.peakDecelG ?? 0).toBeGreaterThan(1.2);
+  });
+
+  it('is clean at 1.3 g (GR86 field fact) when on-track with good GPS (R2-1/A3)', () => {
+    // A realistic, sustained 1.3 g braking event -- exactly the user's own
+    // measured figure on a GR86 -- must never anomalize an otherwise clean lap.
+    const samples = syntheticLap({
+      accelAt: (distanceM) => (distanceM >= 200 && distanceM < 220 ? -1.3 * GRAVITY_MPS2 : 0),
+    });
+    const result = classifyLap(LAP, samples, OPTIONS);
+    expect(result.status).toBe('clean');
+    expect(result.clean).toBe(true);
+    expect(result.reasons).toEqual([]);
+    expect(result.labels).toContain('HEAVY_BRAKING');
+    expect(result.peakDecelG ?? 0).toBeCloseTo(1.3, 1);
+  });
+
+  it('never puts yawSpike or decelSpike in reasons any more (R2-1)', () => {
+    const withYaw = classifyLap(
+      LAP,
+      syntheticLap({ headingDeg: (distanceM, index) => (distanceM > 640 ? (index * 40) % 360 : 10) }),
+      OPTIONS,
+    );
+    const withDecel = classifyLap(
+      LAP,
+      syntheticLap().map((sample, index) => (index === 120 ? { ...sample, speedKph: 5 } : sample)),
+      OPTIONS,
+    );
+    for (const result of [withYaw, withDecel]) {
+      expect(result.reasons).not.toContain('yawSpike' as never);
+      expect(result.reasons).not.toContain('decelSpike' as never);
+    }
   });
 
   it('detects poor GNSS quality over the lap', () => {
@@ -257,8 +298,12 @@ describe('classifyLap: yaw anomaly vs the implied yaw (H6)', () => {
         : { ...sample, channels: { ...(sample.channels ?? {}), yawRateDps: 0 } },
     );
     const result = classifyLap(LAP, samples, OPTIONS);
-    expect(result.reasons).toContain('yawSpike');
-    expect(result.detail).toMatch(/yaw/i);
+    // R2-1: a yaw spike is the informative SLIDE_ROTATION label now, never an
+    // anomaly reason -- the lap stays clean and the numeric excess is exposed
+    // directly rather than folded into the anomaly `detail` string.
+    expect(result.labels).toContain('SLIDE_ROTATION');
+    expect(result.clean).toBe(true);
+    expect(result.yawExcessDps).not.toBeNull();
   });
 
   it('does NOT flag a fast but geometrically implied yaw (a tight corner)', () => {
@@ -271,7 +316,7 @@ describe('classifyLap: yaw anomaly vs the implied yaw (H6)', () => {
       centrelineHeadingDeg: (distanceM) => swing(distanceM),
     });
     const result = classifyLap(LAP, samples, OPTIONS);
-    expect(result.reasons).not.toContain('yawSpike');
+    expect(result.labels).not.toContain('SLIDE_ROTATION');
   });
 
   it('detects a 0.2 s spike at 5 Hz as well as at 20 Hz (sample-rate independent)', () => {
@@ -287,7 +332,7 @@ describe('classifyLap: yaw anomaly vs the implied yaw (H6)', () => {
         return { ...sample, channels: { ...(sample.channels ?? {}), yawRateDps: spiking ? 320 : 0 } };
       });
       const result = classifyLap(LAP, samples, OPTIONS);
-      expect(result.reasons, `sampleRateHz=${sampleRateHz}`).toContain('yawSpike');
+      expect(result.labels, `sampleRateHz=${sampleRateHz}`).toContain('SLIDE_ROTATION');
     }
   });
 
@@ -295,22 +340,28 @@ describe('classifyLap: yaw anomaly vs the implied yaw (H6)', () => {
     const spinning = straightLap(1, (index) => (index >= 10 ? 200 : 30));
     const result = classifyLap(LAP, spinning, OPTIONS);
     expect(result.unavailableChecks).not.toContain('yawSpike');
-    expect(result.reasons).toContain('yawSpike');
+    expect(result.labels).toContain('SLIDE_ROTATION');
   });
 
   it('leaves a clean 1 Hz lap clean of yaw (the rule evaluates, it does not fire)', () => {
     const result = classifyLap(LAP, straightLap(1, () => 30), OPTIONS);
     expect(result.unavailableChecks).not.toContain('yawSpike');
-    expect(result.reasons).not.toContain('yawSpike');
+    expect(result.labels).not.toContain('SLIDE_ROTATION');
   });
 
-  it('marks the yaw check unavailable below 1 Hz instead of calling the lap clean (H6)', () => {
+  // R2-1 (changed from the pre-REVISION-2 behaviour): yawSpike is no longer a
+  // required safety check -- it only feeds the informational SLIDE_ROTATION
+  // label now, so its unavailability never blocks CLEAN status any more. The
+  // coverage/availability MECHANISM itself is untouched (still reported via
+  // `unavailableChecks`, per A4) -- only what GATES `status` changed.
+  it('keeps the lap clean when only the (now informational) yaw check is unavailable below 1 Hz (H6, R2-1)', () => {
     // 0.8 Hz at 8 m/s: the fixes are 10 m and 1.25 s apart, so the lap is still
     // fully covered and inside the sample-gap limit -- only the yaw rule is
     // starved of the resolution a spin needs.
     const result = classifyLap(LAP, straightLap(0.8, () => 30, undefined, 8), OPTIONS);
     expect(result.unavailableChecks).toEqual(['yawSpike']);
-    expect(result.status).toBe('unverified');
+    expect(result.status).toBe('clean');
+    expect(result.labels).not.toContain('SLIDE_ROTATION');
   });
 
   it('tolerates the projection lag in METRES, so a 5 Hz slide next to a vertex still counts', () => {
@@ -323,7 +374,7 @@ describe('classifyLap: yaw anomaly vs the implied yaw (H6)', () => {
       (distanceM) => vertexAt(distanceM),
     );
     const result = classifyLap(LAP, samples, OPTIONS);
-    expect(result.reasons).toContain('yawSpike');
+    expect(result.labels).toContain('SLIDE_ROTATION');
   });
 
   it('does not invent a spike at a 35 deg vertex the car really drove, at 25 Hz', () => {
@@ -336,7 +387,7 @@ describe('classifyLap: yaw anomaly vs the implied yaw (H6)', () => {
     );
     const result = classifyLap(LAP, samples, OPTIONS);
     expect(result.unavailableChecks).not.toContain('yawSpike');
-    expect(result.reasons).not.toContain('yawSpike');
+    expect(result.labels).not.toContain('SLIDE_ROTATION');
   });
 
   it('marks yaw unavailable when >10% of the lap sits behind >1000 ms gaps, even though the MEDIAN interval is exactly 1000 ms (H6/Q2)', () => {
@@ -372,7 +423,10 @@ describe('classifyLap: yaw anomaly vs the implied yaw (H6)', () => {
     expect(result.unavailableChecks).not.toContain('offTrack');
     expect(result.unavailableChecks).not.toContain('decelSpike');
     expect(result.unavailableChecks).not.toContain('gnssPoor');
-    expect(result.status).toBe('unverified');
+    // R2-1: yawSpike alone being unavailable no longer blocks CLEAN status --
+    // only offTrack/gnssPoor/coverage still gate it (the per-interval coverage
+    // MECHANISM this test protects is unchanged; only its consequence is).
+    expect(result.status).toBe('clean');
   });
 
   it('keeps the implausible-lateral-g guard: crawling-speed heading noise is not a spike', () => {
@@ -388,6 +442,45 @@ describe('classifyLap: yaw anomaly vs the implied yaw (H6)', () => {
       centrelineHeadingDeg: 30,
     }));
     const result = classifyLap(LAP, samples, OPTIONS);
-    expect(result.reasons).not.toContain('yawSpike');
+    expect(result.labels).not.toContain('SLIDE_ROTATION');
+  });
+});
+
+describe('classifyLap: ABS-like oscillation (R2-1)', () => {
+  /** A braking zone (400-600 m, matching syntheticLap's own profile) whose
+   * accelerometer longG pulses rapidly between a strong bite and a release --
+   * the signature of ABS modulation, not a single hard stop. */
+  function absPulseAccelAt(distanceM: number): number {
+    if (distanceM < 400 || distanceM >= 600) return 0;
+    const cyclePos = ((distanceM - 400) / 8) % 1; // ~5 Hz worth of pulses at 40 m/s
+    return cyclePos < 0.5 ? -1.4 * GRAVITY_MPS2 : -0.3 * GRAVITY_MPS2;
+  }
+
+  it('detects ABS-like oscillation from the accelerometer longG channel and labels it, without anomalizing the lap', () => {
+    const samples = syntheticLap({ channels: 'imu', accelAt: absPulseAccelAt });
+    const result = classifyLap(LAP, samples, OPTIONS);
+    expect(result.labels).toContain('ABS_SUSPECTED');
+    expect(result.clean).toBe(true);
+    expect(result.reasons).toEqual([]);
+  });
+
+  it('does NOT detect ABS oscillation on a single smooth hard brake (no pulsing)', () => {
+    const samples = syntheticLap({ channels: 'imu' }); // default profile: one steady -3 m/s^2 braking zone
+    const result = classifyLap(LAP, samples, OPTIONS);
+    expect(result.labels).not.toContain('ABS_SUSPECTED');
+    expect(result.absOscillationDetected).toBe(false);
+  });
+
+  it('does NOT detect ABS oscillation from noise while not braking', () => {
+    const samples = syntheticLap({ channels: 'imu', accelAt: () => 0 });
+    const result = classifyLap(LAP, samples, OPTIONS);
+    expect(result.labels).not.toContain('ABS_SUSPECTED');
+  });
+
+  it('is unavailable (never falsely detected) with no accelerometer longG channel at all', () => {
+    const samples = syntheticLap({ accelAt: absPulseAccelAt }); // channels: 'none' (default)
+    const result = classifyLap(LAP, samples, OPTIONS);
+    expect(result.labels).not.toContain('ABS_SUSPECTED');
+    expect(result.absOscillationDetected).toBe(false);
   });
 });

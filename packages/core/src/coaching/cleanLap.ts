@@ -6,20 +6,32 @@ import {
   type LapAnomalyReason,
   type LapCheckId,
   type LapClassification,
+  type LapLabel,
   type LapStatus,
 } from './types';
 
 /**
- * Clean-lap classification -- `docs/architecture/analysis-engine.md` §3.
+ * Clean-lap classification -- Phase 5 REVISION 2 (`docs/architecture/
+ * contracts.md` R2-1, user finding F1), superseding the earlier
+ * `analysis-engine.md` §3 text.
  *
- * A lap is CLEAN unless it is incomplete, went off track, shows a yaw or
- * deceleration spike, or its GNSS quality is too poor to trust. Only clean laps
- * feed the reference lap and the demonstrated envelope (Phase 5 safety contract
- * rule 2); anomalous laps are still reported as facts, with their reason.
+ * A lap is CLEAN unless it is incomplete, went off track, or its GNSS quality
+ * is too poor to trust. Heavy braking (any |longG|), ABS-like oscillation and a
+ * yaw/slide excursion ("rotation") are NORMAL circuit driving -- the user has
+ * measured 1.3 g lateral in a GR86, and cars reach 1.3-1.5 g longitudinal on a
+ * circuit -- so they never anomalize a lap any more. They become the
+ * informative `HEAVY_BRAKING` / `ABS_SUSPECTED` / `SLIDE_ROTATION` labels
+ * instead (see `LapLabel`), carried on every clean or unverified lap.
+ *
+ * Only clean laps feed the reference lap and the demonstrated envelope
+ * (Phase 5 safety contract rule 2); anomalous laps are still reported as
+ * facts, with their reason.
  *
  * Every check states whether it could run at all: a lap whose samples carry no
  * lateral offset cannot be tested for off-track, and the report says so instead
- * of pretending the lap was clean on that axis.
+ * of pretending the lap was clean on that axis. The label heuristics (decel,
+ * yaw, ABS) keep their own availability bookkeeping too, purely to qualify the
+ * label's confidence -- unlike before R2-1, none of it gates `status` any more.
  */
 
 export interface ClassifyLapOptions {
@@ -32,11 +44,20 @@ export interface ClassifyLapOptions {
   poorAccuracyFraction?: number;
   /** Sample gap above this makes the lap anomalous, ms. Default 1500. */
   maxSampleGapMs?: number;
-  /** |longitudinal g| above this is an implausible spike. Default 1.2. */
+  /**
+   * |longitudinal g| above this triggers the informative `HEAVY_BRAKING`
+   * label (R2-1) -- it never anomalizes the lap any more. Default 1.2, kept
+   * deliberately conservative: real circuit driving reaches 1.3-1.5 g (the
+   * user has measured 1.3 g braking on a GR86), so this threshold exists only
+   * to decide when the label is worth showing, not to police the driver.
+   */
   decelSpikeG?: number;
   /**
    * How far the measured yaw rate may exceed the yaw the track's own curvature
-   * implies before it counts as a spike, degrees/second. Default 150.
+   * implies before it counts as a spike and triggers the informative
+   * `SLIDE_ROTATION` label (R2-1) -- a controlled slide/rotation is normal
+   * circuit driving and never anomalizes the lap any more. Degrees/second.
+   * Default 150.
    */
   yawSpikeDps?: number;
   /**
@@ -65,27 +86,75 @@ export interface ClassifyLapOptions {
    * bridging distance: 1.5 s at 150 km/h).
    */
   checkBridgeM?: number;
+  /**
+   * ABS-like oscillation (R2-1): how much a swing in the accelerometer
+   * `longG` channel must span, within one `absWindowMs` window, to count as a
+   * genuine brake-release-reapply cycle rather than accelerometer noise
+   * (typically 0.02-0.05 g) or the ordinary decay of a single braking event.
+   * g. Default 0.35.
+   */
+  absSwingG?: number;
+  /**
+   * How many such swings (direction reversals of at least `absSwingG`) must
+   * occur inside the window to call it an oscillation rather than one bump.
+   * Default 3 (>= 1.5 full pulse cycles).
+   */
+  absMinCycles?: number;
+  /**
+   * The window a cycle count is judged over, milliseconds. ABS pulses several
+   * times a second, so a window of a few hundred ms holds multiple cycles at
+   * any typical pulse rate. Default 700.
+   */
+  absWindowMs?: number;
+  /**
+   * The window's OWN average longitudinal g must be braking by at least this
+   * much (magnitude) before its oscillation counts -- otherwise throttle
+   * modulation or plain accelerometer noise while coasting could be mistaken
+   * for ABS. g. Default 0.3.
+   */
+  absMinAvgDecelG?: number;
 }
 
 /** Fixed reporting/priority order: the first reason present becomes `reason`. */
 const REASON_PRIORITY: readonly LapAnomalyReason[] = Object.freeze([
   'incomplete',
   'offTrack',
-  'yawSpike',
-  'decelSpike',
   'gnssPoor',
 ]);
 
+/** Fixed reporting order for the informative labels (R2-1). */
+const LABEL_PRIORITY: readonly LapLabel[] = Object.freeze([
+  'HEAVY_BRAKING',
+  'ABS_SUSPECTED',
+  'SLIDE_ROTATION',
+]);
+
 /**
- * Checks the Phase 5 safety contract (rule 2) requires before a lap may be
- * called CLEAN: "on-track, no yaw/decel anomaly, valid GNSS quality", plus the
- * coverage that proves the lap was actually driven. A lap that passes every
- * check it COULD run but could not run one of these is `unverified`.
+ * Every check the lap's own evidence may or may not support, in a fixed
+ * reporting order -- exposed via `unavailableChecks`/`checkCoverage`
+ * regardless of whether the check gates `status` (R2-1: yaw/decel no longer
+ * do, see `STATUS_GATING_CHECKS`). A4 (ticket P4c-A): this bookkeeping is
+ * unchanged from before REVISION 2.
  */
-const REQUIRED_CHECKS: readonly LapCheckId[] = Object.freeze([
+const ALL_CHECKS: readonly LapCheckId[] = Object.freeze([
   'offTrack',
   'yawSpike',
   'decelSpike',
+  'gnssPoor',
+  'coverage',
+] as const);
+
+/**
+ * Checks the Phase 5 REVISION 2 safety contract (`contracts.md` R2-1) requires
+ * before a lap may be called CLEAN: on-track, valid GNSS quality, plus the
+ * coverage that proves the lap was actually driven. Heavy braking, ABS-like
+ * oscillation and a yaw/slide excursion are NORMAL circuit driving and never
+ * gate this any more -- they only ever produce the informative `LapLabel`s. A
+ * lap that passes every REQUIRED check it could run but could not run one of
+ * these is `unverified`.
+ */
+const STATUS_GATING_CHECKS: readonly LapCheckId[] = Object.freeze([
+  'offTrack',
   'gnssPoor',
   'coverage',
 ] as const);
@@ -331,6 +400,93 @@ function evaluateYaw(
   return { available: true, source, worstDps, windowMs };
 }
 
+interface AbsEvaluation {
+  /** False when the samples carry no (or too sparse) accelerometer `longG`. */
+  available: boolean;
+  /** True when a brake-release-reapply oscillation was found (R2-1). */
+  detected: boolean;
+}
+
+/**
+ * Direction-reversal ("zig-zag") count over a series: how many times the
+ * signal changes direction by at least `minSwing`, tracking each qualifying
+ * reversal from the last one so small back-and-forth noise near a genuine
+ * turning point cannot be counted twice. Used only to detect the REPEATED
+ * brake-release-reapply pattern of ABS, never a single spike.
+ */
+function countSwings(values: readonly number[], minSwing: number): number {
+  if (values.length === 0) return 0;
+  let cycles = 0;
+  let lastExtreme = values[0] ?? 0;
+  let direction: -1 | 0 | 1 = 0;
+  for (let index = 1; index < values.length; index += 1) {
+    const previous = values[index - 1] ?? 0;
+    const current = values[index] ?? 0;
+    const delta = current - previous;
+    if (delta === 0) continue;
+    const dir: 1 | -1 = delta > 0 ? 1 : -1;
+    if (direction === 0) {
+      lastExtreme = previous;
+    } else if (dir !== direction) {
+      const swing = Math.abs(previous - lastExtreme);
+      if (swing >= minSwing) {
+        cycles += 1;
+        lastExtreme = previous;
+      }
+    }
+    direction = dir;
+  }
+  return cycles;
+}
+
+/**
+ * ABS-like oscillation (R2-1, ticket P4c-A/A2): braking g that swings rapidly
+ * between a strong bite and a release is the signature of ABS modulation, not
+ * a single hard stop. Detected ONLY from the accelerometer `longG` channel --
+ * GPS-derived deceleration (what `decelSpikeG` uses) is far too coarse (1-5 Hz)
+ * to resolve a pulse train that repeats several times a second. This only ever
+ * produces the INFORMATIONAL `ABS_SUSPECTED` label: it never anomalizes a lap,
+ * and with no accelerometer evidence it simply stays `available: false` --
+ * never fabricating a detection either way.
+ */
+function evaluateAbsOscillation(
+  samples: readonly CornerLapSample[],
+  swingG: number,
+  minCycles: number,
+  windowMs: number,
+  minAvgDecelG: number,
+): AbsEvaluation {
+  const series: { tMonoMs: number; g: number }[] = [];
+  for (const sample of samples) {
+    const g = sample.channels?.longG;
+    if (finite(g)) series.push({ tMonoMs: sample.tMonoMs, g });
+  }
+  // Needs enough accelerometer evidence to resolve a multi-cycle pulse train
+  // at all; a channel present but too sparse could never show a swing.
+  if (series.length < minCycles + 2) return { available: false, detected: false };
+
+  for (let start = 0; start < series.length; start += 1) {
+    let end = start;
+    const startEntry = series[start];
+    if (startEntry === undefined) continue;
+    while (end + 1 < series.length && (series[end + 1]?.tMonoMs ?? 0) - startEntry.tMonoMs <= windowMs) {
+      end += 1;
+    }
+    if (end === start) continue;
+    const windowValues = series.slice(start, end + 1);
+    const avgG = windowValues.reduce((sum, entry) => sum + entry.g, 0) / windowValues.length;
+    // Braking is longG < 0 in this codebase's convention (see cornerMetrics).
+    // A window that is not itself braking by at least this much cannot be ABS.
+    if (avgG > -minAvgDecelG) continue;
+    const cycles = countSwings(
+      windowValues.map((entry) => entry.g),
+      swingG,
+    );
+    if (cycles >= minCycles) return { available: true, detected: true };
+  }
+  return { available: true, detected: false };
+}
+
 /**
  * Fraction of the LAP DISTANCE over which a channel is continuous evidence:
  * the union, in METRES, of the spans between consecutive readings no more
@@ -384,8 +540,13 @@ export function classifyLap(
   const minCoverageFraction = options.minCoverageFraction ?? 0.9;
   const minCheckCoverageFraction = options.minCheckCoverageFraction ?? 0.9;
   const checkBridgeM = options.checkBridgeM ?? 60;
+  const absSwingG = options.absSwingG ?? 0.35;
+  const absMinCycles = options.absMinCycles ?? 3;
+  const absWindowMs = options.absWindowMs ?? 700;
+  const absMinAvgDecelG = options.absMinAvgDecelG ?? 0.3;
 
   const reasons = new Set<LapAnomalyReason>();
+  const labels = new Set<LapLabel>();
   const unavailable = new Set<LapCheckId>();
   const details: string[] = [];
 
@@ -509,22 +670,28 @@ export function classifyLap(
   if (!yaw.available || checkCoverage.yawSpike < minCheckCoverageFraction) {
     unavailable.add('yawSpike');
   }
+  // R2-1: a yaw/slide excess is NORMAL circuit driving now -- the informative
+  // SLIDE_ROTATION label, never the `decelSpike` anomaly reason it used to be.
   if (yaw.worstDps !== null) {
-    reasons.add('yawSpike');
-    details.push(
-      `yaw rate exceeded the implied (centreline) yaw by ${Math.round(yaw.worstDps)} deg/s ` +
-        `over ${Math.round(yaw.windowMs)} ms (limit ${yawSpikeDps} deg/s)`,
-    );
+    labels.add('SLIDE_ROTATION');
   }
 
   if (speedCount === 0 || checkCoverage.decelSpike < minCheckCoverageFraction) {
     unavailable.add('decelSpike');
   }
+  // R2-1: heavy braking is NORMAL circuit driving now (the user has measured
+  // 1.3 g on a GR86; cars reach 1.3-1.5 g) -- the informative HEAVY_BRAKING
+  // label, never the `decelSpike` anomaly reason it used to be.
   if (worstDecelG !== null && worstDecelG > decelSpikeG) {
-    reasons.add('decelSpike');
-    details.push(
-      `deceleration reached ${worstDecelG.toFixed(2)} g (limit ${decelSpikeG.toFixed(2)} g)`,
-    );
+    labels.add('HEAVY_BRAKING');
+  }
+
+  // R2-1: ABS-like oscillation is likewise normal circuit driving and only
+  // ever an informative label -- detected from the accelerometer `longG`
+  // channel alone (see `evaluateAbsOscillation`).
+  const abs = evaluateAbsOscillation(samples, absSwingG, absMinCycles, absWindowMs, absMinAvgDecelG);
+  if (abs.detected) {
+    labels.add('ABS_SUSPECTED');
   }
 
   if (accuracyCount === 0 || checkCoverage.gnssPoor < minCheckCoverageFraction) {
@@ -542,11 +709,16 @@ export function classifyLap(
 
   const ordered = REASON_PRIORITY.filter((reason) => reasons.has(reason));
   const first = ordered[0] ?? null;
-  const unavailableChecks = REQUIRED_CHECKS.filter((check) => unavailable.has(check));
+  const orderedLabels = LABEL_PRIORITY.filter((label) => labels.has(label));
+  // Reported in full regardless of what gates `status` (A4: unchanged
+  // bookkeeping) -- offTrack/gnssPoor/coverage are what the STATUS below
+  // actually gates, per R2-1 (yaw/decel are informational only now).
+  const unavailableChecks = ALL_CHECKS.filter((check) => unavailable.has(check));
+  const statusGatingUnavailable = STATUS_GATING_CHECKS.filter((check) => unavailable.has(check));
   // An unavailable required check can never be reported as "clean": the lap did
   // not fail, but the evidence to call it clean was not there either.
   const status: LapStatus =
-    ordered.length > 0 ? 'anomalous' : unavailableChecks.length > 0 ? 'unverified' : 'clean';
+    ordered.length > 0 ? 'anomalous' : statusGatingUnavailable.length > 0 ? 'unverified' : 'clean';
   // The evidence percentage belongs in the sentence: "could not run" reads very
   // differently from "ran over 11 % of the lap".
   const listUnavailable = (): string =>
@@ -571,5 +743,9 @@ export function classifyLap(
     coverageFraction,
     worstAccuracyM,
     maxSampleGapMs: observedMaxGapMs,
+    labels: orderedLabels,
+    peakDecelG: worstDecelG,
+    yawExcessDps: yaw.worstDps,
+    absOscillationDetected: abs.detected,
   };
 }

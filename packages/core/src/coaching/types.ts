@@ -179,8 +179,22 @@ export interface ClassifiableLap {
   quality: string;
 }
 
-/** Why a lap is not clean. */
-export type LapAnomalyReason = 'incomplete' | 'offTrack' | 'yawSpike' | 'decelSpike' | 'gnssPoor';
+/**
+ * Why a lap is not clean -- Phase 5 REVISION 2 (`contracts.md` R2-1, user
+ * finding F1): anomalous ONLY for an incomplete lap, an off-track excursion or
+ * weak GPS/missing data. Heavy braking, ABS-like oscillation and a yaw/slide
+ * excursion are NORMAL circuit driving and never anomalize a lap any more --
+ * see `LapLabel`.
+ */
+export type LapAnomalyReason = 'incomplete' | 'offTrack' | 'gnssPoor';
+
+/**
+ * Informative signatures a CLEAN (or unverified) lap may carry -- R2-1. The
+ * user has measured 1.3 g lateral cornering in a GR86, and cars reach
+ * 1.3-1.5 g longitudinal braking on a circuit: none of that is a fault, so it
+ * is reported as a neutral fact on the lap instead of excluding it.
+ */
+export type LapLabel = 'HEAVY_BRAKING' | 'ABS_SUSPECTED' | 'SLIDE_ROTATION';
 
 /** Checks that could not run because the samples lack the required field. */
 export type LapCheckId = 'offTrack' | 'yawSpike' | 'decelSpike' | 'gnssPoor' | 'coverage';
@@ -219,6 +233,26 @@ export interface LapClassification {
   worstAccuracyM: number | null;
   /** Largest gap between consecutive samples, milliseconds. */
   maxSampleGapMs: number | null;
+  /** Informative labels this lap carries (R2-1) -- never used to exclude it. */
+  labels: LapLabel[];
+  /**
+   * Peak |longitudinal g| observed over the lap, magnitude. Always reported
+   * when measured (like `worstAccuracyM`), regardless of the HEAVY_BRAKING
+   * threshold -- feeds that label's report sentence. Null with no evidence.
+   */
+  peakDecelG: number | null;
+  /**
+   * Worst yaw-rate excess over the track-implied yaw, deg/s, when it exceeded
+   * the spike threshold -- feeds the SLIDE_ROTATION label's report sentence.
+   * Null when never exceeded, or the check could not run.
+   */
+  yawExcessDps: number | null;
+  /**
+   * True when the accelerometer `longG` channel showed a rapid
+   * brake-release-reapply oscillation -- feeds the ABS_SUSPECTED label. Always
+   * `false` (never fabricated) when the channel is absent or too sparse.
+   */
+  absOscillationDetected: boolean;
 }
 
 /** One clean lap's corner metrics, the input to the demonstrated envelope. */

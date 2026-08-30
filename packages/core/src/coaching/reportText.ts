@@ -1,12 +1,13 @@
 import type {
   CornerInsight,
   CornerLapRow,
+  LapInsight,
   Limitation,
   SessionInsights,
   TimeLossCause,
   TimeLossFinding,
 } from './sessionInsights';
-import type { CoachingChannelId, CornerMetrics, LapAnomalyReason, LapCheckId } from './types';
+import type { CoachingChannelId, CornerMetrics, LapAnomalyReason, LapCheckId, LapLabel } from './types';
 
 /**
  * Template-generated session report in Romanian and English -- Phase 5 REVISION
@@ -171,16 +172,32 @@ const REASON_LABELS: Record<ReportLanguage, Record<LapAnomalyReason, string>> = 
   ro: {
     incomplete: 'tur incomplet',
     offTrack: 'ieșire de pe traseu',
-    yawSpike: 'derapaj / rotire bruscă',
-    decelSpike: 'decelerare imposibilă (date suspecte)',
     gnssPoor: 'semnal GPS slab',
   },
   en: {
     incomplete: 'incomplete lap',
     offTrack: 'off-track excursion',
-    yawSpike: 'slide or spin',
-    decelSpike: 'implausible deceleration (suspect data)',
     gnssPoor: 'poor GPS signal',
+  },
+};
+
+/**
+ * Informative lap labels (R2-1, `contracts.md` "Phase 5 REVISION 2"): heavy
+ * braking, ABS-like oscillation and a slide/rotation are NORMAL circuit
+ * driving, rendered as neutral facts -- never as a reason the lap was
+ * excluded. The base word for each is here; the numeric detail (g, deg/s) is
+ * appended by `labelSummary` when it was measured.
+ */
+const LABEL_LABELS: Record<ReportLanguage, Record<LapLabel, string>> = {
+  ro: {
+    HEAVY_BRAKING: 'frânare foarte tare',
+    ABS_SUSPECTED: 'ABS activat (probabil)',
+    SLIDE_ROTATION: 'derapaj / rotație controlată',
+  },
+  en: {
+    HEAVY_BRAKING: 'very hard braking',
+    ABS_SUSPECTED: 'ABS likely active',
+    SLIDE_ROTATION: 'slide / controlled rotation',
   },
 };
 
@@ -284,6 +301,32 @@ function checkNames(checks: readonly LapCheckId[], language: ReportLanguage): st
   return names.length === 0 ? (language === 'ro' ? 'verificările de siguranță' : 'the safety checks') : names.join(', ');
 }
 
+/**
+ * One neutral-observation sentence per labelled lap (R2-1): heavy braking,
+ * ABS-like oscillation and a slide/rotation are stated as facts about the
+ * lap, WITH their own measured number when there is one, never as a reason it
+ * was excluded -- the lap this describes is clean (or unverified) by
+ * definition, and the sentence says so.
+ */
+function labelSummary(lap: LapInsight, language: ReportLanguage): string | null {
+  if (lap.labels.length === 0) return null;
+  const ro = language === 'ro';
+  const parts = lap.labels.map((label) => {
+    const base = LABEL_LABELS[language][label];
+    if (label === 'HEAVY_BRAKING' && lap.peakDecelG !== null) {
+      return `${base} (${gForce(lap.peakDecelG, language)})`;
+    }
+    if (label === 'SLIDE_ROTATION' && lap.yawExcessDps !== null) {
+      const dps = Math.round(lap.yawExcessDps);
+      return ro ? `${base} (${dps} °/s peste traseu)` : `${base} (${dps} deg/s beyond the track)`;
+    }
+    return base;
+  });
+  return ro
+    ? `Turul ${lap.lapNumber}: ${parts.join(', ')} — condus normal pe circuit.`
+    : `Lap ${lap.lapNumber}: ${parts.join(', ')} — normal circuit driving.`;
+}
+
 function overviewLines(insights: SessionInsights, language: ReportLanguage): string[] {
   const lines: string[] = [];
   const ro = language === 'ro';
@@ -348,6 +391,13 @@ function overviewLines(insights: SessionInsights, language: ReportLanguage): str
         ? `Tururile ${lapList(unverified.map((lap) => lap.lapNumber), language)} nu au putut fi verificate (${evidenceRo}), așa că nu intră în comparații.`
         : `Laps ${lapList(unverified.map((lap) => lap.lapNumber), language)} could not be verified (${evidenceEn}), so they stay out of the comparisons.`,
     );
+  }
+  // R2-1: heavy braking / ABS / slide are neutral facts about an otherwise
+  // clean (or unverified) lap, never a reason it was excluded -- so this is
+  // listed separately from the anomalous/unverified sentences above.
+  for (const lap of insights.laps) {
+    const line = labelSummary(lap, language);
+    if (line !== null) lines.push(line);
   }
   if (insights.availability.available.length > 0) {
     lines.push(

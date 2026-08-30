@@ -23,6 +23,7 @@ import type {
   CornerMetrics,
   LapAnomalyReason,
   LapCheckId,
+  LapLabel,
   LapStatus,
 } from './types';
 
@@ -101,6 +102,14 @@ export interface LapInsight {
   checkCoverage: Record<LapCheckId, number>;
   coverageFraction: number;
   corners: CornerMetrics[];
+  /** Informative labels this lap carries (R2-1) -- never used to exclude it. */
+  labels: LapLabel[];
+  /** Peak |longitudinal g| observed, magnitude. Feeds HEAVY_BRAKING's sentence. */
+  peakDecelG: number | null;
+  /** Worst yaw-rate excess over the implied yaw, deg/s. Feeds SLIDE_ROTATION's sentence. */
+  yawExcessDps: number | null;
+  /** True when an ABS-like brake-release-reapply oscillation was detected. */
+  absOscillationDetected: boolean;
 }
 
 export interface CornerLapRow {
@@ -370,6 +379,10 @@ export function analyzeSession(
       checkCoverage: classification.checkCoverage,
       coverageFraction: classification.coverageFraction,
       corners: computeCornerMetrics(entry.samples, orderedCorners, metricsOptions),
+      labels: classification.labels,
+      peakDecelG: classification.peakDecelG,
+      yawExcessDps: classification.yawExcessDps,
+      absOscillationDetected: classification.absOscillationDetected,
     };
   });
 

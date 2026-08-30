@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { analyzeSession, MIN_CLEAN_LAPS_FOR_COMPARISON } from '../../src/coaching';
+import { GRAVITY_MPS2, MIN_CLEAN_LAPS_FOR_COMPARISON, analyzeSession } from '../../src/coaching';
 import type { SessionAnalysisContext, SessionLapInput } from '../../src/coaching';
 import { CORNER_ANALYSIS_VERSION } from '../../src/contracts';
 
@@ -298,6 +298,28 @@ describe('analyzeSession: unverified laps (H5)', () => {
     const limitation = insights.limitations.find((entry) => entry.code === 'UNVERIFIED_LAPS');
     expect(limitation?.coveragePercent ?? 0).toBeGreaterThan(0);
     expect(limitation?.coveragePercent ?? 100).toBeLessThan(15);
+  });
+});
+
+describe('analyzeSession: R2-1 -- heavy braking / ABS / slide are labels, never anomalies (A3)', () => {
+  it('keeps a heavy-braking lap CLEAN and in the demonstrated envelope', () => {
+    clock = 0;
+    const heavy = lapInput(1, {
+      accelAt: (distanceM) => (distanceM >= 200 && distanceM < 220 ? -1.3 * GRAVITY_MPS2 : 0),
+    });
+    const insights = analyzeSession([heavy, lapInput(2, { profileShiftM: 10 })], CORNERS, CONTEXT);
+    expect(insights.laps[0]?.status).toBe('clean');
+    expect(insights.laps[0]?.clean).toBe(true);
+    expect(insights.laps[0]?.labels).toContain('HEAVY_BRAKING');
+    expect(insights.envelope.cleanLapIds).toContain(1);
+  });
+
+  it('still excludes a genuinely off-track lap from the envelope', () => {
+    clock = 0;
+    const dirty = lapInput(1, { lateralM: () => 40 });
+    const insights = analyzeSession([dirty, lapInput(2, { profileShiftM: 10 })], CORNERS, CONTEXT);
+    expect(insights.laps[0]?.status).toBe('anomalous');
+    expect(insights.envelope.cleanLapIds).not.toContain(1);
   });
 });
 

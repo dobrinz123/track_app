@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { analyzeSession, buildReport, renderReport } from '../../src/coaching';
+import { GRAVITY_MPS2, analyzeSession, buildReport, renderReport } from '../../src/coaching';
 import type { SessionAnalysisContext, SessionInsights, SessionLapInput } from '../../src/coaching';
 
 import { SYNTHETIC_CORNER, SYNTHETIC_TOTAL_LENGTH_M, syntheticLap } from './syntheticLap';
@@ -275,6 +275,59 @@ describe('renderReport', () => {
     const en = renderReport(insights, 'en');
     expect(ro).toContain('viteza înregistrată');
     expect(en).toContain('recorded speed');
+    expect(ro).not.toMatch(FORBIDDEN);
+    expect(en).not.toMatch(FORBIDDEN);
+  });
+
+  it('renders heavy braking as a neutral label, never an exclusion (R2-1)', () => {
+    clock = 0;
+    const heavy = lapInput(1, {
+      accelAt: (distanceM) => (distanceM >= 200 && distanceM < 220 ? -1.3 * GRAVITY_MPS2 : 0),
+    });
+    const insights = analyzeSession([heavy, lapInput(2, { profileShiftM: 10 })], CORNERS, CONTEXT);
+    expect(insights.laps[0]?.status).toBe('clean');
+    const ro = renderReport(insights, 'ro');
+    const en = renderReport(insights, 'en');
+    expect(ro).toMatch(/Turul 1:.*frânare foarte tare/);
+    expect(en).toMatch(/Lap 1:.*very hard braking/);
+    // Never presented as an exclusion: this lap IS the/among the clean laps.
+    expect(ro).not.toMatch(/Turul 1[^\n]*tur incomplet/);
+    expect(en).not.toContain('Laps excluded from the comparisons: 1');
+    expect(ro).not.toMatch(FORBIDDEN);
+    expect(en).not.toMatch(FORBIDDEN);
+  });
+
+  it('renders a slide/rotation label with its yaw excess, never as an anomaly reason (R2-1)', () => {
+    clock = 0;
+    const sliding = lapInput(1, {
+      headingDeg: (distanceM, index) => (distanceM > 640 ? (index * 40) % 360 : 10),
+    });
+    const insights = analyzeSession([sliding, lapInput(2, { profileShiftM: 10 })], CORNERS, CONTEXT);
+    expect(insights.laps[0]?.status).toBe('clean');
+    const ro = renderReport(insights, 'ro');
+    const en = renderReport(insights, 'en');
+    expect(ro).toMatch(/Turul 1:.*derapaj/);
+    expect(en).toMatch(/Lap 1:.*slide/);
+    expect(ro).not.toMatch(FORBIDDEN);
+    expect(en).not.toMatch(FORBIDDEN);
+  });
+
+  it('renders ABS-suspected oscillation as a neutral label sourced from the accelerometer', () => {
+    clock = 0;
+    const absLap = lapInput(1, {
+      channels: 'imu',
+      accelAt: (distanceM) => {
+        if (distanceM < 400 || distanceM >= 600) return 0;
+        const cyclePos = ((distanceM - 400) / 8) % 1;
+        return cyclePos < 0.5 ? -1.4 * GRAVITY_MPS2 : -0.3 * GRAVITY_MPS2;
+      },
+    });
+    const insights = analyzeSession([absLap, lapInput(2, { profileShiftM: 10 })], CORNERS, CONTEXT);
+    expect(insights.laps[0]?.labels).toContain('ABS_SUSPECTED');
+    const ro = renderReport(insights, 'ro');
+    const en = renderReport(insights, 'en');
+    expect(ro).toMatch(/ABS/);
+    expect(en).toMatch(/ABS/);
     expect(ro).not.toMatch(FORBIDDEN);
     expect(en).not.toMatch(FORBIDDEN);
   });
