@@ -124,3 +124,111 @@ describe('P4n N3: a binding confirmed mid-session sets the "restart to apply" hi
     await provider.stop();
   }, 15_000);
 });
+
+/**
+ * Ticket P4n-FIX1 Q2 (binding, Codex P4n-REV1 MEDIUM): "brakeBindingsSignature
+ * ... computed only over bindings that actually enter the poll plan (a
+ * binding overridden by a configured spec does not count)". Before this fix,
+ * `getDiagnostics()`'s recheck resolved the FULL (unfiltered) binding list
+ * while the build-time signature had been filtered -- an override would have
+ * made the two permanently disagree, showing the restart hint for a channel
+ * that was never actually rebuilt from the binding at all.
+ */
+describe('P4n-FIX1 Q2: an overridden binding never counts toward the signature', () => {
+  beforeEach(() => {
+    state.instances.length = 0;
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reconfirming an OVERRIDDEN brakeSwitch binding never sets the restart hint', async () => {
+    const store = enetStore();
+    // An explicit user `did` spec for `brakeSwitch` -- this always wins over
+    // any confirmed binding, so the binding below never enters the plan.
+    store.update({
+      enetChannelSpecsJson: JSON.stringify([
+        {
+          channel: 'brakeSwitch',
+          mode: 'did',
+          requestHex: '500C',
+          targetAddress: 0x29,
+          decode: { byteOffset: 0, byteLength: 1, scale: 1, offset: 0 },
+          provenance: 'test override',
+        },
+      ]),
+    });
+    let bindings: VehicleProfileBinding[] = [SWITCH_BINDING];
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: () => Date.now(),
+      isDev: true,
+      enetAdapterReservation: createEnetAdapterReservation(),
+      readVehicleProfileBindings: () => bindings,
+    });
+    provider.start();
+    await waitFor(() => provider.getDiagnostics().state === 'polling');
+    expect(provider.getDiagnostics().brakeBindingsChangedSincePoll).toBe(false);
+
+    // Reconfirm the SAME channel with materially different evidence -- still
+    // overridden, so it must still count for nothing.
+    bindings = [
+      {
+        ...SWITCH_BINDING,
+        evidenceJson: JSON.stringify({ restValueHex: '04', min: 4, max: 5, byteOffset: null, flagBit: 0, activeValueHex: '05' }),
+      },
+    ];
+    expect(provider.getDiagnostics().brakeBindingsChangedSincePoll).toBe(false);
+
+    await provider.stop();
+  }, 15_000);
+});
+
+/**
+ * Ticket P4n-FIX1 Q1 (binding): `brakeSwitchCoarse` reflects the binding THIS
+ * session's poll plan actually inserted -- true for legacy evidence (neither
+ * `flagBit` nor `activeValueHex`), false once either is on file.
+ */
+describe('P4n-FIX1 Q1: brakeSwitchCoarse diagnostics', () => {
+  beforeEach(() => {
+    state.instances.length = 0;
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('is true for legacy evidence (no flagBit, no activeValueHex)', async () => {
+    const store = enetStore();
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: () => Date.now(),
+      isDev: true,
+      enetAdapterReservation: createEnetAdapterReservation(),
+      readVehicleProfileBindings: () => [SWITCH_BINDING],
+    });
+    provider.start();
+    await waitFor(() => provider.getDiagnostics().state === 'polling');
+    expect(provider.getDiagnostics().brakeSwitchCoarse).toBe(true);
+    await provider.stop();
+  }, 15_000);
+
+  it('is false once the binding carries a flagBit', async () => {
+    const store = enetStore();
+    const provider = createTelemetryProvider({
+      settingsStore: store,
+      monotonicNow: () => Date.now(),
+      isDev: true,
+      enetAdapterReservation: createEnetAdapterReservation(),
+      readVehicleProfileBindings: () => [
+        {
+          ...SWITCH_BINDING,
+          evidenceJson: JSON.stringify({ restValueHex: '04', min: 4, max: 5, byteOffset: null, flagBit: 0, activeValueHex: '05' }),
+        },
+      ],
+    });
+    provider.start();
+    await waitFor(() => provider.getDiagnostics().state === 'polling');
+    expect(provider.getDiagnostics().brakeSwitchCoarse).toBe(false);
+    await provider.stop();
+  }, 15_000);
+});

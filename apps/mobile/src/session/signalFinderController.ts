@@ -389,6 +389,30 @@ interface FinderPools {
   cached: SignalFinderTargetRef[];
 }
 
+/**
+ * Ticket P4n-FIX1 Q1 (binding): the confirmed binding's own ACTIVE-level
+ * response, hex, in the SAME whole-response representation `restValueHex`
+ * already uses (`telemetryProvider.ts`'s `decodeBrakeBindingValue` parses
+ * both the same way -- see its own doc comment). Only derivable when the
+ * scored series decoded the WHOLE response as one scalar (`byteOffset ===
+ * null`, a 1-4 byte response): a block's `min`/`max` describe one BYTE, not
+ * the full multi-byte response `restValueHex` carries, so reconstructing a
+ * whole-response hex from it would be a guess, never persisted here. `min`
+ * and `max` must also resolve to EXACTLY "rest" and "the other level" -- a
+ * series that visited more than two distinct levels has no single active
+ * value to name, and this returns `null` rather than pick one.
+ */
+function activeValueHexFromScore(score: SignalCandidateScore): string | null {
+  if (score.byteOffset !== null || score.restValueHex === null || score.min === null || score.max === null) return null;
+  const restNumeric = Number.parseInt(score.restValueHex, 16);
+  if (!Number.isFinite(restNumeric)) return null;
+  let activeNumeric: number | null = null;
+  if (score.min === restNumeric && score.max !== restNumeric) activeNumeric = score.max;
+  else if (score.max === restNumeric && score.min !== restNumeric) activeNumeric = score.min;
+  if (activeNumeric === null) return null;
+  return activeNumeric.toString(16).toUpperCase().padStart(score.restValueHex.length, '0');
+}
+
 export function createSignalFinderController(deps: SignalFinderControllerDeps): SignalFinderController {
   const reservation = deps.reservation ?? sharedEnetAdapterReservation;
   const nowUtc = deps.nowUtc ?? ((): string => new Date().toISOString());
@@ -1254,6 +1278,10 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
           sampleCount: score.sampleCount,
           byteOffset: score.byteOffset,
           flagBit: score.flagBit ?? null,
+          // Ticket P4n-FIX1 Q1 (binding): the boolean decode's second
+          // precedence, right after `flagBit` -- see `activeValueHexFromScore`'s
+          // own doc comment for when this can (and cannot) be derived.
+          activeValueHex: activeValueHexFromScore(score),
           correlationSign: score.correlationSign,
           restValueHex: score.restValueHex,
           min: score.min,

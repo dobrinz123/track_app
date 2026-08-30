@@ -14,8 +14,10 @@ import {
 } from '../../session/composition';
 import { useSettings } from '../hooks/useSettings';
 import {
+  brakeSwitchRowLabel,
   formatBrakePctRawDisplay,
   formatBrakeSwitchDisplay,
+  shouldShowBrakeBindingRestartHint,
   summarizeGForceSamples,
   type TelemetryProviderDiagnostics,
 } from '../../session/telemetryProvider';
@@ -348,7 +350,15 @@ export function TelemetryScreen(_props: Props): React.JSX.Element {
                 // "(0x49 raw)" is its own label -- the 0x49 fallback with NO
                 // rest offset learned is NOT normalized, and the monitor must
                 // not claim it is.
-                const label = id === 'accelPedalPct' ? `${channel.label} ${PEDAL_SOURCE_LABEL[diagnostics.pedalSource]}` : channel.label;
+                // Ticket P4n-FIX1 Q1 (binding): "Brake switch (coarse)" when
+                // this session's binding has no persisted flagBit/activeValueHex
+                // (`brakeSwitchRowLabel`, pinned by `telemetryProviderBrakeDisplay.test.ts`).
+                const label =
+                  id === 'accelPedalPct'
+                    ? `${channel.label} ${PEDAL_SOURCE_LABEL[diagnostics.pedalSource]}`
+                    : id === 'brakeSwitch'
+                      ? brakeSwitchRowLabel(channel.label, diagnostics.brakeSwitchCoarse)
+                      : channel.label;
                 // Ticket P4n N2 (binding): "Brake switch" reads ON/OFF, never
                 // the raw 100/0; "Brake pressure" keeps its normal %
                 // reading, plus the raw response value in small text (e.g.
@@ -404,7 +414,7 @@ export function TelemetryScreen(_props: Props): React.JSX.Element {
               })}
             </View>
 
-            {isEnet && diagnostics.brakeBindingsChangedSincePoll === true ? (
+            {shouldShowBrakeBindingRestartHint(diagnostics) ? (
               <Text style={styles.hintText} maxFontSizeMultiplier={1.3}>
                 New binding confirmed — Stop → Start to apply
               </Text>

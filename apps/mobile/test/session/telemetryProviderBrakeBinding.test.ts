@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  brakeBindingsSignature,
   decodeBrakeBindingValue,
   resolveBrakeBindingsFromProfile,
   type ResolvedBrakeBinding,
@@ -315,5 +316,187 @@ describe('the DME brake binding of field test 5 (0x12 0x4002, 0x01 rest / 0x19 a
     expect(decodeBrakeBindingValue(resolved, Uint8Array.from([0x11]))).toBe(100);
     // A response of the wrong length is no reading at all (P4l-FIX4 N4).
     expect(decodeBrakeBindingValue(resolved, Uint8Array.from([0x00, 0x01]))).toBeNull();
+  });
+
+  /**
+   * Ticket P4n-FIX1 Q1 (binding, Codex P4n-REV1 HIGH): this legacy evidence
+   * carries NEITHER `flagBit` NOR `activeValueHex` -- exactly the shape every
+   * binding confirmed before this ticket has -- so it MUST keep decoding via
+   * the coarse "off rest" fallback (rule c), unchanged, but the binding must
+   * now say so (`coarse: true`) rather than silently trusting it.
+   */
+  it('legacy evidence (no flagBit, no activeValueHex) resolves as coarse', () => {
+    const resolved = resolveOne([dmeBinding]) as ResolvedBrakeBinding;
+    expect(resolved.flagBit).toBeNull();
+    expect(resolved.activeValueHex).toBeNull();
+    expect(resolved.coarse).toBe(true);
+  });
+});
+
+/**
+ * Ticket P4n-FIX1 Q1 (binding, Codex P4n-REV1 HIGH): "Boolean brake decode
+ * must not be '≠ rest ⇒ pressed'" -- three precedences, tested against the
+ * ticket's own field facts: confirmed brakeSwitch = 0x29/0x500C (rest 0x04,
+ * active 0x05, flagBit 0), and the DME 0x4002 danger case (rest changes with
+ * the engine: 0x01 off, 0x83 running) that a boolean binding must never read
+ * as pressed just because the value differs from the STORED rest.
+ */
+describe('P4n-FIX1 Q1: boolean decode precedence (flagBit > activeValueHex > coarse "off rest")', () => {
+  describe('(a) flagBit -- 0x500C, rest 0x04, active 0x05, flagBit 0', () => {
+    const flagBound = resolveOne([
+      binding({
+        evidenceJson: JSON.stringify({ restValueHex: '04', min: 4, max: 5, byteOffset: null, flagBit: 0, activeValueHex: '05' }),
+      }),
+    ]) as ResolvedBrakeBinding;
+
+    it('resolves flagBit and marks the binding NOT coarse', () => {
+      expect(flagBound.flagBit).toBe(0);
+      expect(flagBound.coarse).toBe(false);
+    });
+
+    it('04 -> 0, 05 -> 100 -- the ordinary two-code case', () => {
+      expect(decodeBrakeBindingValue(flagBound, Uint8Array.from([0x04]))).toBe(0);
+      expect(decodeBrakeBindingValue(flagBound, Uint8Array.from([0x05]))).toBe(100);
+    });
+
+    it('0x06 -> 0 -- bit0 of 0x06 is 0, matching rest\'s own bit0, even though 0x06 ≠ the stored rest byte', () => {
+      expect(decodeBrakeBindingValue(flagBound, Uint8Array.from([0x06]))).toBe(0);
+    });
+  });
+
+  it('(a) flagBit direction follows the REST level\'s own bit, not "bit set = active"', () => {
+    // A flag that CLEARS when actuated (DME 0x4007-shaped: rest 0x9001 bit0=1,
+    // active 0x9000 bit0=0) must read "pressed" just as correctly as one that
+    // SETS -- the bit test is relative to rest, never an absolute 0/1 guess.
+    const clearingFlag = resolveOne([
+      binding({
+        length: 2,
+        evidenceJson: JSON.stringify({ restValueHex: '9001', min: 0x9000, max: 0x9001, byteOffset: null, flagBit: 0, activeValueHex: '9000' }),
+      }),
+    ]) as ResolvedBrakeBinding;
+    expect(decodeBrakeBindingValue(clearingFlag, Uint8Array.from([0x90, 0x01]))).toBe(0);
+    expect(decodeBrakeBindingValue(clearingFlag, Uint8Array.from([0x90, 0x00]))).toBe(100);
+  });
+
+  describe('(b) activeValueHex, no flagBit -- 0x4002-like, rest 0x01, active 0x19', () => {
+    const activeBound = resolveOne([
+      binding({
+        ecu: 0x12,
+        did: 0x4002,
+        evidenceJson: JSON.stringify({ restValueHex: '01', min: 1, max: 25, byteOffset: null, activeValueHex: '19' }),
+      }),
+    ]) as ResolvedBrakeBinding;
+
+    it('resolves activeValueHex, no flagBit, and marks the binding NOT coarse', () => {
+      expect(activeBound.flagBit).toBeNull();
+      expect(activeBound.activeValueHex).toBe('19');
+      expect(activeBound.coarse).toBe(false);
+    });
+
+    it('01 -> 0, 19 -> 100 -- equality with the persisted rest/active levels', () => {
+      expect(decodeBrakeBindingValue(activeBound, Uint8Array.from([0x01]))).toBe(0);
+      expect(decodeBrakeBindingValue(activeBound, Uint8Array.from([0x19]))).toBe(100);
+    });
+
+    /**
+     * The ticket's own field fact: "DME 0x4002 rest changes with the engine
+     * (0x01 off, 0x83 running) -- a boolean binding on it must never read
+     * pressed just because the value differs from the stored rest." With an
+     * activeValueHex on file, 0x83 matches NEITHER the persisted rest NOR the
+     * persisted active level -- an UNKNOWN level, so no sample, never 100.
+     */
+    it('0x83 (engine running, a THIRD level) -> no sample, never fabricated as pressed', () => {
+      expect(decodeBrakeBindingValue(activeBound, Uint8Array.from([0x83]))).toBeNull();
+    });
+  });
+
+  describe('(b) without (a): the SAME rest/active pair as the flagBit case above, but no flagBit on file', () => {
+    const activeOnly = resolveOne([
+      binding({
+        evidenceJson: JSON.stringify({ restValueHex: '04', min: 4, max: 5, byteOffset: null, activeValueHex: '05' }),
+      }),
+    ]) as ResolvedBrakeBinding;
+
+    it('04 -> 0, 05 -> 100', () => {
+      expect(decodeBrakeBindingValue(activeOnly, Uint8Array.from([0x04]))).toBe(0);
+      expect(decodeBrakeBindingValue(activeOnly, Uint8Array.from([0x05]))).toBe(100);
+    });
+
+    // The ticket's own contrast: WITHOUT flagBit, 0x06 matches neither the
+    // persisted rest (0x04) nor the persisted active (0x05) -- no sample.
+    // (With flagBit ALSO on file, rule (a) takes precedence and 0x06 -> 0,
+    // covered by the flagBit describe block above.)
+    it('0x06 -> no sample under (b) alone', () => {
+      expect(decodeBrakeBindingValue(activeOnly, Uint8Array.from([0x06]))).toBeNull();
+    });
+  });
+
+  describe('(c) neither flagBit nor activeValueHex -- coarse legacy fallback, unchanged behaviour', () => {
+    const coarse = resolveOne([binding()]) as ResolvedBrakeBinding; // binding()'s own evidence carries neither.
+
+    it('is marked coarse', () => {
+      expect(coarse.coarse).toBe(true);
+    });
+
+    it('keeps the pre-existing "anything off rest reads pressed" rule', () => {
+      expect(decodeBrakeBindingValue(coarse, Uint8Array.from([0x04]))).toBe(0);
+      expect(decodeBrakeBindingValue(coarse, Uint8Array.from([0x05]))).toBe(100);
+      expect(decodeBrakeBindingValue(coarse, Uint8Array.from([0x06]))).toBe(100);
+    });
+  });
+});
+
+/**
+ * Ticket P4n-FIX1 Q2 (binding, Codex P4n-REV1 MEDIUM): the signature used to
+ * carry only `channel`/`ecu`/`did`, so reconfirming the SAME DID with a
+ * different observed range (or byte offset, decode kind, rest/active level,
+ * flag bit) never changed it. Every decoding-relevant field is included now.
+ */
+describe('P4n-FIX1 Q2: brakeBindingsSignature includes every decoding-relevant field', () => {
+  it('changes when the observed max changes (reconfirming 0x58B7 with a new max)', () => {
+    const before = resolveBrakeBindingsFromProfile([
+      binding({
+        channel: 'brakePressure',
+        ecu: 0x12,
+        did: 0x58b7,
+        evidenceJson: JSON.stringify({ restValueHex: '00', min: 0, max: 64, byteOffset: null }),
+      }),
+    ]);
+    const after = resolveBrakeBindingsFromProfile([
+      binding({
+        channel: 'brakePressure',
+        ecu: 0x12,
+        did: 0x58b7,
+        evidenceJson: JSON.stringify({ restValueHex: '00', min: 0, max: 200, byteOffset: null }),
+      }),
+    ]);
+    expect(brakeBindingsSignature(before)).not.toBe(brakeBindingsSignature(after));
+  });
+
+  it('changes when flagBit/activeValueHex are newly persisted for the SAME channel/ecu/did', () => {
+    const withoutEvidence = resolveBrakeBindingsFromProfile([binding()]); // binding()'s default evidence has neither.
+    const withEvidence = resolveBrakeBindingsFromProfile([
+      binding({ evidenceJson: JSON.stringify({ restValueHex: '04', min: 4, max: 5, byteOffset: null, flagBit: 0, activeValueHex: '05' }) }),
+    ]);
+    expect(brakeBindingsSignature(withoutEvidence)).not.toBe(brakeBindingsSignature(withEvidence));
+  });
+
+  it('is identical for the SAME bindings regardless of array order', () => {
+    const switchBinding = binding();
+    const pressureBinding = binding({
+      channel: 'brakePressure',
+      ecu: 0x12,
+      did: 0x58b7,
+      evidenceJson: JSON.stringify({ restValueHex: '00', min: 0, max: 64, byteOffset: null }),
+    });
+    const forward = resolveBrakeBindingsFromProfile([switchBinding, pressureBinding]);
+    const reversed = resolveBrakeBindingsFromProfile([pressureBinding, switchBinding]);
+    expect(brakeBindingsSignature(forward)).toBe(brakeBindingsSignature(reversed));
+  });
+
+  it('is unchanged when nothing decoding-relevant changed', () => {
+    const first = resolveBrakeBindingsFromProfile([binding()]);
+    const second = resolveBrakeBindingsFromProfile([binding()]);
+    expect(brakeBindingsSignature(first)).toBe(brakeBindingsSignature(second));
   });
 });

@@ -93,6 +93,32 @@ export interface ResolvedBrakeBinding {
   /** Observed range, from the finder's evidence — the scaling reference for `scaled-0-100`. */
   observedMin: number | null;
   observedMax: number | null;
+  /**
+   * Ticket P4n-FIX1 Q1 (binding): the confirmed series' own flag-bit index
+   * (0 = LSB), when the Signal Finder scored it as a single-bit flag inside a
+   * word (e.g. DME 0x4007). `null` when the evidence carries none -- the
+   * commonest case (a switch whose two levels are not a bit relationship, or
+   * legacy evidence from before this field existed).
+   */
+  flagBit: number | null;
+  /**
+   * Ticket P4n-FIX1 Q1 (binding): the confirmed binding's own ACTIVE-level
+   * response, hex, in the SAME whole-response representation `restValueHex`
+   * already uses (never just the scored byte offset alone). `null` when the
+   * evidence carries none.
+   */
+  activeValueHex: string | null;
+  /**
+   * Ticket P4n-FIX1 Q1 (binding): true for a `boolean-0-100` binding whose
+   * evidence carries NEITHER `flagBit` NOR `activeValueHex` -- legacy
+   * evidence, or a binding confirmed before this ticket. Its decode falls
+   * back to "anything off the rest level reads pressed", which is honest for
+   * a simple two-code switch but can misread an ECU whose REST level itself
+   * moves (e.g. DME 0x4002, whose rest changes 0x01 off / 0x83 running) --
+   * the monitor and diagnostics say so ("Brake switch (coarse)") rather than
+   * silently trusting it. Always `false` for `scaled-0-100` (unused there).
+   */
+  coarse: boolean;
   provenance: string;
 }
 
@@ -101,6 +127,10 @@ interface BindingEvidence {
   min?: unknown;
   max?: unknown;
   byteOffset?: unknown;
+  /** Ticket P4n-FIX1 Q1 (binding): the Signal Finder score's own flag-bit index (0 = LSB), when the confirmed series was a single-bit flag inside a word. Highest decode precedence -- see {@link decodeBrakeBindingValue}. */
+  flagBit?: unknown;
+  /** Ticket P4n-FIX1 Q1 (binding): the confirmed binding's own ACTIVE-level response, hex, in the SAME whole-response representation as `restValueHex`. Second decode precedence, used only when `flagBit` is absent. */
+  activeValueHex?: unknown;
 }
 
 /** Read defensively — a corrupt/older evidence blob degrades to "no evidence", never a throw. */
@@ -137,6 +167,14 @@ function resolveOneBrakeBinding(
   if (binding === undefined) return null;
   const evidence = parseBindingEvidence(binding.evidenceJson);
   const byteOffset = typeof evidence.byteOffset === 'number' && evidence.byteOffset >= 0 ? Math.floor(evidence.byteOffset) : 0;
+  // Ticket P4n-FIX1 Q1 (binding): the two decode precedences ABOVE the legacy
+  // "off rest" fallback -- both optional, both defensively parsed (a corrupt
+  // or pre-existing evidence blob degrades to "neither", never a throw).
+  const flagBit =
+    typeof evidence.flagBit === 'number' && Number.isInteger(evidence.flagBit) && evidence.flagBit >= 0
+      ? evidence.flagBit
+      : null;
+  const activeValueHex = typeof evidence.activeValueHex === 'string' ? evidence.activeValueHex : null;
   return {
     channel: entry.channel,
     ecu: binding.ecu,
@@ -147,6 +185,11 @@ function resolveOneBrakeBinding(
     restValueHex: typeof evidence.restValueHex === 'string' ? evidence.restValueHex : null,
     observedMin: typeof evidence.min === 'number' ? evidence.min : null,
     observedMax: typeof evidence.max === 'number' ? evidence.max : null,
+    flagBit,
+    activeValueHex,
+    // Q1: coarse ONLY applies to the boolean decode -- `scaled-0-100` never
+    // reads `flagBit`/`activeValueHex` at all, so it is never "coarse".
+    coarse: entry.decodeKind === 'boolean-0-100' && flagBit === null && activeValueHex === null,
     provenance: `Signal Finder field-confirmed binding (${binding.decode})`,
   };
 }
@@ -176,10 +219,31 @@ export function resolveBrakeBindingsFromProfile(
  * `activeBrakeBindingsSignature`'s own doc comment). Two resolutions of the
  * SAME bindings always produce the same signature regardless of array order;
  * any change to channel/ecu/DID changes it.
+ *
+ * Ticket P4n-FIX1 Q2 (binding, Codex P4n-REV1 MEDIUM): the signature used to
+ * carry only `channel`/`ecu`/`did` -- so reconfirming the SAME DID with a
+ * different observed range, byte offset, decode kind, rest/active level or
+ * flag bit (any of which changes what a live response actually decodes to)
+ * left the signature unchanged, and the "Stop -> Start to apply" hint never
+ * fired. Every decoding-relevant field is included now.
  */
 export function brakeBindingsSignature(bindings: readonly ResolvedBrakeBinding[]): string {
   return [...bindings]
-    .map((binding) => `${binding.channel}:${binding.ecu.toString(16)}:${binding.requestHex}`)
+    .map((binding) =>
+      [
+        binding.channel,
+        binding.ecu.toString(16),
+        binding.requestHex,
+        binding.length === null ? 'null' : binding.length,
+        binding.byteOffset,
+        binding.decodeKind,
+        binding.restValueHex ?? 'null',
+        binding.activeValueHex ?? 'null',
+        binding.flagBit === null ? 'null' : binding.flagBit,
+        binding.observedMin === null ? 'null' : binding.observedMin,
+        binding.observedMax === null ? 'null' : binding.observedMax,
+      ].join(':'),
+    )
     .sort()
     .join('|');
 }
@@ -208,16 +272,28 @@ function brakeBindingSeriesValue(binding: ResolvedBrakeBinding, raw: Uint8Array)
   return raw[binding.byteOffset] ?? null;
 }
 
-/** The binding's rest-level response, as the same series value `brakeBindingSeriesValue` reads from a live response. `null` when the evidence hex is absent or unparseable. */
-function brakeBindingRestValue(binding: ResolvedBrakeBinding): number | null {
-  if (binding.restValueHex === null) return null;
-  const compact = binding.restValueHex.replace(/\s+/g, '');
+/** Parses a compact hex string into bytes, `null` when it is empty, odd-length, or carries a non-hex character -- shared by every evidence hex field (`restValueHex`, `activeValueHex`) so all of them degrade the SAME way. */
+function parseEvidenceHex(hex: string): Uint8Array | null {
+  const compact = hex.replace(/\s+/g, '');
   if (compact.length === 0 || compact.length % 2 !== 0 || !/^[0-9A-Fa-f]+$/.test(compact)) return null;
   const bytes = new Uint8Array(compact.length / 2);
   for (let index = 0; index < bytes.length; index += 1) {
     bytes[index] = Number.parseInt(compact.slice(index * 2, index * 2 + 2), 16);
   }
+  return bytes;
+}
+
+/** `hex`, decoded as the SAME series value `brakeBindingSeriesValue` reads from a live response. `null` when `hex` is absent or unparseable. */
+function brakeBindingHexSeriesValue(binding: ResolvedBrakeBinding, hex: string | null): number | null {
+  if (hex === null) return null;
+  const bytes = parseEvidenceHex(hex);
+  if (bytes === null) return null;
   return brakeBindingSeriesValue(binding, bytes);
+}
+
+/** The binding's rest-level response, as the same series value `brakeBindingSeriesValue` reads from a live response. `null` when the evidence hex is absent or unparseable. */
+function brakeBindingRestValue(binding: ResolvedBrakeBinding): number | null {
+  return brakeBindingHexSeriesValue(binding, binding.restValueHex);
 }
 
 /**
@@ -226,6 +302,24 @@ function brakeBindingRestValue(binding: ResolvedBrakeBinding): number | null {
  * binding) too short for the byte offset the finder confirmed, or with
  * evidence too damaged to compare against. An ECU that changed what it
  * answers must never silently produce a fabricated brake reading.
+ *
+ * Ticket P4n-FIX1 Q1 (binding, Codex P4n-REV1 HIGH): the boolean decode used
+ * to be a single rule -- "anything off the rest level reads pressed" -- which
+ * fabricates a reading the moment an ECU's REST level itself moves (DME
+ * 0x4002: 0x01 with the engine off, 0x83 running -- an engine start would
+ * have read as full brake forever after). Three precedences, in order,
+ * decide a boolean binding now:
+ *
+ *  (a) a persisted `flagBit` (the Signal Finder score's own single-bit flag,
+ *      stored at confirm time) -- the read bit, relative to the REST value's
+ *      own bit (so a flag that CLEARS when actuated reads exactly as
+ *      correctly as one that SETS);
+ *  (b) a persisted `activeValueHex` (the score's own active level) --
+ *      equality with active is 100, equality with rest is 0, and anything
+ *      else is an UNKNOWN level: no sample, never a guess;
+ *  (c) neither -- the legacy "off rest" rule, honest for a simple two-code
+ *      switch but blind to a moving rest level. `binding.coarse` (set at
+ *      resolve time) is what tells the diagnostics/monitor to say so.
  */
 export function decodeBrakeBindingValue(binding: ResolvedBrakeBinding, raw: Uint8Array): number | null {
   // Ticket P4l-FIX4 N4 (binding, Codex P4l-REV2b finding 8): the LENGTH is
@@ -239,6 +333,26 @@ export function decodeBrakeBindingValue(binding: ResolvedBrakeBinding, raw: Uint
   const value = brakeBindingSeriesValue(binding, raw);
   if (value === null) return null;
   if (binding.decodeKind === 'boolean-0-100') {
+    // (a) flagBit: read the bit, relative to the rest level's OWN bit -- a
+    // flag that clears when actuated (rest bit 1) reads pressed exactly as
+    // correctly as one that sets (rest bit 0).
+    if (binding.flagBit !== null) {
+      const restValue = brakeBindingRestValue(binding);
+      const restBit = restValue === null ? 0 : (restValue >>> binding.flagBit) & 1;
+      const bit = (value >>> binding.flagBit) & 1;
+      return bit === restBit ? 0 : 100;
+    }
+    // (b) activeValueHex: equality decides both directions; a third level
+    // (an ECU answering something neither confirmed level ever was) is
+    // UNKNOWN, never fabricated as either.
+    if (binding.activeValueHex !== null) {
+      const activeValue = brakeBindingHexSeriesValue(binding, binding.activeValueHex);
+      const restValue = brakeBindingRestValue(binding);
+      if (activeValue !== null && value === activeValue) return 100;
+      if (restValue !== null && value === restValue) return 0;
+      return null;
+    }
+    // (c) coarse legacy fallback: "off rest" reads pressed.
     const restValue = brakeBindingRestValue(binding);
     if (restValue === null) return null;
     return value === restValue ? 0 : 100;
@@ -343,6 +457,35 @@ export const TELEMETRY_NO_VALUE_PLACEHOLDER = '—';
 export function formatBrakeSwitchDisplay(value: number | undefined): string {
   if (value === undefined) return TELEMETRY_NO_VALUE_PLACEHOLDER;
   return value >= 50 ? 'ON' : 'OFF';
+}
+
+/**
+ * Ticket P4n-FIX1 Q1 (binding): the monitor's own "Brake switch" row label,
+ * with "(coarse)" appended exactly when `diagnostics.brakeSwitchCoarse` is
+ * true -- the binding's decode has no persisted `flagBit`/`activeValueHex`
+ * and falls back to "anything off the rest level reads pressed", which can
+ * misread an ECU whose rest level itself moves. Pure -- unit-tested
+ * directly, no react-native import.
+ */
+export function brakeSwitchRowLabel(baseLabel: string, coarse: boolean | undefined): string {
+  return coarse === true ? `${baseLabel} (coarse)` : baseLabel;
+}
+
+/**
+ * Ticket P4n-FIX1 Q3 (binding, Codex P4n-REV1 LOW): the ONE rule that decides
+ * "Stop -> Start to apply" anywhere it might be shown -- true only for a
+ * RUNNING ENET session whose ACTIVE poll plan the just-confirmed binding
+ * actually changed (`brakeBindingsChangedSincePoll`, computed fresh by
+ * `getDiagnostics()` on every call). Never true for ELM327 (no ENET poll-plan
+ * concept there), an identical reconfirmation, or a channel that never
+ * entered a poll plan at all -- both leave `brakeBindingsChangedSincePoll`
+ * `false`/`undefined`. Shared by the Telemetry monitor and the Signal Finder
+ * confirm banner so the two can never disagree about when to show it.
+ */
+export function shouldShowBrakeBindingRestartHint(
+  diagnostics: Pick<TelemetryProviderDiagnostics, 'adapterType' | 'brakeBindingsChangedSincePoll'>,
+): boolean {
+  return diagnostics.adapterType === 'enet' && diagnostics.brakeBindingsChangedSincePoll === true;
 }
 
 /**
@@ -662,6 +805,16 @@ export interface TelemetryProviderDiagnostics {
    * one sample this generation.
    */
   brakePctRaw?: { raw: number; observedMax: number | null };
+  /**
+   * Ticket P4n-FIX1 Q1 (binding): true exactly when the `brakeSwitch` binding
+   * THIS session's poll plan actually inserted has neither a persisted
+   * `flagBit` nor `activeValueHex` (`ResolvedBrakeBinding.coarse`) -- legacy
+   * evidence, decoded by "anything off the rest level reads pressed". The
+   * monitor reads this as "Brake switch (coarse)". ENET-only; `false`
+   * (never absent) once a poll plan has been built, so a fresh session never
+   * shows a stale coarse warning from an earlier one.
+   */
+  brakeSwitchCoarse?: boolean;
 }
 
 /** See {@link TelemetryProviderDiagnostics.pedalSource}. */
@@ -843,6 +996,14 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
    * this generation, so a fresh session never shows a stale reading.
    */
   let lastBrakePctRaw: { raw: number; observedMax: number | null } | null = null;
+  /**
+   * Ticket P4n-FIX1 Q1 (binding): whether the `brakeSwitch` binding THIS
+   * session's poll plan actually inserted (see `insertedBrakeBindings` in
+   * `buildEnetConfig()`) is `coarse` -- set every time that build runs,
+   * alongside `activeBrakeBindingsSignature`; reset to `false` in `doStop()`
+   * so a stopped/fresh session never carries a stale coarse warning.
+   */
+  let activeBrakeSwitchCoarse = false;
   /** Surfaced via `getDiagnostics()`'s `lastError` chain when the settings-change watcher (below) stops a live generation -- cleared at the top of every fresh `launchSession()`, same reset discipline as `reservationBlockedDetail`/`autoDiscoveryFailureDetail`. */
   let settingsChangedDetail: string | undefined;
   /**
@@ -1261,15 +1422,14 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   }
 
   /**
-   * ENET telemetry addendum: builds the ENET engine's config from settings --
-   * channel specs (parsed/validated JSON, or the built-in defaults --
-   * `resolveEnetChannelSpecs`), the poll plan derived from those SAME resolved
-   * specs (`buildEnetPollPlan`, above), tester/target addresses from settings,
-   * and the addendum's default tester-present interval/command-timeout/error-budget
-   * (`DEFAULT_ENET_CONFIG`, `COMMAND_TIMEOUT_MS`/`MAX_CONSECUTIVE_ERRORS`
-   * shared with the ELM327 config below).
+   * The channel specs a FRESH ENET config would start from right now, before
+   * any brake binding is considered -- settings' own resolved specs, with the
+   * pedal-fallback swap already applied. Shared by `buildEnetConfig()` (which
+   * builds a real config from this) and `getDiagnostics()`'s own "would a
+   * fresh build poll something different" recheck (Q2 below), so both agree
+   * on exactly which channels a currently-configured spec already claims.
    */
-  function buildEnetConfig(): EnetConfig {
+  function resolveBaseEnetChannelSpecs(): readonly EnetChannelSpec[] {
     const settings = settingsStore.getSettings();
     let channelSpecs = resolveEnetChannelSpecs(settings.enetChannelSpecsJson);
     // Field revision 2 (binding, pedal PID fallback): once the fallback has
@@ -1281,23 +1441,64 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     if (pedalPidSource === '49') {
       channelSpecs = [...channelSpecs.filter((spec) => spec.channel !== 'accelPedalPct'), ACCEL_PEDAL_FALLBACK_ENET_SPEC];
     }
-    // Ticket P4l-FIX1 F1 (binding), extended by P4n N1: EVERY field-confirmed
-    // brake binding becomes its own real poll entry (see this file's Signal
-    // Finder section) -- `brakeSwitch` AND `brakePct` independently, never
-    // one dropping the other (field test 7's own defect). Each is appended
-    // LAST and only when the settings' own specs don't already name that
-    // channel, so an explicit user spec always wins over the discovered
-    // binding; the resulting spec goes through core's own
-    // `validateEnetChannelSpecs` like any other, so a malformed binding row
-    // is dropped with a warning rather than polled.
+    return channelSpecs;
+  }
+
+  /**
+   * Ticket P4l-FIX1 F1 (binding), extended by P4n N1: EVERY field-confirmed
+   * brake binding becomes its own real poll entry (see this file's Signal
+   * Finder section) -- `brakeSwitch` AND `brakePct` independently, never one
+   * dropping the other (field test 7's own defect). Each is appended LAST and
+   * only when `baseChannelSpecs` doesn't already name that channel, so an
+   * explicit user spec always wins over the discovered binding; the
+   * resulting spec goes through core's own `validateEnetChannelSpecs` like
+   * any other, so a malformed binding row is dropped rather than polled.
+   *
+   * Ticket P4n-FIX1 Q2 (binding, Codex P4n-REV1 MEDIUM): returns which
+   * bindings actually ENTERED the plan (`inserted`) alongside the specs
+   * themselves -- a binding a configured spec already overrides, or one
+   * `validateEnetChannelSpecs` rejected, contributes nothing to what is
+   * actually polled, so it must contribute nothing to the SIGNATURE either
+   * (`brakeBindingsSignature(inserted)`, read by both `buildEnetConfig()` and
+   * `getDiagnostics()`'s recheck of the SAME question). `warn: false` is used
+   * for the read-only recheck -- it must never re-print warnings already
+   * printed at build time on every `getDiagnostics()` poll.
+   */
+  function computeBrakePollAdditions(
+    baseChannelSpecs: readonly EnetChannelSpec[],
+    options: { warn: boolean },
+  ): { specs: EnetChannelSpec[]; inserted: ResolvedBrakeBinding[] } {
     const brakeBindings = resolveBrakeBindings();
-    activeBrakeBindingsSignature = brakeBindingsSignature(brakeBindings);
+    const specs: EnetChannelSpec[] = [];
+    const inserted: ResolvedBrakeBinding[] = [];
     for (const brakeBinding of brakeBindings) {
-      if (channelSpecs.some((spec) => spec.channel === brakeBinding.channel)) continue;
+      if (baseChannelSpecs.some((spec) => spec.channel === brakeBinding.channel)) continue;
       const { valid, warnings } = validateEnetChannelSpecs([wrapBrakeSpecWithRawCapture(brakeBinding)]);
-      for (const warning of warnings) console.warn(`[telemetryProvider] ${warning}`);
-      channelSpecs = [...channelSpecs, ...valid];
+      if (options.warn) for (const warning of warnings) console.warn(`[telemetryProvider] ${warning}`);
+      if (valid.length > 0) inserted.push(brakeBinding);
+      specs.push(...valid);
     }
+    return { specs, inserted };
+  }
+
+  /**
+   * ENET telemetry addendum: builds the ENET engine's config from settings --
+   * channel specs (parsed/validated JSON, or the built-in defaults --
+   * `resolveEnetChannelSpecs`), the poll plan derived from those SAME resolved
+   * specs (`buildEnetPollPlan`, above), tester/target addresses from settings,
+   * and the addendum's default tester-present interval/command-timeout/error-budget
+   * (`DEFAULT_ENET_CONFIG`, `COMMAND_TIMEOUT_MS`/`MAX_CONSECUTIVE_ERRORS`
+   * shared with the ELM327 config below).
+   */
+  function buildEnetConfig(): EnetConfig {
+    const settings = settingsStore.getSettings();
+    const baseChannelSpecs = resolveBaseEnetChannelSpecs();
+    const { specs: brakeSpecs, inserted: insertedBrakeBindings } = computeBrakePollAdditions(baseChannelSpecs, {
+      warn: true,
+    });
+    const channelSpecs = [...baseChannelSpecs, ...brakeSpecs];
+    activeBrakeBindingsSignature = brakeBindingsSignature(insertedBrakeBindings);
+    activeBrakeSwitchCoarse = insertedBrakeBindings.some((binding) => binding.channel === 'brakeSwitch' && binding.coarse);
     return {
       channelSpecs,
       pollPlan: buildEnetPollPlan(channelSpecs),
@@ -1865,6 +2066,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     // both from scratch).
     activeBrakeBindingsSignature = null;
     lastBrakePctRaw = null;
+    activeBrakeSwitchCoarse = false;
     if (retryTimer !== null) {
       clearTimeout(retryTimer);
       retryTimer = null;
@@ -2206,8 +2408,18 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
         // `EnetSession`'s poll plan in place, so this is a HINT: the
         // Telemetry monitor and Signal Finder screens tell the driver to
         // Stop -> Start rather than silently keeping the old plan.
+        // Ticket P4n-FIX1 Q2 (binding): re-derived through the EXACT SAME
+        // "would this binding actually enter the plan" filter `buildEnetConfig()`
+        // used (`computeBrakePollAdditions`) -- comparing an UNFILTERED fresh
+        // resolve against the filtered signature `buildEnetConfig()` stored
+        // would make a binding a configured spec overrides look like it
+        // "changed" on every poll, regardless of whether anything pollable
+        // actually did. `warn: false`: this runs on every `getDiagnostics()`
+        // call and must never re-print a warning already printed at build time.
+        const freshInsertedBrakeBindings = computeBrakePollAdditions(resolveBaseEnetChannelSpecs(), { warn: false }).inserted;
         const brakeBindingsChangedSincePoll =
-          activeBrakeBindingsSignature !== null && brakeBindingsSignature(resolveBrakeBindings()) !== activeBrakeBindingsSignature;
+          activeBrakeBindingsSignature !== null &&
+          brakeBindingsSignature(freshInsertedBrakeBindings) !== activeBrakeBindingsSignature;
         return {
           state: currentState,
           retriesUsed,
@@ -2227,6 +2439,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
           pedalSource: pedalSourceDiagnostic(),
           brakeBindingsChangedSincePoll,
           ...(lastBrakePctRaw === null ? {} : { brakePctRaw: lastBrakePctRaw }),
+          brakeSwitchCoarse: activeBrakeSwitchCoarse,
         };
       }
       const base = current?.session.getDiagnostics() ?? { observedHzByChannel: {}, errorCount: 0 };

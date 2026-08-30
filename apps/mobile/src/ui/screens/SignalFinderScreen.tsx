@@ -21,6 +21,7 @@ import { useSettings } from '../hooks/useSettings';
 import { EnetTcpTransport } from '../../session/enetTcpTransport';
 import { createDidSweepStore, createVehicleProfileBindingStore, type VehicleProfileBinding } from '../../persistence/didSweepStore';
 import { createSignalFinderController, type SignalFinderSnapshot } from '../../session/signalFinderController';
+import { shouldShowBrakeBindingRestartHint } from '../../session/telemetryProvider';
 import { resolveSignalFinderScreenStrings, signalFinderErrorMessage, type SignalFinderScreenStrings } from './signalFinderStrings';
 import {
   buildSignalFinderExportDocument,
@@ -258,25 +259,28 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
   async function handleConfirm(score: SignalCandidateScore): Promise<void> {
     const controller = controllerRef.current;
     if (controller === null || snapshot === null || snapshot.targetId === null) return;
-    // Ticket P4n N3 (binding): read BEFORE the confirm write -- a telemetry
-    // session already polling right now is exactly the case whose poll plan
-    // this confirm cannot reach live (`telemetryProvider.ts`'s ENET config is
-    // fixed at session construction; see `activeBrakeBindingsSignature`'s own
-    // doc comment).
-    const telemetryRunning = !['idle', 'stopped', 'failed'].includes(telemetryProvider.getDiagnostics().state);
     const written = await controller.confirmBinding(snapshot.targetId, score);
+    // P4l-FIX3 J5 (binding): a confirmed channel must reach live telemetry
+    // without the user restarting the app -- refreshes composition.ts's own
+    // cached snapshot so the NEXT `telemetryProvider.start()` picks it up.
+    //
+    // Ticket P4n-FIX1 Q3 (binding, Codex P4n-REV1 LOW): AWAITED (not
+    // fire-and-forget) before the restart-hint check below -- the hint must
+    // read what THIS confirm just wrote, not whatever the cache held before
+    // it. `shouldShowBrakeBindingRestartHint` is the SAME rule the Telemetry
+    // monitor uses: ENET only, and only when the confirm actually changed the
+    // ACTIVE poll plan's signature -- never for ELM327, an identical
+    // reconfirmation, or a channel that was never polled to begin with.
+    if (written !== null) await refreshVehicleProfileBindingsCache();
+    const showRestartHint = written !== null && shouldShowBrakeBindingRestartHint(telemetryProvider.getDiagnostics());
     setBanner(
       written === null
         ? strings.bannerNoProfileStorage
-        : telemetryRunning
+        : showRestartHint
           ? `${strings.bannerConfirmed(written.channel, ecuHex(written.ecu), didHex(written.did))} ${strings.bannerConfirmedRestartHint}`
           : strings.bannerConfirmed(written.channel, ecuHex(written.ecu), didHex(written.did)),
     );
     setBindings(await bindingStoreRef.current.listBindings(profileId));
-    // P4l-FIX3 J5 (binding): a confirmed channel must reach live telemetry
-    // without the user restarting the app -- refreshes composition.ts's own
-    // cached snapshot so the NEXT `telemetryProvider.start()` picks it up.
-    if (written !== null) void refreshVehicleProfileBindingsCache();
   }
 
   async function handleShare(kind: 'summary' | 'json'): Promise<void> {

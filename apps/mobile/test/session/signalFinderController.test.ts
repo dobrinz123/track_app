@@ -567,6 +567,31 @@ describe('confirmBinding', () => {
     expect(harness.controller.getSnapshot().confirmedChannels).toContain('brakeSwitch');
   });
 
+  /**
+   * Ticket P4n-FIX1 Q1 (binding): the confirm path must persist `flagBit` AND
+   * `activeValueHex` for a boolean binding -- `telemetryProvider.ts`'s new
+   * decode precedence needs both, not just `flagBit` (already persisted
+   * before this ticket). The 0x29/0x500C series (04 rest, 05 pressed) has a
+   * single-bit difference, so this also proves `activeValueHex` is derived
+   * even when `flagBit` is ALSO present.
+   */
+  it('persists activeValueHex (and flagBit) into the evidence for a boolean binding', async () => {
+    const bindingStore = createInMemoryVehicleProfileBindingStore();
+    const pedal: PedalDouble = { pressed: false };
+    const harness = makeController((ecu, did) => {
+      if (ecu === 0x29 && did === 0x500c) return bytes(pedal.pressed ? '05' : '04');
+      return 'nrc';
+    }, { bindingStore, profileId: 'test-profile' });
+    followMetronome(harness, pedal);
+    await runFind(harness);
+
+    const winner = harness.controller.getSnapshot().scores.find((s) => s.verdict === 'found')!;
+    await harness.controller.confirmBinding('brakeSwitch', winner);
+    const stored = await bindingStore.getBinding('test-profile', 'brakeSwitch');
+    const evidence: unknown = JSON.parse(stored!.evidenceJson);
+    expect(evidence).toMatchObject({ restValueHex: '04', activeValueHex: '05' });
+  });
+
   it('is a no-op returning null when no binding store is wired (web preview)', async () => {
     const harness = makeController(() => bytes('00'));
     await runFind(harness);
