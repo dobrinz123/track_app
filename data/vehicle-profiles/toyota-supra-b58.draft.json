@@ -20,14 +20,14 @@
   },
   "channels": [
     {
-      "channel": "brakeSwitch",
+      "channel": "brakePedalTravel",
       "source": "did",
       "ecu": "0x12",
       "did": "0x4002",
       "length": 1,
-      "decode": "boolean: 0x01 released -> 0x19 pressed (25 may encode pedal state/pressure; treat as a switch until proven)",
+      "decode": "u8: bit7 = engine running flag (0x80), bits0-6 = pedal travel (engine off: 0x01 rest -> 0x19 pressed; engine running: 0x83 rest -> 0x9B pressed, i.e. 3..27)",
       "status": "field-observed",
-      "provenance": "Signal Finder test 5 2026-08-29 (engine off, ignition on): 0x19 in all 5 press windows, 0x01 in all release windows, 0 baseline changes, 0 extras; flat 0x01 during the accelerator run (data/field/signal-finder/2026-08-29-brakeSwitch.json). Marked insufficient by build 5 only because of undersampling (16 DIDs per pass). Preferred over 0x29/0x500C: same ECU as the rest of the telemetry."
+      "provenance": "Signal Finder test 5 2026-08-29 (engine off, ignition on): 0x19 in all 5 press windows, 0x01 in all release windows, 0 baseline changes, 0 extras; flat 0x01 during the accelerator run (data/field/signal-finder/2026-08-29-brakeSwitch.json). Marked insufficient by build 5 only because of undersampling (16 DIDs per pass). Preferred over 0x29/0x500C: same ECU as the rest of the telemetry.; test 7 2026-08-30: engine off 01 -> 1..25 (found 6/6), engine running 0x83 -> 131..155 (found 6/6) — NOT a pure switch: rest value changes with the engine, so a boolean binding on it would read pressed whenever the engine runs; use as a small analog (travel) if ever bound."
     },
     {
       "channel": "accelIdleFlag",
@@ -37,7 +37,7 @@
       "length": 2,
       "decode": "bit0 of u16: 0x9001 pedal released -> 0x9000 pedal pressed",
       "status": "field-observed",
-      "provenance": "Signal Finder test 5 2026-08-29 accelerator run: 0x9000 during presses 3-5 (1-2 samples per window), 0x9001 otherwise; flat 0x9001 in the brake run (data/field/signal-finder/2026-08-29-accelPedal.json). Validation channel for accelPedalPct (0x5A)."
+      "provenance": "Signal Finder test 5 2026-08-29 accelerator run: 0x9000 during presses 3-5 (1-2 samples per window), 0x9001 otherwise; flat 0x9001 in the brake run (data/field/signal-finder/2026-08-29-accelPedal.json). Validation channel for accelPedalPct (0x5A).; test 7 2026-08-30 accelerator run (4 rounds, engine off): NOT found this time (unrelated) — keep as weak; accelPedalPct via 0x5A remains the channel."
     },
     {
       "channel": "accelPedalPct",
@@ -60,8 +60,8 @@
       "did": "0x500C",
       "length": 1,
       "decode": "bit0 (0x04 released → 0x05 pressed)",
-      "status": "field-observed",
-      "provenance": "test 4 2026-08-29 (engine off, ignition on, batched observation 5 samples/phase): 0x04 in baseline/throttle, 0x05 in 3/5 brake-phase samples + the first steering-phase sample (brake still held at the transition); 2026-08-29-test4-ecu29-0x5000-0x58F2.json. Needs one confirmation run (focused, ≥10 samples) before 'field-confirmed'"
+      "status": "field-confirmed",
+      "provenance": "test 4 2026-08-29 (engine off, ignition on, batched observation 5 samples/phase): 0x04 in baseline/throttle, 0x05 in 3/5 brake-phase samples + the first steering-phase sample (brake still held at the transition); 2026-08-29-test4-ecu29-0x5000-0x58F2.json. Needs one confirmation run (focused, ≥10 samples) before 'field-confirmed'; test 7 2026-08-30 (build 7 Signal Finder v2, engine off): found 6/6 edges, 0 baseline changes; CONFIRMED by the user in the app (binding brakeSwitch = 0x29/0x500C) and verified live in the Telemetry monitor with the engine running (brakeSwitch 0/100 at 3.9 Hz, polled inside the DME session)."
     },
     {
       "channel": "brakeStatusBits",
@@ -71,7 +71,7 @@
       "length": 2,
       "decode": "bitfield; 0x0002 at rest, 0x0006 (bit2) seen once during the brake phase",
       "status": "weak",
-      "provenance": "test 4 2026-08-29: single 0x0006 sample out of 5 in the brake phase, never elsewhere — plausible 'firm press' / brake-light bit; confirm with the focused run"
+      "provenance": "test 4 2026-08-29: single 0x0006 sample out of 5 in the brake phase, never elsewhere — plausible 'firm press' / brake-light bit; confirm with the focused run; test 7: unrelated (0/6 edges, 1 extra) — not a brake signal."
     },
     {
       "channel": "brakeBoosterSensorV",
@@ -99,9 +99,9 @@
       "ecu": "0x12",
       "did": "0x58B7",
       "length": 1,
-      "decode": "u8 hPa (as listed; coarse — verify)",
-      "status": "hypothesis",
-      "provenance": "same page ('Current brake pressure'); test 4 sweep: answers 0x00 (engine off); not observed in a brake phase"
+      "decode": "u8, 0 at rest -> up to 64 observed with a firm press at idle (public table says hPa; scale unverified — treat as 0..max ratio)",
+      "status": "field-confirmed",
+      "provenance": "same page ('Current brake pressure'); test 4 sweep: answers 0x00 (engine off); not observed in a brake phase; test 7 2026-08-30 (engine running, idle): found 6/6 edges, raw 00 -> 0..64, 0 baseline changes; CONFIRMED by the user (binding brakePressure = 0x12/0x58B7). Not yet visible in the Telemetry monitor: the provider resolved ONE brake binding (pressure preferred, switch dropped) and the monitor session was not restarted — P4n."
     },
     {
       "channel": "longG",
@@ -153,8 +153,7 @@
     }
   ],
   "nextFocusedTest": {
-    "engine": "off, ignition on",
-    "protocol": "builds/ipa/TEST-6-PROTOCOL.md (after Signal Finder v2)",
-    "note": "confirm 0x12 0x4002 (brake) and 0x4007 (accel idle) with one 21 s metronome each; 0x29 0x500C as fallback"
+    "engine": "running (idle, ~2 min)",
+    "note": "steering angle only (Signal Finder → Steering angle → Find, after a 0x29 0x58F3–0x6FFF sweep); brake switch + pressure are confirmed"
   }
 }

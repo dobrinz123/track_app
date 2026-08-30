@@ -1,0 +1,9029 @@
+{
+  "schemaVersion": 4,
+  "kind": "trace-signal-finder",
+  "generatedAtUtc": "2026-08-30T09:58:15.304Z",
+  "session": {
+    "sessionId": "signal-finder-1788083853393-j192yu",
+    "profileId": "toyota-supra-b58",
+    "targetId": "brakeSwitch",
+    "targetLabel": "Brake switch",
+    "engineRequirement": "off-ok",
+    "startedAtUtc": "2026-08-30T09:57:33.393Z",
+    "measuredReqPerSec": 36.25377643504532,
+    "rateSource": "measured",
+    "rounds": 1,
+    "budget": 12
+  },
+  "metronome": {
+    "totalMs": 21000,
+    "pollDurationMs": 21500,
+    "settleMs": 500,
+    "repetitions": 3,
+    "expectedEdges": 6,
+    "steps": [
+      {
+        "index": 0,
+        "kind": "baseline",
+        "repetition": 0,
+        "startMs": 0,
+        "endMs": 3000,
+        "prompt": "Hold still — foot OFF the brake"
+      },
+      {
+        "index": 1,
+        "kind": "press",
+        "repetition": 1,
+        "startMs": 3000,
+        "endMs": 6000,
+        "prompt": "PRESS the brake"
+      },
+      {
+        "index": 2,
+        "kind": "release",
+        "repetition": 1,
+        "startMs": 6000,
+        "endMs": 9000,
+        "prompt": "RELEASE the brake"
+      },
+      {
+        "index": 3,
+        "kind": "press",
+        "repetition": 2,
+        "startMs": 9000,
+        "endMs": 12000,
+        "prompt": "PRESS the brake"
+      },
+      {
+        "index": 4,
+        "kind": "release",
+        "repetition": 2,
+        "startMs": 12000,
+        "endMs": 15000,
+        "prompt": "RELEASE the brake"
+      },
+      {
+        "index": 5,
+        "kind": "press",
+        "repetition": 3,
+        "startMs": 15000,
+        "endMs": 18000,
+        "prompt": "PRESS the brake"
+      },
+      {
+        "index": 6,
+        "kind": "release",
+        "repetition": 3,
+        "startMs": 18000,
+        "endMs": 21000,
+        "prompt": "RELEASE the brake"
+      }
+    ]
+  },
+  "passes": [
+    {
+      "ecuHex": "0x12",
+      "didHex": [
+        "0x4002",
+        "0x5422",
+        "0x5468",
+        "0x1000",
+        "0x100A",
+        "0x100E",
+        "0x1600",
+        "0x1700",
+        "0x1701"
+      ],
+      "hypothesisDidHex": [
+        "0x4002"
+      ],
+      "changedDidHex": [
+        "0x5422",
+        "0x5468"
+      ],
+      "cachedDidHex": [
+        "0x1000",
+        "0x100A",
+        "0x100E",
+        "0x1600",
+        "0x1700",
+        "0x1701"
+      ]
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": [
+        "0x500C",
+        "0x500B",
+        "0x5002"
+      ],
+      "hypothesisDidHex": [
+        "0x500C",
+        "0x500B"
+      ],
+      "changedDidHex": [
+        "0x5002"
+      ],
+      "cachedDidHex": []
+    }
+  ],
+  "candidates": [
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "verdict": "found",
+      "matchedEdges": 6,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": null,
+      "restValueHex": "01",
+      "lastRawHex": "01",
+      "min": 1,
+      "max": 25,
+      "length": 1,
+      "netEdges": 6,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": null,
+      "verdictCapReason": null,
+      "sampleCount": 40,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 6,
+      "flagBit": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "verdict": "found",
+      "matchedEdges": 6,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": null,
+      "restValueHex": "04",
+      "lastRawHex": "04",
+      "min": 4,
+      "max": 5,
+      "length": 1,
+      "netEdges": 6,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": null,
+      "verdictCapReason": null,
+      "sampleCount": 41,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 6,
+      "flagBit": 0
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "verdict": "unrelated",
+      "matchedEdges": 2,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": null,
+      "restValueHex": "344F",
+      "lastRawHex": "344F",
+      "min": 13367,
+      "max": 13416,
+      "length": 2,
+      "netEdges": 0,
+      "extraTransitions": 10,
+      "didBaselineChanges": 0,
+      "bipolarSides": null,
+      "verdictCapReason": null,
+      "sampleCount": 40,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 5,
+      "flagBit": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "verdict": "unrelated",
+      "matchedEdges": 1,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": null,
+      "restValueHex": "0002",
+      "lastRawHex": "0002",
+      "min": 2,
+      "max": 6,
+      "length": 2,
+      "netEdges": 0,
+      "extraTransitions": 1,
+      "didBaselineChanges": 0,
+      "bipolarSides": null,
+      "verdictCapReason": null,
+      "sampleCount": 41,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 4,
+      "flagBit": 2
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": null,
+      "restValueHex": "010000",
+      "lastRawHex": "010000",
+      "min": 65536,
+      "max": 65536,
+      "length": 3,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": null,
+      "verdictCapReason": "never-moved",
+      "sampleCount": 39,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": null,
+      "restValueHex": "00",
+      "lastRawHex": "00",
+      "min": 0,
+      "max": 0,
+      "length": 1,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": null,
+      "verdictCapReason": "never-moved",
+      "sampleCount": 40,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": null,
+      "restValueHex": "00",
+      "lastRawHex": "00",
+      "min": 0,
+      "max": 0,
+      "length": 1,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": null,
+      "verdictCapReason": "never-moved",
+      "sampleCount": 39,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": null,
+      "restValueHex": "09",
+      "lastRawHex": "09",
+      "min": 9,
+      "max": 9,
+      "length": 1,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": null,
+      "verdictCapReason": "never-moved",
+      "sampleCount": 40,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": null,
+      "restValueHex": "003A01",
+      "lastRawHex": "003A01",
+      "min": 14849,
+      "max": 14849,
+      "length": 3,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": null,
+      "verdictCapReason": "never-moved",
+      "sampleCount": 38,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 3,
+      "responseBaselineChanges": 3,
+      "byteOffset": null,
+      "correlationSign": null,
+      "restValueHex": "030799F0",
+      "lastRawHex": "03079A04",
+      "min": 50829807,
+      "max": 50829828,
+      "length": 4,
+      "netEdges": 0,
+      "extraTransitions": 2,
+      "didBaselineChanges": 3,
+      "bipolarSides": null,
+      "verdictCapReason": null,
+      "sampleCount": 39,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": null,
+      "restValueHex": "00",
+      "lastRawHex": "00",
+      "min": 0,
+      "max": 0,
+      "length": 1,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": null,
+      "verdictCapReason": "never-moved",
+      "sampleCount": 40,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 4,
+      "byteOffset": 0,
+      "correlationSign": null,
+      "restValueHex": "000000CCE30101010058070500001B10480A28FFFF",
+      "lastRawHex": "000000CCF70101010058070500001B10480A28FFFF",
+      "min": 0,
+      "max": 0,
+      "length": 21,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 4,
+      "bipolarSides": null,
+      "verdictCapReason": null,
+      "sampleCount": 40,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null
+    }
+  ],
+  "noResponse": [],
+  "notRead": [
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1702"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1721"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1731"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1750"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1751"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4007"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4044"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4047"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x409A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40A4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40DA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40E5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4105"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4117"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4118"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4121"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4123"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4125"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4126"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4128"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x412A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x412B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x415F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x417D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4181"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x41A1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4200"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4201"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4202"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4203"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4204"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4205"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4206"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4300"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4310"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4402"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4403"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4408"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4409"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x440A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x440B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x440C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4420"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4421"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4422"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4423"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4424"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4425"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4426"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4427"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4428"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x442A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x442B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x442C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x442D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x442E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x442F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4430"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4431"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4432"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4433"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4434"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4436"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4500"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4501"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4502"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4503"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4505"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4506"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4507"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4508"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4509"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x450C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x450D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x450E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4510"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4511"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4512"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4513"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4514"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4515"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4516"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4517"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4518"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4519"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x451A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x451B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x451C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x451D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x451E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4520"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4521"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4522"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4523"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4524"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4525"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4526"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4527"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x452A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x452B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x452C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x452E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4530"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4531"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4532"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4533"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4534"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4535"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4536"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4538"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4539"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4540"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4600"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4601"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4602"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4603"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4605"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4608"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4609"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4617"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4618"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x461B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4620"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4621"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4622"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4650"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4651"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4653"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4654"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4659"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x465B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4662"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4663"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4680"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4681"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4683"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4700"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4704"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4705"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4710"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4711"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4712"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4713"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4714"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4715"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4716"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x472C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x472E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4730"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4731"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4733"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4734"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4735"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4736"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4800"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4801"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4802"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4803"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4804"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4805"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4806"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4807"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4808"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4809"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x480A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x480B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x480C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x480D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x480E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x480F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4810"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4811"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4812"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4813"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4880"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4881"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4882"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4883"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4895"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4896"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4897"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48A0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48A1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48A2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48A3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48A4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48A5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48A6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48A7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48A8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48A9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48AA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48AB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48AC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48AD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48AE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48AF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48B0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48B1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48B2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48B3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48B4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48B5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48B6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48B7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48B8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48B9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48BA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48BB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48BC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48BD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48BE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48BF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48C0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48C1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48C2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48C3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48C4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48C5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48C6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48C7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48C8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48D0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x48D1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A02"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A03"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A04"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A05"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A08"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A0C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A11"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A13"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A1B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A1D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A1E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A21"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A23"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A24"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A25"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A29"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A2B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A2D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A2E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A30"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A31"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A32"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A33"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A34"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A35"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A36"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A37"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A38"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A39"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A3A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A3B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A3C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A49"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A4A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A4B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A4C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A4D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A4E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A4F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A52"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A54"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A56"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A58"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A59"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A60"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A61"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A65"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A69"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A6A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A6B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A6C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A74"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A77"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A78"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A7A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A7B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A81"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A85"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A94"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A95"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A96"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A97"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A99"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4A9D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AA1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AA4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AAA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AAB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AB0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AB1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AB3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AB4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AB6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AB7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AB8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4ABC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4ABD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AC2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4ACC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4ACD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4ACE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4ACF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AD0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AD1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AD2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AD4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AD5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AD6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AD7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AD8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4ADF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AE0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AE2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AE3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AE4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AE5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AE6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AE7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AE8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AE9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AEA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AEB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AEC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AED"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AEE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AEF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AF0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AF1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AF2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AF3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AF4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AF5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AF6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AF7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AF8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AF9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AFA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AFB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AFC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AFD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4AFE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B10"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B11"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B12"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B13"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B14"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B15"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B20"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B21"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B22"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B23"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B24"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B25"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B30"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B31"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B32"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B50"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B51"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B52"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B53"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B54"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B55"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B58"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B59"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B5A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B5B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4B5D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4BCB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4C5F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5059"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x505A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x505B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x505C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x505D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x505E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x505F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5060"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5061"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5062"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5063"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5064"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5065"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5066"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5069"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x506A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x506B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x506C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x506D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x506E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5300"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5301"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5302"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5303"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5304"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5305"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5307"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5308"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5309"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x530A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x530B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x541B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x541D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x541E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x541F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5420"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5421"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5423"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5424"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5425"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5426"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5427"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5428"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5429"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x542A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x542B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x542C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x542D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x542E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x542F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5430"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5431"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5432"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5433"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5442"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5443"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5444"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5446"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5447"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5448"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5449"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x544E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5450"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5451"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5452"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5453"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5454"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5455"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5456"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5457"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5458"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5459"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x545A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x545B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x545C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x545E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x545F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5460"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5461"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5462"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5467"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5469"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x546A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x546B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x546D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x546E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x546F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5470"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5471"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5472"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5476"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5477"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5478"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5479"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x547A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x547B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x547C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x547D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x547E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x547F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5480"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5481"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5482"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5483"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5484"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5485"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5486"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5487"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5488"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5489"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x548A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x548B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x54A9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x54CC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x54CD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x54CE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x54CF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x54D0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x54D1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x54D2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x54D3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5500"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5501"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5502"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5503"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5504"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5505"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5506"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5507"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5508"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5509"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x550A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x550B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x550C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x550D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x550E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x550F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5510"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5511"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5512"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5513"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5514"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5515"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5516"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5517"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5518"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5519"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x551A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x551B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x551C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x551D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x551E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x551F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5520"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5521"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5522"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x552A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x552B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x552C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x552D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x552E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x552F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5530"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5531"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5532"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5533"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5534"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5535"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5538"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5539"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x553A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x553B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x553C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x553D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x553E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x553F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5540"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5541"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5542"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5543"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5544"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5545"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5546"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5547"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5548"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5549"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x554A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x554B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x554C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5556"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5557"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5558"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x555A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x555B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x555C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x555D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x555E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x555F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5562"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5563"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5564"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x556F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5570"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5571"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5572"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5574"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5575"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5576"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5577"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5578"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5579"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x557A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x557B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x557C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x557D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x557E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x557F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5580"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5581"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5589"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x558A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x558D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x558E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x558F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5590"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5591"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5592"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5593"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5594"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5596"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5597"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x559A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x559B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55A4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55A5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55A6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55A7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55A8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55A9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55AD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55AE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55AF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55B0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55B1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55B2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55B3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55B4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55B5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55B6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55B7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55B8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55B9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55BA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55BB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55BC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55BD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55BE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55BF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55C0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55C1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55C2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55C3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55C4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55C6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55C8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55C9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55CE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55CF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55D1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55D2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55DE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55DF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55E0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55E1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55E2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55E3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55E4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55E5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55E6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55E7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55E8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55E9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55EA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55EB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55EC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55ED"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55EE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55EF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55F0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55F1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55F2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55F3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55F4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55F5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55F8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55F9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55FA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55FB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x55FC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5600"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5601"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5602"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5603"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5604"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5605"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5606"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5607"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5608"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5609"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x560A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x560B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x560C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x560D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x560E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x560F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5610"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5611"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5612"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5613"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5614"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5615"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5616"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5617"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5618"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5619"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x561A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5622"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5624"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x562C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x562D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x562E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x562F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5630"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5631"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5632"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5633"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5634"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5635"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5636"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5637"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5638"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5639"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x563A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x563B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x563D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5640"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5641"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5642"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5643"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5644"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5645"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5646"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5647"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5648"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5649"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x564A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x564B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x564C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x564E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x564F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5654"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5656"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5657"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5658"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x565B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x565C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x565D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x565E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x565F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5660"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5661"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5662"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5663"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5664"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5665"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5666"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5669"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x566A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x566B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x566C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x566D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x566E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x566F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5670"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5671"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5672"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5673"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5674"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5675"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5676"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5677"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5678"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5679"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x567A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x567B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x567C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x567D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x567E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x567F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5680"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5681"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5684"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5687"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x568A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x568D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5690"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5693"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5696"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5699"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x569C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x569F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56A2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56A9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56AA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56AB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56AC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56AD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56AE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56AF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56B4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56B5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56B6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56B7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56B8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56B9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56BA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56BB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56BC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56BD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56BE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56BF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56C0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56C1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56CF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56D5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56D6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56D7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56D8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56DA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56DB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56DC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56DD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56DE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56DF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56E0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56E3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56E4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56E5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56E6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56E7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56E8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56E9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56EA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56EB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56EC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56ED"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56EE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56EF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56F0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56F1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56F2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56F3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56F4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56F5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56F6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56F7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56F8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56F9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56FA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56FB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56FC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56FD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56FE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x56FF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5700"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5703"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5705"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5717"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5718"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5728"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x572A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x572B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x572C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x572D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x572E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x572F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5737"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5738"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5739"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x573A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x573B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x573C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x573D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x573E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5742"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5743"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5744"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5745"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5746"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5747"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5748"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5749"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x574A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x574B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x574C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x574F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5750"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5751"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5752"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5753"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5754"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x575F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5761"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5768"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x576A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x576B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5772"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5773"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5776"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x577A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x577E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x577F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5780"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5784"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x578F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5790"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5793"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5794"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5795"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5796"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x579B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57A0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57A1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57A3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57A4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57A9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57AD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57AE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57C1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57C2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57C3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57C5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57C6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57C9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57CA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57CC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57D0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57D1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57D2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57D3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57DB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57DC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57DF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57E1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57E3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57E9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57EC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57F0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57F2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57F4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57FB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57FC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57FD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x57FF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5800"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5801"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5802"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5803"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5804"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5805"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5806"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5807"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x580A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x580B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x580C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x580D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x580E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x580F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5810"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5811"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5812"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5813"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5814"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5815"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5816"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5817"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5818"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5819"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x581A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x581B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x581C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x581D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x581E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x581F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5820"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5821"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5822"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5823"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5824"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5825"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5826"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5827"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5829"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x582B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x582C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5832"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5833"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5834"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5835"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5836"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5839"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x583A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x583B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x583D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x583E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x583F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5840"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5841"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5842"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5843"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5844"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5845"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5846"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5847"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5849"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x584A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x584C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x584D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x584E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5850"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5851"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5855"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5857"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5858"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x586A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x586D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x586F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5871"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5875"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5877"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5878"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x587B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x587D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x587E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5881"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5882"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5883"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5885"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5886"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5887"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5888"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5889"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x588B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x588C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5890"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5891"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5892"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5894"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5895"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5896"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5898"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5899"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x589A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x589B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x589C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x589D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x589E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58A2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58A3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58A4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58A5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58A6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58A7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58A8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58A9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58AA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58AB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58AC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58AD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58AF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58B0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58B1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58B2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58B3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58B4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58B5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58B6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58B7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58B9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58BA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58BB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58BD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58BE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58BF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58C0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58C1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58C6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58C8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58C9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58CA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58CB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58CC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58CD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58CE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58D1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58D2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58D3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58D4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58D5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58D6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58D7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58D8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58D9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58DA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58DB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58DC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58DD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58DE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58DF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58E4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58E5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58E6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58E7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58E8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58EE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58F1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58F3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58F5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58F6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58F7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58F8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58F9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58FA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58FB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58FC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x58FF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5900"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5901"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5903"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5909"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5910"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5912"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5914"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5917"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5918"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5919"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5927"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x592A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x592B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x592C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x592D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x592E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x592F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5930"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5932"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5934"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5935"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5936"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5937"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5938"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5939"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x593A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x593B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x593D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x593E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x593F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5940"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5941"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5942"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5943"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5944"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5945"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5946"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5948"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5949"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x594A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x594B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x594C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x594D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x594F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5950"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5951"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5952"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5958"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5959"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x595A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x595B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x595C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x595D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5960"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5963"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5981"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5982"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5984"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5986"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5988"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x598A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59A1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59A2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59A3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59A4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59A5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59A6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59A8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59A9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59AA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59AB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59AC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59AD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59AE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59AF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59B0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59B1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59B2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59B3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59B4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59B5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59B6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59B7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59B8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59BA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59BB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59BC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59BD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59BE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59BF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59C0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59C1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59C2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59C5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59C6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59C7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59C9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59CC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59CD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59CE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59D1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59D4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59D7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59DA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59DB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59DC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59DD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59E1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59E2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59E3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59E5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59E7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59E8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59EB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59EC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59F0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59F2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59F4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59F6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59F9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59FA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59FD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A02"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A03"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A04"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A05"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A06"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A07"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A08"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A0A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A0B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A0C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A0D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A0E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A0F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A10"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A11"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A12"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A13"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A14"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A15"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A16"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A17"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5A18"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5F74"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5F75"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5FAA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5FEB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5FFD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1001"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1601"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1603"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1607"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4006"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x400A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x400B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x401F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4025"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x402E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4035"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4037"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4038"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x404C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x404F"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4083"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4095"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40A0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40A1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40A2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40A3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40A5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40A6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40A8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40A9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40AA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40AB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40AC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40AD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40AE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40AF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40B0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40B1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40B2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40B3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40B4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40B5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40B6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40B7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40BD"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40BE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40C0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40C1"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40C2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40C3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40C4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40C5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40C6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40C8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40C9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40CB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40D3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40D8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40DE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40E0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40E6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40E7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40E9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40EA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40EB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40F0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40F5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x40F8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4104"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4106"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4119"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x411A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x411B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x411D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x411E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4120"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4122"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4124"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4127"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x412C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4140"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4141"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4143"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4144"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4147"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4148"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4149"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x414A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x414B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x414C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4150"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4158"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4159"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x415A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x415B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x415C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x415D"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x415E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4162"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4163"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4164"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4165"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4166"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x416A"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x416B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x416C"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x417B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x417E"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4195"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x419B"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x41AB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x41D8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x59C8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5F80"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5FAB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5FAE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5FE6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5FE7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5FE8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5FE9"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4107"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4108"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4109"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410C"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410D"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410E"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4110"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4111"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4112"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5003"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5004"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5008"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500E"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5023"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5024"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5026"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5027"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x502F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5040"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5041"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5043"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5046"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5050"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5051"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5055"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5058"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5059"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5107"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5108"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5109"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x510A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x510C"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x510D"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5057"
+    }
+  ],
+  "silent": {
+    "ecus": [],
+    "dids": []
+  },
+  "samples": [
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 20,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 62,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 91,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 123,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 149,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 220,
+      "rawHex": "000000CCE20101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 260,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 291,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 319,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 349,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 389,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 419,
+      "rawHex": "030799EF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 453,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 489,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 519,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 549,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 589,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 660,
+      "rawHex": "000000CCE20101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 719,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 749,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 790,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 820,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 849,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 889,
+      "rawHex": "030799F0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 919,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 959,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 989,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 1021,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 1059,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 1119,
+      "rawHex": "000000CCE30101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 1169,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 1200,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 1239,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 1269,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 1299,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 1339,
+      "rawHex": "030799F0"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 1371,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 1410,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 1440,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 1470,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 1499,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 1795,
+      "rawHex": "000000CCE30101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 1829,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 1849,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 1889,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 1938,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 1969,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 1999,
+      "rawHex": "030799F1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 2379,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 2409,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 2439,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 2469,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 2539,
+      "rawHex": "000000CCE40101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 2579,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 2603,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 2639,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 2670,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 2699,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 2739,
+      "rawHex": "030799F2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 2770,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 2809,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 2839,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 2869,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 2912,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 2969,
+      "rawHex": "000000CCE50101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 3009,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 3039,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 3076,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 3109,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 3139,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 3171,
+      "rawHex": "030799F2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 3217,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 3260,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 3289,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 3319,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 3360,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 3419,
+      "rawHex": "000000CCE50101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 3459,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 3489,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 3519,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 3559,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 3590,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 3629,
+      "rawHex": "030799F2"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 3649,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 3689,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 3729,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 3759,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 3789,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 3868,
+      "rawHex": "000000CCE60101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 3909,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 3940,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 3969,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 4000,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 4370,
+      "rawHex": "030799F3"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 4400,
+      "rawHex": "19"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 4440,
+      "rawHex": "05"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 4497,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 4519,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 4549,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 4620,
+      "rawHex": "000000CCE60101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 4661,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 4699,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 4739,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 4769,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 4799,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 4839,
+      "rawHex": "030799F4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 4870,
+      "rawHex": "19"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 4912,
+      "rawHex": "05"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 4939,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 4969,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 5000,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 5295,
+      "rawHex": "000000CCE70101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 5330,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 5349,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 5389,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 5420,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 5449,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 5489,
+      "rawHex": "030799F4"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 5519,
+      "rawHex": "19"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 5569,
+      "rawHex": "05"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 5609,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 5644,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 5669,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 5740,
+      "rawHex": "000000CCE80101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 5779,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 5799,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 5839,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 5869,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 5900,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 5940,
+      "rawHex": "030799F5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 5969,
+      "rawHex": "19"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 6009,
+      "rawHex": "05"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 6049,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 6099,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 6141,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 6210,
+      "rawHex": "000000CCE80101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 6249,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 6289,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 6319,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 6354,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 6389,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 6419,
+      "rawHex": "030799F5"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 6459,
+      "rawHex": "19"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 6489,
+      "rawHex": "05"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 6529,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 6550,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 6589,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 6659,
+      "rawHex": "000000CCE80101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 6719,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 6759,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 6789,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 6819,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 6849,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 6889,
+      "rawHex": "030799F6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 6919,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 6960,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 6989,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 7019,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 7056,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 7121,
+      "rawHex": "000000CCE90101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 7159,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 7189,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 7222,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 7249,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 7290,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 7319,
+      "rawHex": "030799F6"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 7349,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 7399,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 7439,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 7469,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 7500,
+      "rawHex": "3468"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 7795,
+      "rawHex": "000000CCE90101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 7829,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 7864,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 7890,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 7922,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 7959,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 7989,
+      "rawHex": "030799F7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 8019,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 8069,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 8110,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 8139,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 8169,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 8239,
+      "rawHex": "000000CCEA0101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 8281,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 8304,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 8359,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 8389,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 8419,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 8450,
+      "rawHex": "030799F7"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 8489,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 8529,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 8559,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 8589,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 8619,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 8689,
+      "rawHex": "000000CCEB0101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 8729,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 8749,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 8790,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 8820,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 8849,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 8889,
+      "rawHex": "030799F8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 8919,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 8959,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 8989,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 9020,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 9054,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 9119,
+      "rawHex": "000000CCEB0101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 9159,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 9189,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 9219,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 9254,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 9289,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 9319,
+      "rawHex": "030799F8"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 9349,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 9389,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 9429,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 9459,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 9489,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 9559,
+      "rawHex": "000000CCEB0101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 9622,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 9659,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 9689,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 9719,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 9759,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 9789,
+      "rawHex": "030799F9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 9822,
+      "rawHex": "19"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 9867,
+      "rawHex": "05"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 9909,
+      "rawHex": "0006"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 9939,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 9969,
+      "rawHex": "3437"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 10040,
+      "rawHex": "000000CCEC0101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 10089,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 10126,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 10160,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 10191,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 10219,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 10259,
+      "rawHex": "030799F9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 10289,
+      "rawHex": "19"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 10329,
+      "rawHex": "05"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 10360,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 10389,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 10419,
+      "rawHex": "3437"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 10489,
+      "rawHex": "000000CCEC0101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 10531,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 10549,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 10589,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 10629,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 10651,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 10689,
+      "rawHex": "030799F9"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 10721,
+      "rawHex": "19"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 10760,
+      "rawHex": "05"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 10789,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 10819,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 10854,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 10919,
+      "rawHex": "000000CCED0101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 10959,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 10989,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 11019,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 11054,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 11089,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 11128,
+      "rawHex": "030799FA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 11154,
+      "rawHex": "19"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 11192,
+      "rawHex": "05"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 11229,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 11249,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 11289,
+      "rawHex": "3437"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 11359,
+      "rawHex": "000000CCED0101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 11420,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 11449,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 11489,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 11519,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 11549,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 11589,
+      "rawHex": "030799FA"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 11621,
+      "rawHex": "19"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 11659,
+      "rawHex": "05"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 11700,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 11740,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 11769,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 12044,
+      "rawHex": "000000CCEE0101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 12089,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 12127,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 12176,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 12199,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 12240,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 12269,
+      "rawHex": "030799FB"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 12309,
+      "rawHex": "19"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 12342,
+      "rawHex": "05"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 12379,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 12409,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 12439,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 12512,
+      "rawHex": "000000CCEE0101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 12549,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 12589,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 12619,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 12649,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 12689,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 12721,
+      "rawHex": "030799FC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 12751,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 12789,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 12829,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 12849,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 12889,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 12959,
+      "rawHex": "000000CCEF0101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 13019,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 13049,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 13091,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 13119,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 13149,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 13190,
+      "rawHex": "030799FC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 13219,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 13259,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 13290,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 13319,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 13359,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 13425,
+      "rawHex": "000000CCEF0101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 13489,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 13522,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 13559,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 13589,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 13623,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 13659,
+      "rawHex": "030799FC"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 13689,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 13729,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 13762,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 13789,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 13821,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 13889,
+      "rawHex": "000000CCF00101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 13929,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 13959,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 13989,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 14019,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 14059,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 14429,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 14459,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 14489,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 14529,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 14559,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 14621,
+      "rawHex": "000000CCF00101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 14669,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 14709,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 14759,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 14789,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 14819,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 14865,
+      "rawHex": "030799FE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 14890,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 14929,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 14959,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 14989,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 15019,
+      "rawHex": "3468"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 15300,
+      "rawHex": "000000CCF10101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 15349,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 15370,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 15409,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 15440,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 15474,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 15512,
+      "rawHex": "030799FE"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 15539,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 15587,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 15629,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 15659,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 15692,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 15759,
+      "rawHex": "000000CCF20101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 16049,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 16069,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 16439,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 16470,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 16509,
+      "rawHex": "030799FF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 16540,
+      "rawHex": "19"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 16579,
+      "rawHex": "05"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 16609,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 16640,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 16672,
+      "rawHex": "3468"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 16739,
+      "rawHex": "000000CCF30101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 16779,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 16809,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 16839,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 16871,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 16919,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 16959,
+      "rawHex": "03079A00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 16989,
+      "rawHex": "19"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 17029,
+      "rawHex": "05"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 17059,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 17089,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 17119,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 17193,
+      "rawHex": "000000CCF30101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 17239,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 17269,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 17319,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 17359,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 17389,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 17429,
+      "rawHex": "03079A00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 17462,
+      "rawHex": "19"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 17499,
+      "rawHex": "05"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 17531,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 17560,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 17591,
+      "rawHex": "3437"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 17659,
+      "rawHex": "000000CCF30101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 17720,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 17759,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 17789,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 17819,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 17864,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 17889,
+      "rawHex": "03079A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 17922,
+      "rawHex": "19"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 17959,
+      "rawHex": "05"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 17989,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 18019,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 18059,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 18122,
+      "rawHex": "000000CCF40101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 18500,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 18519,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 18577,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 18609,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 18639,
+      "rawHex": "03079A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 18669,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 18710,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 18751,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 18789,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 18819,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 18889,
+      "rawHex": "000000CCF50101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 18929,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 18959,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 18989,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 19030,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 19059,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 19089,
+      "rawHex": "03079A02"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 19119,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 19160,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 19199,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 19219,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 19259,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 19550,
+      "rawHex": "000000CCF50101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 19579,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 19609,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 19639,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 19669,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 19711,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 19739,
+      "rawHex": "03079A03"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 19769,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 19809,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 19857,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 19889,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 19919,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 19989,
+      "rawHex": "000000CCF60101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 20029,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 20059,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 20089,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 20119,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 20489,
+      "rawHex": "03079A03"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 20519,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 20559,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 20601,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 20639,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 20669,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 20739,
+      "rawHex": "000000CCF70101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 20779,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 20809,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 20841,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 20869,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 20909,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 20941,
+      "rawHex": "03079A04"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 20970,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 21009,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 21049,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5422",
+      "tMs": 21069,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x5468",
+      "tMs": 21109,
+      "rawHex": "344F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 21194,
+      "rawHex": "000000CCF70101010058070500001B10480A28FFFF"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1000",
+      "tMs": 21229,
+      "rawHex": "010000"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100A",
+      "tMs": 21260,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x100E",
+      "tMs": 21289,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1600",
+      "tMs": 21319,
+      "rawHex": "09"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1700",
+      "tMs": 21359,
+      "rawHex": "003A01"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x1701",
+      "tMs": 21389,
+      "rawHex": "03079A04"
+    },
+    {
+      "ecuHex": "0x12",
+      "didHex": "0x4002",
+      "tMs": 21419,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 21459,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 21501,
+      "rawHex": "0002"
+    }
+  ],
+  "confirmedBindings": [],
+  "nextStep": null,
+  "diagnostics": {
+    "rawError": null,
+    "timeoutInclusiveReqPerSec": 27.397260273972602,
+    "adapterTeardownPending": false
+  }
+}
