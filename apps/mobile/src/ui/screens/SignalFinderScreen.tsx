@@ -140,6 +140,27 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
       unsubscribeSample();
     };
   }, []);
+  /**
+   * Ticket P4o-FIX2 U2 (binding, Codex P4o-REV2 finding 3, PARTIAL): `rpm`'s
+   * AGE moves on its own, with no new sample and no controller snapshot to
+   * trigger a re-render -- so a fresh rpm reading kept suppressing
+   * `engineWarning` long after it crossed `ENGINE_SAMPLE_MAX_AGE_MS` and
+   * telemetry had actually gone quiet, with the screen stuck rendering
+   * whatever `performance.now()` happened to read at the LAST unrelated
+   * render. `engineNotDetectedRunning` is a pure function of `lastRpmSample`
+   * and the current instant (targets.test.ts's own `NOW`/`sampleAge` cases
+   * already prove IT ages correctly); the missing piece was purely this
+   * screen never asking it again. Re-render on a 1 s ticker -- same
+   * discipline as `PreflightScreen.tsx`'s own staleness ticker and
+   * `TelemetryScreen.tsx`'s G-force one -- so `engineWarning` is actually
+   * RE-EVALUATED as time passes rather than only on the next unrelated state
+   * change.
+   */
+  const [, forceEngineWarningTick] = React.useState(0);
+  React.useEffect(() => {
+    const timer = setInterval(() => forceEngineWarningTick((n) => n + 1), 1_000);
+    return () => clearInterval(timer);
+  }, []);
   /** P4o O5: armed replace tracking lives on the CONTROLLER (testable without rendering) — this is just a render helper. */
   const engineWarning = (engineRequirement: SignalEngineRequirement): boolean =>
     // V3: the SAME monotonic clock basis `TelemetrySample.tMonoMs` is stamped

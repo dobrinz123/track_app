@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildMetronomeTimeline,
-  countDistinctLevels,
+  isGradedAnalogSeries,
   scoreSignalCandidates,
   type MetronomeTimeline,
   type SignalActionScript,
@@ -1056,44 +1056,149 @@ describe('scoreSignalCandidates -- P4o O2 (two-level analog series capped at pro
     });
     expect(score).toMatchObject({ verdict: 'found', verdictCapReason: null, flagBit: 0 });
   });
+
+  it('a genuine THREE-level signal with a SINGLE intermediate sample per press window keeps FOUND -- P4o-FIX2 U1 (finding 7)', () => {
+    // Two press windows each hold their OWN singleton intermediate value (40,
+    // then 45 -- never repeated, and more than `floor` apart from each other)
+    // alongside the shared max (100); the other three windows read a plain
+    // two-level 100. Each intermediate's OWN whole-run support is exactly 1 --
+    // below the OLD clustering's support floor, which dropped both and capped
+    // this genuinely graded reading as two-level. The new rule judges each
+    // window on its own evidence and needs only 2 qualifying windows.
+    const samples = layOnTimeline(
+      timeline,
+      ECU_12,
+      0x7001,
+      cycles(['00', '00'], [
+        [['64', '28'], ['00', '00']],
+        [['64', '2D'], ['00', '00']],
+        [['64', '64'], ['00', '00']],
+        [['64', '64'], ['00', '00']],
+        [['64', '64'], ['00', '00']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'analog-monotone' });
+    expect(score).toMatchObject({ did: 0x7001, verdict: 'found', verdictCapReason: null });
+  });
+
+  it('four one-off outliers scattered across the RELEASE windows do not turn a two-state signal graded -- P4o-FIX2 U1 (finding 6)', () => {
+    // Field bug (Codex P4o-REV2 finding 6): the OLD clustering ran over the
+    // WHOLE run's values (baseline + press + release together), so four
+    // NEARBY one-off reads during release (149-152 -- each a singleton on its
+    // own, but within `floor` of each other) could pool their support into a
+    // spurious THIRD supported cluster and let a plain two-state signal
+    // escape the cap. The new rule only ever looks at press/hold windows, so
+    // release-window noise -- however it clusters -- is simply invisible to
+    // it. Each outlier sits FIRST in its release window (so the window still
+    // ENDS at rest, and `matchedEdges` stays 10/10 -- this test isolates the
+    // two-level classification, not edge counting).
+    const samples = layOnTimeline(
+      timeline,
+      ECU_12,
+      0x7002,
+      cycles(['00', '00'], [
+        [['64', '64'], ['95', '00']],
+        [['64', '64'], ['96', '00']],
+        [['64', '64'], ['00', '00']],
+        [['64', '64'], ['97', '00']],
+        [['64', '64'], ['98', '00']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'analog-monotone' });
+    expect(score).toMatchObject({
+      did: 0x7002,
+      matchedEdges: 10,
+      verdict: 'probable',
+      verdictCapReason: 'two-level',
+    });
+    expect(score!.verdict).not.toBe('found');
+  });
 });
 
 /**
- * Ticket P4o-FIX1 V1 (binding, Codex P4o-REV1 finding 1 HIGH + finding 2
- * MEDIUM): the two-level cap's own level-counting must be robust to a noisy
- * outlier AND must not collapse a genuine staircase. Tested directly on
- * `countDistinctLevels` -- the exact function both findings named -- rather
- * than through the whole scorer, so the clustering rule stands on its own.
+ * Ticket P4o-FIX2 U1 (binding, Codex P4o-REV2 findings 6 HIGH + 7 MEDIUM + 8
+ * MEDIUM): the new window-consistent graded rule, tested directly on
+ * `isGradedAnalogSeries` -- the exact function all three findings named --
+ * rather than through the whole scorer, so the rule stands on its own.
  */
-describe('countDistinctLevels -- P4o-FIX1 V1 (diameter-bound clusters, support-gated)', () => {
-  it('(a) a noisy two-state series -- one stray outlier is UNSUPPORTED, not a third level', () => {
-    // [0 x10, 10 x8, 14 x1], floor 3: single-linkage used to count 0, 10 and
-    // 14 as three SEPARATE clusters (neither gap is <= 3) and let the lone 14
-    // escape the cap entirely. Diameter-bound clustering agrees they are
-    // three distinct clusters -- but the 14 cluster's support (1 sample) is
-    // below the floor (max(2, 10% of 19) = 2), so it does not count.
-    const values = [...Array(10).fill(0), ...Array(8).fill(10), ...Array(1).fill(14)];
-    expect(countDistinctLevels(values, 3)).toBe(2);
+describe('isGradedAnalogSeries -- P4o-FIX2 U1 (window-consistent, symmetric, order-independent)', () => {
+  it('field 0x58B7 (many intermediate values across at least 2 press windows) is GRADED', () => {
+    const windows = new Map<number, readonly number[]>([
+      [1, [0x1a, 0x30]],
+      [2, [0x36, 0x40]],
+      [3, [0x05, 0x2d]],
+      [4, [0x3b, 0x3d]],
+      [5, [0x1a, 0x32]],
+    ]);
+    expect(isGradedAnalogSeries(windows, 0, 3)).toBe(true);
   });
 
-  it('(b) a genuine staircase (0..12, floor 3) resolves to >= 3 clusters -- never collapses to one', () => {
-    // Single-linkage chained this into ONE cluster (every ADJACENT gap is
-    // <= 3, even though 0 and 12 are 12 apart) and wrongly capped a graded
-    // reading as switch-like. Diameter-bound clustering (a new cluster once a
-    // value is more than `floor` from the CURRENT cluster's FIRST value)
-    // instead yields [0-3], [4-7], [8-11], [12] -- the last dropped for thin
-    // support (1 sample < the 2-sample floor), leaving >= 3 supported.
-    const values = Array.from({ length: 13 }, (_, v) => v); // 0, 1, ..., 12
-    expect(countDistinctLevels(values, 3)).toBeGreaterThanOrEqual(3);
+  it('field 0x4002 (0x83 rest / 0x9B pressed, nothing between) is NOT graded', () => {
+    const windows = new Map<number, readonly number[]>([
+      [1, [155, 155]],
+      [2, [155, 155]],
+      [3, [155, 155]],
+      [4, [155, 155]],
+      [5, [155, 155]],
+    ]);
+    expect(isGradedAnalogSeries(windows, 131, 3)).toBe(false);
   });
 
-  it('a flat series (one level) and an empty series are unaffected', () => {
-    expect(countDistinctLevels([5, 5, 5, 5], 3)).toBe(1);
-    expect(countDistinctLevels([], 3)).toBe(0);
+  it('a genuine three-level signal with a SINGLE intermediate sample per press window is GRADED', () => {
+    const windows = new Map<number, readonly number[]>([
+      [1, [100, 40]],
+      [2, [100, 40]],
+      [3, [100, 40]],
+    ]);
+    expect(isGradedAnalogSeries(windows, 0, 3)).toBe(true);
   });
 
-  it('a clean two-level series (field: DME 0x4002, 0x83/0x9B) is exactly 2 -- still capped', () => {
-    const values = [...Array(25).fill(0x83), ...Array(25).fill(0x9b)];
-    expect(countDistinctLevels(values, 3)).toBe(2);
+  it('only ONE graded window is not enough -- needs at least 2', () => {
+    const windows = new Map<number, readonly number[]>([
+      [1, [100, 40]],
+      [2, [100, 100]],
+      [3, [100, 100]],
+    ]);
+    expect(isGradedAnalogSeries(windows, 0, 3)).toBe(false);
+  });
+
+  it('window order and within-window sample order do not affect the result (symmetric, order-independent -- finding 8)', () => {
+    const forward = new Map<number, readonly number[]>([
+      [1, [40, 100]],
+      [2, [40, 100]],
+    ]);
+    const reversed = new Map<number, readonly number[]>([
+      [2, [100, 40]],
+      [1, [100, 40]],
+    ]);
+    expect(isGradedAnalogSeries(forward, 0, 3)).toBe(true);
+    expect(isGradedAnalogSeries(reversed, 0, 3)).toBe(isGradedAnalogSeries(forward, 0, 3));
+  });
+
+  it('an excursion no larger than 2x the floor never counts, however many samples sit inside it', () => {
+    // windowMax(6) - rest(0) = 6, not > 2*floor(3) = 6 -- the interval is
+    // empty/inverted, so nothing inside it can ever be "intermediate".
+    const windows = new Map<number, readonly number[]>([
+      [1, [6, 3]],
+      [2, [6, 3]],
+    ]);
+    expect(isGradedAnalogSeries(windows, 0, 3)).toBe(false);
+  });
+
+  it('a noise singleton scattered across windows only counts inside its OWN window\'s interval', () => {
+    // Two windows genuinely graded (100/40); a third window's own stray value
+    // (55) does not borrow support from the other two -- it is judged solely
+    // against ITS OWN window's max (55 itself), which cannot be < 55 - floor.
+    const windows = new Map<number, readonly number[]>([
+      [1, [100, 40]],
+      [2, [100, 40]],
+      [3, [55]],
+    ]);
+    expect(isGradedAnalogSeries(windows, 0, 3)).toBe(true); // windows 1+2 alone already clear the >= 2 bar
+  });
+
+  it('a flat/empty run has nothing to grade', () => {
+    expect(isGradedAnalogSeries(new Map(), 0, 3)).toBe(false);
+    expect(isGradedAnalogSeries(new Map([[1, []]]), 0, 3)).toBe(false);
   });
 });

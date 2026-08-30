@@ -87,9 +87,9 @@ export type SignalVerdictCapReason =
   /** P4m (item 11): the DID answered the WHOLE script with one identical response — it did not answer the driver. */
   | 'never-moved'
   /**
-   * Ticket P4o O2 (binding, field test 8): an `analog-monotone`/`analog-bipolar`
-   * target's scored series took on <= 2 distinct values (after its own noise
-   * floor) for the WHOLE run — switch-like, not analog. Field test 8: the
+   * Ticket P4o O2 (binding, field test 8), reworked by ticket P4o-FIX2 U1: an
+   * `analog-monotone`/`analog-bipolar` target's scored series is NOT
+   * {@link isGradedAnalogSeries} — switch-like, not analog. Field test 8: the
    * generic profile's brakePressure find scored DME 0x12 0x4002 `found`
    * (0x83 rest / 0x9B pressed, nothing in between) and let the user confirm
    * it over the real, GRADED 0x58B7 (26–64, many intermediate levels). Never
@@ -310,69 +310,56 @@ function deriveActiveValueHex(
 }
 
 /**
- * Ticket P4o O2 (binding), reworked by ticket P4o-FIX1 V1 (Codex P4o-REV1
- * finding 1 HIGH + finding 2 MEDIUM): the number of distinct LEVELS `values`
- * visits, over the WHOLE run -- the same noise floor `scoreSeries` already
- * uses to decide "away from rest" for an analog series. A graded reading
- * (field: DME 0x58B7, 26–64 with many intermediate values inside the press
- * windows) resolves to several levels; a switch dressed up as an analog
- * reading (field: DME 0x4002, 0x83 rest / 0x9B pressed, nothing between)
- * resolves to exactly 2.
+ * Ticket P4o-FIX2 U1 (binding, Codex P4o-REV2 findings 6 HIGH + 7 MEDIUM + 8
+ * MEDIUM) — replaces the P4o-FIX1 diameter-bound clustering (`countDistinctLevels`,
+ * now deleted) entirely. That version clustered the WHOLE run's raw values
+ * (baseline + press + release together), which meant:
  *
- * Two independent fixes over the original single-linkage version:
+ *  - (finding 6, HIGH) noise ANYWHERE in the run could pool its SUPPORT into a
+ *    spurious extra "level" — four scattered one-off outliers, none of them
+ *    evidence of an intermediate excursion on their own, could jointly clear
+ *    the support floor and let a two-state signal escape the cap again;
+ *  - (finding 7, MEDIUM) a genuine three-level signal whose intermediate value
+ *    appeared only ONCE per press window (many press windows, one sample
+ *    each) could still fail the support floor and lose that level;
+ *  - (finding 8, MEDIUM) the clustering walked the sorted values in one
+ *    direction, so reflecting the same weighted values could change which
+ *    clusters formed and how much support they got.
  *
- *  1. (finding 2, MEDIUM) Clustering is bounded by DIAMETER around a
- *     representative, never by CHAINING adjacent gaps: a new cluster starts
- *     the moment a sorted value is more than `floor` away from the CURRENT
- *     CLUSTER'S FIRST value. Single-linkage used to walk a genuine staircase
- *     (`0, 1, 2, ..., 12` at floor 3) into ONE cluster end to end, because
- *     every ADJACENT gap was <= 3 even though 0 and 12 are 12 apart --
- *     wrongly capping a graded reading as switch-like.
- *  2. (finding 1, HIGH) A cluster only counts as a real level when its
- *     SUPPORT (samples, not distinct values) clears a floor of its own: at
- *     least 2 samples, or 10 % of the run's DISTINCT values, whichever is
- *     larger. A two-state series with one stray outlier (`[0 x10, 10 x8,
- *     14 x1]`) used to count that lone 14 as a THIRD level and escape the cap
- *     entirely -- "more distinct clusters" is not the same claim as "more
- *     states the series actually rests in".
+ * The metronome already tells us exactly which samples are evidence for which
+ * press window, so "graded" is now a WINDOW-CONSISTENT claim instead of a
+ * clustering of the whole run: a series is graded iff, in at least 2 press
+ * windows, some sample's value lies STRICTLY inside the open interval
+ * `(rest + floor, windowMax - floor)` — an intermediate value on the way from
+ * rest to THAT window's own maximum — AND that window's own excursion
+ * (`windowMax - rest`) exceeds `2 * floor` (so the interval is non-empty and
+ * "intermediate" is a meaningful claim, not a rounding artifact).
  *
- *     The 10 % is taken over DISTINCT values rather than raw sample count
- *     deliberately: a field run samples far faster than the driver's own
- *     press/release cadence, so a genuinely graded reading (0x58B7: 16
- *     distinct raw bytes across only ~45 in-window samples) can visit most of
- *     its levels once or twice each. Sizing the floor off the raw sample
- *     count would then demand more support than a real intermediate level
- *     ever gets and re-introduce finding 2's own bug from the other
- *     direction — collapsing a graded reading down to its single dominant
- *     (rest) cluster. Distinct-value count stays near the flat "2" floor for
- *     the ordinary case (a handful of levels) and only asks for more once a
- *     series carries dozens of them, which is exactly where one truly noisy
- *     value among many is worth discounting.
+ * This is symmetric and order-independent by construction: only a value's
+ * membership in its OWN window's interval decides anything, never its
+ * position in the timeline or the direction the run is read in (finding 8 is
+ * moot — there is no sort, no chaining, no direction to be dependent on). A
+ * noise singleton scattered across OTHER windows never contributes (each
+ * window is judged only by its own samples), and a two-state signal (e.g.
+ * 0x83 rest / 0x9B pressed) never has an intermediate: its only press value
+ * IS the window's max, so it can never be strictly less than `windowMax -
+ * floor`.
  */
-export function countDistinctLevels(values: readonly number[], floor: number): number {
-  if (values.length === 0) return 0;
-  const counts = new Map<number, number>();
-  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
-  const distinctSorted = [...counts.keys()].sort((a, b) => a - b);
-  const minSupport = Math.max(2, Math.ceil(distinctSorted.length * 0.1));
-  let supportedClusters = 0;
-  let clusterFirst = distinctSorted[0] as number;
-  let clusterSupport = counts.get(clusterFirst) ?? 0;
-  const closeCluster = (): void => {
-    if (clusterSupport >= minSupport) supportedClusters += 1;
-  };
-  for (let i = 1; i < distinctSorted.length; i += 1) {
-    const value = distinctSorted[i] as number;
-    if (value - clusterFirst <= floor) {
-      clusterSupport += counts.get(value) ?? 0;
-      continue;
-    }
-    closeCluster();
-    clusterFirst = value;
-    clusterSupport = counts.get(value) ?? 0;
+export function isGradedAnalogSeries(
+  pressValuesByWindow: ReadonlyMap<number, readonly number[]>,
+  restValue: number,
+  floor: number,
+): boolean {
+  let gradedWindows = 0;
+  for (const values of pressValuesByWindow.values()) {
+    if (values.length === 0) continue;
+    const windowMax = Math.max(...values);
+    if (windowMax - restValue <= 2 * floor) continue;
+    const lower = restValue + floor;
+    const upper = windowMax - floor;
+    if (values.some((value) => value > lower && value < upper)) gradedWindows += 1;
   }
-  closeCluster();
-  return supportedClusters;
+  return gradedWindows >= 2;
 }
 
 /** The most frequent value, ties broken by first appearance (deterministic). */
@@ -432,11 +419,11 @@ interface SeriesScore {
    */
   booleanLike: boolean;
   /**
-   * Ticket P4o O2 (binding): for a NON-boolean series (`!booleanLike`), does
-   * its whole run collapse to <= 2 distinct levels once values within the
-   * series' own noise floor are merged? Always `false` for a boolean/flag
-   * series (the two-level cap is about an analog reading that turns out to
-   * be switch-like, not about a switch itself).
+   * Ticket P4o O2 (binding), reworked by P4o-FIX2 U1: for a NON-boolean series
+   * (`!booleanLike`), is it switch-like -- i.e. NOT {@link isGradedAnalogSeries}?
+   * Always `false` for a boolean/flag series (the two-level cap is about an
+   * analog reading that turns out to be switch-like, not about a switch
+   * itself).
    */
   twoLevel: boolean;
   /**
@@ -492,10 +479,6 @@ function scoreSeries(
   const noiseFloor = boolean
     ? 0
     : Math.max(options.analogMarginRawUnits, options.analogMarginMultiplier * spreadP90P10(baselineValues));
-  // P4o O2: computed over the WHOLE run (every point, every window), using
-  // the same noise floor the active()/direction logic below already uses --
-  // this is a fact about the series, independent of the metronome timing.
-  const twoLevel = !boolean && countDistinctLevels(points.map((p) => p.value), noiseFloor) <= 2;
 
   /** "Away from rest" — the noise floor makes this a real excursion for analogs. */
   const active = (value: number): boolean =>
@@ -524,6 +507,10 @@ function scoreSeries(
       releaseValuesByRepetition.set(step.repetition, list);
     }
   }
+  // Ticket P4o-FIX2 U1: window-consistent, built ONLY from the press/hold
+  // windows above -- never from the whole run's points (that was P4o-FIX1's
+  // bug; see `isGradedAnalogSeries`'s own doc comment).
+  const twoLevel = !boolean && !isGradedAnalogSeries(pressValuesByRepetition, restValue as number, noiseFloor);
 
   // Ordered transitions, attributed to the step the ARRIVING sample belongs to.
   interface Transition {

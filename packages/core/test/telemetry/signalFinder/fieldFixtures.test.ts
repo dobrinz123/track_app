@@ -1,5 +1,4 @@
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   findSignalTarget,
@@ -52,9 +51,16 @@ interface ExportedSession {
   samples: ExportedSample[];
 }
 
+/**
+ * Ticket P4o-FIX2 U3 (binding, Codex P4o-REV2 finding 9, MEDIUM): `__dirname`
+ * is undefined under native-ESM CI (this package is `"type": "module"`), so
+ * the field export path is resolved from THIS FILE's own URL instead --
+ * `node:fs`'s `readFileSync` accepts a `file:` URL directly, no
+ * `fileURLToPath` round-trip needed.
+ */
 function loadExport(name: string): ExportedSession {
-  const path = resolve(__dirname, '../../../../../data/field/signal-finder', name);
-  return JSON.parse(readFileSync(path, 'utf8')) as ExportedSession;
+  const url = new URL(`../../../../../data/field/signal-finder/${name}`, import.meta.url);
+  return JSON.parse(readFileSync(url, 'utf8')) as ExportedSession;
 }
 
 /** The export carries the prompt timeline; the evidence windows are its own settle-shifted derivation (`metronome.ts`). */
