@@ -167,12 +167,53 @@ export interface SignalFinderProbeProgress {
 export interface SignalFinderEcuPass {
   ecu: number;
   dids: readonly number[];
+  /**
+   * Ticket P4o O4 (binding): the subset that came from the target's OWN
+   * previously confirmed binding on this profile — read before every other
+   * pool, hypotheses included.
+   */
+  confirmedDids: readonly number[];
   /** The subset that came from the target's own hypotheses (data). */
   hypothesisDids: readonly number[];
   /** The subset that carried CHANGE evidence from an earlier observation (item 10b). */
   changedDids: readonly number[];
   /** The subset that came from `did_sweep_responders` of earlier sweep runs on this ECU. */
   cachedDids: readonly number[];
+}
+
+/**
+ * Ticket P4o O3 (binding, field test 8): one binding a confirm SILENTLY
+ * overwrote before this ticket — field test 8's own defect ("brake pressure
+ * became 0/100 %" when a generic-profile confirm on 0x4002 replaced the
+ * engine-running-confirmed 0x58B7 with no warning at all). Recorded only
+ * once the SECOND, explicit tap actually committed the replacement — never
+ * for the first, informational tap.
+ */
+export interface SignalFinderReplacedBinding {
+  channel: SignalTargetId;
+  /** The NEW binding's (ecu, did) — what the export's `candidates`/`confirmedBindings` also carry. */
+  ecu: number;
+  did: number;
+  /** The binding this replaced. */
+  previousEcu: number;
+  previousDid: number;
+  replacedAtUtc: string;
+}
+
+/**
+ * Ticket P4o O3 (binding): armed by a FIRST tap of "Confirm as <target>" when
+ * the channel already has a different field-confirmed binding — the second,
+ * explicit tap (same `channel`/`ecu`/`did`/`byteOffset`) is what actually
+ * writes it. `null` whenever nothing is armed (including right after a
+ * successful confirm, a replace or a plain first-ever confirm).
+ */
+export interface SignalFinderPendingReplace {
+  channel: SignalTargetId;
+  ecu: number;
+  did: number;
+  byteOffset: number | null;
+  /** The existing field-confirmed binding a second tap would replace. */
+  existing: VehicleProfileBinding;
 }
 
 export interface SignalFinderStepSnapshot {
@@ -220,6 +261,10 @@ export interface SignalFinderSnapshot {
   nextStep: NextDiscoveryStep | null;
   /** Channels already written into the vehicle profile by {@link SignalFinderController.confirmBinding}. */
   confirmedChannels: readonly string[];
+  /** Ticket P4o O3: non-null exactly while a replace confirm is armed, waiting for its second tap. */
+  pendingReplace: SignalFinderPendingReplace | null;
+  /** Ticket P4o O3: every binding a confirm has REPLACED so far, for the export's `replaced` section. */
+  replacedBindings: readonly SignalFinderReplacedBinding[];
   /** Fresh per `find()` — the id carried into the export. */
   sessionId: string | null;
   startedAtUtc: string | null;
@@ -382,8 +427,14 @@ function changedDidsFromSummaryJson(summaryJson: string): number[] {
   return dids;
 }
 
-/** The three priority pools of item 10, already ECU-tagged. Computed once per `find()` and reused by every `nextRound()`. */
+/**
+ * The priority pools of item 10, already ECU-tagged — extended by ticket P4o
+ * O4 with `confirmed` (the target's own previously confirmed binding(s),
+ * read before every other pool). Computed once per `find()` and reused by
+ * every `nextRound()`.
+ */
 interface FinderPools {
+  confirmed: SignalFinderTargetRef[];
   hypotheses: SignalFinderTargetRef[];
   changed: SignalFinderTargetRef[];
   cached: SignalFinderTargetRef[];
@@ -440,6 +491,8 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     noResponseDids: [],
     nextStep: null,
     confirmedChannels: [],
+    pendingReplace: null,
+    replacedBindings: [],
     sessionId: null,
     startedAtUtc: null,
     measuredReqPerSec: assumedReqPerSec,
@@ -469,7 +522,7 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
 
   /** Everything a `nextRound()` needs from the find that started it. */
   let currentTarget: SignalTargetDefinition | null = null;
-  let currentPools: FinderPools = { hypotheses: [], changed: [], cached: [] };
+  let currentPools: FinderPools = { confirmed: [], hypotheses: [], changed: [], cached: [] };
   let readEntries: SignalFinderPlanEntry[] = [];
   let noResponse: SignalFinderTargetRef[] = [];
 
@@ -641,6 +694,19 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
    * responses before blocks).
    */
   async function collectPools(target: SignalTargetDefinition): Promise<FinderPools> {
+    /**
+     * P4o O4 (binding, field test 8): the target's OWN previously confirmed
+     * binding, on THIS profile — read before every other pool. A
+     * generic-profile find for `brakePressure` used to never even OFFER the
+     * Supra's field-confirmed 0x58B7 (it is not a hypothesis on the generic
+     * catalog), so the two-level DME flag 0x4002 — a plain cached responder
+     * — won the round unopposed and got silently confirmed over it.
+     */
+    const confirmed: SignalFinderTargetRef[] = [];
+    if (deps.bindingStore !== undefined) {
+      const existing = await deps.bindingStore.getBinding(profileId, target.id);
+      if (existing !== null) confirmed.push({ ecu: existing.ecu, did: existing.did });
+    }
     const hypotheses: SignalFinderTargetRef[] = [];
     for (const ecu of targetHypothesisEcus(target)) {
       for (const hypothesis of target.hypotheses.filter((h) => h.ecu === ecu)) {
@@ -698,7 +764,7 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         for (const did of [...short, ...blocks]) cached.push({ ecu, did });
       }
     }
-    return { hypotheses, changed, cached };
+    return { confirmed, hypotheses, changed, cached };
   }
 
   /** {@link readEntries}, grouped per ECU — what the result header and the export count. */
@@ -707,11 +773,12 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     for (const entry of entries) {
       let pass = byEcu.get(entry.ecu);
       if (pass === undefined) {
-        pass = { ecu: entry.ecu, dids: [], hypothesisDids: [], changedDids: [], cachedDids: [] };
+        pass = { ecu: entry.ecu, dids: [], confirmedDids: [], hypothesisDids: [], changedDids: [], cachedDids: [] };
         byEcu.set(entry.ecu, pass);
       }
       (pass.dids as number[]).push(entry.did);
-      if (entry.source === 'hypothesis') (pass.hypothesisDids as number[]).push(entry.did);
+      if (entry.source === 'confirmed') (pass.confirmedDids as number[]).push(entry.did);
+      else if (entry.source === 'hypothesis') (pass.hypothesisDids as number[]).push(entry.did);
       else if (entry.source === 'changed') (pass.changedDids as number[]).push(entry.did);
       else (pass.cachedDids as number[]).push(entry.did);
     }
@@ -749,12 +816,19 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     silentEcus: readonly number[],
     silentDids: readonly SignalFinderTargetRef[] = [],
   ): FinderRunPlan {
-    return planFinderRun(reqPerSec, currentPools.hypotheses, currentPools.changed, currentPools.cached, {
-      budget: budgetFor(reqPerSec),
-      exclude: readEntries,
-      silentEcus,
-      silentDids,
-    });
+    return planFinderRun(
+      reqPerSec,
+      currentPools.confirmed,
+      currentPools.hypotheses,
+      currentPools.changed,
+      currentPools.cached,
+      {
+        budget: budgetFor(reqPerSec),
+        exclude: readEntries,
+        silentEcus,
+        silentDids,
+      },
+    );
   }
 
   /**
@@ -1151,6 +1225,10 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         scores: [],
         noResponseDids: [],
         nextStep: null,
+        // P4o O3: a fresh find (a new target, or the same one again) starts
+        // with nothing armed — an armed replace belongs to the SCORE ROW that
+        // armed it, and that row is gone the moment a new script runs.
+        pendingReplace: null,
         error: null,
         errorCode: null,
         // X1: a fresh find has measured NOTHING yet -- it says so until its
@@ -1196,7 +1274,7 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
       if (target === null) return 0;
       const pools = await collectPools(target);
       const keys = new Set<string>();
-      for (const pool of [pools.hypotheses, pools.changed, pools.cached]) {
+      for (const pool of [pools.confirmed, pools.hypotheses, pools.changed, pools.cached]) {
         for (const entry of pool) keys.add(`${entry.ecu}:${entry.did}`);
       }
       return keys.size;
@@ -1228,6 +1306,41 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
 
     async confirmBinding(channel, score): Promise<VehicleProfileBinding | null> {
       if (deps.bindingStore === undefined) return null;
+      /**
+       * Ticket P4o O3 (binding, field test 8): "when a target already has a
+       * field-confirmed binding on a different (ecu,did), the confirm button
+       * reads 'Replace 0x58B7 → 0x4002' and requires a second tap (inline
+       * confirm) ... the export lists the replaced binding in a `replaced`
+       * entry." Field bug this closes: a plain re-confirm used to overwrite
+       * the engine-running-confirmed 0x58B7 with the generic profile's
+       * two-level 0x4002 silently — the monitor's brake pressure became
+       * 0/100 % with no warning anywhere.
+       *
+       * The state machine lives HERE (not in the screen) so it is testable
+       * without rendering anything: a FIRST call for a differing binding
+       * arms {@link SignalFinderSnapshot.pendingReplace} and writes nothing;
+       * only a SECOND call naming the SAME (channel, ecu, did, byteOffset)
+       * actually commits the replacement.
+       */
+      const byteOffset = score.byteOffset ?? null;
+      const existing = await deps.bindingStore.getBinding(profileId, channel);
+      const isReplace =
+        existing !== null &&
+        existing.status === 'field-confirmed' &&
+        (existing.ecu !== score.ecu || existing.did !== score.did);
+      if (isReplace) {
+        const pending = snapshot.pendingReplace;
+        const armed =
+          pending !== null &&
+          pending.channel === channel &&
+          pending.ecu === score.ecu &&
+          pending.did === score.did &&
+          pending.byteOffset === byteOffset;
+        if (!armed) {
+          emit({ pendingReplace: { channel, ecu: score.ecu, did: score.did, byteOffset, existing } });
+          return null;
+        }
+      }
       const target = findSignalTarget(catalog, channel);
       const hypothesis = target?.hypotheses.find((h) => h.ecu === score.ecu && h.did === score.did) ?? null;
       const binding: VehicleProfileBinding = {
@@ -1272,7 +1385,23 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         updatedAtUtc: nowUtc(),
       };
       await deps.bindingStore.upsertBinding(binding);
-      emit({ confirmedChannels: [...new Set([...snapshot.confirmedChannels, channel])] });
+      emit({
+        confirmedChannels: [...new Set([...snapshot.confirmedChannels, channel])],
+        pendingReplace: null,
+        replacedBindings: isReplace
+          ? [
+              ...snapshot.replacedBindings,
+              {
+                channel,
+                ecu: score.ecu,
+                did: score.did,
+                previousEcu: existing!.ecu,
+                previousDid: existing!.did,
+                replacedAtUtc: binding.updatedAtUtc,
+              },
+            ]
+          : snapshot.replacedBindings,
+      });
       return binding;
     },
   };

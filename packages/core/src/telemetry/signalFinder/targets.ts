@@ -338,8 +338,18 @@ export const GENERIC_SIGNAL_TARGET_CATALOG: SignalTargetCatalog = {
   labelRo: 'Vehicul necunoscut (fără profil)',
   targets: [
     genericTarget('brakeSwitch', 'Brake switch', 'off-ok', 'boolean-edge', PEDAL_SCRIPT, BRAKE_VERBS),
-    genericTarget('brakePressure', 'Brake pressure', 'off-ok', 'analog-monotone', PEDAL_SCRIPT, BRAKE_VERBS),
-    genericTarget('steeringAngle', 'Steering angle', 'off-ok', 'analog-bipolar', STEERING_SCRIPT, STEERING_VERBS),
+    // Ticket P4o O1 (binding, field test 8): engineRequirement is a property
+    // of the TARGET, identical in every catalog. The generic catalog used to
+    // say 'off-ok' here -- with the engine off the booster has no vacuum and
+    // hydraulic pressure barely builds (the same field fact the Supra catalog
+    // already recorded), so a generic-profile find silently accepted a
+    // DME flag (0x4002) that answered with the engine off as if it were the
+    // analog brakePressure reading, replacing the real (engine-running)
+    // 0x58B7 binding.
+    genericTarget('brakePressure', 'Brake pressure', 'running', 'analog-monotone', PEDAL_SCRIPT, BRAKE_VERBS),
+    // Same fact for steering: the EPS is unpowered with the engine off, so the
+    // wheel cannot be turned at all -- 'running' in every catalog.
+    genericTarget('steeringAngle', 'Steering angle', 'running', 'analog-bipolar', STEERING_SCRIPT, STEERING_VERBS),
     genericTarget('accelPedal', 'Accelerator pedal', 'off-ok', 'analog-monotone', PEDAL_SCRIPT, THROTTLE_VERBS),
     genericTarget('longG', 'Longitudinal acceleration', 'running', 'analog-bipolar', PEDAL_SCRIPT, LONG_G_VERBS),
     genericTarget('latG', 'Lateral acceleration', 'running', 'analog-bipolar', STEERING_SCRIPT, LAT_G_VERBS),
@@ -656,6 +666,30 @@ export function estimateSweepMinutes(didCount: number, reqPerSec: number): numbe
   if (!Number.isFinite(didCount) || didCount <= 0) return 0;
   const rate = Number.isFinite(reqPerSec) && reqPerSec > 0 ? reqPerSec : ASSUMED_SWEEP_REQ_PER_SEC;
   return didCount / rate / 60;
+}
+
+/** Ticket P4o O5 (binding): the ONE fact the soft engine check needs about the app's most recent telemetry reading — never the whole `TelemetrySample`/provider shape (this module has no I/O and must stay pure). */
+export interface SignalRecentEngineSample {
+  /** `null` when the app has never seen an rpm sample at all. */
+  rpm: number | null;
+}
+
+/**
+ * Ticket P4o O5 (binding, field test 8): a SOFT check — never a hard block,
+ * because this app has no lap-timing-grade tachometer reading of its own,
+ * only whatever telemetry happens to be live. True when `engineRequirement`
+ * is `'running'` and the most recent rpm reading says otherwise: no reading
+ * at all (`recentSample === null`, or one whose `rpm` is `null`), or an rpm
+ * of exactly 0. An `'off-ok'` target is never flagged, however stale or
+ * absent the reading is — the engine's state is simply irrelevant to it.
+ */
+export function engineNotDetectedRunning(
+  engineRequirement: SignalEngineRequirement,
+  recentSample: SignalRecentEngineSample | null,
+): boolean {
+  if (engineRequirement !== 'running') return false;
+  if (recentSample === null || recentSample.rpm === null) return true;
+  return recentSample.rpm === 0;
 }
 
 export interface NextDiscoveryStep {

@@ -5,11 +5,13 @@ import {
   SimulatedEnetTransport,
   DEFAULT_ENET_DID_SCENARIO,
   SIGNAL_TARGET_CATALOGS,
+  engineNotDetectedRunning,
   resolveSignalTargetCatalog,
   resolveSignalTargetCatalogLabel,
   resolveSignalTargetLabel,
   type ObdTransport,
   type SignalCandidateScore,
+  type SignalEngineRequirement,
   type SignalTargetDefinition,
   type SignalTargetId,
 } from '@circuit/core';
@@ -101,6 +103,25 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
   const [sharing, setSharing] = React.useState(false);
   const [summary, setSummary] = React.useState<string | null>(null);
   const [bindings, setBindings] = React.useState<VehicleProfileBinding[]>([]);
+  /**
+   * Ticket P4o O5 (binding): the soft engine check needs the app's own most
+   * recent rpm reading, whatever telemetry (if any) happens to be live —
+   * `null` until the FIRST sample this screen ever sees, which
+   * `engineNotDetectedRunning` already reads as "not detected running".
+   * Never touches `telemetryProvider.ts` itself: this is a plain
+   * `onSample` subscriber, same discipline as the Telemetry monitor's own.
+   */
+  const [lastRpmSample, setLastRpmSample] = React.useState<{ rpm: number | null } | null>(null);
+  React.useEffect(
+    () =>
+      telemetryProvider.onSample((sample) => {
+        if (sample.channel === 'rpm') setLastRpmSample({ rpm: sample.value });
+      }),
+    [],
+  );
+  /** P4o O5: armed replace tracking lives on the CONTROLLER (testable without rendering) — this is just a render helper. */
+  const engineWarning = (engineRequirement: SignalEngineRequirement): boolean =>
+    engineNotDetectedRunning(engineRequirement, lastRpmSample);
 
   const sweepStoreRef = React.useRef(createDidSweepStore(getTelemetryReadDb()));
   const bindingStoreRef = React.useRef(createVehicleProfileBindingStore(getTelemetryReadDb()));
@@ -273,9 +294,17 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
     // reconfirmation, or a channel that was never polled to begin with.
     if (written !== null) await refreshVehicleProfileBindingsCache();
     const showRestartHint = written !== null && shouldShowBrakeBindingRestartHint(telemetryProvider.getDiagnostics());
+    // Ticket P4o O3: a `null` result is EITHER "no profile storage on this
+    // platform" OR "this tap just ARMED a replace, waiting for the second
+    // one" -- the controller's own `pendingReplace` (not a guess from the
+    // score) tells them apart. An armed row already shows its own inline
+    // evidence line, so no banner is needed for it.
+    const armed = controller.getSnapshot().pendingReplace !== null;
     setBanner(
       written === null
-        ? strings.bannerNoProfileStorage
+        ? armed
+          ? null
+          : strings.bannerNoProfileStorage
         : showRestartHint
           ? `${strings.bannerConfirmed(written.channel, ecuHex(written.ecu), didHex(written.did))} ${strings.bannerConfirmedRestartHint}`
           : strings.bannerConfirmed(written.channel, ecuHex(written.ecu), didHex(written.did)),
@@ -432,6 +461,12 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
                   {target.engineRequirement === 'running' ? strings.engineRunningHint : strings.engineOffHint} ·{' '}
                   {targetStatus(target)}
                 </Text>
+                {/* P4o O5 (binding): a SOFT warning on the Find row itself — never a
+                    hard block, since this app has no tachometer reading of its own
+                    beyond whatever telemetry happens to be live. */}
+                {engineWarning(target.engineRequirement) ? (
+                  <Text style={styles.warningInline}>{strings.warningEngineNotDetected}</Text>
+                ) : null}
               </View>
               <Pressable
                 style={[styles.button, busy || eligible[target.id] === 0 ? styles.buttonDisabled : null]}
@@ -482,39 +517,92 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
                 ? strings.rateMeasured(snapshot.measuredReqPerSec)
                 : strings.rateAssumed(snapshot.measuredReqPerSec)}
             </Text>
+            {/* P4o O5 (binding): the result HEADER's own soft warning. */}
+            {snapshot.engineRequirement !== null && engineWarning(snapshot.engineRequirement) ? (
+              <Text style={styles.warningInline}>{strings.warningEngineNotDetected}</Text>
+            ) : null}
             {snapshot.scores.length === 0 ? <Text style={styles.caption}>{strings.nothingAnswered}</Text> : null}
-            {snapshot.scores.slice(0, 20).map((score) => (
-              <View key={`${score.ecu}-${score.did}-${score.byteOffset ?? 'n'}`} style={styles.row}>
-                <View style={styles.rowText}>
-                  <Text style={styles.mono}>
-                    {didHex(score.did)}
-                    {score.byteOffset === null ? '' : ` b${score.byteOffset}`} · {ecuHex(score.ecu)}
-                  </Text>
-                  <Text style={styles.caption}>
-                    {evidenceLine(score, strings)} ·{' '}
-                    {strings.rawRange(score.restValueHex ?? '-', String(score.min ?? '-'), String(score.max ?? '-'))}
-                    {score.insufficientReason === null ? '' : ` · ${strings.insufficientReasons[score.insufficientReason]}`}
-                  </Text>
+            {snapshot.scores.slice(0, 20).map((score) => {
+              /**
+               * Ticket P4o O3 (binding): the existing binding for THIS
+               * target/channel, read from the same `bindings` state the
+               * screen already loads — no need to ask the controller before
+               * the driver has tapped anything.
+               */
+              const existingBinding = bindings.find((b) => b.channel === snapshot.targetId);
+              const isReplaceRow =
+                existingBinding !== undefined &&
+                existingBinding.status === 'field-confirmed' &&
+                (existingBinding.ecu !== score.ecu || existingBinding.did !== score.did);
+              const isArmedForThisRow =
+                snapshot.pendingReplace !== null &&
+                snapshot.pendingReplace.channel === snapshot.targetId &&
+                snapshot.pendingReplace.ecu === score.ecu &&
+                snapshot.pendingReplace.did === score.did &&
+                snapshot.pendingReplace.byteOffset === score.byteOffset;
+              // P4o O2 (binding): "Confirm as <analog target>" is disabled
+              // for a row capped at `probable` for being switch-like, not
+              // analog — never a silent no-op, the row's own evidence line
+              // already says "capped: switch-like, not analog".
+              const confirmDisabled = score.verdictCapReason === 'two-level';
+              return (
+                <View key={`${score.ecu}-${score.did}-${score.byteOffset ?? 'n'}`} style={styles.row}>
+                  <View style={styles.rowText}>
+                    <Text style={styles.mono}>
+                      {didHex(score.did)}
+                      {score.byteOffset === null ? '' : ` b${score.byteOffset}`} · {ecuHex(score.ecu)}
+                    </Text>
+                    <Text style={styles.caption}>
+                      {evidenceLine(score, strings)} ·{' '}
+                      {strings.rawRange(score.restValueHex ?? '-', String(score.min ?? '-'), String(score.max ?? '-'))}
+                      {score.insufficientReason === null ? '' : ` · ${strings.insufficientReasons[score.insufficientReason]}`}
+                    </Text>
+                    {isArmedForThisRow && existingBinding !== undefined ? (
+                      <Text style={styles.caption}>
+                        {strings.replaceArmed}{' '}
+                        {strings.replaceExistingEvidence(
+                          ecuHex(existingBinding.ecu),
+                          didHex(existingBinding.did),
+                          existingBinding.decode,
+                        )}
+                      </Text>
+                    ) : null}
+                  </View>
+                  <View style={styles.verdictColumn}>
+                    {/* P4m item 11: sparse-but-consistent evidence says so. */}
+                    <Text style={[styles.verdict, { color: VERDICT_COLOR[score.verdict] }]}>
+                      {strings.verdicts[score.verdict]}
+                      {score.sparse === true ? strings.sparseSuffix : ''}
+                    </Text>
+                    {score.verdict === 'found' || score.verdict === 'probable' ? (
+                      <Pressable
+                        style={[styles.button, confirmDisabled ? styles.buttonDisabled : null]}
+                        disabled={confirmDisabled}
+                        onPress={() => void handleConfirm(score)}
+                        accessibilityRole="button"
+                        accessibilityLabel={
+                          confirmDisabled
+                            ? `${strings.confirmA11y(didHex(score.did), resultTargetLabel)} — ${strings.confirmDisabledTwoLevel}`
+                            : isReplaceRow
+                              ? strings.replaceA11y(
+                                  existingBinding !== undefined ? didHex(existingBinding.did) : '',
+                                  didHex(score.did),
+                                  resultTargetLabel,
+                                )
+                              : strings.confirmA11y(didHex(score.did), resultTargetLabel)
+                        }
+                      >
+                        <Text style={styles.buttonText}>
+                          {isReplaceRow
+                            ? strings.replaceAs(existingBinding !== undefined ? didHex(existingBinding.did) : '', didHex(score.did))
+                            : strings.confirmAs(resultTargetLabel)}
+                        </Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
                 </View>
-                <View style={styles.verdictColumn}>
-                  {/* P4m item 11: sparse-but-consistent evidence says so. */}
-                  <Text style={[styles.verdict, { color: VERDICT_COLOR[score.verdict] }]}>
-                    {strings.verdicts[score.verdict]}
-                    {score.sparse === true ? strings.sparseSuffix : ''}
-                  </Text>
-                  {score.verdict === 'found' || score.verdict === 'probable' ? (
-                    <Pressable
-                      style={styles.button}
-                      onPress={() => void handleConfirm(score)}
-                      accessibilityRole="button"
-                      accessibilityLabel={strings.confirmA11y(didHex(score.did), resultTargetLabel)}
-                    >
-                      <Text style={styles.buttonText}>{strings.confirmAs(resultTargetLabel)}</Text>
-                    </Pressable>
-                  ) : null}
-                </View>
-              </View>
-            ))}
+              );
+            })}
 
             {snapshot.noResponseDids.length > 0 ? (
               <Text style={styles.caption}>
@@ -653,6 +741,7 @@ const styles = StyleSheet.create({
   metronomeCountdown: { ...typography.timeLarge, color: colors.textPrimary },
   banner: { ...typography.caption, color: colors.accent },
   error: { ...typography.caption, color: colors.danger },
+  warningInline: { ...typography.caption, color: colors.warning },
   nextStep: { ...typography.caption, color: colors.warning },
   shareRow: { flexDirection: 'row', gap: spacing.sm, alignItems: 'center' },
   summaryBox: {

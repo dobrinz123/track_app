@@ -565,6 +565,11 @@ describe('confirmBinding', () => {
     const evidence: unknown = JSON.parse(stored!.evidenceJson);
     expect(evidence).toMatchObject({ expectedEdges: TIMELINE.expectedEdges, baselineChanges: 0 });
     expect(harness.controller.getSnapshot().confirmedChannels).toContain('brakeSwitch');
+    // P4o O3: a first-ever confirm (nothing existing to replace) writes in
+    // ONE tap -- no pending replace is ever armed, and nothing is reported
+    // as replaced.
+    expect(harness.controller.getSnapshot().pendingReplace).toBeNull();
+    expect(harness.controller.getSnapshot().replacedBindings).toEqual([]);
   });
 
   /**
@@ -1145,5 +1150,191 @@ describe('createSignalFinderController -- the dev simulator must reach the scrip
     expect(controller.getSnapshot().silentEcus).toEqual([0x29]);
     // ONE transport for the whole find -- the probe, its retry and the script.
     expect(transports).toHaveLength(1);
+  });
+});
+
+/**
+ * Ticket P4o O4 (binding, field test 8): "Previously confirmed bindings are
+ * read FIRST in every profile: the plan's pool order becomes
+ * confirmed-binding DIDs of the target → hypotheses → changed → cached.
+ * Test: generic profile + confirmed 0x58B7 → 0x58B7 in the first round."
+ *
+ * Field bug this closes: a generic-profile find for `brakePressure` never
+ * even OFFERED the Supra's field-confirmed 0x58B7 (it is not a hypothesis on
+ * the generic catalog, and has no hypotheses at all here either), so a
+ * two-level cached responder won the round unopposed and got confirmed over
+ * it.
+ */
+describe('createSignalFinderController -- P4o O4 (confirmed bindings lead every pool)', () => {
+  it('a target with NO hypotheses still reads its own confirmed binding first', async () => {
+    const bindingStore = createInMemoryVehicleProfileBindingStore();
+    await bindingStore.upsertBinding({
+      profileId: 'test-profile',
+      channel: 'steeringAngle',
+      ecu: 0x40,
+      did: 0x1234,
+      length: 2,
+      decode: 'previously confirmed (test fixture)',
+      status: 'field-confirmed',
+      evidenceJson: '{}',
+      updatedAtUtc: '2026-08-29T10:00:00.000Z',
+    });
+    const harness = makeController(() => bytes('0000'), { bindingStore, profileId: 'test-profile' });
+    // X9 (unchanged): without the confirmed binding this target has nothing
+    // to read at all -- with it, exactly one DID is eligible.
+    expect(await harness.controller.eligibleDidCount('steeringAngle')).toBe(1);
+    await runFind(harness, 'steeringAngle');
+    const snapshot = harness.controller.getSnapshot();
+    expect(snapshot.readDids).toEqual([{ ecu: 0x40, did: 0x1234 }]);
+    expect(snapshot.passes.find((p) => p.ecu === 0x40)?.confirmedDids).toEqual([0x1234]);
+  });
+
+  it('a confirmed binding leads even a target with its OWN hypotheses on other DIDs', async () => {
+    const bindingStore = createInMemoryVehicleProfileBindingStore();
+    await bindingStore.upsertBinding({
+      profileId: 'test-profile',
+      channel: 'brakeSwitch',
+      ecu: 0x40,
+      did: 0x1234,
+      length: 1,
+      decode: 'previously confirmed (test fixture)',
+      status: 'field-confirmed',
+      evidenceJson: '{}',
+      updatedAtUtc: '2026-08-29T10:00:00.000Z',
+    });
+    const harness = makeController(() => bytes('00'), { bindingStore, profileId: 'test-profile' });
+    await runFind(harness);
+    const snapshot = harness.controller.getSnapshot();
+    // Confirmed FIRST, then the two hypotheses (0x12/0x58b7, 0x29/0x500c).
+    expect(snapshot.readDids.slice(0, 1)).toEqual([{ ecu: 0x40, did: 0x1234 }]);
+    expect(snapshot.readDids).toContainEqual({ ecu: 0x12, did: 0x58b7 });
+    expect(snapshot.readDids).toContainEqual({ ecu: 0x29, did: 0x500c });
+    const pass = snapshot.passes.find((p) => p.ecu === 0x40);
+    expect(pass?.confirmedDids).toEqual([0x1234]);
+    expect(pass?.hypothesisDids).toEqual([]);
+  });
+
+  it('a target with no confirmed binding at all is unaffected -- hypotheses still lead', async () => {
+    const bindingStore = createInMemoryVehicleProfileBindingStore();
+    const harness = makeController(() => bytes('00'), { bindingStore });
+    await runFind(harness);
+    const snapshot = harness.controller.getSnapshot();
+    expect(snapshot.readDids.slice(0, 2)).toEqual([
+      { ecu: 0x12, did: 0x58b7 },
+      { ecu: 0x29, did: 0x500c },
+    ]);
+  });
+});
+
+/**
+ * Ticket P4o O3 (binding, field test 8): "when a target already has a
+ * field-confirmed binding on a different (ecu,did), the confirm button reads
+ * 'Replace 0x58B7 → 0x4002' and requires a second tap (inline confirm),
+ * showing the existing binding's evidence line; the export lists the
+ * replaced binding in a `replaced` entry." Tested at the CONTROLLER level
+ * (there is no `@testing-library/react-native` in this repo to render-test
+ * the screen's own tap handling).
+ */
+describe('confirmBinding -- P4o O3 (replacing a confirmed binding needs an explicit second tap)', () => {
+  it('a FIRST confirm on a different (ecu,did) than an existing field-confirmed binding arms pendingReplace and writes NOTHING', async () => {
+    const bindingStore = createInMemoryVehicleProfileBindingStore();
+    await bindingStore.upsertBinding({
+      profileId: 'test-profile',
+      channel: 'brakeSwitch',
+      ecu: 0x12,
+      did: 0x58b7,
+      length: 1,
+      decode: 'existing (test fixture)',
+      status: 'field-confirmed',
+      evidenceJson: '{}',
+      updatedAtUtc: '2026-08-29T10:00:00.000Z',
+    });
+    const pedal: PedalDouble = { pressed: false };
+    const harness = makeController(
+      (ecu, did) => {
+        if (ecu === 0x29 && did === 0x500c) return bytes(pedal.pressed ? '05' : '04');
+        return 'nrc';
+      },
+      { bindingStore, profileId: 'test-profile' },
+    );
+    followMetronome(harness, pedal);
+    await runFind(harness);
+    const winner = harness.controller.getSnapshot().scores.find((s) => s.verdict === 'found')!; // 0x29/0x500c
+
+    const first = await harness.controller.confirmBinding('brakeSwitch', winner);
+    expect(first).toBeNull();
+    const armed = harness.controller.getSnapshot();
+    expect(armed.pendingReplace).toMatchObject({ channel: 'brakeSwitch', ecu: 0x29, did: 0x500c });
+    // Nothing was written -- the existing binding is untouched.
+    expect(await bindingStore.getBinding('test-profile', 'brakeSwitch')).toMatchObject({ ecu: 0x12, did: 0x58b7 });
+    expect(armed.confirmedChannels).not.toContain('brakeSwitch');
+    expect(armed.replacedBindings).toEqual([]);
+
+    const second = await harness.controller.confirmBinding('brakeSwitch', winner);
+    expect(second).toMatchObject({ ecu: 0x29, did: 0x500c, status: 'field-confirmed' });
+    const done = harness.controller.getSnapshot();
+    expect(done.pendingReplace).toBeNull();
+    expect(done.confirmedChannels).toContain('brakeSwitch');
+    expect(done.replacedBindings).toMatchObject([
+      { channel: 'brakeSwitch', ecu: 0x29, did: 0x500c, previousEcu: 0x12, previousDid: 0x58b7 },
+    ]);
+    expect(await bindingStore.getBinding('test-profile', 'brakeSwitch')).toMatchObject({ ecu: 0x29, did: 0x500c });
+  });
+
+  it('a re-confirm of the SAME (ecu,did) as the existing binding is not a replace -- one tap, no arming', async () => {
+    const bindingStore = createInMemoryVehicleProfileBindingStore();
+    await bindingStore.upsertBinding({
+      profileId: 'test-profile',
+      channel: 'brakeSwitch',
+      ecu: 0x29,
+      did: 0x500c,
+      length: 1,
+      decode: 'existing (test fixture)',
+      status: 'field-confirmed',
+      evidenceJson: '{}',
+      updatedAtUtc: '2026-08-29T10:00:00.000Z',
+    });
+    const pedal: PedalDouble = { pressed: false };
+    const harness = makeController(
+      (ecu, did) => (ecu === 0x29 && did === 0x500c ? bytes(pedal.pressed ? '05' : '04') : 'nrc'),
+      { bindingStore, profileId: 'test-profile' },
+    );
+    followMetronome(harness, pedal);
+    await runFind(harness);
+    const winner = harness.controller.getSnapshot().scores.find((s) => s.verdict === 'found')!;
+    const written = await harness.controller.confirmBinding('brakeSwitch', winner);
+    expect(written).toMatchObject({ ecu: 0x29, did: 0x500c });
+    expect(harness.controller.getSnapshot().pendingReplace).toBeNull();
+    expect(harness.controller.getSnapshot().replacedBindings).toEqual([]);
+  });
+
+  it('a SECOND tap on a DIFFERENT row than the one armed re-arms instead of replacing', async () => {
+    const bindingStore = createInMemoryVehicleProfileBindingStore();
+    await bindingStore.upsertBinding({
+      profileId: 'test-profile',
+      channel: 'brakeSwitch',
+      ecu: 0x12,
+      did: 0x58b7,
+      length: 1,
+      decode: 'existing (test fixture)',
+      status: 'field-confirmed',
+      evidenceJson: '{}',
+      updatedAtUtc: '2026-08-29T10:00:00.000Z',
+    });
+    const harness = makeController(() => bytes('00'), { bindingStore, profileId: 'test-profile' });
+    await runFind(harness);
+    const scores = harness.controller.getSnapshot().scores;
+    const rowA = scores.find((s) => s.ecu === 0x29 && s.did === 0x500c)!;
+    const rowB = scores.find((s) => s.ecu === 0x12 && s.did === 0x58b7)!; // same as the EXISTING binding -- not a replace at all, but still armed by the previous tap's mismatch check
+
+    await harness.controller.confirmBinding('brakeSwitch', rowA); // arms replace for rowA
+    expect(harness.controller.getSnapshot().pendingReplace).toMatchObject({ ecu: 0x29, did: 0x500c });
+
+    // Tapping a DIFFERENT row (rowB, which happens to equal the existing
+    // binding) is not a replace at all -- it writes in one tap and clears
+    // whatever was armed for rowA.
+    const written = await harness.controller.confirmBinding('brakeSwitch', rowB);
+    expect(written).toMatchObject({ ecu: 0x12, did: 0x58b7 });
+    expect(harness.controller.getSnapshot().pendingReplace).toBeNull();
   });
 });

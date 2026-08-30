@@ -80,6 +80,20 @@ export interface SignalFinderScreenStrings {
   rawRange: (rest: string, min: string, max: string) => string;
   confirmAs: (target: string) => string;
   confirmA11y: (did: string, target: string) => string;
+  /**
+   * Ticket P4o O3 (binding): the confirm button's label when the channel
+   * already has a DIFFERENT field-confirmed binding — shown from the very
+   * first tap (the screen already knows the existing binding), not only
+   * after arming. `previousDid`/`newDid` are hex, e.g. "0x58B7"/"0x4002".
+   */
+  replaceAs: (previousDid: string, newDid: string) => string;
+  replaceA11y: (previousDid: string, newDid: string, target: string) => string;
+  /** P4o O3: shown once the FIRST tap has armed the replace, alongside the existing binding's own evidence — the driver's chance to back out before the second, committing tap. */
+  replaceArmed: string;
+  /** P4o O3: the existing binding's evidence line — decode guess plus (ecu, did). */
+  replaceExistingEvidence: (ecu: string, did: string, decode: string) => string;
+  /** P4o O2: appended to a capped-at-`probable` two-level row — "Confirm as <target>" is disabled for it. */
+  confirmDisabledTwoLevel: string;
   nextStep: (range: string, ecu: string, minutes: number, engine: string, note: string) => string;
   everyEcuThatAnswered: string;
   share: string;
@@ -110,6 +124,13 @@ export interface SignalFinderScreenStrings {
   errorUnknown: string;
   /** P4m-FIX2 Y7 + P4m-FIX3 Z7: a share that failed. The platform's own (raw) error goes to the export, never into this banner. */
   bannerShareFailed: string;
+  /**
+   * Ticket P4o O5 (binding): "for a 'running' target, if the app has a
+   * recent telemetry sample with rpm 0 or no rpm at all, the result header
+   * and the Find row show 'engine not detected running — results may be
+   * meaningless' (no hard block)."
+   */
+  warningEngineNotDetected: string;
 }
 
 const EN: SignalFinderScreenStrings = {
@@ -155,6 +176,7 @@ const EN: SignalFinderScreenStrings = {
     'one-sided-bipolar': 'one-sided',
     'extra-transitions': 'extra transitions',
     'never-moved': 'never moved',
+    'two-level': 'switch-like, not analog',
   },
   insufficientReasons: {
     undersampled: 'too few samples',
@@ -168,6 +190,11 @@ const EN: SignalFinderScreenStrings = {
   rawRange: (rest, min, max) => `raw ${rest} → ${min}..${max}`,
   confirmAs: (target) => `Confirm as ${target}`,
   confirmA11y: (did, target) => `Confirm ${did} as ${target}`,
+  replaceAs: (previousDid, newDid) => `Replace ${previousDid} → ${newDid}`,
+  replaceA11y: (previousDid, newDid, target) => `Replace ${previousDid} with ${newDid} as ${target}`,
+  replaceArmed: 'Tap again to confirm the replacement.',
+  replaceExistingEvidence: (ecu, did, decode) => `Currently: ${ecu} ${did} — ${decode}`,
+  confirmDisabledTwoLevel: 'switch-like, not analog — confirm disabled',
   nextStep: (range, ecu, minutes, engine, note) => `Next step: sweep ${ecu} ${range}, ≈ ${minutes} min, ${engine} — ${note}`,
   everyEcuThatAnswered: 'every ECU that answered',
   share: 'Share',
@@ -187,6 +214,7 @@ const EN: SignalFinderScreenStrings = {
   errorNoTarget: 'This target is not defined for the selected vehicle profile.',
   errorUnknown: 'The find could not be completed. The details are in the shared JSON.',
   bannerShareFailed: 'Sharing failed. The details are in the shared JSON.',
+  warningEngineNotDetected: 'engine not detected running — results may be meaningless',
 };
 
 const RO: SignalFinderScreenStrings = {
@@ -232,6 +260,7 @@ const RO: SignalFinderScreenStrings = {
     'one-sided-bipolar': 'unilateral',
     'extra-transitions': 'tranziții în plus',
     'never-moved': 'nu s-a schimbat deloc',
+    'two-level': 'ca un comutator, nu analog',
   },
   insufficientReasons: {
     undersampled: 'prea puține citiri',
@@ -245,6 +274,11 @@ const RO: SignalFinderScreenStrings = {
   rawRange: (rest, min, max) => `brut ${rest} → ${min}..${max}`,
   confirmAs: (target) => `Confirmă ca ${target}`,
   confirmA11y: (did, target) => `Confirmă ${did} ca ${target}`,
+  replaceAs: (previousDid, newDid) => `Înlocuiește ${previousDid} → ${newDid}`,
+  replaceA11y: (previousDid, newDid, target) => `Înlocuiește ${previousDid} cu ${newDid} ca ${target}`,
+  replaceArmed: 'Apasă din nou pentru a confirma înlocuirea.',
+  replaceExistingEvidence: (ecu, did, decode) => `În prezent: ${ecu} ${did} — ${decode}`,
+  confirmDisabledTwoLevel: 'ca un comutator, nu analog — confirmare dezactivată',
   nextStep: (range, ecu, minutes, engine, note) => `Pasul următor: scanează ${ecu} ${range}, ≈ ${minutes} min, ${engine} — ${note}`,
   everyEcuThatAnswered: 'fiecare ECU care a răspuns',
   share: 'Partajează',
@@ -264,6 +298,7 @@ const RO: SignalFinderScreenStrings = {
   errorNoTarget: 'Această țintă nu este definită pentru profilul de vehicul selectat.',
   errorUnknown: 'Căutarea nu a putut fi finalizată. Detaliile sunt în JSON-ul partajat.',
   bannerShareFailed: 'Partajarea a eșuat. Detaliile sunt în JSON-ul partajat.',
+  warningEngineNotDetected: 'motor nedetectat pornit — rezultatele pot fi eronate',
 };
 
 export const SIGNAL_FINDER_SCREEN_STRINGS: Readonly<Record<SignalFinderUiLanguage, SignalFinderScreenStrings>> = {

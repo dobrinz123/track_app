@@ -8,13 +8,14 @@
  *   10. "Budget, not passes. The DIDs read during that script are chosen up
  *        front from the measured request rate so every DID gets >= 3 samples
  *        per 3 s window: `budget = floor(rate x 3 / 3)` clamped to [4, 12].
- *        Priority: (a) hypotheses of the target on every ECU; (b) DIDs that
- *        CHANGED in earlier observations/finder runs (any rank other than
- *        static, from the sweep/finder stores); (c) other cached responders
- *        of the target's ECUs. All ECUs are polled in the SAME session
- *        (per-entry target address). Whatever does not fit is listed as
- *        'not read (N) — Next round' with the button; each round is one more
- *        full script."
+ *        Priority: (0, ticket P4o O4) the target's own previously
+ *        CONFIRMED binding(s); (a) hypotheses of the target on every ECU;
+ *        (b) DIDs that CHANGED in earlier observations/finder runs (any rank
+ *        other than static, from the sweep/finder stores); (c) other cached
+ *        responders of the target's ECUs. All ECUs are polled in the SAME
+ *        session (per-entry target address). Whatever does not fit is listed
+ *        as 'not read (N) — Next round' with the button; each round is one
+ *        more full script."
  *
  * WHY THIS EXISTS (field test 5, the user's own words: "inhuman to press the
  * brake that many times — the tests are robotic"): build 5 chose the opposite
@@ -27,8 +28,18 @@
  * Pure, deterministic — no I/O, no clock, no vehicle constants.
  */
 
-/** Where a planned DID came from — the priority ladder of item 10, in order. */
-export type SignalFinderEntrySource = 'hypothesis' | 'changed' | 'cached';
+/**
+ * Where a planned DID came from — the priority ladder of item 10, in order.
+ *
+ * Ticket P4o O4 (binding, field test 8): `'confirmed'` LEADS every other
+ * source. Field bug: a generic-profile find never even READ the Supra's
+ * already field-confirmed 0x58B7 (it was not a hypothesis on that profile),
+ * so the two-level DME flag it did read won the round unopposed. A
+ * previously confirmed binding is the strongest evidence this app has for a
+ * target, on ANY profile — it must be read first, or a fresh find can starve
+ * it out of the round's budget entirely.
+ */
+export type SignalFinderEntrySource = 'confirmed' | 'hypothesis' | 'changed' | 'cached';
 
 /** One (ECU, DID) pair the caller offers to the plan. */
 export interface SignalFinderTargetRef {
@@ -148,6 +159,14 @@ function key(ref: SignalFinderTargetRef): string {
  */
 export function planFinderRun(
   measuredReqPerSec: number,
+  /**
+   * Ticket P4o O4 (binding): `(ecu, did)` of the target's OWN previously
+   * confirmed binding(s) — read FIRST, ahead of every hypothesis. Typically
+   * zero or one entry (a channel has at most one current binding per
+   * profile), but the caller may offer more than one profile's worth without
+   * this function needing to know that.
+   */
+  confirmedDids: readonly SignalFinderTargetRef[],
   hypotheses: readonly SignalFinderTargetRef[],
   changedDids: readonly SignalFinderTargetRef[],
   cachedDids: readonly SignalFinderTargetRef[],
@@ -162,6 +181,7 @@ export function planFinderRun(
   const seen = new Set<string>();
   const ordered: SignalFinderPlanEntry[] = [];
   const pools: ReadonlyArray<readonly [SignalFinderEntrySource, readonly SignalFinderTargetRef[]]> = [
+    ['confirmed', confirmedDids],
     ['hypothesis', hypotheses],
     ['changed', changedDids],
     ['cached', cachedDids],

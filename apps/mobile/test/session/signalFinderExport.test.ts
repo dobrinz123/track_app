@@ -112,8 +112,8 @@ function input(overrides: Partial<SignalFinderExportInput> = {}): SignalFinderEx
     rateSource: 'measured',
     timeline: TIMELINE,
     passes: [
-      { ecu: 0x12, dids: [0x58b7], hypothesisDids: [0x58b7], changedDids: [], cachedDids: [] },
-      { ecu: 0x29, dids: [0x500c, 0x500b], hypothesisDids: [0x500c, 0x500b], changedDids: [], cachedDids: [] },
+      { ecu: 0x12, dids: [0x58b7], confirmedDids: [], hypothesisDids: [0x58b7], changedDids: [], cachedDids: [] },
+      { ecu: 0x29, dids: [0x500c, 0x500b], confirmedDids: [], hypothesisDids: [0x500c, 0x500b], changedDids: [], cachedDids: [] },
     ],
     rounds: 1,
     budget: 12,
@@ -126,6 +126,7 @@ function input(overrides: Partial<SignalFinderExportInput> = {}): SignalFinderEx
     confirmedBindings: [],
     nextStep: null,
     diagnostics: { rawError: null, timeoutInclusiveReqPerSec: null, adapterTeardownPending: false },
+    replacedBindings: [],
     ...overrides,
   };
 }
@@ -138,7 +139,7 @@ function snapshot(overrides: Partial<SignalFinderSnapshot> = {}): SignalFinderSn
     targetLabel: 'Brake switch',
     engineRequirement: 'off-ok',
     timeline: TIMELINE,
-    passes: [{ ecu: 0x29, dids: [0x500c], hypothesisDids: [0x500c], changedDids: [], cachedDids: [] }],
+    passes: [{ ecu: 0x29, dids: [0x500c], confirmedDids: [], hypothesisDids: [0x500c], changedDids: [], cachedDids: [] }],
     round: 1,
     budget: 12,
     readDids: [{ ecu: 0x29, did: 0x500c }],
@@ -152,6 +153,8 @@ function snapshot(overrides: Partial<SignalFinderSnapshot> = {}): SignalFinderSn
     noResponseDids: [],
     nextStep: null,
     confirmedChannels: [],
+    pendingReplace: null,
+    replacedBindings: [],
     sessionId: 'signal-finder-1788-abc',
     startedAtUtc: '2026-08-29T18:10:00.000Z',
     measuredReqPerSec: 15.8,
@@ -174,10 +177,10 @@ beforeEach(() => {
 });
 
 describe('buildSignalFinderExportDocument', () => {
-  it('is schemaVersion 4 of trace-signal-finder and carries the whole session, rounds included (P4m M3, P4m-FIX1 X1/X2, P4m-FIX3 Z7)', () => {
+  it('is schemaVersion 5 of trace-signal-finder and carries the whole session, rounds included (P4m M3, P4m-FIX1 X1/X2, P4m-FIX3 Z7)', () => {
     const doc = buildSignalFinderExportDocument(input());
     expect(doc.schemaVersion).toBe(SIGNAL_FINDER_EXPORT_SCHEMA_VERSION);
-    expect(doc.schemaVersion).toBe(4);
+    expect(doc.schemaVersion).toBe(5);
     expect(doc.kind).toBe(SIGNAL_FINDER_EXPORT_KIND);
     expect(doc.kind).toBe('trace-signal-finder');
     expect(doc.session).toMatchObject({
@@ -398,6 +401,17 @@ describe('buildSignalFinderSummaryMarkdown (pure, <= 1 page)', () => {
     );
     const md = buildSignalFinderSummaryMarkdown(doc, 'en');
     expect(md).toMatch(/baseline.*3/i);
+  });
+
+  /** Ticket P4o O2 (binding): the "switch-like, not analog" capped label, in both languages. */
+  it('shows the two-level cap reason as "switch-like, not analog" (EN) / RO', () => {
+    const doc = buildSignalFinderExportDocument(
+      input({
+        scores: [score({ did: 0x4002, verdict: 'probable', matchedEdges: 10, expectedEdges: 10, verdictCapReason: 'two-level' })],
+      }),
+    );
+    expect(buildSignalFinderSummaryMarkdown(doc, 'en')).toMatch(/capped:.*switch-like, not analog/);
+    expect(buildSignalFinderSummaryMarkdown(doc, 'ro')).toMatch(/plafonat:.*comutator/);
   });
 
   it('omits every extras marker when the score carries none of them (the common case)', () => {
@@ -756,7 +770,7 @@ describe('P4m-FIX3 Z1/Z7 -- the export diagnostics section', () => {
         diagnostics: { rawError: 'socket hang up', timeoutInclusiveReqPerSec: 1.8, adapterTeardownPending: true },
       }),
     );
-    expect(doc.schemaVersion).toBe(4);
+    expect(doc.schemaVersion).toBe(5);
     expect(doc.diagnostics).toEqual({
       rawError: 'socket hang up',
       timeoutInclusiveReqPerSec: 1.8,
@@ -873,5 +887,86 @@ describe('P4m-FIX4 W4 -- the export redacts diagnostics.rawError', () => {
     expect(doc.diagnostics.rawError).toContain('EHOSTUNREACH');
     expect(doc.diagnostics.rawError).not.toContain('fe80');
     expect(doc.diagnostics.rawError).not.toContain('adapter.local');
+  });
+});
+
+/**
+ * Ticket P4o O3 (binding, field test 8): "the export lists the replaced
+ * binding in a `replaced` entry." Field bug this closes: a confirm used to
+ * silently overwrite the engine-running-confirmed 0x58B7 with the generic
+ * profile's 0x4002, leaving no record anywhere that a replacement even
+ * happened.
+ */
+describe('P4o O3 -- the export lists every binding a confirm replaced', () => {
+  it('carries channel, old and new (ecu, did) as hex, and the timestamp (schema 5)', () => {
+    const doc = buildSignalFinderExportDocument(
+      input({
+        replacedBindings: [
+          {
+            channel: 'brakePressure',
+            ecu: 0x12,
+            did: 0x4002,
+            previousEcu: 0x12,
+            previousDid: 0x58b7,
+            replacedAtUtc: '2026-08-30T11:50:00.000Z',
+          },
+        ],
+      }),
+    );
+    expect(doc.replaced).toEqual([
+      {
+        channel: 'brakePressure',
+        ecuHex: '0x12',
+        didHex: '0x4002',
+        previousEcuHex: '0x12',
+        previousDidHex: '0x58B7',
+        replacedAtUtc: '2026-08-30T11:50:00.000Z',
+      },
+    ]);
+  });
+
+  it('is empty when nothing was replaced this session', () => {
+    expect(buildSignalFinderExportDocument(input()).replaced).toEqual([]);
+  });
+
+  it('the snapshot bridge carries replacedBindings through unchanged', () => {
+    const replacedBindings = [
+      {
+        channel: 'brakePressure' as const,
+        ecu: 0x12,
+        did: 0x4002,
+        previousEcu: 0x12,
+        previousDid: 0x58b7,
+        replacedAtUtc: '2026-08-30T11:50:00.000Z',
+      },
+    ];
+    const result = signalFinderExportInputFromSnapshot(snapshot({ replacedBindings }), [], [], '2026-08-30T12:00:00.000Z');
+    expect(result!.replacedBindings).toBe(replacedBindings);
+  });
+
+  it('the Markdown summary shows a "Replaced" line only when something was replaced', () => {
+    const withReplacement = buildSignalFinderExportDocument(
+      input({
+        replacedBindings: [
+          {
+            channel: 'brakePressure',
+            ecu: 0x12,
+            did: 0x4002,
+            previousEcu: 0x12,
+            previousDid: 0x58b7,
+            replacedAtUtc: '2026-08-30T11:50:00.000Z',
+          },
+        ],
+      }),
+    );
+    const en = buildSignalFinderSummaryMarkdown(withReplacement, 'en');
+    expect(en).toContain('Replaced');
+    expect(en).toContain('0x58B7');
+    expect(en).toContain('0x4002');
+    const ro = buildSignalFinderSummaryMarkdown(withReplacement, 'ro');
+    expect(ro).toContain('Înlocuite');
+
+    const withoutReplacement = buildSignalFinderExportDocument(input());
+    expect(buildSignalFinderSummaryMarkdown(withoutReplacement, 'en')).not.toContain('Replaced');
   });
 });

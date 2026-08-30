@@ -369,6 +369,9 @@ describe('scoreSignalCandidates -- analog shapes', () => {
   });
 
   it('baseline jitter inside the noise floor is not a baseline change', () => {
+    // Ticket P4o O2: two levels overall (the jitter merges under the noise
+    // floor) -- `probable`, not `found` (see the P4l-FIX4 "protects the
+    // SCORED byte" fixture below, which pins the SAME series' baselineChanges).
     const jitter = layOnTimeline(
       timeline,
       ECU_12,
@@ -382,7 +385,7 @@ describe('scoreSignalCandidates -- analog shapes', () => {
       ]),
     );
     const [score] = scoreSignalCandidates({ samples: jitter, timeline, shape: 'analog-monotone' });
-    expect(score).toMatchObject({ baselineChanges: 0, verdict: 'found' });
+    expect(score).toMatchObject({ baselineChanges: 0, verdict: 'probable', verdictCapReason: 'two-level' });
   });
 });
 
@@ -601,6 +604,12 @@ describe('scoreSignalCandidates -- P4l-FIX4 review findings', () => {
   });
 
   it('N1: the analog noise floor still protects the SCORED byte (a jittering LSB is not restlessness)', () => {
+    // Ticket P4o O2: this series is ALSO, incidentally, exactly two levels
+    // (baseline jitter 0x0129/0x0131 merge under the noise floor; 0x0300 is
+    // the only other level ever seen) -- so it is now capped at `probable`
+    // rather than `found`, same as every other two-level analog reading.
+    // The point of THIS fixture (the jitter is not restlessness) still holds:
+    // baselineChanges/didBaselineChanges stay 0.
     const jitter = layOnTimeline(
       timeline,
       ECU_12,
@@ -614,7 +623,12 @@ describe('scoreSignalCandidates -- P4l-FIX4 review findings', () => {
       ]),
     );
     const [score] = scoreSignalCandidates({ samples: jitter, timeline, shape: 'analog-monotone' });
-    expect(score).toMatchObject({ baselineChanges: 0, didBaselineChanges: 0, verdict: 'found' });
+    expect(score).toMatchObject({
+      baselineChanges: 0,
+      didBaselineChanges: 0,
+      verdict: 'probable',
+      verdictCapReason: 'two-level',
+    });
   });
 
   it('N2: a ONE-SIDED analog-bipolar candidate is UNRELATED, not probable', () => {
@@ -915,6 +929,10 @@ describe('scoreSignalCandidates -- P4n-FIX1 R5 (activeValueHex)', () => {
   });
 
   it('an analog reading has no single "active level" -- activeValueHex is undefined', () => {
+    // Ticket P4o O2: this series is also exactly two levels (0x00 rest,
+    // 0x20 pressed, nothing between) -- capped at `probable`. The point of
+    // THIS fixture (no single active level for a real analog reading) still
+    // holds regardless of the verdict.
     const samples = layOnTimeline(
       timeline,
       ECU_12,
@@ -928,7 +946,113 @@ describe('scoreSignalCandidates -- P4n-FIX1 R5 (activeValueHex)', () => {
       ]),
     );
     const [score] = scoreSignalCandidates({ samples, timeline, shape: 'analog-monotone' });
-    expect(score!.verdict).toBe('found');
+    expect(score).toMatchObject({ verdict: 'probable', verdictCapReason: 'two-level' });
     expect(score!.activeValueHex).toBeUndefined();
+  });
+});
+
+/**
+ * Ticket P4o O2 (binding, field test 8): "Analog targets (`analog-monotone` /
+ * `analog-bipolar`) never yield `found` on a TWO-LEVEL series: if the scored
+ * series has <= 2 distinct values (after the noise floor) the verdict is
+ * capped at `probable` with `verdictCapReason: 'two-level'` ... A graded
+ * series (>= 3 distinct levels with intermediate values inside press windows,
+ * like 0x58B7's 0x1A/0x30/0x3B/0x40) keeps `found`. Boolean targets
+ * unchanged."
+ *
+ * The field bug this closes: on the GENERIC profile with the engine off, DME
+ * 0x12 0x4002 (0x83 rest / 0x9B pressed, two levels, nothing between) scored
+ * `found` for the brakePressure target and was confirmed over the real,
+ * GRADED 0x58B7 (26–64, many intermediate levels) -- silently replacing it.
+ */
+describe('scoreSignalCandidates -- P4o O2 (two-level analog series capped at probable)', () => {
+  const timeline = buildMetronomeTimeline(SCRIPT);
+
+  it('a two-level analog-monotone series (field: DME 0x4002, 0x83 rest / 0x9B pressed) is capped at PROBABLE, never found', () => {
+    const samples = layOnTimeline(
+      timeline,
+      ECU_12,
+      0x4002,
+      cycles(['83', '83'], [
+        [['9B', '9B'], ['83', '83']],
+        [['9B', '9B'], ['83', '83']],
+        [['9B', '9B'], ['83', '83']],
+        [['9B', '9B'], ['83', '83']],
+        [['9B', '9B'], ['83', '83']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'analog-monotone' });
+    expect(score).toMatchObject({
+      did: 0x4002,
+      verdict: 'probable',
+      verdictCapReason: 'two-level',
+      matchedEdges: 10,
+    });
+    expect(score!.verdict).not.toBe('found');
+  });
+
+  it('a GRADED analog-monotone series (field: DME 0x58B7, many intermediate levels) keeps FOUND', () => {
+    const samples = layOnTimeline(
+      timeline,
+      ECU_12,
+      0x58b7,
+      cycles(['00', '00'], [
+        [['1A', '30'], ['00', '00']],
+        [['36', '40'], ['00', '00']],
+        [['05', '2D'], ['00', '00']],
+        [['3B', '3D'], ['00', '00']],
+        [['1A', '32'], ['00', '00']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'analog-monotone' });
+    expect(score).toMatchObject({ did: 0x58b7, verdict: 'found', verdictCapReason: null });
+  });
+
+  // A genuine both-sided `analog-bipolar` reading needs at least 3 distinct
+  // levels by construction (rest, a positive excursion beyond the noise
+  // floor, a negative one) -- so the two-level cap never actually fires
+  // there in practice; the ONE-sided case is already capped, more strictly,
+  // by `one-sided-bipolar` (see the P4l-FIX4 fixtures above).
+
+  it('boolean-edge targets are UNCHANGED by the two-level rule (a switch IS two levels)', () => {
+    const samples = layOnTimeline(
+      timeline,
+      ECU_29,
+      0x500c,
+      cycles(
+        ['04', '04'],
+        [
+          [['05', '05'], ['04', '04']],
+          [['05', '05'], ['04', '04']],
+          [['05', '05'], ['04', '04']],
+          [['05', '05'], ['04', '04']],
+          [['05', '05'], ['04', '04']],
+        ],
+      ),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'boolean-edge' });
+    expect(score).toMatchObject({ verdict: 'found', verdictCapReason: null });
+  });
+
+  it('a DECLARED flag under an analog target is exempt (that IS a switch, read as one)', () => {
+    const samples = layOnTimeline(
+      timeline,
+      ECU_12,
+      0x4007,
+      cycles(['9001', '9001'], [
+        [['9000', '9000'], ['9001', '9001']],
+        [['9000', '9000'], ['9001', '9001']],
+        [['9000', '9000'], ['9001', '9001']],
+        [['9000', '9000'], ['9001', '9001']],
+        [['9000', '9000'], ['9001', '9001']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({
+      samples,
+      timeline,
+      shape: 'analog-monotone',
+      declaredFlagDids: [{ ecu: ECU_12, did: 0x4007 }],
+    });
+    expect(score).toMatchObject({ verdict: 'found', verdictCapReason: null, flagBit: 0 });
   });
 });

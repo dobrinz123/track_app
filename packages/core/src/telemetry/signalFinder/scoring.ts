@@ -85,7 +85,19 @@ export type SignalVerdictCapReason =
   | 'one-sided-bipolar'
   | 'extra-transitions'
   /** P4m (item 11): the DID answered the WHOLE script with one identical response — it did not answer the driver. */
-  | 'never-moved';
+  | 'never-moved'
+  /**
+   * Ticket P4o O2 (binding, field test 8): an `analog-monotone`/`analog-bipolar`
+   * target's scored series took on <= 2 distinct values (after its own noise
+   * floor) for the WHOLE run — switch-like, not analog. Field test 8: the
+   * generic profile's brakePressure find scored DME 0x12 0x4002 `found`
+   * (0x83 rest / 0x9B pressed, nothing in between) and let the user confirm
+   * it over the real, GRADED 0x58B7 (26–64, many intermediate levels). Never
+   * `found`, capped at `probable`; a DECLARED or evidence-detected flag
+   * (`SignalCandidateScore.flagBit` / a catalog `boolean-edge` hypothesis) is
+   * a different signal and is exempt.
+   */
+  | 'two-level';
 
 /** Which sides of rest an analog DID actually visited during the press windows. */
 export type SignalBipolarSides = 'both' | 'positive' | 'negative' | 'none';
@@ -297,6 +309,26 @@ function deriveActiveValueHex(
   return bestHex;
 }
 
+/**
+ * Ticket P4o O2 (binding): the number of distinct LEVELS `values` visits,
+ * merging any two values whose gap is <= `floor` into the same level
+ * (single-linkage over the distinct values, ascending) -- the same noise
+ * floor `scoreSeries` already uses to decide "away from rest" for an analog
+ * series. A graded reading (field: DME 0x58B7, 26–64 with many intermediate
+ * values inside the press windows) resolves to several levels; a switch
+ * dressed up as an analog reading (field: DME 0x4002, 0x83 rest / 0x9B
+ * pressed, nothing between) resolves to exactly 2.
+ */
+function countDistinctLevels(values: readonly number[], floor: number): number {
+  const distinctSorted = [...new Set(values)].sort((a, b) => a - b);
+  if (distinctSorted.length === 0) return 0;
+  let levels = 1;
+  for (let i = 1; i < distinctSorted.length; i += 1) {
+    if ((distinctSorted[i] as number) - (distinctSorted[i - 1] as number) > floor) levels += 1;
+  }
+  return levels;
+}
+
 /** The most frequent value, ties broken by first appearance (deterministic). */
 function modeOf(values: readonly number[]): number | null {
   if (values.length === 0) return null;
@@ -354,6 +386,14 @@ interface SeriesScore {
    */
   booleanLike: boolean;
   /**
+   * Ticket P4o O2 (binding): for a NON-boolean series (`!booleanLike`), does
+   * its whole run collapse to <= 2 distinct levels once values within the
+   * series' own noise floor are merged? Always `false` for a boolean/flag
+   * series (the two-level cap is about an analog reading that turns out to
+   * be switch-like, not about a switch itself).
+   */
+  twoLevel: boolean;
+  /**
    * Ticket P4n-FIX1 R5 (binding): the exact rest level THIS series compared
    * every sample against (`modeOf` for boolean/flag, `meanOf` for analog) --
    * exposed so the DID-level loop can classify a press/hold sample as
@@ -406,6 +446,10 @@ function scoreSeries(
   const noiseFloor = boolean
     ? 0
     : Math.max(options.analogMarginRawUnits, options.analogMarginMultiplier * spreadP90P10(baselineValues));
+  // P4o O2: computed over the WHOLE run (every point, every window), using
+  // the same noise floor the active()/direction logic below already uses --
+  // this is a fact about the series, independent of the metronome timing.
+  const twoLevel = !boolean && countDistinctLevels(points.map((p) => p.value), noiseFloor) <= 2;
 
   /** "Away from rest" — the noise floor makes this a real excursion for analogs. */
   const active = (value: number): boolean =>
@@ -563,6 +607,7 @@ function scoreSeries(
     flagBit,
     sparseConsistent,
     booleanLike: boolean,
+    twoLevel,
     restScalar: restValue,
   };
 }
@@ -913,7 +958,19 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
     const disqualified = restlessBaseline || neverMoved;
     const sparseFound = !disqualified && sparseFoundFor(best);
     const insufficient = !disqualified && !sparseFound && undersampled;
-    const finalVerdict: SignalVerdict = insufficient ? 'insufficient' : sparseFound ? 'found' : verdict;
+    let finalVerdict: SignalVerdict = insufficient ? 'insufficient' : sparseFound ? 'found' : verdict;
+    let finalCapReason: SignalVerdictCapReason | null = insufficient || finalVerdict === 'found' ? null : verdictCapReason;
+    // P4o O2 (binding): a `found` verdict for an analog target resting on a
+    // <= 2-level series is switch-like, not analog -- never `found`, however
+    // it got there (ordered transitions or the sparse window-agreement rule).
+    // A declared/detected flag (`best.booleanLike`) is a different signal and
+    // is exempt (that IS a switch, read as one).
+    const twoLevelAnalog =
+      (input.shape === 'analog-monotone' || input.shape === 'analog-bipolar') && !best.booleanLike && best.twoLevel;
+    if (twoLevelAnalog && finalVerdict === 'found') {
+      finalVerdict = 'probable';
+      finalCapReason = 'two-level';
+    }
     scores.push({
       ...base,
       min,
@@ -932,7 +989,7 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
       // windows were thin says so on screen ("found (sparse)").
       sparse: finalVerdict === 'found' && windowsBelowMinimum > 0,
       insufficientReason: insufficient ? 'undersampled' : null,
-      verdictCapReason: insufficient || finalVerdict === 'found' ? null : verdictCapReason,
+      verdictCapReason: finalCapReason,
       // Ticket P4n-FIX1 R5 (binding): only for a boolean/flag series -- an
       // analog reading has no single "active level" to name.
       activeValueHex: best.booleanLike ? deriveActiveValueHex(group.entries, best.byteOffset, best.restScalar) : undefined,

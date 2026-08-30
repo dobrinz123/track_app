@@ -15,7 +15,7 @@ import {
   type SignalVerdictCapReason,
 } from '@circuit/core';
 import type { VehicleProfileBinding, VehicleProfileBindingStatus } from '../persistence/didSweepStore';
-import type { SignalFinderEcuPass, SignalFinderSnapshot } from './signalFinderController';
+import type { SignalFinderEcuPass, SignalFinderReplacedBinding, SignalFinderSnapshot } from './signalFinderController';
 
 /**
  * Signal Finder export (ticket P4l S5, binding — the user's own 2026-08-29
@@ -55,8 +55,15 @@ import type { SignalFinderEcuPass, SignalFinderSnapshot } from './signalFinderCo
  * achieved, as opposed to `session.measuredReqPerSec`, which is the rate of the
  * entries the round KEPT and therefore what the budget and every minute
  * estimate rest on), and whether the adapter confirmed its own shutdown.
+ *
+ * Ticket P4o O3/O4 (binding, field test 8): schema 5 adds the top-level
+ * `replaced` list (every binding a confirm in THIS session replaced, with
+ * both the old and the new (ecu, did) — field test 8's own defect was a
+ * confirm silently overwriting a good binding with no record anywhere) and a
+ * `confirmedDidHex` list on each `passes[]` entry (which DIDs were read
+ * because the target already had a confirmed binding — O4's pool order).
  */
-export const SIGNAL_FINDER_EXPORT_SCHEMA_VERSION = 4;
+export const SIGNAL_FINDER_EXPORT_SCHEMA_VERSION = 5;
 export const SIGNAL_FINDER_EXPORT_KIND = 'trace-signal-finder';
 
 /** RO/EN, per contracts.md item 8. Ticket P4l-FIX1 F2 (binding): the screen now passes the app's `language` setting (`settingsStore.ts`'s `AppLanguage`, the same two values), defaulted from the device locale -- it no longer hard-codes `'en'`. */
@@ -92,6 +99,8 @@ export interface SignalFinderExportInput {
   nextStep: NextDiscoveryStep | null;
   /** P4m-FIX3 Z1/Z7 (schema 4): everything the DRIVER is deliberately not shown. */
   diagnostics: SignalFinderExportDiagnostics;
+  /** Ticket P4o O3 (schema 5): every binding a confirm in THIS session replaced. */
+  replacedBindings: readonly SignalFinderReplacedBinding[];
 }
 
 /**
@@ -116,6 +125,8 @@ export interface SignalFinderExportDiagnostics {
 export interface SignalFinderExportPass {
   ecuHex: string;
   didHex: string[];
+  /** Ticket P4o O4 (schema 5): read because the target already had a confirmed binding here. */
+  confirmedDidHex: string[];
   hypothesisDidHex: string[];
   /** P4m (item 10b): read because an earlier observation saw them CHANGE. */
   changedDidHex: string[];
@@ -210,6 +221,15 @@ export interface SignalFinderExportDocument {
   nextStep: (NextDiscoveryStep & { ecuHex: string | null; fromDidHex: string; toDidHex: string }) | null;
   /** P4m-FIX3 Z1/Z7 (schema 4): the raw error text and the probe's own overall rate — never shown on screen. */
   diagnostics: SignalFinderExportDiagnostics;
+  /** Ticket P4o O3 (schema 5): every binding a confirm in THIS session replaced, oldest first. */
+  replaced: Array<{
+    channel: string;
+    ecuHex: string;
+    didHex: string;
+    previousEcuHex: string;
+    previousDidHex: string;
+    replacedAtUtc: string;
+  }>;
 }
 
 function didHex(did: number): string {
@@ -271,6 +291,8 @@ export function signalFinderExportInputFromSnapshot(
       timeoutInclusiveReqPerSec: snap.diagnosticReqPerSec,
       adapterTeardownPending: snap.adapterTeardownPending,
     },
+    // P4o O3: whatever this session's confirms have replaced so far.
+    replacedBindings: snap.replacedBindings,
   };
 }
 
@@ -369,6 +391,7 @@ export function buildSignalFinderExportDocument(input: SignalFinderExportInput):
     passes: input.passes.map((pass) => ({
       ecuHex: ecuHex(pass.ecu),
       didHex: pass.dids.map(didHex),
+      confirmedDidHex: pass.confirmedDids.map(didHex),
       hypothesisDidHex: pass.hypothesisDids.map(didHex),
       changedDidHex: pass.changedDids.map(didHex),
       cachedDidHex: pass.cachedDids.map(didHex),
@@ -442,6 +465,14 @@ export function buildSignalFinderExportDocument(input: SignalFinderExportInput):
       timeoutInclusiveReqPerSec: input.diagnostics.timeoutInclusiveReqPerSec,
       adapterTeardownPending: input.diagnostics.adapterTeardownPending,
     },
+    replaced: input.replacedBindings.map((r) => ({
+      channel: r.channel,
+      ecuHex: ecuHex(r.ecu),
+      didHex: didHex(r.did),
+      previousEcuHex: ecuHex(r.previousEcu),
+      previousDidHex: didHex(r.previousDid),
+      replacedAtUtc: r.replacedAtUtc,
+    })),
   };
 }
 
@@ -501,6 +532,8 @@ interface SummaryStrings {
   moreChars: (count: number) => string;
   /** P4m-FIX1 X8: the whole-summary budget marker. */
   truncated: string;
+  /** Ticket P4o O3: "Replaced" section heading — the bindings a confirm in THIS session overwrote. */
+  replaced: string;
 }
 
 const EN: SummaryStrings = {
@@ -535,11 +568,13 @@ const EN: SummaryStrings = {
   moreItems: (count) => `(+${count} more)`,
   moreChars: (count) => `(+${count} more chars)`,
   truncated: '_(+ more, truncated to stay within the summary budget)_',
+  replaced: 'Replaced',
   capReasons: {
     'response-baseline-changes': 'restless baseline',
     'one-sided-bipolar': 'one-sided',
     'extra-transitions': 'extra transitions',
     'never-moved': 'never moved',
+    'two-level': 'switch-like, not analog',
   },
 };
 
@@ -575,11 +610,13 @@ const RO: SummaryStrings = {
   moreItems: (count) => `(+încă ${count})`,
   moreChars: (count) => `(+încă ${count} caractere)`,
   truncated: '_(+ restul, tăiat ca rezumatul să rămână de o pagină)_',
+  replaced: 'Înlocuite',
   capReasons: {
     'response-baseline-changes': 'repaus neliniștit',
     'one-sided-bipolar': 'unilateral',
     'extra-transitions': 'tranziții în plus',
     'never-moved': 'nu s-a schimbat deloc',
+    'two-level': 'ca un comutator, nu analog',
   },
 };
 
@@ -753,6 +790,20 @@ export function buildSignalFinderSummaryMarkdown(
           )
     }`,
   );
+  // P4o O3: only rendered when something was actually replaced this session
+  // -- unlike "Confirmed bindings" above, there is no "none" line to keep a
+  // report from field test 5 onward looking identical.
+  if (doc.replaced.length > 0) {
+    lines.push('');
+    lines.push(
+      `**${s.replaced}:** ${joinWithMoreMarker(
+        doc.replaced,
+        SUMMARY_MAX_CONFIRMED_LISTED,
+        (r) => `${r.channel} = ${r.previousEcuHex} ${r.previousDidHex} → ${r.ecuHex} ${r.didHex}`,
+        s,
+      )}`,
+    );
+  }
   if (doc.nextStep !== null) {
     lines.push('');
     const range = `${doc.nextStep.fromDidHex}–${doc.nextStep.toDidHex}`;

@@ -3,6 +3,7 @@ import {
   GENERIC_SIGNAL_TARGET_CATALOG,
   SIGNAL_TARGET_CATALOGS,
   SIGNAL_TARGET_IDS,
+  engineNotDetectedRunning,
   estimateSweepMinutes,
   findSignalTarget,
   nextDiscoveryStep,
@@ -77,6 +78,30 @@ describe('signal target catalog (data)', () => {
     expect(findSignalTarget(catalog, 'brakePressure')?.engineRequirement).toBe('running');
     expect(findSignalTarget(catalog, 'steeringAngle')?.engineRequirement).toBe('running');
     expect(findSignalTarget(catalog, 'brakeSwitch')?.engineRequirement).toBe('off-ok');
+  });
+
+  /**
+   * Ticket P4o O1 (binding, field test 8): "Engine requirement is a property
+   * of the TARGET, identical in every catalog (generic included):
+   * brakePressure/steeringAngle/longG/latG = 'running'." Field bug: the
+   * generic catalog said `brakePressure` was `'off-ok'`, so an
+   * engine-off generic find accepted a DME flag as the analog pressure
+   * reading and silently replaced the real, engine-running-confirmed one.
+   */
+  it('O1: every target id has the SAME engineRequirement in every catalog', () => {
+    for (const id of SIGNAL_TARGET_IDS) {
+      const requirements = new Set(
+        SIGNAL_TARGET_CATALOGS.map((catalog) => findSignalTarget(catalog, id)?.engineRequirement),
+      );
+      expect(requirements.size, `${id} disagrees across catalogs: ${[...requirements].join(', ')}`).toBe(1);
+    }
+    // The exact split the ticket names.
+    expect(findSignalTarget(GENERIC_SIGNAL_TARGET_CATALOG, 'brakePressure')?.engineRequirement).toBe('running');
+    expect(findSignalTarget(GENERIC_SIGNAL_TARGET_CATALOG, 'steeringAngle')?.engineRequirement).toBe('running');
+    expect(findSignalTarget(GENERIC_SIGNAL_TARGET_CATALOG, 'longG')?.engineRequirement).toBe('running');
+    expect(findSignalTarget(GENERIC_SIGNAL_TARGET_CATALOG, 'latG')?.engineRequirement).toBe('running');
+    expect(findSignalTarget(GENERIC_SIGNAL_TARGET_CATALOG, 'brakeSwitch')?.engineRequirement).toBe('off-ok');
+    expect(findSignalTarget(GENERIC_SIGNAL_TARGET_CATALOG, 'accelPedal')?.engineRequirement).toBe('off-ok');
   });
 
   it('targetHypothesisEcus lists each ECU once, in ascending address order', () => {
@@ -212,5 +237,38 @@ describe('Supra catalog after field test 5 (P4m M5)', () => {
       }
       expect(resolveSignalActionVerbs(target, 'ro')).not.toEqual(resolveSignalActionVerbs(target, 'en'));
     }
+  });
+});
+
+/**
+ * Ticket P4o O5 (binding, field test 8): "Soft engine check: for a 'running'
+ * target, if the app has a recent telemetry sample with rpm 0 or no rpm at
+ * all, the result header and the Find row show 'engine not detected running
+ * — results may be meaningless' (no hard block)." Pure predicate — no clock,
+ * no telemetry provider, no UI.
+ */
+describe('engineNotDetectedRunning (O5, pure predicate)', () => {
+  it('never flags an off-ok target, whatever the reading (or its absence)', () => {
+    expect(engineNotDetectedRunning('off-ok', null)).toBe(false);
+    expect(engineNotDetectedRunning('off-ok', { rpm: null })).toBe(false);
+    expect(engineNotDetectedRunning('off-ok', { rpm: 0 })).toBe(false);
+    expect(engineNotDetectedRunning('off-ok', { rpm: 850 })).toBe(false);
+  });
+
+  it('flags a running target with no reading at all', () => {
+    expect(engineNotDetectedRunning('running', null)).toBe(true);
+  });
+
+  it('flags a running target with a reading that carries no rpm', () => {
+    expect(engineNotDetectedRunning('running', { rpm: null })).toBe(true);
+  });
+
+  it('flags a running target reading exactly rpm 0', () => {
+    expect(engineNotDetectedRunning('running', { rpm: 0 })).toBe(true);
+  });
+
+  it('does NOT flag a running target with a positive rpm reading', () => {
+    expect(engineNotDetectedRunning('running', { rpm: 850 })).toBe(false);
+    expect(engineNotDetectedRunning('running', { rpm: 1 })).toBe(false);
   });
 });
