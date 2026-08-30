@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildMetronomeTimeline,
+  gradedAnalogEvidenceStrength,
   isGradedAnalogSeries,
   scoreSignalCandidates,
   type MetronomeTimeline,
@@ -1200,5 +1201,235 @@ describe('isGradedAnalogSeries -- P4o-FIX2 U1 (window-consistent, symmetric, ord
   it('a flat/empty run has nothing to grade', () => {
     expect(isGradedAnalogSeries(new Map(), 0, 3)).toBe(false);
     expect(isGradedAnalogSeries(new Map([[1, []]]), 0, 3)).toBe(false);
+  });
+});
+
+/**
+ * Ticket P4o-FIX3 T1 (binding, Codex P4o-REV3 finding 6, HIGH): a `graded`
+ * verdict gets an evidence STRENGTH -- a single mid-transition sample per
+ * press window cannot be told apart from a slewing two-state signal. `strong`
+ * when either a qualifying window holds >= 2 samples inside its own interval,
+ * or the intermediate values across the qualifying windows are NOT all
+ * within `floor` of each other (>= 2 genuinely distinct levels); otherwise
+ * `weak`. `null` when the series is not graded at all.
+ */
+describe('gradedAnalogEvidenceStrength -- P4o-FIX3 T1 (graded-evidence strength)', () => {
+  it('field 0x58B7 (P1 has 1A/40/36/30 -- >= 2 samples inside one window) is STRONG', () => {
+    const windows = new Map<number, readonly number[]>([
+      [1, [0x1a, 0x40, 0x36, 0x30, 0x30, 0x30]],
+      [2, [0x05, 0x2d, 0x3b, 0x3d, 0x3b, 0x38]],
+      [3, [0x1a, 0x32, 0x35, 0x31, 0x30, 0x2f]],
+    ]);
+    expect(gradedAnalogEvidenceStrength(windows, 0, 3)).toBe('strong');
+  });
+
+  it('field 0x4002 (0x83 rest / 0x9B pressed, nothing between) is not graded at all -- null', () => {
+    const windows = new Map<number, readonly number[]>([
+      [1, [155, 155]],
+      [2, [155, 155]],
+      [3, [155, 155]],
+      [4, [155, 155]],
+      [5, [155, 155]],
+    ]);
+    expect(gradedAnalogEvidenceStrength(windows, 131, 3)).toBeNull();
+  });
+
+  it('a SINGLE intermediate sample per qualifying window, all within floor of each other, is WEAK', () => {
+    // Both windows catch exactly ONE mid-transition sample (41, 42 -- 1 apart,
+    // well inside floor 3) alongside their shared max (100) -- exactly the
+    // signature a slewing two-state signal, sampled once per window, would
+    // also produce.
+    const windows = new Map<number, readonly number[]>([
+      [1, [100, 41]],
+      [2, [100, 42]],
+      [3, [100, 100]],
+    ]);
+    expect(gradedAnalogEvidenceStrength(windows, 0, 3)).toBe('weak');
+  });
+
+  it('a SINGLE intermediate sample per qualifying window, but genuinely DISTINCT levels (> floor apart), is STRONG', () => {
+    const windows = new Map<number, readonly number[]>([
+      [1, [100, 40]],
+      [2, [100, 80]],
+    ]);
+    expect(gradedAnalogEvidenceStrength(windows, 0, 3)).toBe('strong');
+  });
+
+  it('only ONE graded window is not enough -- null, same bar as isGradedAnalogSeries', () => {
+    const windows = new Map<number, readonly number[]>([
+      [1, [100, 40]],
+      [2, [100, 100]],
+      [3, [100, 100]],
+    ]);
+    expect(gradedAnalogEvidenceStrength(windows, 0, 3)).toBeNull();
+    expect(isGradedAnalogSeries(windows, 0, 3)).toBe(false);
+  });
+
+  it('a flat/empty run has nothing to grade -- null', () => {
+    expect(gradedAnalogEvidenceStrength(new Map(), 0, 3)).toBeNull();
+    expect(gradedAnalogEvidenceStrength(new Map([[1, []]]), 0, 3)).toBeNull();
+  });
+});
+
+/**
+ * Ticket P4o-FIX3 T1, through the whole scorer: `SignalCandidateScore.gradedEvidence`
+ * is set on a `found` graded-analog candidate, `null` for boolean/flag and
+ * for a `two-level`-capped candidate, and never disables `confirm` (that
+ * stays a screen-only concern, unaffected here).
+ */
+describe('scoreSignalCandidates -- P4o-FIX3 T1 (gradedEvidence field)', () => {
+  const timeline = buildMetronomeTimeline(SCRIPT);
+
+  it('a STRONG graded reading (field: DME 0x58B7) carries gradedEvidence "strong"', () => {
+    const samples = layOnTimeline(
+      timeline,
+      ECU_12,
+      0x58b7,
+      cycles(['00', '00'], [
+        [['1A', '30'], ['00', '00']],
+        [['36', '40'], ['00', '00']],
+        [['05', '2D'], ['00', '00']],
+        [['3B', '3D'], ['00', '00']],
+        [['1A', '32'], ['00', '00']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'analog-monotone' });
+    expect(score).toMatchObject({ verdict: 'found', verdictCapReason: null, gradedEvidence: 'strong' });
+  });
+
+  it('a WEAK graded reading (one intermediate sample per press window, close together) still FOUND, but gradedEvidence "weak"', () => {
+    const samples = layOnTimeline(
+      timeline,
+      ECU_12,
+      0x7003,
+      cycles(['00', '00'], [
+        [['64', '29'], ['00', '00']],
+        [['64', '2A'], ['00', '00']],
+        [['64', '64'], ['00', '00']],
+        [['64', '64'], ['00', '00']],
+        [['64', '64'], ['00', '00']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'analog-monotone' });
+    expect(score).toMatchObject({ did: 0x7003, verdict: 'found', verdictCapReason: null, gradedEvidence: 'weak' });
+  });
+
+  it('a two-level series (field: DME 0x4002) has gradedEvidence null -- there is nothing graded to rate', () => {
+    const samples = layOnTimeline(
+      timeline,
+      ECU_12,
+      0x4002,
+      cycles(['83', '83'], [
+        [['9B', '9B'], ['83', '83']],
+        [['9B', '9B'], ['83', '83']],
+        [['9B', '9B'], ['83', '83']],
+        [['9B', '9B'], ['83', '83']],
+        [['9B', '9B'], ['83', '83']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'analog-monotone' });
+    expect(score).toMatchObject({ verdict: 'probable', verdictCapReason: 'two-level', gradedEvidence: null });
+  });
+
+  it('a boolean-edge target (field: DME 0x500C) has gradedEvidence null -- a switch is not graded', () => {
+    const samples = layOnTimeline(
+      timeline,
+      ECU_29,
+      0x500c,
+      cycles(
+        ['04', '04'],
+        [
+          [['04', '05'], ['05', '04']],
+          [['05', '05'], ['04', '04']],
+          [['05', '05'], ['04', '04']],
+          [['05', '05'], ['04', '04']],
+          [['05', '05'], ['04', '04']],
+        ],
+      ),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'boolean-edge' });
+    expect(score).toMatchObject({ verdict: 'found', gradedEvidence: null });
+  });
+});
+
+/**
+ * Ticket P4o-FIX3 T2 (binding, Codex P4o-REV3 finding 7, MEDIUM): `analog-bipolar`
+ * grading must look at BOTH sides of rest -- a window qualifies from its
+ * negative side (an intermediate strictly inside `(windowMin + floor, rest -
+ * floor)`, with the amplitude condition mirrored) exactly as it already does
+ * from its positive side. A monotone target is unaffected (the 4th argument
+ * defaults to `false`).
+ */
+describe('isGradedAnalogSeries / gradedAnalogEvidenceStrength -- P4o-FIX3 T2 (bipolar, both directions)', () => {
+  it('a steering series graded ONLY on its negative (left) side is GRADED when bipolar=true', () => {
+    // rest 100; window 1 swings right to a plain two-level max (150, no
+    // intermediate); window 2 swings left with a genuine intermediate (40,
+    // between windowMin(20) and rest(100)).
+    const windows = new Map<number, readonly number[]>([
+      [1, [150, 150]],
+      [2, [20, 40]],
+    ]);
+    expect(isGradedAnalogSeries(windows, 100, 3, true)).toBe(false); // only ONE qualifying window so far
+  });
+
+  it('two windows graded only on their negative side clear the >= 2 bar when bipolar=true', () => {
+    const windows = new Map<number, readonly number[]>([
+      [1, [20, 40]],
+      [2, [22, 45]],
+    ]);
+    expect(isGradedAnalogSeries(windows, 100, 3, true)).toBe(true);
+    // One intermediate per window (40, 45) -- more than `floor` (3) apart, so
+    // "distinct levels" earns `strong` even though neither window alone has
+    // >= 2 samples inside its interval.
+    expect(gradedAnalogEvidenceStrength(windows, 100, 3, true)).toBe('strong');
+  });
+
+  it('the SAME negative-side-only windows are NOT graded when bipolar=false (monotone unaffected)', () => {
+    const windows = new Map<number, readonly number[]>([
+      [1, [20, 40]],
+      [2, [22, 45]],
+    ]);
+    expect(isGradedAnalogSeries(windows, 100, 3, false)).toBe(false);
+    expect(isGradedAnalogSeries(windows, 100, 3)).toBe(false); // default is false
+  });
+
+  it('a bipolar TWO-STATE signal (rest middle, plain left/right jumps, no intermediate on either side) is NOT graded even with bipolar=true', () => {
+    const windows = new Map<number, readonly number[]>([
+      [1, [150, 150]],
+      [2, [20, 20]],
+      [3, [150, 150]],
+      [4, [20, 20]],
+    ]);
+    expect(isGradedAnalogSeries(windows, 100, 3, true)).toBe(false);
+    expect(gradedAnalogEvidenceStrength(windows, 100, 3, true)).toBeNull();
+  });
+
+  it('field-level regression: a steering signal (rest 0x8000) with graded evidence ONLY on its left sweeps is FOUND, not capped two-level', () => {
+    // Right sweeps (repetitions 1, 3, 5): a plain two-level jump to 0x9000,
+    // no intermediate. Left sweeps (repetitions 2, 4): a genuine intermediate
+    // BELOW rest each time. The un-fixed rule only ever inspected windowMax,
+    // so it saw zero qualifying windows here and capped this two-sided,
+    // genuinely graded reading as switch-like.
+    const timeline = buildMetronomeTimeline(SCRIPT);
+    const samples = layOnTimeline(
+      timeline,
+      0x30,
+      0x1236,
+      cycles(['8000', '8000'], [
+        [['9000', '9000'], ['8000', '8000']],
+        [['7000', '7800'], ['8000', '8000']],
+        [['9000', '9000'], ['8000', '8000']],
+        [['7100', '7900'], ['8000', '8000']],
+        [['9000', '9000'], ['8000', '8000']],
+      ]),
+    );
+    const [score] = scoreSignalCandidates({ samples, timeline, shape: 'analog-bipolar' });
+    expect(score).toMatchObject({
+      did: 0x1236,
+      verdict: 'found',
+      bipolarSides: 'both',
+      verdictCapReason: null,
+      gradedEvidence: 'strong',
+    });
   });
 });

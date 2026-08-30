@@ -11,6 +11,7 @@ import {
   type SignalCandidateScore,
   type SignalEngineRequirement,
   type SignalFinderSample,
+  type SignalGradedEvidenceStrength,
   type SignalTargetId,
   type SignalVerdictCapReason,
 } from '@circuit/core';
@@ -172,6 +173,13 @@ export interface SignalFinderExportCandidate {
   windowMatchedEdges: number;
   /** P4m (item 11): the single bit that separates the two levels (DME 0x4007 = bit 0), or `null`. */
   flagBit: number | null;
+  /**
+   * Ticket P4o-FIX3 T1 (binding, Codex P4o-REV3 finding 6, HIGH): a GRADED
+   * analog reading's evidence strength -- `'strong'`/`'weak'`, or `null` for
+   * a boolean/flag series or one capped `two-level`. `confirm` stays enabled
+   * for both strengths; this is a disclosure, not a cap.
+   */
+  gradedEvidence: SignalGradedEvidenceStrength | null;
 }
 
 export interface SignalFinderExportDocument {
@@ -427,6 +435,7 @@ export function buildSignalFinderExportDocument(input: SignalFinderExportInput):
       sparse: score.sparse ?? false,
       windowMatchedEdges: score.windowMatchedEdges ?? 0,
       flagBit: score.flagBit ?? null,
+      gradedEvidence: score.gradedEvidence ?? null,
     })),
     noResponse: input.noResponseDids.map((entry) => ({ ecuHex: ecuHex(entry.ecu), didHex: didHex(entry.did) })),
     notRead: input.notReadDids.map((entry) => ({ ecuHex: ecuHex(entry.ecu), didHex: didHex(entry.did) })),
@@ -502,6 +511,10 @@ interface SummaryStrings {
   notRead: (count: number) => string;
   /** P4m item 11: the "(sparse)" qualifier on a found verdict. */
   sparseSuffix: string;
+  /** Ticket P4o-FIX3 T1: the "(graded)" qualifier on a found GRADED analog verdict with strong evidence. */
+  gradedSuffix: string;
+  /** Ticket P4o-FIX3 T1: the "(graded — weak evidence: ...)" qualifier for a found GRADED analog verdict resting on a single intermediate sample per press window. */
+  gradedWeakSuffix: string;
   tableHeader: string;
   verdicts: Record<SignalCandidateScore['verdict'], string>;
   noResponse: string;
@@ -548,6 +561,8 @@ const EN: SummaryStrings = {
   inRounds: (rounds) => ` in ${rounds} round${rounds === 1 ? '' : 's'}`,
   notRead: (count) => `Not read: ${count} (tap Next round)`,
   sparseSuffix: ' (sparse)',
+  gradedSuffix: ' (graded)',
+  gradedWeakSuffix: ' (graded — weak evidence: 1 intermediate sample per press)',
   tableHeader: '| DID | ECU | verdict | edges | baseline | raw |',
   verdicts: { found: 'found', probable: 'probable', unrelated: 'unrelated', insufficient: 'insufficient' },
   noResponse: 'No response (NRC or silence)',
@@ -590,6 +605,8 @@ const RO: SummaryStrings = {
   inRounds: (rounds) => ` în ${rounds} rund${rounds === 1 ? 'ă' : 'e'}`,
   notRead: (count) => `Necitite: ${count} (apasă Runda următoare)`,
   sparseSuffix: ' (rar)',
+  gradedSuffix: ' (gradat)',
+  gradedWeakSuffix: ' (gradat — dovadă slabă: o singură probă intermediară per apăsare)',
   tableHeader: '| DID | ECU | verdict | fronturi | repaus | brut |',
   verdicts: { found: 'găsit', probable: 'probabil', unrelated: 'fără legătură', insufficient: 'insuficient' },
   noResponse: 'Fără răspuns (NRC sau tăcere)',
@@ -681,6 +698,18 @@ function enforceTotalBudget(lines: readonly string[], s: SummaryStrings): string
  * The common case (nothing extra, nothing capped) renders exactly like the
  * old plain `matchedEdges/expectedEdges` cell.
  */
+/**
+ * Ticket P4o-FIX3 T1 (binding): "found (graded)" for strong evidence,
+ * "found (graded — weak evidence: ...)" for weak — only ever appended to a
+ * `found` verdict (a `probable`/`unrelated` row already explains itself via
+ * `verdictCapReason`), and only when the series actually IS graded (`null`
+ * for boolean/flag and for `two-level`).
+ */
+function gradedSuffixFor(candidate: SignalFinderExportCandidate, s: SummaryStrings): string {
+  if (candidate.verdict !== 'found' || candidate.gradedEvidence == null) return '';
+  return candidate.gradedEvidence === 'strong' ? s.gradedSuffix : s.gradedWeakSuffix;
+}
+
 function evidenceCell(candidate: SignalFinderExportCandidate, s: SummaryStrings): string {
   // P4m (item 11): a `sparse` verdict rests on WINDOW AGREEMENT, not on
   // observed transitions (at one sample per window a transition is often
@@ -761,7 +790,7 @@ export function buildSignalFinderSummaryMarkdown(
     lines.push(
       `| ${candidate.didHex}${offset} | ${candidate.ecuHex} | ${s.verdicts[candidate.verdict]}${
         candidate.sparse ? s.sparseSuffix : ''
-      } | ${evidenceCell(candidate, s)} | ${candidate.baselineChanges} | ${candidate.restValueHex ?? '-'} → ${candidate.min ?? '-'}..${candidate.max ?? '-'} |`,
+      }${gradedSuffixFor(candidate, s)} | ${evidenceCell(candidate, s)} | ${candidate.baselineChanges} | ${candidate.restValueHex ?? '-'} → ${candidate.min ?? '-'}..${candidate.max ?? '-'} |`,
     );
   }
   lines.push('');

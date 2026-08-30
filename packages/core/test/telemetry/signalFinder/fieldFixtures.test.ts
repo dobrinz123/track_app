@@ -226,6 +226,18 @@ describe('field test 8 replay -- brake pressure, graded (2026-08-30-brakePressur
     expect(score).toBeDefined();
     expect(score).toMatchObject({ verdict: 'found', verdictCapReason: null });
   });
+
+  /**
+   * Ticket P4o-FIX3 T1 (binding, Codex P4o-REV3 finding 6, HIGH): this run's
+   * own press window 1 alone holds several samples strictly inside its own
+   * interval (1A/40/36/30/30/30 around a shared max) -- real within-window
+   * support, not a single mid-transition sample per window, so this reading
+   * earns `'strong'`, not merely "graded".
+   */
+  it('DME 0x12 DID 0x58B7 carries gradedEvidence "strong"', () => {
+    const score = scores.get(`${0x12}:${0x58b7}`);
+    expect(score?.gradedEvidence).toBe('strong');
+  });
 });
 
 describe('field test 8 replay -- brake pressure, two-level (2026-08-30-brakePressure-2.json)', () => {
@@ -237,6 +249,12 @@ describe('field test 8 replay -- brake pressure, two-level (2026-08-30-brakePres
     expect(score).toMatchObject({ verdictCapReason: 'two-level' });
     expect(score!.verdict).not.toBe('found');
   });
+
+  /** Ticket P4o-FIX3 T1: a two-level series has nothing graded to rate -- `gradedEvidence` is `null`. */
+  it('DME 0x12 DID 0x4002 has gradedEvidence null', () => {
+    const score = scores.get(`${0x12}:${0x4002}`);
+    expect(score?.gradedEvidence).toBeNull();
+  });
 });
 
 describe('field test 8 replay -- brake switch (2026-08-30-brakeSwitch.json)', () => {
@@ -246,5 +264,11 @@ describe('field test 8 replay -- brake switch (2026-08-30-brakeSwitch.json)', ()
     const score = scores.get(`${0x29}:${0x500c}`);
     expect(score).toBeDefined();
     expect(score).toMatchObject({ verdict: 'found', verdictCapReason: null, restValueHex: '04' });
+  });
+
+  /** Ticket P4o-FIX3 T1: a boolean/flag series is never "graded" -- `gradedEvidence` is `null` even on a `found` verdict. */
+  it('0x29 DID 0x500C has gradedEvidence null -- a switch is not graded', () => {
+    const score = scores.get(`${0x29}:${0x500c}`);
+    expect(score?.gradedEvidence).toBeNull();
   });
 });

@@ -245,6 +245,20 @@ describe('buildSignalFinderExportDocument', () => {
     expect(doc.candidates[0]).toMatchObject({ netEdges: 10, extraTransitions: 0, didBaselineChanges: 0, bipolarSides: null, verdictCapReason: null });
   });
 
+  /** Ticket P4o-FIX3 T1 (binding): `gradedEvidence` carries through to the export candidate, defaulting to `null` when the score never set it. */
+  it('carries gradedEvidence on every candidate, defaulting to null', () => {
+    const doc = buildSignalFinderExportDocument(
+      input({
+        scores: [
+          score({ did: 0x58b7, gradedEvidence: 'strong' }),
+          score({ did: 0x7003, gradedEvidence: 'weak' }),
+          score({ did: 0x500b, gradedEvidence: undefined }),
+        ],
+      }),
+    );
+    expect(doc.candidates.map((c) => c.gradedEvidence)).toEqual(['strong', 'weak', null]);
+  });
+
   it('names the files after the date and target', () => {
     expect(signalFinderExportFileName('2026-08-29T18:12:03.000Z', 'brakeSwitch', 'json')).toBe(
       'trace-signal-finder-2026-08-29-brakeSwitch.json',
@@ -412,6 +426,43 @@ describe('buildSignalFinderSummaryMarkdown (pure, <= 1 page)', () => {
     );
     expect(buildSignalFinderSummaryMarkdown(doc, 'en')).toMatch(/capped:.*switch-like, not analog/);
     expect(buildSignalFinderSummaryMarkdown(doc, 'ro')).toMatch(/plafonat:.*comutator/);
+  });
+
+  /**
+   * Ticket P4o-FIX3 T1 (binding, Codex P4o-REV3 finding 6, HIGH): "found
+   * (graded)" for strong evidence, "found (graded — weak evidence: ...)"
+   * for weak -- appended to the verdict, alongside (not replacing) the
+   * `sparse` suffix.
+   */
+  it('appends "(graded)" to a found verdict with strong gradedEvidence', () => {
+    const doc = buildSignalFinderExportDocument(
+      input({ scores: [score({ did: 0x58b7, verdict: 'found', gradedEvidence: 'strong' })] }),
+    );
+    const md = buildSignalFinderSummaryMarkdown(doc, 'en');
+    expect(md).toMatch(/found \(graded\)/);
+  });
+
+  it('appends the weak-evidence wording to a found verdict with weak gradedEvidence', () => {
+    const doc = buildSignalFinderExportDocument(
+      input({ scores: [score({ did: 0x7003, verdict: 'found', gradedEvidence: 'weak' })] }),
+    );
+    const en = buildSignalFinderSummaryMarkdown(doc, 'en');
+    expect(en).toContain('found (graded — weak evidence: 1 intermediate sample per press)');
+    const ro = buildSignalFinderSummaryMarkdown(doc, 'ro');
+    expect(ro).toMatch(/găsit \(gradat — dovadă slabă/);
+  });
+
+  it('never shows the graded suffix for a non-found verdict, or when gradedEvidence is null', () => {
+    const doc = buildSignalFinderExportDocument(
+      input({
+        scores: [
+          score({ did: 0x4002, verdict: 'probable', verdictCapReason: 'two-level', gradedEvidence: null }),
+          score({ did: 0x500c, verdict: 'found', gradedEvidence: null }),
+        ],
+      }),
+    );
+    const md = buildSignalFinderSummaryMarkdown(doc, 'en');
+    expect(md).not.toContain('graded');
   });
 
   it('omits every extras marker when the score carries none of them (the common case)', () => {

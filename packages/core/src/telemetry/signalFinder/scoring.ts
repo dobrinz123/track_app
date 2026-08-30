@@ -102,6 +102,13 @@ export type SignalVerdictCapReason =
 /** Which sides of rest an analog DID actually visited during the press windows. */
 export type SignalBipolarSides = 'both' | 'positive' | 'negative' | 'none';
 
+/**
+ * P4o-FIX3 T1 (binding): how much a `graded` analog reading's evidence
+ * actually supports "graded" over "a two-state signal caught mid-slew" — see
+ * {@link gradedAnalogEvidenceStrength}.
+ */
+export type SignalGradedEvidenceStrength = 'strong' | 'weak';
+
 export interface SignalCandidateScore {
   ecu: number;
   did: number;
@@ -179,6 +186,17 @@ export interface SignalCandidateScore {
    * compare against or no active sample ever observed.
    */
   activeValueHex?: string;
+  /**
+   * P4o-FIX3 T1 (binding, Codex P4o-REV3 finding 6, HIGH): set only for a
+   * GRADED analog series (`shape` is `analog-monotone`/`analog-bipolar`, not
+   * boolean/flag, and not {@link SignalVerdictCapReason} `'two-level'`) --
+   * `null` for every other series (boolean/flag, two-level, or no baseline
+   * evidence at all). The screen/export append "(graded)" / "(graded — weak
+   * evidence: 1 intermediate sample per press)" to a `found` verdict from
+   * this; `confirm` stays enabled either way (the user sees the raw range
+   * and can judge for themselves).
+   */
+  gradedEvidence?: SignalGradedEvidenceStrength | null;
 }
 
 export interface SignalScoringOptions {
@@ -335,31 +353,100 @@ function deriveActiveValueHex(
  * (`windowMax - rest`) exceeds `2 * floor` (so the interval is non-empty and
  * "intermediate" is a meaningful claim, not a rounding artifact).
  *
+ * Ticket P4o-FIX3 T2 (binding, Codex P4o-REV3 finding 7, MEDIUM): for
+ * `analog-bipolar` (`bipolar = true`) a window ALSO qualifies from its NEGATIVE
+ * side — an intermediate strictly inside `(windowMin + floor, rest - floor)`,
+ * with the amplitude condition (`rest - windowMin > 2 * floor`) mirrored on
+ * that side. The un-fixed rule only ever looked at `windowMax`, so a steering
+ * series whose graded (multi-level) evidence happened to live entirely in its
+ * LEFT sweeps — while every right sweep was a plain two-level jump — read as
+ * switch-like and was capped, even though the negative-side excursions alone
+ * already prove a graded reading. `bipolar` defaults to `false` so every
+ * existing (monotone) caller is unaffected — this is strictly an ADDITIONAL
+ * way for a window to qualify, never a stricter one.
+ *
  * This is symmetric and order-independent by construction: only a value's
- * membership in its OWN window's interval decides anything, never its
- * position in the timeline or the direction the run is read in (finding 8 is
- * moot — there is no sort, no chaining, no direction to be dependent on). A
- * noise singleton scattered across OTHER windows never contributes (each
- * window is judged only by its own samples), and a two-state signal (e.g.
- * 0x83 rest / 0x9B pressed) never has an intermediate: its only press value
- * IS the window's max, so it can never be strictly less than `windowMax -
- * floor`.
+ * membership in its OWN window's interval (on whichever side(s) apply)
+ * decides anything, never its position in the timeline or the direction the
+ * run is read in (finding 8 is moot — there is no sort, no chaining, no
+ * direction to be dependent on). A noise singleton scattered across OTHER
+ * windows never contributes (each window is judged only by its own samples),
+ * and a two-state signal (e.g. 0x83 rest / 0x9B pressed, or a bipolar rest/
+ * left/right triple with no intermediate on either side) never has an
+ * intermediate: its only press values ARE the window's extremes, so neither
+ * can be strictly inside its own open interval.
  */
+function qualifyingIntermediateGroups(
+  pressValuesByWindow: ReadonlyMap<number, readonly number[]>,
+  restValue: number,
+  floor: number,
+  bipolar: boolean,
+): number[][] {
+  const groups: number[][] = [];
+  for (const values of pressValuesByWindow.values()) {
+    if (values.length === 0) continue;
+    const intermediates: number[] = [];
+    const windowMax = Math.max(...values);
+    if (windowMax - restValue > 2 * floor) {
+      const lower = restValue + floor;
+      const upper = windowMax - floor;
+      for (const value of values) if (value > lower && value < upper) intermediates.push(value);
+    }
+    if (bipolar) {
+      const windowMin = Math.min(...values);
+      if (restValue - windowMin > 2 * floor) {
+        const lowerN = windowMin + floor;
+        const upperN = restValue - floor;
+        for (const value of values) if (value > lowerN && value < upperN) intermediates.push(value);
+      }
+    }
+    if (intermediates.length > 0) groups.push(intermediates);
+  }
+  return groups;
+}
+
 export function isGradedAnalogSeries(
   pressValuesByWindow: ReadonlyMap<number, readonly number[]>,
   restValue: number,
   floor: number,
+  bipolar = false,
 ): boolean {
-  let gradedWindows = 0;
-  for (const values of pressValuesByWindow.values()) {
-    if (values.length === 0) continue;
-    const windowMax = Math.max(...values);
-    if (windowMax - restValue <= 2 * floor) continue;
-    const lower = restValue + floor;
-    const upper = windowMax - floor;
-    if (values.some((value) => value > lower && value < upper)) gradedWindows += 1;
-  }
-  return gradedWindows >= 2;
+  return qualifyingIntermediateGroups(pressValuesByWindow, restValue, floor, bipolar).length >= 2;
+}
+
+/**
+ * P4o-FIX3 T1 (binding, Codex P4o-REV3 finding 6, HIGH): a `graded` verdict's
+ * evidence STRENGTH — a single mid-transition sample caught once per press
+ * window cannot be told apart from a slewing two-state signal (the same
+ * transition sample, sampled once, lands at a different point of its own
+ * slew each cycle purely from jitter). `'strong'` when either:
+ *
+ *  - at least one qualifying window holds >= 2 samples inside its own
+ *    interval (real WITHIN-window support, not a single passing sample), OR
+ *  - the intermediate values across every qualifying window are not all
+ *    within `floor` of each other (>= 2 genuinely DISTINCT intermediate
+ *    levels, which a single slewing transition sampled once per window could
+ *    not produce — each window's one catch would cluster near the same
+ *    transition point).
+ *
+ * Otherwise `'weak'`. `null` when the series is not graded at all (fewer than
+ * 2 qualifying windows — {@link isGradedAnalogSeries} would return `false`).
+ * Shares {@link qualifyingIntermediateGroups} with `isGradedAnalogSeries` so
+ * the two can never disagree about which windows qualify.
+ */
+export function gradedAnalogEvidenceStrength(
+  pressValuesByWindow: ReadonlyMap<number, readonly number[]>,
+  restValue: number,
+  floor: number,
+  bipolar = false,
+): SignalGradedEvidenceStrength | null {
+  const groups = qualifyingIntermediateGroups(pressValuesByWindow, restValue, floor, bipolar);
+  if (groups.length < 2) return null;
+  if (groups.some((group) => group.length >= 2)) return 'strong';
+  const allIntermediates = groups.flat();
+  const min = Math.min(...allIntermediates);
+  const max = Math.max(...allIntermediates);
+  return max - min > floor ? 'strong' : 'weak';
 }
 
 /** The most frequent value, ties broken by first appearance (deterministic). */
@@ -426,6 +513,14 @@ interface SeriesScore {
    * itself).
    */
   twoLevel: boolean;
+  /**
+   * P4o-FIX3 T1 (binding): `null` when `!twoLevel` is false-ish in the sense
+   * that no grading applies (boolean/flag, or the series IS two-level) --
+   * otherwise the strength {@link gradedAnalogEvidenceStrength} computed.
+   * Always the mirror of `twoLevel`: non-null exactly when `!boolean &&
+   * !twoLevel`.
+   */
+  gradedEvidence: SignalGradedEvidenceStrength | null;
   /**
    * Ticket P4n-FIX1 R5 (binding): the exact rest level THIS series compared
    * every sample against (`modeOf` for boolean/flag, `meanOf` for analog) --
@@ -510,7 +605,17 @@ function scoreSeries(
   // Ticket P4o-FIX2 U1: window-consistent, built ONLY from the press/hold
   // windows above -- never from the whole run's points (that was P4o-FIX1's
   // bug; see `isGradedAnalogSeries`'s own doc comment).
-  const twoLevel = !boolean && !isGradedAnalogSeries(pressValuesByRepetition, restValue as number, noiseFloor);
+  //
+  // Ticket P4o-FIX3 T2: for `analog-bipolar`, a window may ALSO qualify from
+  // its negative side (steering left as well as right).
+  const bipolarDirection = shape === 'analog-bipolar';
+  const twoLevel =
+    !boolean && !isGradedAnalogSeries(pressValuesByRepetition, restValue as number, noiseFloor, bipolarDirection);
+  // Ticket P4o-FIX3 T1: the evidence-strength companion -- `null` exactly when
+  // `boolean` or `twoLevel` (there is nothing graded to rate the strength of).
+  const gradedEvidence = boolean
+    ? null
+    : gradedAnalogEvidenceStrength(pressValuesByRepetition, restValue as number, noiseFloor, bipolarDirection);
 
   // Ordered transitions, attributed to the step the ARRIVING sample belongs to.
   interface Transition {
@@ -641,6 +746,7 @@ function scoreSeries(
     sparseConsistent,
     booleanLike: boolean,
     twoLevel,
+    gradedEvidence,
     restScalar: restValue,
   };
 }
@@ -824,6 +930,7 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
         correlationSign: null,
         insufficientReason: 'length-inconsistent',
         verdictCapReason: null,
+        gradedEvidence: null,
       });
       continue;
     }
@@ -932,6 +1039,7 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
         correlationSign: null,
         insufficientReason: 'no-response',
         verdictCapReason: null,
+        gradedEvidence: null,
       });
       continue;
     }
@@ -1023,6 +1131,11 @@ export function scoreSignalCandidates(input: ScoreSignalCandidatesInput): Signal
       sparse: finalVerdict === 'found' && windowsBelowMinimum > 0,
       insufficientReason: insufficient ? 'undersampled' : null,
       verdictCapReason: finalCapReason,
+      // P4o-FIX3 T1: the offset the DID is REPORTED by is `best` -- its own
+      // grading strength, not re-derived from `finalVerdict` (a `probable`
+      // verdict capped by something other than `two-level` still carries
+      // whatever grading evidence its series actually had).
+      gradedEvidence: best.gradedEvidence,
       // Ticket P4n-FIX1 R5 (binding): only for a boolean/flag series -- an
       // analog reading has no single "active level" to name.
       activeValueHex: best.booleanLike ? deriveActiveValueHex(group.entries, best.byteOffset, best.restScalar) : undefined,

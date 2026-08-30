@@ -79,6 +79,18 @@ function ecuHex(ecu: number): string {
   return `0x${ecu.toString(16).toUpperCase().padStart(2, '0')}`;
 }
 
+/**
+ * Ticket P4o-FIX3 T1 (binding, Codex P4o-REV3 finding 6, HIGH): "found
+ * (graded)" for strong evidence, "found (graded — weak evidence: ...)" for
+ * weak — appended only to a `found` verdict, and only for a series that IS
+ * graded (`gradedEvidence` is `null` for boolean/flag and for `two-level`).
+ * `confirm` stays enabled either way; this is a disclosure, not a cap.
+ */
+function gradedSuffixFor(score: SignalCandidateScore, strings: SignalFinderScreenStrings): string {
+  if (score.verdict !== 'found' || score.gradedEvidence == null) return '';
+  return score.gradedEvidence === 'strong' ? strings.gradedSuffix : strings.gradedWeakSuffix;
+}
+
 /** P4l-FIX3 J6 (binding, Codex re-review finding L12): the SAME `netEdges`-first evidence line as the `.md`/JSON export (`signalFinderExport.ts`'s `evidenceCell`) — what the verdict was ACTUALLY computed from, plus the P4l-FIX2 extras/cap reason when present. */
 function evidenceLine(score: SignalCandidateScore, strings: SignalFinderScreenStrings): string {
   const extraTransitions = score.extraTransitions ?? 0;
@@ -617,6 +629,7 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
                     <Text style={[styles.verdict, { color: VERDICT_COLOR[score.verdict] }]}>
                       {strings.verdicts[score.verdict]}
                       {score.sparse === true ? strings.sparseSuffix : ''}
+                      {gradedSuffixFor(score, strings)}
                     </Text>
                     {score.verdict === 'found' || score.verdict === 'probable' ? (
                       <Pressable

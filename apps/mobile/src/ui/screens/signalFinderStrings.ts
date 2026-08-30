@@ -70,6 +70,10 @@ export interface SignalFinderScreenStrings {
   errorTeardownPending: string;
   nextRound: (dids: number, seconds: number) => string;
   sparseSuffix: string;
+  /** Ticket P4o-FIX3 T1: the "(graded)" qualifier on a found GRADED analog verdict with strong evidence. */
+  gradedSuffix: string;
+  /** Ticket P4o-FIX3 T1: the "(graded — weak evidence: ...)" qualifier for a found GRADED analog verdict resting on a single intermediate sample per press window. */
+  gradedWeakSuffix: string;
   verdicts: Record<SignalCandidateScore['verdict'], string>;
   capReasons: Record<SignalVerdictCapReason, string>;
   insufficientReasons: Record<'undersampled' | 'length-inconsistent' | 'no-response', string>;
@@ -170,6 +174,8 @@ const EN: SignalFinderScreenStrings = {
   errorTeardownPending: 'The adapter is still shutting down — try again in a moment.',
   nextRound: (dids, seconds) => `Next round (${dids} DIDs, ≈ ${seconds} s)`,
   sparseSuffix: ' (sparse)',
+  gradedSuffix: ' (graded)',
+  gradedWeakSuffix: ' (graded — weak evidence: 1 intermediate sample per press)',
   verdicts: { found: 'found', probable: 'probable', unrelated: 'unrelated', insufficient: 'insufficient' },
   capReasons: {
     'response-baseline-changes': 'restless baseline',
@@ -254,6 +260,8 @@ const RO: SignalFinderScreenStrings = {
   errorTeardownPending: 'Adaptorul încă se închide — încearcă din nou într-o clipă.',
   nextRound: (dids, seconds) => `Runda următoare (${dids} DID-uri, ≈ ${seconds} s)`,
   sparseSuffix: ' (rar)',
+  gradedSuffix: ' (gradat)',
+  gradedWeakSuffix: ' (gradat — dovadă slabă: o singură probă intermediară per apăsare)',
   verdicts: { found: 'găsit', probable: 'probabil', unrelated: 'fără legătură', insufficient: 'insuficient' },
   capReasons: {
     'response-baseline-changes': 'repaus neliniștit',
