@@ -128,6 +128,20 @@ export class SqlSettingsStore implements SettingsStore {
     if (!rowHasActiveVehicleProfileId) {
       initial = { ...initial, activeVehicleProfileId: DEFAULT_SETTINGS.activeVehicleProfileId };
     }
+    // Codex R2 fix (ticket P4q follow-up, binding): a present-but-malformed
+    // `activeVehicleProfileSource` (outside the three-value vocabulary) must
+    // never be read as `'user'` by accident -- that would either wrongly
+    // block a real VIN auto-select, or (worse, if it decoded to something
+    // else entirely) let one silently overwrite a choice the repair itself
+    // cannot prove was ever explicit. Repaired back to the default, the same
+    // defensive discipline every other enum-like field above follows.
+    if (
+      initial.activeVehicleProfileSource !== 'user' &&
+      initial.activeVehicleProfileSource !== 'vin' &&
+      initial.activeVehicleProfileSource !== 'default'
+    ) {
+      initial = { ...initial, activeVehicleProfileSource: DEFAULT_SETTINGS.activeVehicleProfileSource };
+    }
     // Ticket P4q (binding): a present-but-malformed persisted VIN (wrong
     // type from a corrupt/legacy row) must never reach the Signal Finder
     // screen or the VIN-matching logic -- repaired back to `null` (never read

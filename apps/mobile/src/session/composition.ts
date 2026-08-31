@@ -720,35 +720,35 @@ export async function applyInitialActiveVehicleProfile(store: SqlSettingsStore):
 /** The DME address the VIN read is addressed to -- ISO 14229-1 DID 0xF190 (`@circuit/core`'s `vinRead.ts`). */
 const VIN_READ_ECU = 0x12;
 
+/** Codex R3 fix (ticket P4q follow-up, binding, LOW): the whole connect-and-read attempt (lazy native transport import included) may never take longer than this -- see `maybeDetectVehicleFromVin`'s own doc comment. */
+const VIN_READ_OVERALL_TIMEOUT_MS = 4_000;
+
 type VinDetectionState = 'idle' | 'attempting' | 'done';
 let vinDetectionState: VinDetectionState = 'idle';
 /** The result of the ONE completed attempt this app run has made (or will make) -- `null` before `vinDetectionState === 'done'`, and forever after if the read found nothing usable. */
 let cachedDetectedVin: string | null = null;
 
 /**
- * Ticket P4q (binding): "auto-select NEVER overrides an explicit user choice
- * from this app run" -- set the instant the user taps a profile chip
- * (`setActiveVehicleProfileIdExplicit`, below), for the lifetime of this
- * process. A profile the user picked in an EARLIER app run (persisted,
- * ordinary settings hydration) does NOT set this -- only an explicit choice
- * made THIS run blocks auto-select, exactly as the ticket words it.
+ * Codex R2 fix (ticket P4q follow-up, binding, MEDIUM): "the explicit-choice
+ * flag is in-memory only, so after an app restart VIN detection could
+ * overwrite a profile the user picked deliberately." Replaces what used to be
+ * a plain in-memory `let` -- the question "did the user explicitly choose?"
+ * is now answered by `settings.activeVehicleProfileSource === 'user'`, a
+ * PERSISTED field (`settingsStore.ts`), so the guard survives a restart
+ * exactly like the choice it protects does.
  */
-let userExplicitlyChoseVehicleProfileThisRun = false;
+export function hasUserExplicitlyChosenVehicleProfileThisRun(): boolean {
+  return settingsStore.getSettings().activeVehicleProfileSource === 'user';
+}
 
 /**
  * Ticket P4q (binding): the ONE place a profile CHIP tap (or any other
  * explicit UI choice) must go through -- never `settingsStore.update`
- * directly -- so the explicit-choice flag above is set atomically with the
- * setting itself. `SignalFinderScreen.tsx`'s profile chips call this.
+ * directly -- so `activeVehicleProfileSource` is set to `'user'` atomically
+ * with the id itself. `SignalFinderScreen.tsx`'s profile chips call this.
  */
 export function setActiveVehicleProfileIdExplicit(profileId: string): void {
-  userExplicitlyChoseVehicleProfileThisRun = true;
-  settingsStore.update({ activeVehicleProfileId: profileId });
-}
-
-/** Test/diagnostic visibility into the explicit-choice flag above. */
-export function hasUserExplicitlyChosenVehicleProfileThisRun(): boolean {
-  return userExplicitlyChoseVehicleProfileThisRun;
+  settingsStore.update({ activeVehicleProfileId: profileId, activeVehicleProfileSource: 'user' });
 }
 
 export interface VinAutoDetectNotice {
@@ -782,8 +782,13 @@ export function dismissVinAutoDetectNotice(): void {
 /**
  * Ticket P4q Q3 (binding): "exactly ONE profile matches -> auto-select ...
  * zero or multiple matches -> nothing changes (manual choice). Auto-select
- * never overrides a profile the user chose EXPLICITLY this app-run." A pure
- * function of the match list and that one flag -- directly unit-testable
+ * never overrides a profile the user chose EXPLICITLY."
+ *
+ * R2 fix (Codex follow-up, binding): the second argument now answers "does
+ * `settings.activeVehicleProfileSource` say `'user'` right now?" -- a
+ * PERSISTED fact, so a choice made in an earlier app run still blocks
+ * auto-select after a restart, not only for the rest of the run it was made
+ * in. Still a pure function of its two arguments -- directly unit-testable
  * without any catalog/settings/transport involved.
  */
 export function decideVinAutoSelect(
@@ -807,13 +812,29 @@ export function decideVinAutoSelect(
  */
 export function applyVinAutoSelect(vin: string, catalogs: readonly SignalTargetCatalog[] = SIGNAL_TARGET_CATALOGS): void {
   const matches = matchVehicleProfilesByVin(vin, catalogs);
+  // R2 fix: read the PERSISTED source fresh, every call -- never a stale
+  // in-memory snapshot from whenever this module happened to load.
   const decision = decideVinAutoSelect(
     matches.map((catalog) => catalog.profileId),
-    userExplicitlyChoseVehicleProfileThisRun,
+    settingsStore.getSettings().activeVehicleProfileSource === 'user',
   );
   if (decision === null) return;
-  settingsStore.update({ activeVehicleProfileId: decision });
+  settingsStore.update({ activeVehicleProfileId: decision, activeVehicleProfileSource: 'vin' });
   setVinAutoDetectNotice({ vin, profileId: decision });
+}
+
+/**
+ * Codex R4 fix (ticket P4q follow-up, binding, LOW): a VIN is personal data
+ * (it identifies the specific vehicle, and via public lookup often the
+ * owner) -- never written to a log line in full. Masks to the WMI (first 3
+ * chars, the manufacturer/region) + the last 2 chars, e.g.
+ * `WBA************34`; everything between is replaced with `*`. The FULL
+ * value is never logged anywhere in this module -- only shown in the UI and
+ * stored in `settings.lastSeenVin`.
+ */
+export function maskVin(vin: string): string {
+  if (vin.length <= 5) return '*'.repeat(vin.length); // defensive: a strict-validated VIN is always 17 chars, so this never actually triggers.
+  return `${vin.slice(0, 3)}${'*'.repeat(vin.length - 5)}${vin.slice(-2)}`;
 }
 
 /**
@@ -825,6 +846,19 @@ export function applyVinAutoSelect(vin: string, catalogs: readonly SignalTargetC
  * the adapter again. A call that finds the reservation held by someone else
  * returns `null` WITHOUT marking detection done, so a later trigger still
  * gets its own chance once the adapter frees up.
+ *
+ * R3 fix (Codex follow-up, binding, LOW): the connect-and-read attempt
+ * (`transport.connect()` -- which itself starts with a LAZY native
+ * `react-native-tcp-socket` import -- then the one-shot read) is raced
+ * against {@link VIN_READ_OVERALL_TIMEOUT_MS}. A hung `connect()` (a dead
+ * adapter, a native import that never resolves) therefore never holds the
+ * shared reservation past that bound: `finally` below closes the transport
+ * and releases the token EITHER way, whichever branch of the race actually
+ * settled it first. The losing side's eventual settlement (a `connect()`
+ * that resolves or rejects long after the timeout already won) is harmless --
+ * `Promise.race` itself attaches a handler to every promise it is given, so
+ * it can never surface as an unhandled rejection, and this function has
+ * already returned by then.
  */
 export async function maybeDetectVehicleFromVin(): Promise<string | null> {
   if (vinDetectionState !== 'idle') return cachedDetectedVin;
@@ -840,9 +874,16 @@ export async function maybeDetectVehicleFromVin(): Promise<string | null> {
   const transport = new EnetTcpTransport({ host: settings.enetHost, port: settings.enetPort });
   let vin: string | null = null;
   try {
-    await transport.connect();
-    const channel = createRawUdsChannel(transport, settings.enetTesterAddress, VIN_READ_ECU);
-    vin = await readVinFromChannel(channel);
+    const attempt = (async (): Promise<string | null> => {
+      await transport.connect();
+      const channel = createRawUdsChannel(transport, settings.enetTesterAddress, VIN_READ_ECU);
+      return readVinFromChannel(channel);
+    })();
+    const timedOut = new Promise<'timeout'>((resolve) => {
+      setTimeout(() => resolve('timeout'), VIN_READ_OVERALL_TIMEOUT_MS);
+    });
+    const raced = await Promise.race([attempt, timedOut]);
+    vin = raced === 'timeout' ? null : raced;
   } catch (error) {
     console.warn('[composition] the one-shot VIN read failed', error);
     vin = null;
@@ -854,9 +895,11 @@ export async function maybeDetectVehicleFromVin(): Promise<string | null> {
   vinDetectionState = 'done';
   cachedDetectedVin = vin;
   if (vin !== null) {
-    // Q2 (binding): displayed/logged so a pattern can be added LATER from the
-    // real car -- never invented here.
-    console.info(`[composition] VIN detected: ${vin}`);
+    // Q2 (binding): logged so a pattern can be added LATER from the real
+    // car -- never invented here. R4 fix (binding, LOW): MASKED -- a VIN is
+    // personal data, and the full value is never written to a log line; the
+    // driver reads it in full only on the Signal Finder screen / `lastSeenVin`.
+    console.info(`[composition] VIN detected: ${maskVin(vin)}`);
     settingsStore.update({ lastSeenVin: vin });
     applyVinAutoSelect(vin);
   }

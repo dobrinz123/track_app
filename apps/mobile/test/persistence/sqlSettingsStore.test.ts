@@ -445,3 +445,59 @@ describe('SqlSettingsStore lastSeenVin (P4q)', () => {
     expect(store.getSettings().lastSeenVin).toBeNull();
   });
 });
+
+/**
+ * Codex R2 fix (ticket P4q follow-up, binding, MEDIUM): `activeVehicleProfileSource`
+ * -- the PERSISTED provenance `composition.ts`'s `decideVinAutoSelect` reads
+ * so an explicit choice from an EARLIER app run still blocks VIN auto-select
+ * after a restart (an in-memory-only flag could not survive one).
+ */
+describe('SqlSettingsStore activeVehicleProfileSource (P4q follow-up R2)', () => {
+  it('defaults to "default" when nothing was ever persisted', async () => {
+    const db = await createSqlJsDatabase();
+    await SqlSessionRepository.create(db);
+    const store = await SqlSettingsStore.create(db);
+    expect(store.getSettings().activeVehicleProfileSource).toBe('default');
+    expect(DEFAULT_SETTINGS.activeVehicleProfileSource).toBe('default');
+  });
+
+  it('round-trips "user" across a simulated app restart (the whole point of the fix)', async () => {
+    const raw = await createRawSqlJsDatabase();
+    const db1 = wrapExistingSqlJsDatabase(raw);
+    await SqlSessionRepository.create(db1);
+    const store1 = await SqlSettingsStore.create(db1);
+
+    store1.update({ activeVehicleProfileId: 'toyota-supra-b58', activeVehicleProfileSource: 'user' });
+    await flush();
+
+    const store2 = await SqlSettingsStore.create(wrapExistingSqlJsDatabase(raw));
+    expect(store2.getSettings().activeVehicleProfileSource).toBe('user');
+    expect(store2.getSettings().activeVehicleProfileId).toBe('toyota-supra-b58');
+  });
+
+  it('round-trips "vin" across a simulated app restart', async () => {
+    const raw = await createRawSqlJsDatabase();
+    const db1 = wrapExistingSqlJsDatabase(raw);
+    await SqlSessionRepository.create(db1);
+    const store1 = await SqlSettingsStore.create(db1);
+
+    store1.update({ activeVehicleProfileSource: 'vin' });
+    await flush();
+
+    const store2 = await SqlSettingsStore.create(wrapExistingSqlJsDatabase(raw));
+    expect(store2.getSettings().activeVehicleProfileSource).toBe('vin');
+  });
+
+  it('a persisted value outside the three-value vocabulary is repaired back to "default", never accepted verbatim', async () => {
+    const raw = await createRawSqlJsDatabase();
+    const db = wrapExistingSqlJsDatabase(raw);
+    await SqlSessionRepository.create(db);
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'app-settings',
+      JSON.stringify({ activeVehicleProfileSource: 'bogus' }),
+    ]);
+
+    const store = await SqlSettingsStore.create(db);
+    expect(store.getSettings().activeVehicleProfileSource).toBe('default');
+  });
+});

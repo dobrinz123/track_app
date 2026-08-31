@@ -82,6 +82,8 @@ const transportDouble = vi.hoisted(() => ({
   connectCalls: 0,
   closeCalls: 0,
   constructedWith: [] as Array<{ host: string; port: number }>,
+  /** Codex R3 fix test seam: when true, `connect()` returns a promise that never settles. */
+  hangConnect: false,
 }));
 
 vi.mock('../../src/session/enetTcpTransport', () => ({
@@ -90,6 +92,7 @@ vi.mock('../../src/session/enetTcpTransport', () => ({
       transportDouble.constructedWith.push(config);
     }
     async connect(): Promise<void> {
+      if (transportDouble.hangConnect) return new Promise(() => undefined); // never resolves -- R3's own test.
       transportDouble.connectCalls += 1;
     }
     onData(): () => void {
@@ -120,6 +123,7 @@ async function bootFresh(): Promise<typeof import('../../src/session/composition
   transportDouble.connectCalls = 0;
   transportDouble.closeCalls = 0;
   transportDouble.constructedWith = [];
+  transportDouble.hangConnect = false;
   vi.resetModules();
   return import('../../src/session/composition');
 }
@@ -220,6 +224,122 @@ describe('composition.ts VIN one-shot read (ticket P4q Q1)', () => {
 
     const { enetAdapterReservation } = await import('../../src/session/enetAdapterReservation');
     expect(enetAdapterReservation.holder()).toBeNull();
+  });
+
+  /**
+   * Codex R3 fix (ticket P4q follow-up, binding, LOW): "bound the whole VIN
+   * connect attempt ... always close/release the reservation when it
+   * expires." A `connect()` that never settles (a dead adapter, a hung
+   * native import) must not hold the reservation forever.
+   */
+  it('R3: bounds the whole connect attempt -- a never-resolving connect() still resolves null and closes/releases within the deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const composition = await bootFresh();
+      composition.settingsStore.update({ adapterType: 'enet', enetHost: '192.168.4.20' });
+      transportDouble.hangConnect = true;
+
+      const pending = composition.maybeDetectVehicleFromVin();
+      await vi.advanceTimersByTimeAsync(4_100);
+      const vin = await pending;
+
+      expect(vin).toBeNull();
+      expect(transportDouble.closeCalls).toBe(1);
+      const { enetAdapterReservation } = await import('../../src/session/enetAdapterReservation');
+      expect(enetAdapterReservation.holder()).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /** Codex R4 fix (ticket P4q follow-up, binding, LOW): "never log the full VIN." */
+  it('R4: logs only the MASKED VIN, never the full value', async () => {
+    const composition = await bootFresh();
+    composition.settingsStore.update({ adapterType: 'enet', enetHost: '192.168.4.20' });
+    channelDouble.queuedResponse = vinPdu('WBA12345678901234');
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+
+    await composition.maybeDetectVehicleFromVin();
+
+    const loggedFullVin = infoSpy.mock.calls.some((args) => args.some((arg) => typeof arg === 'string' && arg.includes('WBA12345678901234')));
+    expect(loggedFullVin).toBe(false);
+    const loggedMasked = infoSpy.mock.calls.some((args) => args.some((arg) => typeof arg === 'string' && arg.includes(composition.maskVin('WBA12345678901234'))));
+    expect(loggedMasked).toBe(true);
+    // The full value is still exactly what gets persisted/shown in the UI.
+    expect(composition.settingsStore.getSettings().lastSeenVin).toBe('WBA12345678901234');
+
+    infoSpy.mockRestore();
+  });
+});
+
+describe('maskVin (ticket P4q follow-up R4, binding)', () => {
+  it('masks the middle, keeping the first 3 (WMI) and last 2 characters', async () => {
+    const { maskVin } = await bootFresh();
+    expect(maskVin('WBA12345678901234')).toBe('WBA************34');
+  });
+
+  it('never leaves any masked output containing the original middle characters', async () => {
+    const { maskVin } = await bootFresh();
+    const masked = maskVin('JTHKD5BH102100001');
+    expect(masked.slice(3, -2)).toBe('*'.repeat('JTHKD5BH102100001'.length - 5));
+  });
+});
+
+/**
+ * Codex R2 fix (ticket P4q follow-up, binding, MEDIUM): "after an app restart
+ * VIN detection could overwrite a profile the user picked deliberately."
+ * `activeVehicleProfileSource: 'user'` set the way a REAL app restart would
+ * see it -- straight into settings, never through
+ * `setActiveVehicleProfileIdExplicit` (which only exists to set it during the
+ * CURRENT run) -- proving the guard reads the PERSISTED field, not an
+ * in-memory flag that would have reset to `false` on a real restart.
+ */
+describe('R2: the explicit-choice guard survives a restart (persisted activeVehicleProfileSource)', () => {
+  const fakeMatch: SignalTargetCatalog = {
+    profileId: 'fake-matched-car',
+    label: 'Fake Matched Car',
+    targets: [],
+    vinPatterns: ['WBA'],
+  };
+
+  it('a fresh composition module hydrated with activeVehicleProfileSource "user" never lets VIN auto-select override it', async () => {
+    const composition = await bootFresh();
+    // Simulates what `SqlSettingsStore.create()` would have hydrated from a
+    // PRIOR run's persisted row -- never calling `setActiveVehicleProfileIdExplicit`
+    // (the in-run path) at all.
+    composition.settingsStore.update({ activeVehicleProfileId: 'generic', activeVehicleProfileSource: 'user' });
+    expect(composition.hasUserExplicitlyChosenVehicleProfileThisRun()).toBe(true);
+
+    composition.applyVinAutoSelect('WBA00000000000001', [fakeMatch]);
+
+    expect(composition.settingsStore.getSettings().activeVehicleProfileId).toBe('generic');
+  });
+
+  it('a fresh composition module hydrated with activeVehicleProfileSource "vin" or "default" still lets auto-select act', async () => {
+    for (const source of ['vin', 'default'] as const) {
+      const composition = await bootFresh();
+      composition.settingsStore.update({ activeVehicleProfileId: 'generic', activeVehicleProfileSource: source });
+
+      composition.applyVinAutoSelect('WBA00000000000001', [fakeMatch]);
+
+      expect(composition.settingsStore.getSettings().activeVehicleProfileId).toBe('fake-matched-car');
+    }
+  });
+
+  it('applyVinAutoSelect itself sets the source to "vin" (never leaves it looking like a user choice)', async () => {
+    const composition = await bootFresh();
+
+    composition.applyVinAutoSelect('WBA00000000000001', [fakeMatch]);
+
+    expect(composition.settingsStore.getSettings().activeVehicleProfileSource).toBe('vin');
+  });
+
+  it('setActiveVehicleProfileIdExplicit persists the source as "user"', async () => {
+    const composition = await bootFresh();
+
+    composition.setActiveVehicleProfileIdExplicit('toyota-supra-b58');
+
+    expect(composition.settingsStore.getSettings().activeVehicleProfileSource).toBe('user');
   });
 });
 

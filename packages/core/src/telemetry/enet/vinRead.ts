@@ -24,6 +24,16 @@ export const VIN_DATA_IDENTIFIER = 0xf190;
 /** Default bound for the one-shot read below -- generous for a single exchange, short enough never to be felt as a stall. */
 const DEFAULT_VIN_READ_TIMEOUT_MS = 300;
 
+/**
+ * Codex R1 fix (binding, MEDIUM): a VIN is ISO 3779 -- exactly 17 characters,
+ * uppercase, from the alphabet that excludes I/O/Q (never used, to avoid
+ * confusion with 1/0). A response that decodes to 17 printable ASCII bytes
+ * but is NOT a well-formed VIN (wrong length, lowercase, contains I/O/Q, a
+ * punctuation byte) is exactly as untrustworthy as an NRC or garbage -- it is
+ * never returned, matched against a catalog, or persisted.
+ */
+const STRICT_VIN_PATTERN = /^[A-HJ-NPR-Z0-9]{17}$/;
+
 /** `0x22 0xF1 0x90` -- the whitelisted ReadDataByIdentifier request for the VIN. */
 export function buildVinRequest(): Uint8Array {
   return buildReadDataByIdentifierRequest(VIN_DATA_IDENTIFIER);
@@ -32,12 +42,14 @@ export function buildVinRequest(): Uint8Array {
 /**
  * Decodes one UDS response PDU as a VIN read answer, or `null` when it is not
  * usable evidence of one: an NRC (`0x7F ...`), a positive response for the
- * wrong SID/DID, a malformed PDU, all-padding, or any non-printable byte
- * anywhere in the (padding-stripped) data.
+ * wrong SID/DID, a malformed PDU, all-padding, any non-printable byte
+ * anywhere in the (padding-stripped) data, or -- R1 fix (binding) -- a
+ * decoded string that is not a well-formed ISO 3779 VIN (exactly 17
+ * characters, uppercase, excluding I/O/Q).
  *
  * Padding: a short/padded ECU response trails the ASCII VIN with `0x00`
  * and/or `0x20` (space) bytes -- stripped from the END only (a VIN never
- * starts with padding) before the printability check.
+ * starts with padding) before the printability/shape checks.
  */
 export function decodeVinResponse(pdu: Uint8Array): string | null {
   let parsed: ReturnType<typeof parseUdsResponse>;
@@ -65,6 +77,9 @@ export function decodeVinResponse(pdu: Uint8Array): string | null {
     if (byte < 0x20 || byte > 0x7e) return null; // non-printable -- reject the WHOLE reading, never garbage-decode it.
     vin += String.fromCharCode(byte);
   }
+  // R1 fix (binding): 17 printable ASCII bytes is necessary but not
+  // sufficient -- only a strict ISO 3779 shape is ever returned as a VIN.
+  if (!STRICT_VIN_PATTERN.test(vin)) return null;
   return vin;
 }
 

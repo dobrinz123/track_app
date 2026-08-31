@@ -244,6 +244,19 @@ export interface AppSettings {
    */
   activeVehicleProfileId: string;
   /**
+   * Codex R2 fix (ticket P4q follow-up, binding, MEDIUM): WHY
+   * `activeVehicleProfileId` is what it is -- `'user'` (an explicit chip tap,
+   * `composition.ts`'s `setActiveVehicleProfileIdExplicit`), `'vin'` (VIN
+   * auto-select, `applyVinAutoSelect`), or `'default'` (nothing chose it yet
+   * -- the static default, or the one-time confirmed-bindings migration
+   * heuristic). PERSISTED (not merely an in-memory flag): the pre-fix
+   * in-memory-only guard let VIN auto-select overwrite a profile the user had
+   * deliberately picked in an EARLIER app run, the instant the app restarted.
+   * `decideVinAutoSelect` reads this (never `'user'`) to decide whether it
+   * may act at all -- see its own doc comment.
+   */
+  activeVehicleProfileSource: 'user' | 'vin' | 'default';
+  /**
    * Ticket P4q (binding, user: "the app should know the car from OBD from
    * the start if possible"): the VIN the ENET one-shot read
    * (`@circuit/core`'s `vinRead.ts`, driven by `composition.ts`'s
@@ -377,6 +390,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   developerModeEnabled: false,
   language: 'en',
   activeVehicleProfileId: GENERIC_VEHICLE_PROFILE_ID,
+  activeVehicleProfileSource: 'default',
   lastSeenVin: null,
 };
 
