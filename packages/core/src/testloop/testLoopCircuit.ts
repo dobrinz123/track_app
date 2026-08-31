@@ -4,7 +4,13 @@ import { CURRENT_SCHEMA_VERSION, validateProfile, type RuntimeProfile } from '..
 
 import { resolveTestLoopConfig, type TestLoopConfigOverrides } from './config';
 import { buildLoopCentreline, type LoopCentreline } from './centreline';
-import { detectLoopClosure, type LoopClosure, type LoopClosureFailureReason } from './loopClosure';
+import {
+  evaluateLoopClosure,
+  qualifiedLapSamples,
+  qualifyTrack,
+  type LoopClosure,
+  type LoopClosureFailureReason,
+} from './loopClosure';
 import { deriveTestLoopCorners, type TestLoopCornerDerivation } from './syntheticCorners';
 
 /**
@@ -55,6 +61,12 @@ export type TestLoopFailureReason =
 
 export interface TestLoopCircuit {
   profile: CircuitProfile;
+  /**
+   * P5d-FIX2 N7: the QUALIFIED fixes of lap 1, in order -- the exact set the
+   * geometry was built from. The app stores these as the session out-lap
+   * trace, so what is recorded is what was learned.
+   */
+  lapSamples: LocationSample[];
   runtime: RuntimeProfile;
   corners: Corner[];
   closure: LoopClosure;
@@ -111,7 +123,10 @@ export function buildTestLoopCircuit(
   options: BuildTestLoopCircuitOptions,
 ): BuildTestLoopCircuitResult {
   const config = resolveTestLoopConfig(options.config ?? {});
-  const closureResult = detectLoopClosure(samples, options.config ?? {});
+  // P5d-FIX2 N7: qualify ONCE. The closure decision and the geometry that
+  // follows are then built from the very same set of fixes.
+  const track = qualifyTrack(samples, config);
+  const closureResult = evaluateLoopClosure(track, config);
   if (!closureResult.closed) {
     return {
       ok: false,
@@ -120,7 +135,8 @@ export function buildTestLoopCircuit(
     };
   }
   const closure = closureResult.closure;
-  const centreline = buildLoopCentreline(samples, closure, options.config ?? {});
+  const lapSamples = qualifiedLapSamples(track, closure);
+  const centreline = buildLoopCentreline(lapSamples, closure, options.config ?? {});
 
   // P5d-FIX1 item 6 (binding, Codex P5d-REV1 MEDIUM 6): a route that lies on
   // top of itself is not a circuit. An out-and-back, or a short loop lapped
@@ -195,7 +211,6 @@ export function buildTestLoopCircuit(
     return { ok: false, reason: 'profile-invalid', errors: validated.errors };
   }
 
-  const lapSamples = samples.slice(closure.startIndex, closure.closeIndex + 1);
   const cornerDerivation = deriveTestLoopCorners(
     validated.runtime,
     lapSamples,
@@ -213,6 +228,7 @@ export function buildTestLoopCircuit(
   return {
     ok: true,
     profile: validated.profile,
+    lapSamples,
     runtime: validated.runtime,
     corners: cornerDerivation.corners,
     closure,

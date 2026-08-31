@@ -18,6 +18,14 @@ import { isLearnedGeometry, type CircuitProfile } from '@circuit/core';
  */
 
 /**
+ * P5d-FIX2 N4: the lap number the Test Loop LEARNING lap is stored under --
+ * the session out-lap. Deliberately 0 and not NULL: the analysis read path
+ * (`readSessionTelemetryByLap`) drops NULL-lap rows by design, which would
+ * make the learning lap's own channels unreadable.
+ */
+export const TEST_LOOP_OUT_LAP_NUMBER = 0;
+
+/**
  * Whether live coaching cues may run for a session on this circuit.
  * `settingCoachingEnabled` is the driver's own toggle; a learned (ad-hoc)
  * circuit overrides it to `false`, never the other way round.

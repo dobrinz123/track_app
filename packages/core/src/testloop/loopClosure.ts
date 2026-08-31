@@ -42,6 +42,10 @@ export interface LoopClosure {
   startIndex: number;
   /** Index (into the ORIGINAL sample array) that closed the loop. */
   closeIndex: number;
+  /** Index of the anchor within the QUALIFIED fixes -- what the geometry is built from (P5d-FIX2 N7). */
+  startFixIndex: number;
+  /** Index of the closing fix within the QUALIFIED fixes. */
+  closeFixIndex: number;
   /** Distance driven from `startIndex` to `closeIndex`, metres. */
   lapLengthM: number;
   /** How near the start point the closing fix passed, metres. */
@@ -190,6 +194,22 @@ export function qualifyTrack(
 }
 
 /**
+ * P5d-FIX2 N7: lap 1 as the closure actually saw it -- the QUALIFIED fixes
+ * between the anchor and the closing fix, in order. The geometry is built
+ * from exactly these, never from a slice of the raw array: a fix the quality
+ * gate refused is refused for the whole pipeline, not just for the distance
+ * total it would have inflated.
+ */
+export function qualifiedLapSamples(
+  track: QualifiedTrack,
+  closure: LoopClosure,
+): LocationSample[] {
+  return track.fixes
+    .slice(closure.startFixIndex, closure.closeFixIndex + 1)
+    .map((fix) => fix.sample);
+}
+
+/**
  * Travel direction at `index` within the QUALIFIED track, measured over a
  * `baselineM` window of track either side of it (clipped at the ends).
  * `null` when there is no usable baseline and no fix reported a heading.
@@ -232,7 +252,20 @@ export function detectLoopClosure(
   overrides: TestLoopConfigOverrides = {},
 ): LoopClosureResult {
   const config = resolveTestLoopConfig(overrides);
-  const { fixes, rejected } = qualifyTrack(samples, config);
+  return evaluateLoopClosure(qualifyTrack(samples, config), config);
+}
+
+/**
+ * The same decision over a track that has ALREADY been through the quality
+ * gate -- so a caller that needs the qualified fixes afterwards (the circuit
+ * builder, P5d-FIX2 N7) qualifies once and builds its geometry from exactly
+ * the fixes this closure was decided on.
+ */
+export function evaluateLoopClosure(
+  track: QualifiedTrack,
+  config: TestLoopConfig,
+): LoopClosureResult {
+  const { fixes, rejected } = track;
   const start = fixes[0];
   const travelledM = fixes[fixes.length - 1]?.cumulativeM ?? 0;
   if (start === undefined || fixes.length < 4) {
@@ -259,6 +292,15 @@ export function detectLoopClosure(
   let sawReturn = false;
   let sawLongEnoughReturn = false;
   let departed = false;
+  /**
+   * P5d-FIX2 N1 (Codex P5d-REV2, completing REV1 finding 5): distance driven
+   * at the moment the car LAST left the closing circle. An inside run may only
+   * finalize once a full minimum lap has been covered SINCE that departure --
+   * so a route that brushes its own start point twice in quick succession (a
+   * hairpin, a roundabout at the start) can never close a "lap" out of the
+   * few metres between the two passes.
+   */
+  let departureM = 0;
 
   // P5d-FIX1 item 5: a "return" is a RUN of consecutive accepted fixes inside
   // the closing radius. The candidate within it is the closest approach, and
@@ -275,7 +317,12 @@ export function detectLoopClosure(
     const fix = fixes[index];
     if (fix === undefined) return null;
     sawReturn = true;
-    if (fix.cumulativeM < config.minLapLengthM) return null;
+    if (
+      fix.cumulativeM < config.minLapLengthM ||
+      fix.cumulativeM - departureM < config.minLapLengthM
+    ) {
+      return null;
+    }
     sawLongEnoughReturn = true;
     const course = courseAtDeg(fixes, index, config.courseBaselineM);
     if (course === null) return null;
@@ -284,6 +331,8 @@ export function detectLoopClosure(
     return {
       startIndex: start.sourceIndex,
       closeIndex: fix.sourceIndex,
+      startFixIndex: 0,
+      closeFixIndex: index,
       lapLengthM: fix.cumulativeM,
       closureDistanceM: distance(start.point, fix.point),
       headingErrorDeg,
@@ -299,7 +348,10 @@ export function detectLoopClosure(
       // The trace must LEAVE the closing circle before returning to it can
       // mean anything -- otherwise a car creeping away from the kerb closes
       // a zero-length loop on its second fix.
-      if (toStartM > config.closeRadiusM) departed = true;
+      if (toStartM > config.closeRadiusM) {
+        departed = true;
+        departureM = fix.cumulativeM;
+      }
       continue;
     }
     if (toStartM <= config.closeRadiusM) {
@@ -310,8 +362,12 @@ export function detectLoopClosure(
       }
       continue;
     }
+    const hadRun = runBestIndex !== null;
     const closure = evaluateRun();
     if (closure !== null) return { closed: true, closure, rejectedSamples: rejected };
+    // The car has just driven back OUT of the circle: that exit -- and only an
+    // exit, never every outside fix -- is where the next lap is measured from.
+    if (hadRun) departureM = fix.cumulativeM;
   }
 
   // P5d-FIX1 item 5: a trace that stops while the car is still inside the
@@ -325,7 +381,10 @@ export function detectLoopClosure(
     const pending = fixes[runBestIndex];
     if (pending !== undefined) {
       sawReturn = true;
-      if (pending.cumulativeM >= config.minLapLengthM) {
+      if (
+        pending.cumulativeM >= config.minLapLengthM &&
+        pending.cumulativeM - departureM >= config.minLapLengthM
+      ) {
         sawLongEnoughReturn = true;
         const course = courseAtDeg(fixes, runBestIndex, config.courseBaselineM);
         pendingPass =

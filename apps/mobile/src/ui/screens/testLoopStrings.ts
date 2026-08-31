@@ -45,6 +45,8 @@ export interface TestLoopStrings {
   /** Honest endings, one per closure failure. */
   failureTitle: string;
   failure: Readonly<Record<TestLoopFailureReason, string>>;
+  /** P5d-FIX2 N6: the learn phase hit its own fix cap. */
+  capDetail: (fixes: number) => string;
   tryAgain: string;
   /** Saving the loop as a reusable circuit (T6). */
   saveTitle: string;
@@ -116,6 +118,8 @@ const EN: TestLoopStrings = {
     'profile-invalid':
       'The lap could not be turned into a usable track — its shape is too irregular to time against.',
   },
+  capDetail: (fixes) =>
+    `Learning stopped after ${fixes} position fixes without a closed loop, and the recording was released.`,
   tryAgain: 'Try again',
   saveTitle: 'Save this as a circuit',
   saveHint:
@@ -184,6 +188,8 @@ const RO: TestLoopStrings = {
     'profile-invalid':
       'Turul nu a putut fi transformat într-un traseu utilizabil — forma lui este prea neregulată pentru cronometrare.',
   },
+  capDetail: (fixes) =>
+    `Învățarea s-a oprit după ${fixes} poziții GPS fără o buclă închisă, iar înregistrarea a fost eliberată.`,
   tryAgain: 'Încearcă din nou',
   saveTitle: 'Salvează ca circuit',
   saveHint:

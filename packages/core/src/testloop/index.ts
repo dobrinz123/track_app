@@ -15,7 +15,9 @@ export type { TestLoopConfig, TestLoopConfigOverrides } from './config';
 
 export {
   detectLoopClosure,
+  evaluateLoopClosure,
   headingDifferenceDeg,
+  qualifiedLapSamples,
   qualifyTrack,
   toLocalTrack,
 } from './loopClosure';

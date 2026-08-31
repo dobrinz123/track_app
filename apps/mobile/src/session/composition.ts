@@ -64,7 +64,7 @@ import {
 } from './learnedCircuitStore';
 import { TestLoopController, type TestLoopSnapshot } from './testLoopController';
 import { TestLoopLocationProvider } from './testLoopProvider';
-import { learnedCoachingEnabled } from './testLoopGuards';
+import { TEST_LOOP_OUT_LAP_NUMBER, learnedCoachingEnabled } from './testLoopGuards';
 import { createLifecycleLock } from './lifecycleLock';
 import type { DevReplayScenario } from './devReplayScenarios';
 import { startVoiceCoach } from './voiceCoach';
@@ -1141,14 +1141,21 @@ function stopTelemetryRecording(): Promise<void> {
 /** Starts recording for `sessionId` (no-op if telemetry is disabled or there is no on-device database, e.g. web preview) and starts `telemetryProvider`. Samples are tagged with `telemetryCurrentLapNumber`, updated whenever `facade`'s `lapNumber` changes -- a lap-crossing flush is also queued at that point (Telemetry addendum: "flushed on lap crossing"). */
 /**
  * P5d-FIX1 H1: writes samples recorded BEFORE the session had an id (the Test
- * Loop learn phase) into the session that grew out of them, tagged `null` --
- * the Telemetry addendum's own meaning for "recorded before the first lap".
- * A no-op when nothing is recording (telemetry disabled, or no database).
+* Loop learn phase) into the session that grew out of them.
+ *
+ * P5d-FIX2 N4 (Codex P5d-REV2): tagged lap 0 -- the out-lap -- rather than
+ * NULL. NULL rows are deliberately excluded from the analysis read path
+ * (`readSessionTelemetryByLap`), which would have made the learning lap's
+ * channels unreadable for the very lap they belong to.
  */
 async function recordPreLapTelemetry(samples: readonly TelemetrySample[]): Promise<void> {
   const recorder = telemetryRecorder;
   if (recorder === null || samples.length === 0) return;
-  for (const sample of samples) recorder.record(sample, null);
+  for (const sample of samples) recorder.record(sample, TEST_LOOP_OUT_LAP_NUMBER);
+  // `flush()` alone only awaits writes already in flight -- the rows just
+  // buffered have to be pushed out first, or the learning lap's channels sit
+  // in memory until some later batch boundary happens to carry them.
+  recorder.flushOnLapCrossing();
   await recorder.flush();
 }
 
@@ -1736,7 +1743,7 @@ async function unlockedRebuildProductionController(): Promise<void> {
   // rebuild is installing), so the only thing this call would do is stop the
   // OBD provider that is mid-stream -- a blink in the very continuity this
   // rebuild exists to preserve.
-  if (testLoopProvider === null) await stopTelemetryRecording();
+  if (!testLoopHandoverActive) await stopTelemetryRecording();
   await staleController.dispose();
   staleFacade?.dispose();
   installProductionController();
@@ -1775,7 +1782,7 @@ async function unlockedRebuildProductionController(): Promise<void> {
     // Test Loop path stops the provider itself when a learn phase ends
     // without a track (`stopTestLoop`), and the session's own end still runs
     // the ordinary teardown.
-    if (testLoopProvider === null) await gnssProvider?.stop();
+    if (!testLoopHandoverActive) await gnssProvider?.stop();
   } catch (error) {
     console.warn('[composition] stopping the GNSS provider after a controller rebuild failed', error);
   }
@@ -2064,6 +2071,25 @@ let memoryLearnedCircuits: LearnedCatalogEntry[] = [];
  * `createProductionController`), which is what makes the handover seamless.
  */
 let testLoopProvider: TestLoopLocationProvider | null = null;
+/**
+ * P5d-FIX2 N5: TRUE only for the handover window (closure -> replay). The two
+ * provider-cleanup exceptions are scoped to this flag rather than to the
+ * provider reference, so a rebuild AFTER the handover cleans up normally.
+ */
+let testLoopHandoverActive = false;
+/**
+ * P5d-FIX2 N2: which adoption steps have already happened, so a retry resumes
+ * instead of repeating them. Cleared when the adoption completes.
+ */
+interface AdoptionProgress {
+  circuitId: string;
+  storedProfile?: CircuitProfile;
+  selected?: boolean;
+  sessionId?: string;
+  recordingStarted?: boolean;
+  outLapSaved?: boolean;
+}
+let adoptionProgress: AdoptionProgress | null = null;
 /** OBD/IMU samples recorded during the learn phase, before a session id exists to tag them with. */
 let testLoopTelemetryBuffer: TelemetrySample[] = [];
 let unsubscribeTestLoopTelemetry: (() => void) | null = null;
@@ -2111,6 +2137,30 @@ function newLearnedCircuitId(): string {
   return `${hex(8)}-${hex(4)}-4${hex(3)}-a${hex(3)}-${hex(12)}`;
 }
 
+/**
+ * P5d-FIX2 N6 (Codex P5d-REV2): a learn phase that gives up on its own -- the
+ * sample cap, most of all -- must not leave the GNSS watcher and the channel
+ * buffers running behind a screen that now says it failed. The teardown is the
+ * same one `stopTestLoop()` performs, and it is idempotent, so the two paths
+ * cannot fight.
+ */
+testLoopController.subscribe((snapshot) => {
+  if (snapshot.phase !== 'failed') return;
+  if (testLoopProvider === null && !testLoopHoldsGForce) return;
+  void tearDownLearnPhase().catch((error) => {
+    console.warn('[composition] tearing down a failed learn phase failed', error);
+  });
+});
+
+/** Detaches the learn-phase recording, releases its holds and stops the buffering provider. Idempotent. */
+async function tearDownLearnPhase(): Promise<void> {
+  detachTestLoopRecording();
+  testLoopTelemetryBuffer = [];
+  await releaseTestLoopGForce();
+  await stopTelemetryRecording();
+  await disposeTestLoopProvider();
+}
+
 /** Live learn-phase state for the Test Loop screen. */
 export function subscribeTestLoop(listener: (snapshot: TestLoopSnapshot) => void): () => void {
   return testLoopController.subscribe(listener);
@@ -2118,6 +2168,21 @@ export function subscribeTestLoop(listener: (snapshot: TestLoopSnapshot) => void
 
 export function testLoopSnapshot(): TestLoopSnapshot {
   return testLoopController.snapshot();
+}
+
+/** Ownership diagnostics for Test Loop mode (P5d-FIX2 N5) -- what still holds the GNSS watcher. */
+export function testLoopDiagnostics(): {
+  providerAttached: boolean;
+  handoverActive: boolean;
+  bufferedTelemetry: number;
+  droppedTelemetry: number;
+} {
+  return {
+    providerAttached: testLoopProvider !== null,
+    handoverActive: testLoopHandoverActive,
+    bufferedTelemetry: testLoopTelemetryBuffer.length,
+    droppedTelemetry: testLoopTelemetryDropped,
+  };
 }
 
 /**
@@ -2206,12 +2271,7 @@ export async function startTestLoop(): Promise<
 export async function stopTestLoop(): Promise<TestLoopSnapshot> {
   const snapshot = testLoopController.stop();
   if (snapshot.phase !== 'learned' && snapshot.phase !== 'adopting') {
-    await lifecycleLock.run(async () => {
-      detachTestLoopRecording();
-      await releaseTestLoopGForce();
-      await stopTelemetryRecording();
-      await disposeTestLoopProvider();
-    });
+    await lifecycleLock.run(() => tearDownLearnPhase());
   }
   return snapshot;
 }
@@ -2231,6 +2291,7 @@ export function retryTestLoopAdoption(): void {
 async function disposeTestLoopProvider(): Promise<void> {
   const provider = testLoopProvider;
   testLoopProvider = null;
+  testLoopHandoverActive = false;
   if (provider === null) return;
   try {
     await provider.stop();
@@ -2251,38 +2312,58 @@ async function adoptLearnedCircuit(circuit: TestLoopCircuit): Promise<void> {
   const provider = testLoopProvider;
   // From here on the learner is done, but every fix still arrives and is
   // still kept -- the controller receives them after it is armed, in order.
+  testLoopHandoverActive = true;
   provider?.beginHandover();
-  const learningSamples = provider?.bufferedSamples() ?? [];
+  // P5d-FIX2 N7: the out-lap trace is the QUALIFIED lap the geometry was built
+  // from, not everything the buffer happens to hold by now.
+  const learningSamples = circuit.lapSamples;
 
   await lifecycleLock.run(async () => {
+    // P5d-FIX2 N2 (Codex P5d-REV2 HIGH 2): every step below is recorded in a
+    // ledger, and every step is skipped when the ledger says it already
+    // happened. A retry after a failure half-way through therefore RESUMES --
+    // it never inserts a second circuit, starts a second session, or writes
+    // the out-lap trace twice.
+    const ledger = (adoptionProgress ??= { circuitId: circuit.profile.circuitId });
+
     // 1. Keep it. A learned circuit that cannot be stored cannot be analysed
     //    after a restart, so this failing is a real failure, not a warning.
-    let profile = circuit.profile;
-    if (learnedCircuitStore !== null) {
-      const stored = await putLearnedCircuitWithFreshId(circuit);
-      profile = stored.profile;
-    } else {
-      // Web dev preview: no database, so the learned circuit lives for this
-      // process only. It is still a real circuit while it lasts.
-      memoryLearnedCircuits = [
-        ...memoryLearnedCircuits.filter(
-          (entry) => entry.circuit.profile.circuitId !== profile.circuitId,
-        ),
-        { circuit: { profile, runtime: circuit.runtime, corners: circuit.corners }, listed: false },
-      ];
+    if (ledger.storedProfile === undefined) {
+      if (learnedCircuitStore !== null) {
+        const stored = await putLearnedCircuitWithFreshId(circuit);
+        ledger.storedProfile = stored.profile;
+      } else {
+        // Web dev preview: no database, so the learned circuit lives for this
+        // process only. It is still a real circuit while it lasts.
+        const profile = circuit.profile;
+        memoryLearnedCircuits = [
+          ...memoryLearnedCircuits.filter(
+            (entry) => entry.circuit.profile.circuitId !== profile.circuitId,
+          ),
+          {
+            circuit: { profile, runtime: circuit.runtime, corners: circuit.corners },
+            listed: false,
+          },
+        ];
+        ledger.storedProfile = profile;
+      }
+      publishLearnedCircuits();
     }
-    publishLearnedCircuits();
+    const profile = ledger.storedProfile;
 
     // 2. Select it, and rebuild the production controller for it. Both go
     //    through the SAME unlocked routine `selectCircuit()` uses -- this
     //    section already holds the lock, so the public wrapper would deadlock.
-    const entry = circuitCatalog.get(profile.circuitId);
-    if (entry === null) {
-      throw new Error(`the learned circuit ${profile.circuitId} could not be registered`);
-    }
-    await unlockedApplySelection(entry);
-    if (productionControllerCircuitId !== profile.circuitId) {
-      await unlockedRebuildProductionController();
+    if (!ledger.selected) {
+      const entry = circuitCatalog.get(profile.circuitId);
+      if (entry === null) {
+        throw new Error(`the learned circuit ${profile.circuitId} could not be registered`);
+      }
+      await unlockedApplySelection(entry);
+      if (productionControllerCircuitId !== profile.circuitId) {
+        await unlockedRebuildProductionController();
+      }
+      ledger.selected = true;
     }
     const ctrl = controller;
     if (ctrl === null) throw new Error('no production controller to run the learned circuit on');
@@ -2291,33 +2372,53 @@ async function adoptLearnedCircuit(circuit: TestLoopCircuit): Promise<void> {
     //    skips calibration (the same path `resumeRecovery()` uses): the
     //    geometry came from this driver, on this road, minutes ago -- there is
     //    nothing a recognition lap could add to it.
-    await ctrl.start('session');
-    ctrl.arm();
-    const sessionId = ctrl.diagnostics().sessionId;
-    if (sessionId === null) throw new Error('the learned-circuit session did not start');
+    if (ledger.sessionId === undefined) {
+      await ctrl.start('session');
+      ctrl.arm();
+      const startedSessionId = ctrl.diagnostics().sessionId;
+      if (startedSessionId === null) throw new Error('the learned-circuit session did not start');
+      ledger.sessionId = startedSessionId;
+    }
+    const sessionId = ledger.sessionId;
 
     // 4. The recording pipeline the learn phase was already running now
     //    belongs to a session: same hooks a normal start goes through.
-    const startedAtUtc = new Date().toISOString();
-    startTelemetryRecording(sessionId);
-    initializeSessionStage(sessionId, startedAtUtc);
-    if (db !== null) {
-      await setActiveSession(db, { sessionId, circuitId: profile.circuitId, startedAtUtc });
+    //
+    //    P5d-FIX2 N3: the learn-phase subscriptions are detached in the SAME
+    //    synchronous step that attaches the session's recorder -- no await
+    //    between them, so no sample can ever reach both and be written twice.
+    if (!ledger.recordingStarted) {
+      detachTestLoopRecording();
+      startTelemetryRecording(sessionId);
+      const startedAtUtc = new Date().toISOString();
+      initializeSessionStage(sessionId, startedAtUtc);
+      ledger.recordingStarted = true;
+      if (db !== null) {
+        await setActiveSession(db, { sessionId, circuitId: profile.circuitId, startedAtUtc });
+      }
+      await flushTestLoopTelemetry();
+      await releaseTestLoopGForce();
     }
-    detachTestLoopRecording();
-    await flushTestLoopTelemetry();
-    await releaseTestLoopGForce();
 
     // 5. The learning lap is STORED as the session's out-lap trace (lap 0),
     //    so the drive that defined the track is not lost.
-    if (learningSamples.length > 0 && repository !== null) {
-      await repository.saveTelemetry(sessionId, 0, learningSamples);
+    if (!ledger.outLapSaved) {
+      if (learningSamples.length > 0 && repository !== null) {
+        await repository.saveTelemetry(sessionId, 0, learningSamples);
+      }
+      ledger.outLapSaved = true;
     }
 
     // 6. Finally, hand the whole backlog to the controller in order -- the
     //    learning lap first, then every fix that arrived while this ran. From
     //    the next fix onwards the session is simply live.
     provider?.flushBuffered();
+    // P5d-FIX2 N5: the handover is over. The module lets go of the buffering
+    // provider (the running controller keeps its own reference) so every later
+    // rebuild takes the ORDINARY provider-cleanup path again.
+    testLoopProvider = null;
+    testLoopHandoverActive = false;
+    adoptionProgress = null;
   });
 }
 

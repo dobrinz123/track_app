@@ -8,6 +8,8 @@ import {
   buildTestLoopCircuit,
   detectLoopClosure,
   isLearnedGeometry,
+  qualifiedLapSamples,
+  qualifyTrack,
 } from '../../src/testloop';
 
 import { rectangleLoopSamples, sampleDensePath, uTurnPath } from './traces';
@@ -26,7 +28,11 @@ describe('buildLoopCentreline (P5d T1b)', () => {
     expect(closure.closed).toBe(true);
     if (!closure.closed) return;
 
-    const centreline = buildLoopCentreline(samples, closure.closure);
+    const track = qualifyTrack(samples, DEFAULT_TEST_LOOP_CONFIG);
+    const centreline = buildLoopCentreline(
+      qualifiedLapSamples(track, closure.closure),
+      closure.closure,
+    );
 
     expect(centreline.local.length).toBeGreaterThanOrEqual(50);
     expect(centreline.points.length).toBe(centreline.local.length);
@@ -55,7 +61,11 @@ describe('buildLoopCentreline (P5d T1b)', () => {
     expect(closure.closed).toBe(true);
     if (!closure.closed) return;
 
-    const centreline = buildLoopCentreline(samples, closure.closure);
+    const track = qualifyTrack(samples, DEFAULT_TEST_LOOP_CONFIG);
+    const centreline = buildLoopCentreline(
+      qualifiedLapSamples(track, closure.closure),
+      closure.closure,
+    );
 
     // The true loop is ~677 m; a noisy raw trace is longer, a smoothed line is not.
     expect(centreline.totalLengthM).toBeGreaterThan(600);

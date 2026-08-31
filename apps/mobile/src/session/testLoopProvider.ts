@@ -33,6 +33,8 @@ export class TestLoopLocationProvider implements LocationProvider {
   private phase: TestLoopProviderPhase = 'learning';
   private buffer: LocationSample[] = [];
   private dropped = 0;
+  /** True while `flushBuffered()` is draining -- new fixes queue behind the backlog. */
+  private draining = false;
   private upstreamUnsubscribe: (() => void) | null = null;
   private readonly listeners = new Set<(sample: LocationSample) => void>();
 
@@ -76,12 +78,28 @@ export class TestLoopLocationProvider implements LocationProvider {
   /**
    * The controller is armed: replay the backlog in order -- the learning lap
    * first, then everything driven while the handover ran -- and go live.
+   *
+   * P5d-FIX2 N2 (Codex P5d-REV2 HIGH 2): the backlog is drained INCREMENTALLY
+   * and the phase flips to live only once it is empty. Two consequences the
+   * previous version got wrong: a listener that throws can no longer take the
+   * un-emitted tail with it (each delivery is isolated, and the cursor moves
+   * only after the attempt), and a fix that arrives DURING the drain is still
+   * appended to the backlog -- so it is delivered after the fixes that precede
+   * it, never ahead of them.
    */
   flushBuffered(): void {
-    const backlog = this.buffer;
-    this.buffer = [];
-    this.phase = 'live';
-    for (const sample of backlog) this.emit(sample);
+    this.draining = true;
+    try {
+      while (this.buffer.length > 0) {
+        const sample = this.buffer[0];
+        if (sample === undefined) break;
+        this.emit(sample);
+        this.buffer.shift();
+      }
+      this.phase = 'live';
+    } finally {
+      this.draining = false;
+    }
   }
 
   /** The learning lap's own fixes, in order (the trace that becomes the centreline). */
@@ -99,7 +117,7 @@ export class TestLoopLocationProvider implements LocationProvider {
   }
 
   private ingest(sample: LocationSample): void {
-    if (this.phase === 'live') {
+    if (this.phase === 'live' && !this.draining) {
       this.emit(sample);
       return;
     }
@@ -111,7 +129,14 @@ export class TestLoopLocationProvider implements LocationProvider {
     if (this.phase === 'learning') this.onLearnSample(sample);
   }
 
+  /** Delivers one fix, isolating each listener: one throwing consumer never stops the replay. */
   private emit(sample: LocationSample): void {
-    for (const listener of [...this.listeners]) listener(sample);
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(sample);
+      } catch (error) {
+        console.warn('[testLoopProvider] a sample listener threw; continuing the replay', error);
+      }
+    }
   }
 }

@@ -181,6 +181,11 @@ export function TestLoopScreen({ navigation }: Props): React.JSX.Element {
             <Text style={styles.mono} maxFontSizeMultiplier={1.3}>
               {strings.travelled(metres(snapshot.failure.travelledM))}
             </Text>
+            {snapshot.failure.sampleCap === undefined ? null : (
+              <Text style={styles.muted} maxFontSizeMultiplier={1.3}>
+                {strings.capDetail(snapshot.failure.sampleCap)}
+              </Text>
+            )}
           </View>
         ) : null}
 

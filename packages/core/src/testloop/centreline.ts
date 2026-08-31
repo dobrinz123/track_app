@@ -121,12 +121,15 @@ function signedArea(points: readonly LocalPoint[]): number {
  * at most `closeRadiusM` away by construction.
  */
 export function buildLoopCentreline(
-  samples: readonly LocationSample[],
+  lapSamples: readonly LocationSample[],
   closure: LoopClosure,
   overrides: TestLoopConfigOverrides = {},
 ): LoopCentreline {
   const config = resolveTestLoopConfig(overrides);
-  const lap = samples.slice(closure.startIndex, closure.closeIndex + 1);
+  // P5d-FIX2 N7: `lapSamples` are the QUALIFIED fixes of lap 1 (see
+  // `qualifiedLapSamples`) -- this builder never re-slices a raw array, so a
+  // fix the closure refused can never reappear as a spike in the centreline.
+  const lap = [...lapSamples];
   const first = lap[0];
   if (first === undefined || lap.length < 4) {
     throw new RangeError('buildLoopCentreline: lap 1 slice is too short to be a loop');

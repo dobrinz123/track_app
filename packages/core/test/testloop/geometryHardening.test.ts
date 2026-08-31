@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { MAX_TEST_LOOP_CORNERS, buildTestLoopCircuit, decodeLearnedCircuit, encodeLearnedCircuit } from '../../src/testloop';
+import {
+  MAX_TEST_LOOP_CORNERS,
+  buildTestLoopCircuit,
+  decodeLearnedCircuit,
+  encodeLearnedCircuit,
+  overlapFractionOf,
+} from '../../src/testloop';
 
 import { rectangleLoopSamples, sampleDensePath, smallLoopPath, wigglyLoopPath } from './traces';
 
@@ -12,14 +18,27 @@ const OPTIONS = {
 
 /** Ticket P5d-FIX1 items 6, 7, 8 and H2 (Codex P5d-REV1). */
 describe('buildTestLoopCircuit -- degenerate traces (P5d-FIX1 item 6)', () => {
-  it('rejects a sub-300 m loop driven round twice to make up the distance', () => {
-    // Three laps of an ~230 m loop: cumulative distance passes 300 m, and the
-    // "lap" that closes would be two stacked copies of the same road.
+  it('refuses a sub-300 m loop driven round and round to make up the distance', () => {
+    // Three laps of an ~230 m loop. Since P5d-FIX2 N1 each pass is judged on
+    // the distance driven SINCE the car last left the start circle, so this is
+    // refused as what it is -- a loop that is too short -- rather than being
+    // stacked into a two-copy circuit.
     const result = buildTestLoopCircuit(sampleDensePath(smallLoopPath(), { laps: 3 }), OPTIONS);
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.reason).toBe('self-overlapping');
+    expect(result.reason).toBe('too-short');
+  });
+
+  it('measures self-overlap directly: a doubled ring is not a circuit', () => {
+    const oneLap = Array.from({ length: 120 }, (_, index) => {
+      const angle = (2 * Math.PI * index) / 120;
+      return { e: 100 * Math.cos(angle), n: 100 * Math.sin(angle) };
+    });
+    const doubled = [...oneLap, ...oneLap.map((point) => ({ e: point.e + 1, n: point.n + 1 }))];
+
+    expect(overlapFractionOf(oneLap, 12, 60)).toBeLessThan(0.15);
+    expect(overlapFractionOf(doubled, 12, 60)).toBeGreaterThan(0.5);
   });
 
   it('accepts an ordinary single-traversal loop', () => {

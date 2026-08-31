@@ -32,6 +32,8 @@ function makeController(
 
 /** Two laps: the first teaches the track, the second proves the car drove through the start. */
 const TWO_LAPS = rectangleLoopSamples({ laps: 2 });
+/** One lap plus the few fixes it takes to drive back out of the closing radius. */
+const ONE_LAP_PLUS_EXIT = TWO_LAPS.slice(0, Math.round(TWO_LAPS.length / 2) + 5);
 
 describe('TestLoopController (P5d T2, T5, P5d-FIX1 H3)', () => {
   it('starts idle and reports progress while learning', () => {
@@ -120,6 +122,22 @@ describe('TestLoopController (P5d T2, T5, P5d-FIX1 H3)', () => {
     expect(controller.snapshot().learned).not.toBeNull();
   });
 
+  it('closes on the FIRST return, as soon as the car drives back out of the radius (P5d-FIX2 N1)', async () => {
+    const controller = makeController();
+    controller.start();
+    for (const sample of ONE_LAP_PLUS_EXIT) controller.feed(sample);
+    await settle();
+
+    const snapshot = controller.snapshot();
+    expect(snapshot.phase).toBe('learned');
+    expect(snapshot.learned!.lengthM).toBeGreaterThan(600);
+    expect(snapshot.learned!.lengthM).toBeLessThan(750);
+    // The learning lap is ONE lap of fixes, not two.
+    expect(controller.learnedLapSamples().length).toBeLessThanOrEqual(
+      Math.round(TWO_LAPS.length / 2) + 1,
+    );
+  });
+
   it('ends a never-closed loop gracefully, naming what was missing (T5)', () => {
     const controller = makeController();
     controller.start();
@@ -164,7 +182,7 @@ describe('TestLoopController (P5d T2, T5, P5d-FIX1 H3)', () => {
     expect(learned).toHaveLength(1);
   });
 
-  it('gives up honestly once the trace is longer than the mode is for', () => {
+  it('gives up at the sample cap, says how many fixes it refused, and frees the buffer (N6)', () => {
     const controller = new TestLoopController({
       nowUtc: () => '2026-08-31T09:00:00.000Z',
       makeCircuitId: () => 'learned-x',
@@ -178,5 +196,9 @@ describe('TestLoopController (P5d T2, T5, P5d-FIX1 H3)', () => {
     const snapshot = controller.snapshot();
     expect(snapshot.phase).toBe('failed');
     expect(snapshot.failure!.reason).toBe('not-returned');
+    expect(snapshot.failure!.sampleCap).toBe(10);
+    // The trace is released: a learn phase that gave up holds no memory.
+    expect(snapshot.sampleCount).toBe(0);
+    expect(controller.learnedLapSamples()).toEqual([]);
   });
 });

@@ -44,6 +44,12 @@ export interface LearnedTrackSummary {
 export interface TestLoopFailure {
   reason: TestLoopFailureReason;
   travelledM: number;
+  /**
+   * P5d-FIX2 N6: set when the learn phase gave up because it hit its own fix
+   * cap -- the number of fixes it consumed. Structured, not prose: the screen
+   * renders it in the driver's language.
+   */
+  sampleCap?: number;
 }
 
 export interface TestLoopSnapshot {
@@ -98,6 +104,10 @@ export class TestLoopController {
   private travelled = 0;
   private distanceToStart: number | null = null;
   private departed = false;
+  /** Whether the previous fix was inside the closing radius -- the exit edge is what triggers a closure test. */
+  private wasInside = true;
+  /** The QUALIFIED fixes of the learned lap (P5d-FIX2 N7), kept for the session out-lap trace. */
+  private lapSamples: LocationSample[] = [];
   private learned: LearnedTrackSummary | null = null;
   private failure: TestLoopFailure | null = null;
   /** P5d-FIX1 H3: the learned circuit waiting to be kept -- retried, never re-derived. */
@@ -135,6 +145,8 @@ export class TestLoopController {
     this.travelled = 0;
     this.distanceToStart = null;
     this.departed = false;
+    this.wasInside = true;
+    this.lapSamples = [];
     this.learned = null;
     this.failure = null;
     this.pendingCircuit = null;
@@ -154,10 +166,20 @@ export class TestLoopController {
     if (start !== undefined) {
       const toStartM = haversineM(start, sample);
       this.distanceToStart = toStartM;
-      if (toStartM > DEFAULT_TEST_LOOP_CONFIG.closeRadiusM) this.departed = true;
+      const insideNow = toStartM <= DEFAULT_TEST_LOOP_CONFIG.closeRadiusM;
+      if (!insideNow) this.departed = true;
+      // P5d-FIX2 N1 (Codex P5d-REV2 HIGH 1): EVERY fix is judged, and the
+      // closure is evaluated the moment the car drives back OUT of the closing
+      // radius after a pass through it -- which is exactly when the geometry
+      // becomes decidable. Evaluating only while inside the radius (the
+      // previous behaviour) could never confirm a pass, so the track was only
+      // learned on the NEXT lap and a whole lap of driving was swallowed into
+      // the out-lap.
+      const leftTheRadius = this.wasInside && !insideNow;
+      this.wasInside = insideNow;
       if (
         this.departed &&
-        toStartM <= DEFAULT_TEST_LOOP_CONFIG.closeRadiusM &&
+        leftTheRadius &&
         this.travelled >= DEFAULT_TEST_LOOP_CONFIG.minLapLengthM
       ) {
         this.tryClose();
@@ -165,10 +187,13 @@ export class TestLoopController {
       }
     } else {
       this.distanceToStart = 0;
+      this.wasInside = true;
     }
 
-    if (this.samples.length >= (this.deps.maxSamples ?? DEFAULT_MAX_SAMPLES)) {
-      this.fail();
+    const cap = this.deps.maxSamples ?? DEFAULT_MAX_SAMPLES;
+    if (this.samples.length >= cap) {
+      // P5d-FIX2 N6: say what happened, in numbers the driver can act on.
+      this.fail(cap);
       return;
     }
     this.emit();
@@ -192,6 +217,8 @@ export class TestLoopController {
     this.travelled = 0;
     this.distanceToStart = null;
     this.departed = false;
+    this.wasInside = true;
+    this.lapSamples = [];
     this.learned = null;
     this.failure = null;
     this.pendingCircuit = null;
@@ -212,7 +239,13 @@ export class TestLoopController {
       // a not-yet into a failure.
       return;
     }
+    this.lapSamples = result.lapSamples;
     this.adopt(result);
+  }
+
+  /** The QUALIFIED fixes of the learned lap -- what the session stores as its out-lap trace. */
+  learnedLapSamples(): LocationSample[] {
+    return [...this.lapSamples];
   }
 
   /**
@@ -258,13 +291,18 @@ export class TestLoopController {
     this.adopt(circuit);
   }
 
-  private fail(): void {
+  private fail(sampleCap?: number): void {
     const closure = detectLoopClosure(this.samples);
     this.failure = {
       reason: closure.closed ? 'not-returned' : closure.reason,
       travelledM: closure.closed ? closure.closure.lapLengthM : closure.travelledM,
+      ...(sampleCap === undefined ? {} : { sampleCap }),
     };
     this.phase = 'failed';
+    // P5d-FIX2 N6: a learn phase that gave up holds no trace. The buffers are
+    // released here, not left to grow until the screen happens to be dismissed.
+    this.samples = [];
+    this.lapSamples = [];
     this.emit();
   }
 

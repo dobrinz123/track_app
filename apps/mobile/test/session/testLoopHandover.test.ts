@@ -114,6 +114,8 @@ function provider(): StubLocationProviderInstance {
 
 /** Three laps of the loop: lap 1 teaches the track, the rest is driving. */
 const THREE_LAPS = rectangleLoopSamples({ laps: 3 });
+/** Where lap 1 ends: the closure fires a few fixes past the start point. */
+const LAP_SAMPLES = Math.round(THREE_LAPS.length / 3);
 
 describe('Test Loop handover (P5d-FIX1 H1, H3)', () => {
   let db: SqlDatabase;
@@ -180,10 +182,89 @@ describe('Test Loop handover (P5d-FIX1 H1, H3)', () => {
     expect(lapCount).toBeGreaterThanOrEqual(1);
 
     // The learning lap itself is STORED: lap 0 is its trace.
-    const rows = await db.getAllAsync<{ lapNumber: number }>(
-      'SELECT lapNumber FROM telemetry ORDER BY lapNumber',
+    const rows = await db.getAllAsync<{ lapNumber: number; payload: string }>(
+      'SELECT lapNumber, payload FROM telemetry ORDER BY lapNumber',
     );
     expect(rows.map((row) => row.lapNumber)).toContain(0);
+
+    // P5d-FIX2 N1: lap 0 holds ONE learning lap, not the lap and a half the
+    // old late-closure behaviour swallowed into it.
+    const outLap = rows.find((row) => row.lapNumber === 0);
+    const storedSamples = JSON.parse(outLap!.payload) as unknown[];
+    expect(storedSamples.length).toBeLessThanOrEqual(LAP_SAMPLES + 4);
+    // ...and a TIMED lap exists beside it.
+    expect(rows.some((row) => row.lapNumber >= 1)).toBe(true);
+  });
+
+  it('hands the GNSS watcher back after the handover, so later rebuilds clean up normally (N5)', async () => {
+    const composition = await boot(db);
+    await composition.startTestLoop();
+    const gnss = provider();
+    for (const sample of THREE_LAPS) {
+      gnss.push(sample);
+      await settle();
+    }
+    await settle();
+
+    expect(composition.testLoopSnapshot().phase).toBe('learned');
+    expect(composition.testLoopDiagnostics().providerAttached).toBe(false);
+    expect(composition.testLoopDiagnostics().handoverActive).toBe(false);
+  });
+
+  it('tears the providers down when a learn phase ends without a track (N5, N6)', async () => {
+    const composition = await boot(db);
+    await composition.startTestLoop();
+    const gnss = provider();
+    for (const sample of THREE_LAPS.slice(0, 12)) gnss.push(sample);
+
+    const stopped = await composition.stopTestLoop();
+    expect(stopped.phase).toBe('failed');
+    expect(composition.testLoopDiagnostics().providerAttached).toBe(false);
+    expect(gnss.stopCount).toBeGreaterThan(0);
+    expect(gnss.running).toBe(false);
+  });
+
+  it('resumes a half-finished handover on retry instead of repeating it (N2)', async () => {
+    const composition = await boot(db);
+    await composition.startTestLoop();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    // Break the LAST step (storing the out-lap trace) so the handover fails
+    // after the circuit was stored, selected and the session started.
+    await db.execAsync('DROP TABLE telemetry');
+    const gnss = provider();
+    for (const sample of THREE_LAPS) {
+      gnss.push(sample);
+      await settle();
+    }
+    await settle();
+
+    expect(composition.testLoopSnapshot().phase).toBe('error');
+    const circuitsAfterFailure = composition.listLearnedCircuits().length;
+    expect(circuitsAfterFailure).toBe(1);
+    const sessionsAfterFailure = await db.getAllAsync<{ sessionId: string }>(
+      'SELECT sessionId FROM sessions',
+    );
+
+    // Repair the database and retry: the steps that already succeeded must not
+    // run again -- no second circuit, no second session.
+    await db.execAsync(
+      'CREATE TABLE IF NOT EXISTS telemetry (sessionId TEXT NOT NULL, lapNumber INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY (sessionId, lapNumber))',
+    );
+    composition.retryTestLoopAdoption();
+    await settle();
+    await settle();
+
+    expect(composition.testLoopSnapshot().phase).toBe('learned');
+    expect(composition.listLearnedCircuits()).toHaveLength(circuitsAfterFailure);
+    const sessionsAfterRetry = await db.getAllAsync<{ sessionId: string }>(
+      'SELECT sessionId FROM sessions',
+    );
+    expect(sessionsAfterRetry.length).toBe(sessionsAfterFailure.length);
+    const outLap = await db.getAllAsync<{ lapNumber: number }>(
+      'SELECT lapNumber FROM telemetry WHERE lapNumber = 0',
+    );
+    expect(outLap).toHaveLength(1);
+    warn.mockRestore();
   });
 
   it('reports an error (not a learned track) when the learned circuit cannot be kept', async () => {
