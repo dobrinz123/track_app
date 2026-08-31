@@ -106,6 +106,10 @@ export class TestLoopController {
   private departed = false;
   /** Whether the previous fix was inside the closing radius -- the exit edge is what triggers a closure test. */
   private wasInside = true;
+  /** The last fix that passed the quality gate -- what distance and the radius edge are measured against. */
+  private lastQualified: LocationSample | null = null;
+  /** The first QUALIFIED fix: the loop is anchored there, exactly as the core anchors it. */
+  private qualifiedStart: LocationSample | null = null;
   /** The QUALIFIED fixes of the learned lap (P5d-FIX2 N7), kept for the session out-lap trace. */
   private lapSamples: LocationSample[] = [];
   private learned: LearnedTrackSummary | null = null;
@@ -146,6 +150,8 @@ export class TestLoopController {
     this.distanceToStart = null;
     this.departed = false;
     this.wasInside = true;
+    this.lastQualified = null;
+    this.qualifiedStart = null;
     this.lapSamples = [];
     this.learned = null;
     this.failure = null;
@@ -156,38 +162,51 @@ export class TestLoopController {
     this.emit();
   }
 
-  /** Feeds one GNSS fix. Ignored unless a learn phase is running. */
+  /**
+   * Feeds one GNSS fix. Ignored unless a learn phase is running.
+   *
+   * P5d-FIX3 F8 (Codex P5d-REV3 HIGH): only a fix that would pass the CORE's
+   * own quality gate is allowed to move this state machine. An urban-canyon
+   * reflection that lands 500 m away is not a departure, not a metre driven,
+   * and above all not the exit that confirms a lap: letting it flip
+   * `wasInside` consumed the one edge that triggers the closure test, and the
+   * loop then could not be learned until a whole further lap had been driven.
+   * The raw fix is still buffered -- the core re-qualifies the whole trace
+   * when it builds the circuit -- it simply proves nothing on its own.
+   */
   feed(sample: LocationSample): void {
     if (this.phase !== 'learning') return;
-    const previous = this.samples[this.samples.length - 1];
-    const start = this.samples[0];
+    const start = this.qualifiedStart;
     this.samples.push(sample);
-    if (previous !== undefined) this.travelled += haversineM(previous, sample);
-    if (start !== undefined) {
-      const toStartM = haversineM(start, sample);
-      this.distanceToStart = toStartM;
-      const insideNow = toStartM <= DEFAULT_TEST_LOOP_CONFIG.closeRadiusM;
-      if (!insideNow) this.departed = true;
-      // P5d-FIX2 N1 (Codex P5d-REV2 HIGH 1): EVERY fix is judged, and the
-      // closure is evaluated the moment the car drives back OUT of the closing
-      // radius after a pass through it -- which is exactly when the geometry
-      // becomes decidable. Evaluating only while inside the radius (the
-      // previous behaviour) could never confirm a pass, so the track was only
-      // learned on the NEXT lap and a whole lap of driving was swallowed into
-      // the out-lap.
-      const leftTheRadius = this.wasInside && !insideNow;
-      this.wasInside = insideNow;
-      if (
-        this.departed &&
-        leftTheRadius &&
-        this.travelled >= DEFAULT_TEST_LOOP_CONFIG.minLapLengthM
-      ) {
-        this.tryClose();
-        if (this.phase !== 'learning') return;
+
+    if (this.qualifies(sample)) {
+      const previous = this.lastQualified;
+      if (previous !== null) this.travelled += haversineM(previous, sample);
+      this.lastQualified = sample;
+      this.qualifiedStart ??= sample;
+
+      if (start !== null && start !== undefined) {
+        const toStartM = haversineM(start, sample);
+        this.distanceToStart = toStartM;
+        const insideNow = toStartM <= DEFAULT_TEST_LOOP_CONFIG.closeRadiusM;
+        if (!insideNow) this.departed = true;
+        // P5d-FIX2 N1: the closure is evaluated the moment the car drives back
+        // OUT of the closing radius after a pass through it -- which is exactly
+        // when the geometry becomes decidable.
+        const leftTheRadius = this.wasInside && !insideNow;
+        this.wasInside = insideNow;
+        if (
+          this.departed &&
+          leftTheRadius &&
+          this.travelled >= DEFAULT_TEST_LOOP_CONFIG.minLapLengthM
+        ) {
+          this.tryClose();
+          if (this.phase !== 'learning') return;
+        }
+      } else {
+        this.distanceToStart = 0;
+        this.wasInside = true;
       }
-    } else {
-      this.distanceToStart = 0;
-      this.wasInside = true;
     }
 
     const cap = this.deps.maxSamples ?? DEFAULT_MAX_SAMPLES;
@@ -197,6 +216,33 @@ export class TestLoopController {
       return;
     }
     this.emit();
+  }
+
+  /**
+   * The same gate `qualifyTrack` applies in `@circuit/core` (P5d-FIX3 F8):
+   * accurate enough, actually moving, and reachable from the previous accepted
+   * fix at a plausible speed. Kept deliberately in step with that function --
+   * if the two ever disagree, the controller triggers a closure test the core
+   * then refuses, which is the exact bug this guards against.
+   */
+  private qualifies(sample: LocationSample): boolean {
+    const config = DEFAULT_TEST_LOOP_CONFIG;
+    const accuracyM = sample.accuracyM;
+    if (accuracyM !== undefined && Number.isFinite(accuracyM) && accuracyM > config.maxAccuracyM) {
+      return false;
+    }
+    const speedMps = sample.speedMps;
+    if (speedMps !== undefined && Number.isFinite(speedMps) && speedMps < config.minSpeedMps) {
+      return false;
+    }
+    const previous = this.lastQualified;
+    if (previous === null) return true;
+    const gapMs = sample.tMono - previous.tMono;
+    const plausibleM =
+      gapMs > 0
+        ? Math.min(config.maxSegmentM, (config.maxSegmentSpeedMps * gapMs) / 1000)
+        : config.maxSegmentM;
+    return haversineM(previous, sample) <= plausibleM;
   }
 
   /**
@@ -218,6 +264,8 @@ export class TestLoopController {
     this.distanceToStart = null;
     this.departed = false;
     this.wasInside = true;
+    this.lastQualified = null;
+    this.qualifiedStart = null;
     this.lapSamples = [];
     this.learned = null;
     this.failure = null;

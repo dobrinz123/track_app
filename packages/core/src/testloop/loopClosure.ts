@@ -348,10 +348,12 @@ export function evaluateLoopClosure(
       // The trace must LEAVE the closing circle before returning to it can
       // mean anything -- otherwise a car creeping away from the kerb closes
       // a zero-length loop on its second fix.
-      if (toStartM > config.closeRadiusM) {
-        departed = true;
-        departureM = fix.cumulativeM;
-      }
+      // P5d-FIX3 F9 (Codex P5d-REV3): leaving the start circle for the FIRST
+      // time is not a "departure to measure from" -- the metres spent getting
+      // out of a 25 m circle belong to the lap. `departureM` stays 0 until a
+      // return has actually been evaluated and rejected (below), which is what
+      // the mid-route-pass protection is really about.
+      if (toStartM > config.closeRadiusM) departed = true;
       continue;
     }
     if (toStartM <= config.closeRadiusM) {
@@ -365,8 +367,9 @@ export function evaluateLoopClosure(
     const hadRun = runBestIndex !== null;
     const closure = evaluateRun();
     if (closure !== null) return { closed: true, closure, rejectedSamples: rejected };
-    // The car has just driven back OUT of the circle: that exit -- and only an
-    // exit, never every outside fix -- is where the next lap is measured from.
+    // A return was evaluated and REJECTED: the next lap is measured from here,
+    // so a route that brushes its own start point cannot bank the driving that
+    // came before the rejected pass towards the next one.
     if (hadRun) departureM = fix.cumulativeM;
   }
 

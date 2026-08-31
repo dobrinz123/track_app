@@ -2090,6 +2090,10 @@ interface AdoptionProgress {
   outLapSaved?: boolean;
 }
 let adoptionProgress: AdoptionProgress | null = null;
+/** P5d-FIX3 F11: bumped by every new learn phase, so a teardown queued for an older one is a no-op. */
+let teardownGeneration = 0;
+/** The teardown currently running -- a second caller awaits this one instead of starting another. */
+let teardownInFlight: Promise<void> | null = null;
 /** OBD/IMU samples recorded during the learn phase, before a session id exists to tag them with. */
 let testLoopTelemetryBuffer: TelemetrySample[] = [];
 let unsubscribeTestLoopTelemetry: (() => void) | null = null;
@@ -2152,14 +2156,148 @@ testLoopController.subscribe((snapshot) => {
   });
 });
 
-/** Detaches the learn-phase recording, releases its holds and stops the buffering provider. Idempotent. */
-async function tearDownLearnPhase(): Promise<void> {
-  detachTestLoopRecording();
-  testLoopTelemetryBuffer = [];
-  await releaseTestLoopGForce();
-  await stopTelemetryRecording();
-  await disposeTestLoopProvider();
+/**
+ * The ONE teardown of a learn phase (P5d-FIX3 F11, Codex P5d-REV3): detach the
+ * learn-phase recording, release its holds, stop the buffering provider.
+ *
+ * Memoized and generation-guarded, and it takes `lifecycleLock` itself. Two
+ * paths reach it for the same failure -- `stopTestLoop()` and the auto-teardown
+ * subscription that the failed phase fires -- and before this they could both
+ * be shutting the GLOBAL providers down at once. Now the second caller awaits
+ * the first, and a teardown queued behind a learn phase that has meanwhile
+ * been restarted does nothing at all (the generation moved on).
+ */
+function tearDownLearnPhase(): Promise<void> {
+  if (teardownInFlight !== null) return teardownInFlight;
+  const generation = teardownGeneration;
+  const run = lifecycleLock
+    .run(async () => {
+      if (generation !== teardownGeneration) return;
+      detachTestLoopRecording();
+      testLoopTelemetryBuffer = [];
+      await releaseTestLoopGForce();
+      await stopTelemetryRecording();
+      await disposeTestLoopProvider();
+    })
+    .finally(() => {
+      if (teardownInFlight === run) teardownInFlight = null;
+    });
+  teardownInFlight = run;
+  return run;
 }
+
+/**
+ * P5d-FIX3 F10 (Codex P5d-REV3 HIGH) -- the adoption journal, on disk.
+ *
+ * The in-memory ledger makes a RETRY resumable; it cannot survive the process
+ * being killed, and the window it covers contains real, durable side effects:
+ * a learned circuit row, a selected circuit, a started session. A launch that
+ * finds a half-adopted state must be able to tell which of those landed and
+ * either finish the job or undo it -- never leave an orphan row behind, and
+ * never say nothing about it.
+ *
+ * One additive `settings` row (the same table the active-session pointer uses),
+ * written BEFORE the first side effect and advanced per completed step.
+ */
+const ADOPTION_JOURNAL_KEY = 'testLoopAdoption';
+
+type AdoptionStage = 'staged' | 'stored' | 'selected' | 'session-started' | 'recording' | 'out-lap';
+
+interface AdoptionJournal {
+  circuitId: string;
+  stage: AdoptionStage;
+  sessionId?: string;
+}
+
+async function writeAdoptionJournal(journal: AdoptionJournal): Promise<void> {
+  if (db === null) return;
+  await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+    ADOPTION_JOURNAL_KEY,
+    JSON.stringify(journal),
+  ]);
+}
+
+async function clearAdoptionJournal(): Promise<void> {
+  if (db === null) return;
+  await db.runAsync('DELETE FROM settings WHERE key = ?', [ADOPTION_JOURNAL_KEY]);
+}
+
+async function readAdoptionJournal(database: SqlDatabase): Promise<AdoptionJournal | null> {
+  const rows = await database.getAllAsync<{ value: string }>(
+    'SELECT value FROM settings WHERE key = ? LIMIT 1',
+    [ADOPTION_JOURNAL_KEY],
+  );
+  const raw = rows[0]?.value;
+  if (raw === undefined) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return null;
+    const journal = parsed as Partial<AdoptionJournal>;
+    if (typeof journal.circuitId !== 'string' || typeof journal.stage !== 'string') return null;
+    return {
+      circuitId: journal.circuitId,
+      stage: journal.stage as AdoptionStage,
+      ...(typeof journal.sessionId === 'string' ? { sessionId: journal.sessionId } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Bootstrap repair: finish a half-adopted Test Loop, or undo it.
+ *
+ *  - the learned geometry IS on disk -> the expensive, irreversible half
+ *    succeeded, so the adoption is COMPLETED here (the circuit is registered by
+ *    the caller and selected below) and the driver is told the session it
+ *    belonged to was interrupted;
+ *  - the geometry is NOT there -> nothing usable survived, so the orphans are
+ *    removed: any half-written circuit row, and the session that was started
+ *    for it (closed the same way `discardRecovery()` closes one, so the next
+ *    launch cannot offer to resume a session with no geometry behind it).
+ *
+ * Runs before the production controller and the history store are built, so
+ * the selection it settles is the one they are built for. Never throws.
+ */
+async function repairInterruptedAdoption(database: SqlDatabase): Promise<void> {
+  const journal = await readAdoptionJournal(database);
+  if (journal === null) return;
+  try {
+    const entry = learnedCircuitStore?.get(journal.circuitId) ?? null;
+    if (entry !== null) {
+      applySelectedCircuit({
+        profile: entry.profile,
+        runtime: entry.runtime,
+        corners: entry.corners,
+      });
+      setRecoveryNotice(
+        `The test loop "${entry.profile.displayName}" was kept, but the session it started was interrupted.`,
+      );
+    } else {
+      if (journal.sessionId !== undefined && repository !== null) {
+        await repository.saveCheckpoint(
+          journal.sessionId,
+          { state: 'sessionComplete', lapNumber: 0, context: {} },
+          [],
+        );
+      }
+      await setActiveSession(database, null);
+      await database.runAsync('DELETE FROM learned_circuits WHERE circuit_id = ?', [
+        journal.circuitId,
+      ]);
+      if (learnedCircuitStore !== null) await learnedCircuitStore.refresh();
+      publishLearnedCircuits();
+      setRecoveryNotice(
+        'A test loop could not be saved before the app closed, so it was discarded.',
+      );
+    }
+  } catch (error) {
+    console.warn('[composition] repairing an interrupted test-loop adoption failed', error);
+  } finally {
+    await clearAdoptionJournal();
+  }
+}
+
 
 /** Live learn-phase state for the Test Loop screen. */
 export function subscribeTestLoop(listener: (snapshot: TestLoopSnapshot) => void): () => void {
@@ -2252,6 +2390,9 @@ export async function startTestLoop(): Promise<
       return { ok: false as const, reason: 'session-active' as const };
     }
     await disposeTestLoopProvider();
+    // A fresh learn phase: any teardown still queued for the previous one must
+    // not reach in and stop the providers this one is about to use.
+    teardownGeneration += 1;
     const provider = new TestLoopLocationProvider(gnssProvider, (sample) =>
       testLoopController.feed(sample),
     );
@@ -2271,7 +2412,7 @@ export async function startTestLoop(): Promise<
 export async function stopTestLoop(): Promise<TestLoopSnapshot> {
   const snapshot = testLoopController.stop();
   if (snapshot.phase !== 'learned' && snapshot.phase !== 'adopting') {
-    await lifecycleLock.run(() => tearDownLearnPhase());
+    await tearDownLearnPhase();
   }
   return snapshot;
 }
@@ -2325,6 +2466,9 @@ async function adoptLearnedCircuit(circuit: TestLoopCircuit): Promise<void> {
     // it never inserts a second circuit, starts a second session, or writes
     // the out-lap trace twice.
     const ledger = (adoptionProgress ??= { circuitId: circuit.profile.circuitId });
+    // P5d-FIX3 F10: the journal is on disk BEFORE the first side effect, so a
+    // kill at any point below leaves a state the next launch can finish or undo.
+    await writeAdoptionJournal({ circuitId: ledger.circuitId, stage: 'staged' });
 
     // 1. Keep it. A learned circuit that cannot be stored cannot be analysed
     //    after a restart, so this failing is a real failure, not a warning.
@@ -2348,6 +2492,7 @@ async function adoptLearnedCircuit(circuit: TestLoopCircuit): Promise<void> {
         ledger.storedProfile = profile;
       }
       publishLearnedCircuits();
+      await writeAdoptionJournal({ circuitId: ledger.storedProfile.circuitId, stage: 'stored' });
     }
     const profile = ledger.storedProfile;
 
@@ -2364,6 +2509,7 @@ async function adoptLearnedCircuit(circuit: TestLoopCircuit): Promise<void> {
         await unlockedRebuildProductionController();
       }
       ledger.selected = true;
+      await writeAdoptionJournal({ circuitId: profile.circuitId, stage: 'selected' });
     }
     const ctrl = controller;
     if (ctrl === null) throw new Error('no production controller to run the learned circuit on');
@@ -2378,6 +2524,11 @@ async function adoptLearnedCircuit(circuit: TestLoopCircuit): Promise<void> {
       const startedSessionId = ctrl.diagnostics().sessionId;
       if (startedSessionId === null) throw new Error('the learned-circuit session did not start');
       ledger.sessionId = startedSessionId;
+      await writeAdoptionJournal({
+        circuitId: profile.circuitId,
+        stage: 'session-started',
+        sessionId: startedSessionId,
+      });
     }
     const sessionId = ledger.sessionId;
 
@@ -2398,6 +2549,7 @@ async function adoptLearnedCircuit(circuit: TestLoopCircuit): Promise<void> {
       }
       await flushTestLoopTelemetry();
       await releaseTestLoopGForce();
+      await writeAdoptionJournal({ circuitId: profile.circuitId, stage: 'recording', sessionId });
     }
 
     // 5. The learning lap is STORED as the session's out-lap trace (lap 0),
@@ -2407,6 +2559,7 @@ async function adoptLearnedCircuit(circuit: TestLoopCircuit): Promise<void> {
         await repository.saveTelemetry(sessionId, 0, learningSamples);
       }
       ledger.outLapSaved = true;
+      await writeAdoptionJournal({ circuitId: profile.circuitId, stage: 'out-lap', sessionId });
     }
 
     // 6. Finally, hand the whole backlog to the controller in order -- the
@@ -2419,6 +2572,8 @@ async function adoptLearnedCircuit(circuit: TestLoopCircuit): Promise<void> {
     testLoopProvider = null;
     testLoopHandoverActive = false;
     adoptionProgress = null;
+    // The adoption is complete: nothing is left for a later launch to repair.
+    await clearAdoptionJournal();
   });
 }
 
@@ -2622,6 +2777,9 @@ async function runBootstrap(): Promise<void> {
       }
     }
     publishLearnedCircuits();
+    // P5d-FIX3 F10: BEFORE the controller and history store are built, so a
+    // repaired selection is the one they are built for.
+    if (db !== null) await repairInterruptedAdoption(db);
 
     // F3 fix: build the production controller/facade now (so `controller`
     // exists for the preflight gate registered just below), but do NOT

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { TestLoopCircuit } from '@circuit/core';
+import type { LocationSample, TestLoopCircuit } from '@circuit/core';
 
 import { TestLoopController } from '../../src/session/testLoopController';
 import { rectangleLoopSamples, uTurnSamples } from '../support/testLoopTraces';
@@ -32,6 +32,30 @@ function makeController(
 
 /** Two laps: the first teaches the track, the second proves the car drove through the start. */
 const TWO_LAPS = rectangleLoopSamples({ laps: 2 });
+/** Metres between two fixes -- enough for a test to find the closing radius edge. */
+function metresBetween(a: LocationSample, b: LocationSample): number {
+  const toRad = Math.PI / 180;
+  const meanLat = ((a.lat + b.lat) / 2) * toRad;
+  return Math.hypot(
+    (b.lon - a.lon) * toRad * Math.cos(meanLat) * 6_371_000,
+    (b.lat - a.lat) * toRad * 6_371_000,
+  );
+}
+
+/** Index of the first fix that leaves the 25 m closing radius AFTER coming back into it. */
+function firstExitIndex(samples: readonly LocationSample[]): number {
+  const start = samples[0]!;
+  let departed = false;
+  let returned = false;
+  for (let index = 1; index < samples.length; index += 1) {
+    const inside = metresBetween(start, samples[index]!) <= 25;
+    if (!inside && !returned) departed = true;
+    if (departed && inside) returned = true;
+    if (returned && !inside) return index;
+  }
+  return samples.length;
+}
+
 /** One lap plus the few fixes it takes to drive back out of the closing radius. */
 const ONE_LAP_PLUS_EXIT = TWO_LAPS.slice(0, Math.round(TWO_LAPS.length / 2) + 5);
 
@@ -136,6 +160,26 @@ describe('TestLoopController (P5d T2, T5, P5d-FIX1 H3)', () => {
     expect(controller.learnedLapSamples().length).toBeLessThanOrEqual(
       Math.round(TWO_LAPS.length / 2) + 1,
     );
+  });
+
+  it('a GPS teleport at the radius edge does not wedge the closure (P5d-FIX3 F8)', async () => {
+    // The car passes the start point, and the very fix that would have carried
+    // it back out of the radius is a reflection: 500 m away, 200 m accuracy.
+    // That fix is not evidence of anything -- it must not consume the exit,
+    // and the next real fix must still close the lap.
+    const exitIndex = firstExitIndex(ONE_LAP_PLUS_EXIT);
+    const head = ONE_LAP_PLUS_EXIT.slice(0, exitIndex);
+    const tail = ONE_LAP_PLUS_EXIT.slice(exitIndex);
+    const last = head[head.length - 1]!;
+    const teleport = { ...last, tMono: last.tMono + 1000, lat: last.lat + 0.005, accuracyM: 200 };
+
+    const controller = makeController();
+    controller.start();
+    for (const sample of [...head, teleport, ...tail]) controller.feed(sample);
+    await settle();
+
+    expect(controller.snapshot().phase).toBe('learned');
+    expect(controller.snapshot().learned!.lengthM).toBeGreaterThan(600);
   });
 
   it('ends a never-closed loop gracefully, naming what was missing (T5)', () => {

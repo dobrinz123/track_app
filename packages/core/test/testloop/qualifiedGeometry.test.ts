@@ -86,3 +86,37 @@ describe('closure completes on the FIRST return (P5d-FIX2 N1)', () => {
     expect(result.reason).toBe('too-short');
   });
 });
+
+/**
+ * Ticket P5d-FIX3 F9 (Codex P5d-REV3): the departure rule must not charge the
+ * driver for the metres they spent leaving the start circle. A loop only just
+ * over the minimum, started mid-straight, is a legal loop.
+ */
+describe('departure distance (P5d-FIX3 F9)', () => {
+  /** ~314 m round: 2 x 70 + 2 x 40 straights and four 15 m corners. */
+  function shortLoopPlusExit() {
+    const path = roundedRectanglePath(100, 70, 15);
+    const samples = sampleDensePath(path, { laps: 2 });
+    return samples.slice(0, Math.round(samples.length / 2) + 4);
+  }
+
+  it('closes a loop barely over the minimum that started mid-straight', () => {
+    const result = detectLoopClosure(shortLoopPlusExit());
+
+    expect(result.closed).toBe(true);
+    if (!result.closed) return;
+    expect(result.closure.lapLengthM).toBeGreaterThan(290);
+    expect(result.closure.lapLengthM).toBeLessThan(340);
+  });
+
+  it('still refuses a second pass that has not driven a lap since the first was rejected', () => {
+    // The same short loop, but the minimum is above its length: pass 1 is
+    // rejected, and pass 2 is measured from that rejection -- not from zero.
+    const path = roundedRectanglePath(100, 70, 15);
+    const result = detectLoopClosure(sampleDensePath(path, { laps: 3 }), { minLapLengthM: 400 });
+
+    expect(result.closed).toBe(false);
+    if (result.closed) return;
+    expect(result.reason).toBe('too-short');
+  });
+});

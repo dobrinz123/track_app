@@ -218,10 +218,35 @@ describe('Test Loop handover (P5d-FIX1 H1, H3)', () => {
     for (const sample of THREE_LAPS.slice(0, 12)) gnss.push(sample);
 
     const stopped = await composition.stopTestLoop();
+    await settle();
     expect(stopped.phase).toBe('failed');
     expect(composition.testLoopDiagnostics().providerAttached).toBe(false);
-    expect(gnss.stopCount).toBeGreaterThan(0);
     expect(gnss.running).toBe(false);
+    // P5d-FIX3 F11: `stopTestLoop()` and the auto-teardown that the same
+    // failure triggers are ONE serialized teardown -- the global provider is
+    // shut down exactly once, never twice from two racing paths.
+    expect(gnss.stopCount).toBe(1);
+  });
+
+  it('serializes concurrent teardowns: the provider is stopped exactly once (P5d-FIX3 F11)', async () => {
+    const composition = await boot(db);
+    await composition.startTestLoop();
+    const gnss = provider();
+    for (const sample of THREE_LAPS.slice(0, 12)) gnss.push(sample);
+
+    // Both paths at once: two stop requests, plus the auto-teardown that the
+    // resulting failed phase fires on its own.
+    const [first, second] = await Promise.all([
+      composition.stopTestLoop(),
+      composition.stopTestLoop(),
+    ]);
+    await settle();
+    await settle();
+
+    expect(first.phase).toBe('failed');
+    expect(second.phase).toBe('failed');
+    expect(gnss.stopCount).toBe(1);
+    expect(composition.testLoopDiagnostics().providerAttached).toBe(false);
   });
 
   it('resumes a half-finished handover on retry instead of repeating it (N2)', async () => {
@@ -290,5 +315,98 @@ describe('Test Loop handover (P5d-FIX1 H1, H3)', () => {
       'transilvania-motor-ring',
     );
     warn.mockRestore();
+  });
+});
+
+/**
+ * Ticket P5d-FIX3 F10 (Codex P5d-REV3 HIGH): the adoption journal outlives the
+ * process. A kill in the middle of keeping a learned track must leave a state
+ * the next launch can either finish or undo -- never an orphan circuit, an
+ * orphan session, or a silent nothing.
+ */
+describe('interrupted adoption is repaired at the next launch (P5d-FIX3 F10)', () => {
+  let db: SqlDatabase;
+
+  beforeEach(async () => {
+    db = await createSqlJsDatabase();
+    await migrateTelemetrySchema(db);
+  });
+
+  async function journalRow(): Promise<string | null> {
+    const rows = await db.getAllAsync<{ value: string }>(
+      'SELECT value FROM settings WHERE key = ?',
+      ['testLoopAdoption'],
+    );
+    return rows[0]?.value ?? null;
+  }
+
+  it('writes a journal while adopting, and finishes the job on the next launch', async () => {
+    const first = await boot(db);
+    await first.startTestLoop();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    // Break the last adoption step so the process "dies" mid-adoption.
+    await db.execAsync('DROP TABLE telemetry');
+    const gnss = provider();
+    for (const sample of THREE_LAPS) {
+      gnss.push(sample);
+      await settle();
+    }
+    await settle();
+
+    expect(first.testLoopSnapshot().phase).toBe('error');
+    const staged = await journalRow();
+    expect(staged).not.toBeNull();
+    const circuitId = first.listLearnedCircuits()[0]!.circuitId;
+
+    // Next launch: the geometry survived, so the adoption is COMPLETED --
+    // the circuit is kept and selected, and the journal is closed.
+    await db.execAsync(
+      'CREATE TABLE IF NOT EXISTS telemetry (sessionId TEXT NOT NULL, lapNumber INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY (sessionId, lapNumber))',
+    );
+    const second = await boot(db);
+
+    expect(await journalRow()).toBeNull();
+    expect(second.listLearnedCircuits().map((record) => record.circuitId)).toEqual([circuitId]);
+    expect(second.settingsStore.getSettings().selectedCircuitId).toBe(circuitId);
+    let notice: string | null = null;
+    second.subscribeRecoveryNotice((value) => {
+      notice = value;
+    })();
+    expect(notice).not.toBeNull();
+    warn.mockRestore();
+  });
+
+  it('rolls a half-adopted circuit back when its geometry never landed', async () => {
+    const seed = await boot(db);
+    expect(seed.listLearnedCircuits()).toHaveLength(0);
+    // A journal from a process that died BEFORE the circuit was stored, with
+    // the session it had already started.
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'testLoopAdoption',
+      JSON.stringify({ circuitId: 'learned-ghost', stage: 'session-started', sessionId: 's-ghost' }),
+    ]);
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'activeSessionId',
+      's-ghost',
+    ]);
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'activeSessionCircuitId',
+      'learned-ghost',
+    ]);
+
+    const relaunched = await boot(db);
+
+    expect(await journalRow()).toBeNull();
+    expect(relaunched.listLearnedCircuits()).toHaveLength(0);
+    const active = await db.getAllAsync<{ value: string }>(
+      'SELECT value FROM settings WHERE key = ?',
+      ['activeSessionId'],
+    );
+    expect(active).toHaveLength(0);
+    let notice: string | null = null;
+    relaunched.subscribeRecoveryNotice((value) => {
+      notice = value;
+    })();
+    expect(notice).not.toBeNull();
   });
 });
