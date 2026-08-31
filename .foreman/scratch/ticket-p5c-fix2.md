@@ -1,0 +1,11 @@
+# Ticket P5c-FIX2 — Codex P5c-REV2 residuals (1 HIGH + 2 MEDIUM + 2 LOW + partials), tests first — Sonnet
+Source: .foreman/scratch/p5crev2-codex-output.log (final list). HEAD = P4p commit. Last safety wave before build 10.
+H13 Pit-flap re-arm: `beginStint()` must require a DEBOUNCED pit state (e.g. inPit sustained ≥ 10 s OR debounced state only — never the raw onPitLane flag alone); a single noisy true/false must not re-arm the one-change allowance. Test with a flapping sequence.
+M15 Geometry-gate hardening: the suggestion gate reads geometryStatus from the BUNDLED catalog asset (source of truth at build time), not from a mutable runtime profile object; if a runtime override exists it can only DISABLE, never enable. Test: a mutated profile object with geometryStatus 'official' while the bundled asset says community-derived → still gated.
+M14 (document only) The FNV-1a seal is same-process integrity, not authenticity — state that in a comment block on sealCueEvidence + one contracts.md sentence under REVISION 2 (R2-3 note).
+L16 Queued boundary batch: on session end/reset, a queued cue-update batch is explicitly discarded WITH a log entry (never silently) and the coach lifecycle reset clears it. Test.
+L17 Tolerance tests: add rejection tests just above the 0.5 m fromM tolerance and at the 10 m clamp edge (10.0 ok, 10.01 rejected).
+P4 (partial) suggestionsFromInsights: honesty gates driven by the limitations SET (typed), not string flags — ensure every blocking limitation code is an explicit enum member with a test enumerating them.
+P10/P11 accepted as documented residuals (stint via debounced pit only after H13; per-boundary rebuild cost) — add one sentence each to the ledger-style comments, no code.
+Gates (real exit codes, repo root): `npm run typecheck`, `npm run test`, `npm run lint`, `npx expo export --platform ios` in apps/mobile — all 0. Report totals + red→green per item.
+WRITE SET: packages/core/src/controller/sessionController.ts, packages/core/src/coaching/suggestions.ts, apps/mobile/src/session/stintCoaching.ts, apps/mobile/src/session/circuit-profile/asset access for the geometry gate (report the exact file you touch), docs/architecture/contracts.md (M14 sentence), tests. No other files. No commit, no agents, no Expo dev server.
