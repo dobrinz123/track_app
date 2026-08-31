@@ -6,6 +6,8 @@ import {
   createSimulatedDiscoveryProbeFactory,
   DEFAULT_ENET_CONFIG,
   ENET_DEFAULT_CHANNEL_RATES_HZ,
+  resolveSignalTargetCatalog,
+  resolveSignalTargetCatalogLabel,
   runDiscovery,
   SimulatedElm327Transport,
   SimulatedEnetTransport,
@@ -511,6 +513,43 @@ export function formatBrakePctRawDisplay(raw: { raw: number; observedMax: number
 }
 
 /**
+ * Ticket P4p G4 (binding, field test 9): the "/ M" of that line is a DISPLAY
+ * max, not the binding. It starts at the binding's own field-confirmed
+ * `observedMax` and rises to the SESSION max whenever a live raw value exceeds
+ * it -- so a weak stored max (the generic profile's 0x4002 evidence, or a
+ * confirm made without a firm press) can no longer pin the row at 100 % while
+ * the small line compares the reading against a number the drive has already
+ * disproved. It never falls back down within a generation, and the BINDING is
+ * never rewritten: re-confirming a channel is the Signal Finder's job, not the
+ * monitor's.
+ *
+ * `null` in, `null` out: a binding that carries no observed max at all has
+ * nothing to compare against, and the row honestly shows a bare "raw N"
+ * rather than inventing "raw N / N" (which would read as a permanent 100 %).
+ */
+export function nextBrakePctDisplayMax(
+  previous: number | null,
+  observedMax: number | null,
+  raw: number,
+): number | null {
+  if (observedMax === null) return null;
+  return Math.max(observedMax, previous ?? observedMax, raw);
+}
+
+/**
+ * Ticket P4p G1 (binding): the Telemetry monitor's own "Vehicle profile" row
+ * -- the ACTIVE profile's catalog label plus its raw id, e.g.
+ * "Toyota GR Supra (A90/J29), BMW B58 (toyota-supra-b58)". The id is always
+ * shown: an id with no bundled catalog resolves to the generic catalog's
+ * LABEL, and the monitor must never claim a profile the app is not actually
+ * reading bindings for.
+ */
+export function formatActiveVehicleProfileDisplay(profileId: string, language: 'ro' | 'en'): string {
+  const catalog = resolveSignalTargetCatalog(profileId);
+  return `${resolveSignalTargetCatalogLabel(catalog, language)} (${profileId})`;
+}
+
+/**
  * Field revision (2026-08-27, binding, "adapter-type switch" fix): the
  * settings this provider actually launched the CURRENT generation from --
  * `adapterType` plus whichever host/port pair that type uses. `start()`
@@ -1005,6 +1044,15 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
    */
   let lastBrakePctRaw: { raw: number; observedMax: number | null } | null = null;
   /**
+   * Ticket P4p G4 (binding): the DISPLAY max the line above compares against
+   * -- the binding's own observed max, raised to this generation's own
+   * highest raw reading (see {@link nextBrakePctDisplayMax}). Reset with
+   * {@link lastBrakePctRaw} in `doStop()`, so a new session starts from the
+   * binding's stored evidence again rather than inheriting the last drive's
+   * peak.
+   */
+  let brakePctDisplayMax: number | null = null;
+  /**
    * Ticket P4n-FIX1 Q1 (binding): whether the `brakeSwitch` binding THIS
    * session's poll plan actually inserted (see `insertedBrakeBindings` in
    * `buildEnetConfig()`) is `coarse` -- set every time that build runs,
@@ -1413,7 +1461,12 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
         const decoded = spec.decodeValue === undefined ? null : spec.decodeValue(dataBytes);
         if (decoded !== null) {
           const raw = brakeBindingSeriesValue(binding, dataBytes);
-          if (raw !== null) lastBrakePctRaw = { raw, observedMax: binding.observedMax };
+          if (raw !== null) {
+            // Ticket P4p G4 (binding): the DISPLAY max follows the session --
+            // see `nextBrakePctDisplayMax`. The binding itself is untouched.
+            brakePctDisplayMax = nextBrakePctDisplayMax(brakePctDisplayMax, binding.observedMax, raw);
+            lastBrakePctRaw = { raw, observedMax: brakePctDisplayMax };
+          }
         }
         return decoded;
       },
@@ -2074,6 +2127,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     // both from scratch).
     activeBrakeBindingsSignature = null;
     lastBrakePctRaw = null;
+    brakePctDisplayMax = null;
     activeBrakeSwitchCoarse = false;
     if (retryTimer !== null) {
       clearTimeout(retryTimer);

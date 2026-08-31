@@ -161,6 +161,11 @@ function snapshot(overrides: Partial<SignalFinderSnapshot> = {}): SignalFinderSn
     rateSource: 'measured',
     diagnosticReqPerSec: null,
     probeProgress: null,
+    // Ticket P4p G2/G5: the finder's own engine reading and the ruled-out
+    // count are part of every snapshot now; the export ignores both.
+    engineRpm: null,
+    engineRunning: null,
+    ruledOutCount: 0,
     adapterTeardownPending: false,
     error: null,
     errorCode: null,

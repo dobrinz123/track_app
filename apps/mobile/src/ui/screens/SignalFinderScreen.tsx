@@ -5,7 +5,6 @@ import {
   SimulatedEnetTransport,
   DEFAULT_ENET_DID_SCENARIO,
   SIGNAL_TARGET_CATALOGS,
-  engineNotDetectedRunning,
   resolveSignalTargetCatalog,
   resolveSignalTargetCatalogLabel,
   resolveSignalTargetLabel,
@@ -21,8 +20,19 @@ import { colors, fontFamily, radii, spacing, typography } from '../theme';
 import { getTelemetryReadDb, refreshVehicleProfileBindingsCache, settingsStore, telemetryProvider } from '../../session/composition';
 import { useSettings } from '../hooks/useSettings';
 import { EnetTcpTransport } from '../../session/enetTcpTransport';
-import { createDidSweepStore, createVehicleProfileBindingStore, type VehicleProfileBinding } from '../../persistence/didSweepStore';
-import { createSignalFinderController, type SignalFinderSnapshot } from '../../session/signalFinderController';
+import {
+  createDidSweepStore,
+  createSignalFinderRuledOutStore,
+  createVehicleProfileBindingStore,
+  type VehicleProfileBinding,
+} from '../../persistence/didSweepStore';
+import {
+  createSignalFinderController,
+  discoverySweepParamsForTarget,
+  finderEngineWarning,
+  formatDidRange,
+  type SignalFinderSnapshot,
+} from '../../session/signalFinderController';
 import { shouldShowBrakeBindingRestartHint } from '../../session/telemetryProvider';
 import { resolveSignalFinderScreenStrings, signalFinderErrorMessage, type SignalFinderScreenStrings } from './signalFinderStrings';
 import {
@@ -105,7 +115,7 @@ function evidenceLine(score: SignalCandidateScore, strings: SignalFinderScreenSt
   return line;
 }
 
-export function SignalFinderScreen(_props: Props): React.JSX.Element {
+export function SignalFinderScreen(props: Props): React.JSX.Element {
   const settings = useSettings(settingsStore);
   const settingsRef = React.useRef(settings);
   settingsRef.current = settings;
@@ -173,20 +183,41 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
     const timer = setInterval(() => forceEngineWarningTick((n) => n + 1), 1_000);
     return () => clearInterval(timer);
   }, []);
-  /** P4o O5: armed replace tracking lives on the CONTROLLER (testable without rendering) — this is just a render helper. */
+  /**
+   * P4o O5: armed replace tracking lives on the CONTROLLER (testable without
+   * rendering) — this is just a render helper.
+   *
+   * Ticket P4p G2 (binding, field test 9 BUG-B): the FINDER's own rpm reading
+   * (taken at probe time, over the adapter this screen holds) decides first;
+   * the telemetry sample below it is a bonus that only applies while the
+   * finder has read nothing itself. Telemetry is stopped for the whole time a
+   * find runs (one adapter reservation), which is exactly why the old
+   * telemetry-only check could never clear.
+   */
   const engineWarning = (engineRequirement: SignalEngineRequirement): boolean =>
-    // V3: the SAME monotonic clock basis `TelemetrySample.tMonoMs` is stamped
-    // from (`platform/clock.ts`'s `PerformanceNowClock`) — never `Date.now()`.
-    engineNotDetectedRunning(engineRequirement, lastRpmSample, performance.now());
+    finderEngineWarning({
+      engineRequirement,
+      engineRunning: snapshot?.engineRunning ?? null,
+      recentSample: lastRpmSample,
+      // V3: the SAME monotonic clock basis `TelemetrySample.tMonoMs` is stamped
+      // from (`platform/clock.ts`'s `PerformanceNowClock`) — never `Date.now()`.
+      nowMs: performance.now(),
+    });
 
   const sweepStoreRef = React.useRef(createDidSweepStore(getTelemetryReadDb()));
   const bindingStoreRef = React.useRef(createVehicleProfileBindingStore(getTelemetryReadDb()));
-  // Which vehicle profile's targets this session works against. There is no
-  // profile setting in `settingsStore` yet, so the choice is made HERE, from
-  // the registry (data) -- defaulting to the hypothesis-free generic catalog
-  // rather than assuming anybody's car. Session-local by design: nothing is
-  // persisted until "Confirm as ..." writes a real binding.
-  const [profileId, setProfileId] = React.useState('generic');
+  /** Ticket P4p G5: where a completed find records the DIDs it ruled out, and where every later plan reads them from. */
+  const ruledOutStoreRef = React.useRef(createSignalFinderRuledOutStore(getTelemetryReadDb()));
+  // Ticket P4p G1 (binding, field test 9 BUG-A): which vehicle profile this
+  // screen -- and the whole app -- works against is a PERSISTED setting now,
+  // not this screen's own React state. The chip below SETS it, and
+  // `composition.ts`'s binding cache (what the telemetry monitor polls) reads
+  // the same value, so a channel confirmed here can never again be confirmed
+  // "under" one profile while the monitor polls another's stale binding.
+  const profileId = settings.activeVehicleProfileId;
+  const setProfileId = (nextProfileId: string): void => {
+    settingsStore.update({ activeVehicleProfileId: nextProfileId });
+  };
   const catalog = React.useMemo(() => resolveSignalTargetCatalog(profileId), [profileId]);
 
   // Read inside the controller factory, which is built once -- a later
@@ -221,6 +252,7 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
       catalog: resolveSignalTargetCatalog(profileIdRef.current),
       sweepStore: sweepStoreRef.current,
       bindingStore: bindingStoreRef.current,
+      ruledOutStore: ruledOutStoreRef.current,
     });
     controllerRef.current = controller;
     controller.subscribe(setSnapshot);
@@ -238,6 +270,9 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
     ensureController();
     void bindingStoreRef.current.listBindings(profileId).then(setBindings);
     void refreshEligibility();
+    // Ticket P4p G1: the profile the provider polls changed with the chip --
+    // the cached bindings composition.ts hands `telemetryProvider` follow it.
+    void refreshVehicleProfileBindingsCache();
     // (No `react-hooks/exhaustive-deps` suppression here: this project's flat
     // eslint config does not wire `eslint-plugin-react-hooks`, and referencing
     // an unknown rule is itself a lint ERROR -- the F8 fix `DidSweepScreen.tsx`
@@ -271,13 +306,43 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
    * or a confirmed binding can make a target eligible).
    */
   const [eligible, setEligible] = React.useState<Partial<Record<SignalTargetId, number>>>({});
+  /** Ticket P4p G5: how many DIDs earlier completed finds ruled out, per target -- the row's own count line and its reset control. */
+  const [ruledOut, setRuledOut] = React.useState<Partial<Record<SignalTargetId, number>>>({});
   const refreshEligibility = React.useCallback(async (): Promise<void> => {
     const controller = controllerRef.current;
     if (controller === null) return;
     const counts: Partial<Record<SignalTargetId, number>> = {};
-    for (const target of catalog.targets) counts[target.id] = await controller.eligibleDidCount(target.id);
+    const ruledOutCounts: Partial<Record<SignalTargetId, number>> = {};
+    for (const target of catalog.targets) {
+      counts[target.id] = await controller.eligibleDidCount(target.id);
+      ruledOutCounts[target.id] = await controller.ruledOutDidCount(target.id);
+    }
     setEligible(counts);
+    setRuledOut(ruledOutCounts);
   }, [catalog]);
+
+  /**
+   * Ticket P4p G3 (binding): coming BACK from the DID sweep the scan button
+   * opened, the row that sent the driver there must show what the sweep found
+   * (its responders are the finder's cached pool) instead of the same
+   * "nothing to read yet" it showed before.
+   */
+  React.useEffect(() => props.navigation.addListener('focus', () => void refreshEligibility()), [props.navigation, refreshEligibility]);
+
+  /** Ticket P4p G5: the "Re-test all" control -- one target's exclusions, cleared, and the row recounted. */
+  async function handleRetestAll(targetId: SignalTargetId): Promise<void> {
+    await controllerRef.current?.clearRuledOut(targetId);
+    await refreshEligibility();
+  }
+
+  /**
+   * Ticket P4p G3 (binding): the params the DID sweep screen is opened with --
+   * the target's own first unswept discovery range, sized from the rate this
+   * session measured (or the assumed one, before any probe).
+   */
+  function scanParamsFor(target: SignalTargetDefinition): ReturnType<typeof discoverySweepParamsForTarget> {
+    return discoverySweepParamsForTarget(target, snapshot?.measuredReqPerSec ?? 12);
+  }
   /** The target the RESULT section is about, in the app's language (the label the catalog carries is the English/export one). */
   const resultTargetLabel =
     snapshot?.targetId == null
@@ -522,6 +587,60 @@ export function SignalFinderScreen(_props: Props): React.JSX.Element {
                     beyond whatever telemetry happens to be live. */}
                 {engineWarning(target.engineRequirement) ? (
                   <Text style={styles.warningInline}>{strings.warningEngineNotDetected}</Text>
+                ) : null}
+                {/* Ticket P4p G5 (binding, the user's own request after field
+                    test 9): what earlier finds already ruled out for THIS
+                    target, with the one control that puts it all back. */}
+                {(ruledOut[target.id] ?? 0) > 0 ? (
+                  <View style={styles.shareRow}>
+                    <Text style={styles.caption}>{strings.ruledOut(ruledOut[target.id] ?? 0)}</Text>
+                    <Pressable
+                      style={[styles.secondaryButton, busy ? styles.buttonDisabled : null]}
+                      disabled={busy}
+                      onPress={() => void handleRetestAll(target.id)}
+                      accessibilityRole="button"
+                      accessibilityLabel={strings.retestAllA11y(resolveSignalTargetLabel(target, settings.language))}
+                    >
+                      <Text style={styles.secondaryButtonText}>{strings.retestAll}</Text>
+                    </Pressable>
+                  </View>
+                ) : null}
+                {/* Ticket P4p G3 (binding, field test 9): a target with
+                    nothing left to read is a DEAD END unless the driver is
+                    handed the one action that changes that -- the sweep of
+                    its own unswept discovery range, engine off, with the
+                    range already filled in. */}
+                {eligible[target.id] === 0 && scanParamsFor(target) !== null ? (
+                  <Pressable
+                    style={[styles.secondaryButton, busy ? styles.buttonDisabled : null]}
+                    disabled={busy}
+                    onPress={() => {
+                      const params = scanParamsFor(target);
+                      if (params === null) return;
+                      props.navigation.navigate('DidSweep', {
+                        fromDid: params.fromDid,
+                        toDid: params.toDid,
+                        ...(params.ecu === null ? {} : { ecu: params.ecu }),
+                      });
+                    }}
+                    accessibilityRole="button"
+                    accessibilityLabel={strings.scanRangeA11y(
+                      scanParamsFor(target)?.ecu == null
+                        ? strings.everyEcuThatAnswered
+                        : ecuHex(scanParamsFor(target)?.ecu ?? 0),
+                      formatDidRange(scanParamsFor(target)?.fromDid ?? 0, scanParamsFor(target)?.toDid ?? 0),
+                    )}
+                  >
+                    <Text style={styles.secondaryButtonText}>
+                      {strings.scanRange(
+                        scanParamsFor(target)?.ecu == null
+                          ? strings.everyEcuThatAnswered
+                          : ecuHex(scanParamsFor(target)?.ecu ?? 0),
+                        formatDidRange(scanParamsFor(target)?.fromDid ?? 0, scanParamsFor(target)?.toDid ?? 0),
+                        Math.max(1, Math.round(scanParamsFor(target)?.estimatedMinutes ?? 0)),
+                      )}
+                    </Text>
+                  </Pressable>
                 ) : null}
               </View>
               <Pressable

@@ -51,8 +51,13 @@ import {
   FINDER_KEEPALIVE_INTERVAL_MS,
   FINDER_PROBE_DURATION_MS,
   FINDER_REQUEST_TIMEOUT_MS,
+  assertAllowedRequest,
   buildMetronomeTimeline,
+  buildObdMode01Request,
   computeFinderDidBudget,
+  decodeMode01Response,
+  engineNotDetectedRunning,
+  extractObdMode01Data,
   finderProbeBoundMs,
   findSignalTarget,
   isAsciiLike,
@@ -60,6 +65,7 @@ import {
   metronomeCountdownMs,
   metronomeStepAt,
   nextDiscoveryStep,
+  parseUdsResponse,
   planFinderRun,
   resolveSignalActionVerbs,
   resolveSignalTargetCatalog,
@@ -79,6 +85,7 @@ import {
   type ObdTransport,
   type SignalCandidateScore,
   type SignalEngineRequirement,
+  type SignalRecentEngineSample,
   type SignalFinderPlanEntry,
   type SignalFinderSample,
   type SignalFinderTargetRef,
@@ -90,7 +97,14 @@ import {
 } from '@circuit/core';
 import { createRawUdsChannel } from './didSweepController';
 import { enetAdapterReservation as sharedEnetAdapterReservation, type EnetAdapterReservation, type EnetAdapterToken } from './enetAdapterReservation';
-import { hexToBytes, type DidSweepStore, type VehicleProfileBinding, type VehicleProfileBindingStore } from '../persistence/didSweepStore';
+import {
+  hexToBytes,
+  type DidSweepStore,
+  type SignalFinderRuledOutRecord,
+  type SignalFinderRuledOutStore,
+  type VehicleProfileBinding,
+  type VehicleProfileBindingStore,
+} from '../persistence/didSweepStore';
 import { noopSignalFinderHaptics, type SignalFinderHaptics } from './signalFinderHaptics';
 
 /** Item 3 (binding): "Insufficient samples (< 2 per window)" — the SCORER's gate. The budget targets 3 (see `planFinderRun`). */
@@ -289,6 +303,27 @@ export interface SignalFinderSnapshot {
   /** P4m-FIX3 Z5: non-null exactly while the pre-script probe is running. */
   probeProgress: SignalFinderProbeProgress | null;
   /**
+   * Ticket P4p G2 (binding, field test 9 BUG-B): the engine speed THIS find
+   * read for itself, with one standard mode-01 0x0C request at probe time,
+   * over the channel it already holds. `null` = not read (yet, or the ECU
+   * refused/ignored it) -- never a fabricated zero.
+   */
+  engineRpm: number | null;
+  /**
+   * {@link engineRpm} judged against {@link FINDER_ENGINE_RPM_MIN}: `true`
+   * running, `false` not running, `null` unknown. Fresh BY CONSTRUCTION -- it
+   * is read inside the round it describes, which is the whole point: telemetry
+   * and the finder can never run at the same time (one adapter reservation),
+   * so the old "wait for a fresh telemetry rpm sample" check could never clear.
+   */
+  engineRunning: boolean | null;
+  /**
+   * Ticket P4p G5 (binding): how many (ecu, did) pairs earlier COMPLETED finds
+   * ruled out for the CURRENT target -- excluded from this find's pools, shown
+   * as one line with a "Re-test all" control.
+   */
+  ruledOutCount: number;
+  /**
    * P4m-FIX3 Z6: the last transport's `close()` had not settled when its
    * reservation had to be released. A find is refused while this is true.
    */
@@ -320,6 +355,20 @@ export interface SignalFinderControllerDeps {
   sweepStore?: DidSweepStore;
   /** Where "Confirm as <target>" writes. Omitted → `confirmBinding` is a no-op returning `null` (web preview). */
   bindingStore?: VehicleProfileBindingStore;
+  /**
+   * Ticket P4p G5: where a completed find records the DIDs it scored
+   * `unrelated` for the target, and where every later plan reads its
+   * exclusions from. Omitted → nothing is ever ruled out (web preview).
+   */
+  ruledOutStore?: SignalFinderRuledOutStore;
+  /**
+   * Ticket P4p G2: the ECU the one-shot mode-01 rpm read is addressed to.
+   * Defaults to {@link ENGINE_RPM_ECU} (0x12, the DME -- the same target
+   * address the ENET settings default to). A test seam, and a way out for a
+   * car whose engine data lives elsewhere; never a vehicle constant written
+   * into a flow.
+   */
+  engineRpmEcu?: number;
   haptics?: SignalFinderHaptics;
   /** Caps the rate-derived budget (never raises it above {@link FINDER_BUDGET_MAX}). */
   maxDidsPerRound?: number;
@@ -351,6 +400,106 @@ export interface SignalFinderController {
   getSamples(): readonly SignalFinderSample[];
   /** Item 5 (binding): writes `score` into the persisted vehicle profile as `channel`'s binding. `null` when no binding store is wired. */
   confirmBinding(channel: SignalTargetId, score: SignalCandidateScore): Promise<VehicleProfileBinding | null>;
+  /** Ticket P4p G5: how many DIDs earlier completed finds ruled out for `targetId` -- the row's "N ruled out from earlier finds" line. */
+  ruledOutDidCount(targetId: SignalTargetId): Promise<number>;
+  /** Ticket P4p G5: the "Re-test all" control -- drops `targetId`'s exclusions so its DIDs are planned again. */
+  clearRuledOut(targetId: SignalTargetId): Promise<void>;
+}
+
+/**
+ * Ticket P4p G2 (binding): the DME address the one-shot rpm read goes to --
+ * the SAME default `DEFAULT_SETTINGS.enetTargetAddress` uses, and overridable
+ * through {@link SignalFinderControllerDeps.engineRpmEcu}.
+ */
+export const ENGINE_RPM_ECU = 0x12;
+
+/** The standard mode-01 PID for engine speed (`pidCodec.ts` owns the decode formula). */
+const MODE01_RPM_PID = 0x0c;
+
+/** How many already-received frames the rpm channel drains looking for its `41 0C` answer (the same ECU's DID responses land there too). */
+const ENGINE_RPM_DRAIN_LIMIT = 64;
+
+/**
+ * Ticket P4p G2 (binding): above this the engine IS running. A real idle sits
+ * at 600-900 rpm; a cranking/stalled engine and every "the ECU answered 0" case
+ * sit far below. Deliberately not "> 0": a single noisy low reading must not
+ * be allowed to say "engine running" about a car that is standing still.
+ */
+export const FINDER_ENGINE_RPM_MIN = 400;
+
+/**
+ * Ticket P4p G2 (binding, field test 9 BUG-B): the ONE rule the Find rows and
+ * the result header render, replacing the screen's direct
+ * `engineNotDetectedRunning` call.
+ *
+ * Order matters, and it is the whole fix: the finder's OWN reading
+ * (`engineRunning`, read inside the round over the adapter it holds) decides
+ * whenever it exists, because it is the only evidence that CAN exist while the
+ * finder owns the adapter -- telemetry is stopped for the entire time (user,
+ * binding: "telemetry and the Signal Finder never run simultaneously"). A
+ * live telemetry sample is used only when the finder has no reading of its
+ * own, and then exactly under the old rules (fresh, non-zero).
+ */
+export function finderEngineWarning(input: {
+  engineRequirement: SignalEngineRequirement;
+  engineRunning: boolean | null;
+  recentSample: SignalRecentEngineSample | null;
+  nowMs: number;
+}): boolean {
+  if (input.engineRequirement !== 'running') return false;
+  if (input.engineRunning !== null) return !input.engineRunning;
+  return engineNotDetectedRunning(input.engineRequirement, input.recentSample, input.nowMs);
+}
+
+/**
+ * Ticket P4p G3 (binding, field test 9): what a target's "the plan is empty
+ * because its discovery range was never swept" row hands the DID sweep screen
+ * -- the FIRST unswept discovery range of `target`, as navigation params.
+ * `null` when the target declares no range at all (nothing to offer, so no
+ * button). A thin, pure wrapper over `@circuit/core`'s own
+ * `nextDiscoveryStep`, so the button and the next-step line can never disagree
+ * about which range comes next.
+ */
+export interface DidSweepScanParams {
+  /** `null` = "every ECU that answered" (the generic catalog's own wording). */
+  ecu: number | null;
+  fromDid: number;
+  toDid: number;
+  estimatedMinutes: number;
+}
+
+export function discoverySweepParamsForTarget(
+  target: SignalTargetDefinition,
+  measuredReqPerSec: number,
+): DidSweepScanParams | null {
+  const step = nextDiscoveryStep(target, measuredReqPerSec);
+  if (step === null) return null;
+  return { ecu: step.ecu, fromDid: step.fromDid, toDid: step.toDid, estimatedMinutes: step.estimatedMinutes };
+}
+
+/** `58F3–6FFF` — the range as the scan button states it (the ECU is named separately). */
+export function formatDidRange(fromDid: number, toDid: number): string {
+  const hex = (did: number): string => did.toString(16).toUpperCase().padStart(4, '0');
+  return `${hex(fromDid)}–${hex(toDid)}`;
+}
+
+/**
+ * Ticket P4p G3: the DID sweep screen's own From/To drafts, hydrated from the
+ * navigation params the finder handed it. Anything missing or out of range
+ * falls back to that screen's full-range defaults -- a prefilled sweep must
+ * never start from a nonsense range, and a screen opened directly (no params)
+ * behaves exactly as it always did.
+ */
+export function sweepRangeDraftsFromParams(
+  params: { fromDid?: number; toDid?: number } | undefined,
+): { from: string; to: string } {
+  const draft = (did: number | undefined): string | null =>
+    typeof did === 'number' && Number.isInteger(did) && did >= 0 && did <= 0xffff
+      ? did.toString(16).toUpperCase().padStart(4, '0')
+      : null;
+  const from = draft(params?.fromDid);
+  const to = draft(params?.toDid);
+  return from === null || to === null ? { from: '0000', to: 'FFFF' } : { from, to };
 }
 
 /**
@@ -499,6 +648,9 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
     rateSource: 'assumed',
     diagnosticReqPerSec: null,
     probeProgress: null,
+    engineRpm: null,
+    engineRunning: null,
+    ruledOutCount: 0,
     adapterTeardownPending: false,
     error: null,
     errorCode: null,
@@ -525,6 +677,8 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
   let currentPools: FinderPools = { confirmed: [], hypotheses: [], changed: [], cached: [] };
   let readEntries: SignalFinderPlanEntry[] = [];
   let noResponse: SignalFinderTargetRef[] = [];
+  /** Ticket P4p G5: the `ecu:did` keys earlier COMPLETED finds ruled out for the CURRENT target -- read once per find, applied to every pool. */
+  let ruledOutKeys: ReadonlySet<string> = new Set();
 
   function emit(patch: Partial<SignalFinderSnapshot>): void {
     snapshot = { ...snapshot, ...patch };
@@ -693,7 +847,28 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
    * itself ranked it in; cached responders keep the sweep's own order (short
    * responses before blocks).
    */
-  async function collectPools(target: SignalTargetDefinition): Promise<FinderPools> {
+  /**
+   * Ticket P4p G5 (binding): the `ecu:did` keys earlier COMPLETED finds ruled
+   * out for `target` on THIS profile. Never throws: a store that fails to read
+   * degrades to "nothing is excluded", which is the pre-ticket behaviour --
+   * a find must never be blocked by the memory of an earlier one.
+   */
+  async function readRuledOutKeys(target: SignalTargetDefinition): Promise<ReadonlySet<string>> {
+    if (deps.ruledOutStore === undefined) return new Set();
+    try {
+      const rows = await deps.ruledOutStore.listRuledOut(profileId, target.id);
+      return new Set(rows.map((row) => `${row.ecu}:${row.did}`));
+    } catch (error) {
+      console.warn('[signalFinderController] could not read the ruled-out DIDs -- none are excluded', error);
+      return new Set();
+    }
+  }
+
+  async function collectPools(
+    target: SignalTargetDefinition,
+    /** Ticket P4p G5: excluded BEFORE the budget, so what a round can read is what is still worth reading. */
+    excluded: ReadonlySet<string> = new Set(),
+  ): Promise<FinderPools> {
     /**
      * P4o O4 (binding, field test 8): the target's OWN previously confirmed
      * binding, on THIS profile — read before every other pool. A
@@ -764,7 +939,18 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         for (const did of [...short, ...blocks]) cached.push({ ecu, did });
       }
     }
-    return { confirmed, hypotheses, changed, cached };
+    // Ticket P4p G5 (binding, the user's own words after field test 9: "they
+    // found nothing -- never offer them again"): every pool minus what an
+    // earlier COMPLETED find already scored `unrelated` for THIS target. The
+    // `confirmed` pool is deliberately exempt -- it is the user's own confirm,
+    // and it leads every round by design (P4o O4).
+    const keep = (entry: SignalFinderTargetRef): boolean => !excluded.has(`${entry.ecu}:${entry.did}`);
+    return {
+      confirmed,
+      hypotheses: hypotheses.filter(keep),
+      changed: changed.filter(keep),
+      cached: cached.filter(keep),
+    };
   }
 
   /** {@link readEntries}, grouped per ECU — what the result header and the export count. */
@@ -829,6 +1015,114 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         silentDids,
       },
     );
+  }
+
+  /**
+   * Ticket P4p G2 (binding, field test 9 BUG-B): ONE standard mode-01 0x0C
+   * request, on the finder's own channel, at probe time -- the engine check
+   * the driver actually needs while the finder owns the adapter.
+   *
+   * Everything here is existing, whitelisted machinery: `buildObdMode01Request`
+   * (SID 0x01, inside the read-only whitelist by construction, re-asserted
+   * before sending), `parseUdsResponse` + `extractObdMode01Data` for the
+   * `41 0C A B` frame, and `pidCodec`'s own `decodeMode01Response` for the
+   * (256A+B)/4 formula -- the finder never writes an rpm formula of its own.
+   *
+   * `null` on ANY doubt (timeout, NRC, an echoed PID that is not 0x0C, a short
+   * frame, a throw): an unknown engine state is reported as unknown, never as
+   * running. Bounded by the SAME per-request timeout every finder exchange
+   * uses, so a mute ECU costs one 300 ms window before the script.
+   */
+  async function sendEngineRpmRequest(channel: SweepTransport): Promise<void> {
+    try {
+      const request = buildObdMode01Request(MODE01_RPM_PID);
+      assertAllowedRequest(request);
+      await channel.send(request);
+    } catch (error) {
+      // A refused/failed send is not evidence about the engine, and must never
+      // break the find it was asked inside of.
+      console.warn('[signalFinderController] the engine rpm request could not be sent', error);
+    }
+  }
+
+  /**
+   * Reads whatever the rpm channel has ALREADY received -- never a wait of its
+   * own (`nextResponse(0)`), so the engine check costs the driver no time at
+   * all: the request went out before the probe, and by the time the probe is
+   * over a live DME has long since answered. Anything that is not a
+   * `41 0C A B` frame (a DID response from the same ECU, an NRC, a stray) is
+   * skipped, bounded by {@link ENGINE_RPM_DRAIN_LIMIT}; `null` means "nothing
+   * that answers the question has arrived", which the snapshot reports as
+   * UNKNOWN and never as "not running".
+   */
+  async function pollEngineRpm(channel: SweepTransport): Promise<number | null> {
+    for (let attempt = 0; attempt < ENGINE_RPM_DRAIN_LIMIT; attempt += 1) {
+      try {
+        const response = await channel.nextResponse(0);
+        if (response === 'timeout') return null;
+        const parsed = parseUdsResponse(response);
+        if (parsed.kind !== 'positive') continue;
+        if (parsed.sid !== 0x41) continue; // a DID answer from the same ECU -- not this question.
+        const data = extractObdMode01Data(parsed.sid, parsed.data, MODE01_RPM_PID);
+        const hex = [0x41, MODE01_RPM_PID, ...data].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+        const rpm = decodeMode01Response('rpm', hex);
+        return Number.isFinite(rpm) ? rpm : null;
+      } catch {
+        // A malformed/mismatched frame proves nothing -- keep draining.
+        continue;
+      }
+    }
+    return null;
+  }
+
+  /** Applies an rpm reading (or the absence of one) to the snapshot. */
+  function emitEngineReading(rpm: number | null): void {
+    emit({ engineRpm: rpm, engineRunning: rpm === null ? null : rpm > FINDER_ENGINE_RPM_MIN });
+  }
+
+  /**
+   * Ticket P4p G5 (binding): what a COMPLETED find leaves behind for the next
+   * one. A `(ecu, did)` is ruled out only when EVERY score it produced this
+   * session says `unrelated` -- a block DID with one unrelated byte offset and
+   * one `insufficient` offset has not been judged, and stays in the pool.
+   * `insufficient`, silent and never-read DIDs are never written here at all:
+   * they are the absence of evidence, which is exactly what item 12's honesty
+   * rule protects.
+   */
+  async function persistRuledOut(target: SignalTargetDefinition, scores: readonly SignalCandidateScore[]): Promise<void> {
+    const store = deps.ruledOutStore;
+    if (store === undefined) return;
+    const byKey = new Map<string, { ecu: number; did: number; allUnrelated: boolean }>();
+    for (const score of scores) {
+      const key = `${score.ecu}:${score.did}`;
+      const entry = byKey.get(key) ?? { ecu: score.ecu, did: score.did, allUnrelated: true };
+      entry.allUnrelated = entry.allUnrelated && score.verdict === 'unrelated';
+      byKey.set(key, entry);
+    }
+    const at = nowUtc();
+    const records: SignalFinderRuledOutRecord[] = [];
+    for (const entry of byKey.values()) {
+      if (!entry.allUnrelated) continue;
+      records.push({
+        profileId,
+        targetId: target.id,
+        ecu: entry.ecu,
+        did: entry.did,
+        verdict: 'unrelated',
+        sessionId: snapshot.sessionId ?? '',
+        ruledOutAtUtc: at,
+      });
+    }
+    if (records.length === 0) return;
+    try {
+      await store.addRuledOut(records);
+      const merged = new Set(ruledOutKeys);
+      for (const record of records) merged.add(`${record.ecu}:${record.did}`);
+      ruledOutKeys = merged;
+      emit({ ruledOutCount: merged.size });
+    } catch (error) {
+      console.warn('[signalFinderController] could not persist the ruled-out DIDs', error);
+    }
   }
 
   /**
@@ -963,6 +1257,22 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         if (myGeneration !== generation || control.stopped) return;
         const channels = createEcuChannels(transport, deps.testerAddress, provisional.dids.map((entry) => entry.ecu));
 
+        // Ticket P4p G2 (binding, field test 9 BUG-B): the engine check, sent
+        // BEFORE the probe and read after it -- one mode-01 0x0C request on a
+        // channel of its OWN (never inserted into `channels`, so the round's
+        // entries and keep-alives are untouched, and draining it cannot steal
+        // a probe answer). The send costs nothing to wait for, and the read
+        // takes only what has already arrived, so the driver never waits on
+        // an ECU that refuses the request. Fresh by construction: it happens
+        // inside the very round it describes, while telemetry is stopped
+        // because this find holds the single adapter reservation.
+        const engineRpmChannel = createRawUdsChannel(
+          transport,
+          deps.testerAddress,
+          deps.engineRpmEcu ?? ENGINE_RPM_ECU,
+        );
+        await sendEngineRpmRequest(engineRpmChannel);
+
         // X1: MEASURE. P4m-FIX2 Y1: ONE ATTEMPT PER PLANNED ENTRY -- not a 2 s
         // deadline. A first ECU that times out on all of its DIDs used to leave
         // the ECUs behind it unattempted while the summary still called them
@@ -984,6 +1294,10 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
           },
         });
         if (myGeneration !== generation || control.stopped) return;
+        // G2: the DME has had the whole probe to answer -- read it now, before
+        // the driver is asked to perform anything, so the row's warning is
+        // already right when the metronome starts.
+        emitEngineReading(await pollEngineRpm(engineRpmChannel));
 
         /**
          * Z4 (Codex P4m-REV3 finding 10): the ONE retry a silent HYPOTHESIS is
@@ -1102,6 +1416,10 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
           // round uses, so rounds are directly comparable.
           samples.push(...result.samples);
           attempted = result.attempted;
+          // G2: a DME that answered slower than the probe still gets counted --
+          // a second, equally free look at what has arrived since. Never
+          // overwrites a reading the first look already got.
+          if (snapshot.engineRpm === null) emitEngineReading(await pollEngineRpm(engineRpmChannel));
         }
       } finally {
         stopTicker();
@@ -1121,6 +1439,10 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
       noResponse = readEntries.filter((entry) => !answered.has(keyOf(entry))).map(refOf);
       const scores = rescore(target, timeline);
       const found = scores.some((score) => score.verdict === 'found');
+      // Ticket P4p G5 (binding): only a COMPLETED script (the driver actually
+      // performed the metronome, and nothing stopped it) is evidence worth
+      // remembering -- a run cut short says nothing about the DIDs it read.
+      if (scriptStarted && !control.stopped) await persistRuledOut(target, scores);
       emit({
         phase: 'result',
         scores,
@@ -1247,6 +1569,11 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         // it, and only that close settling may clear it.)
         diagnosticReqPerSec: null,
         probeProgress: null,
+        // Ticket P4p G2: a fresh find has read no rpm of its own yet -- and
+        // must never inherit the previous find's reading, which could be
+        // minutes old and about a different engine state entirely.
+        engineRpm: null,
+        engineRunning: null,
         budget: budgetFor(assumedReqPerSec),
         sessionId: `signal-finder-${deps.clock.now()}-${Math.random().toString(36).slice(2, 8)}`,
         startedAtUtc: nowUtc(),
@@ -1264,7 +1591,12 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
        * before the transport.
        */
       const run = (async (): Promise<void> => {
-        currentPools = await collectPools(target);
+        // Ticket P4p G5: the exclusions are read ONCE per find and applied to
+        // every pool (and to every `nextRound()` slice, which reuses these
+        // pools).
+        ruledOutKeys = await readRuledOutKeys(target);
+        emit({ ruledOutCount: ruledOutKeys.size });
+        currentPools = await collectPools(target, ruledOutKeys);
         if (myGeneration !== generation || control.stopped) return;
         await doRound(myGeneration, target, 1);
       })();
@@ -1279,7 +1611,11 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
       // anything, whether one script would read anything at all.
       const target = findSignalTarget(catalog, targetId);
       if (target === null) return 0;
-      const pools = await collectPools(target);
+      // Ticket P4p G5: a DID that is ruled out is not eligible -- so a target
+      // whose whole pool has been ruled out reports 0 and its row offers the
+      // discovery scan (G3) instead of a find that would re-read the same
+      // DIDs the user already watched fail.
+      const pools = await collectPools(target, await readRuledOutKeys(target));
       const keys = new Set<string>();
       for (const pool of [pools.confirmed, pools.hypotheses, pools.changed, pools.cached]) {
         for (const entry of pool) keys.add(`${entry.ecu}:${entry.did}`);
@@ -1321,6 +1657,32 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
 
     getSamples(): readonly SignalFinderSample[] {
       return samples;
+    },
+
+    async ruledOutDidCount(targetId): Promise<number> {
+      const target = findSignalTarget(catalog, targetId);
+      if (target === null) return 0;
+      return (await readRuledOutKeys(target)).size;
+    },
+
+    async clearRuledOut(targetId): Promise<void> {
+      const store = deps.ruledOutStore;
+      if (store === undefined) return;
+      const target = findSignalTarget(catalog, targetId);
+      if (target === null) return;
+      try {
+        await store.clearRuledOut(profileId, target.id);
+      } catch (error) {
+        console.warn('[signalFinderController] could not clear the ruled-out DIDs', error);
+        return;
+      }
+      // The pools of a find already in progress are not rebuilt here (that
+      // would change what the CURRENT script is reading mid-run); the next
+      // find picks the restored DIDs up, which is what the control promises.
+      if (currentTarget?.id === target.id || snapshot.targetId === target.id || snapshot.targetId === null) {
+        ruledOutKeys = new Set();
+        emit({ ruledOutCount: 0 });
+      }
     },
 
     async confirmBinding(channel, score): Promise<VehicleProfileBinding | null> {
@@ -1404,6 +1766,7 @@ export function createSignalFinderController(deps: SignalFinderControllerDeps): 
         updatedAtUtc: nowUtc(),
       };
       await deps.bindingStore.upsertBinding(binding);
+
       emit({
         confirmedChannels: [...new Set([...snapshot.confirmedChannels, channel])],
         pendingReplace: null,

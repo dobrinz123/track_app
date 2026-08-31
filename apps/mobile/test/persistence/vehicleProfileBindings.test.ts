@@ -43,14 +43,25 @@ function binding(overrides: Partial<VehicleProfileBinding> = {}): VehicleProfile
   };
 }
 
-describe('did_sweep schema v3 (additive)', () => {
-  it('bumps the version row to 3 and creates vehicle_profile_bindings', async () => {
-    expect(DID_SWEEP_SCHEMA_VERSION).toBe(3);
+describe('did_sweep schema v3/v4 (additive)', () => {
+  // Ticket P4p G5 moved the version to 4 (`signal_finder_ruled_out`), which is
+  // another plain `CREATE TABLE IF NOT EXISTS` addition -- v3's own table is
+  // created exactly as before.
+  it('bumps the version row to the current schema version and creates vehicle_profile_bindings', async () => {
+    expect(DID_SWEEP_SCHEMA_VERSION).toBe(4);
     const db = await migratedDb();
     const version = await db.getAllAsync<{ version: number }>('SELECT version FROM did_sweep_schema_migrations LIMIT 1');
-    expect(version[0]?.version).toBe(3);
+    expect(version[0]?.version).toBe(4);
     const rows = await db.getAllAsync<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'vehicle_profile_bindings'",
+    );
+    expect(rows).toHaveLength(1);
+  });
+
+  it('creates the v4 ruled-out table alongside it', async () => {
+    const db = await migratedDb();
+    const rows = await db.getAllAsync<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'signal_finder_ruled_out'",
     );
     expect(rows).toHaveLength(1);
   });

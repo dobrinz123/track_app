@@ -31,6 +31,16 @@ export class SqlSettingsStore implements SettingsStore {
   private constructor(
     private readonly db: SqlDatabase,
     initial: AppSettings,
+    /**
+     * Ticket P4p G1 (binding): did the persisted ROW itself carry a usable
+     * `activeVehicleProfileId`? Same question (and same reason) as N7's
+     * `rowHasLanguage` above: `DEFAULT_SETTINGS.activeVehicleProfileId` is a
+     * perfectly valid `'generic'`, so after the merge a row written before
+     * this setting existed is indistinguishable from a deliberate "generic"
+     * choice. `composition.ts`'s one-time migration heuristic runs only while
+     * this is `false`, so a profile the USER chose is never overridden.
+     */
+    readonly activeVehicleProfileIdWasStored: boolean,
   ) {
     this.settings = initial;
   }
@@ -55,12 +65,17 @@ export class SqlSettingsStore implements SettingsStore {
     // that predates the setting is indistinguishable from a deliberate
     // English choice, and the device-locale default was never reachable.
     let rowHasLanguage = false;
+    // Ticket P4p G1: the same ROW-level question for the active vehicle
+    // profile -- captured here, before the merge, for the reason N7 documents.
+    let rowHasActiveVehicleProfileId = false;
     const raw = rows[0]?.value;
     if (raw !== undefined) {
       try {
         const parsed: unknown = JSON.parse(raw);
         if (isPartialAppSettings(parsed)) {
           rowHasLanguage = parsed.language === 'ro' || parsed.language === 'en';
+          rowHasActiveVehicleProfileId =
+            typeof parsed.activeVehicleProfileId === 'string' && parsed.activeVehicleProfileId.trim() !== '';
           initial = { ...DEFAULT_SETTINGS, ...parsed };
         }
       } catch {
@@ -105,7 +120,15 @@ export class SqlSettingsStore implements SettingsStore {
     if (!rowHasLanguage) {
       initial = { ...initial, language: defaultLanguageForLocale(readLocale()) };
     }
-    return new SqlSettingsStore(db, initial);
+    // Ticket P4p G1 (binding): a present-but-malformed profile id must never
+    // reach the binding cache -- an unresolvable id would silently poll
+    // nothing at all. Repaired back to `'generic'` the same defensive way the
+    // boolean settings above are, and NOT counted as a stored choice (the
+    // migration heuristic then still gets its one chance).
+    if (!rowHasActiveVehicleProfileId) {
+      initial = { ...initial, activeVehicleProfileId: DEFAULT_SETTINGS.activeVehicleProfileId };
+    }
+    return new SqlSettingsStore(db, initial, rowHasActiveVehicleProfileId);
   }
 
   getSettings(): AppSettings {

@@ -22,6 +22,7 @@ import { EnetTcpTransport } from '../../session/enetTcpTransport';
 import { formatHexByte, mergeEnetChannelSpecJson } from '../../session/enetSettingsValidation';
 import { createDidSweepController, parseFocusedDidList, type DidSweepSnapshot } from '../../session/didSweepController';
 import { createDidSweepStore, selectResumableRun, type DidSweepRunRecord } from '../../persistence/didSweepStore';
+import { sweepRangeDraftsFromParams } from '../../session/signalFinderController';
 import { buildDidSweepExportForRun, buildCopySummaryText, shareDidSweepExport } from '../../session/didSweepExport';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'DidSweep'>;
@@ -112,10 +113,38 @@ function formatDidListDraft(dids: readonly number[]): string {
  * this screen supplies only a `transportFactory` (never connects/closes
  * anything itself) and renders `controller`'s own snapshot.
  */
-export function DidSweepScreen(_props: Props): React.JSX.Element {
+export function DidSweepScreen(props: Props): React.JSX.Element {
   const settings = useSettings(settingsStore);
-  const [fromDraft, setFromDraft] = React.useState('0000');
-  const [toDraft, setToDraft] = React.useState('FFFF');
+  /**
+   * Ticket P4p G3 (binding, field test 9): the range this screen was OPENED
+   * with, when the Signal Finder's "Scan <ecu> <range>" button navigated here
+   * -- the finder's own unswept discovery range, prefilled so the driver taps
+   * Start rather than typing four hex digits twice.
+   * `sweepRangeDraftsFromParams` (pure, unit-tested) falls back to this
+   * screen's own full-range defaults for a screen opened bare from Settings,
+   * or for a malformed param.
+   */
+  const scanParams = props.route.params;
+  const initialDrafts = sweepRangeDraftsFromParams(scanParams);
+  const [fromDraft, setFromDraft] = React.useState(initialDrafts.from);
+  const [toDraft, setToDraft] = React.useState(initialDrafts.to);
+  /**
+   * The sweep polls the ENET TARGET ADDRESS from settings (`enetTargetAddress`),
+   * so a scan handed over for a DIFFERENT ECU (the steering range lives on
+   * 0x29, the DME default is 0x12) has to move that setting or it would sweep
+   * the wrong ECU entirely. Applied ONCE, on mount, and stated on screen --
+   * never silently.
+   */
+  const [scanEcuApplied, setScanEcuApplied] = React.useState<number | null>(null);
+  React.useEffect(() => {
+    const ecu = scanParams?.ecu;
+    if (typeof ecu !== 'number' || !Number.isInteger(ecu) || ecu < 0 || ecu > 0xff) return;
+    setScanEcuApplied(ecu);
+    if (settingsStore.getSettings().enetTargetAddress !== ecu) settingsStore.update({ enetTargetAddress: ecu });
+    // (No `react-hooks/exhaustive-deps` suppression: this project's flat
+    // eslint config does not wire `eslint-plugin-react-hooks` -- see the F8
+    // note elsewhere in this file.)
+  }, [scanParams?.ecu]);
   const [observationWindowDraft, setObservationWindowDraft] = React.useState('60');
   const [rangeError, setRangeError] = React.useState<string | null>(null);
   const [snapshot, setSnapshot] = React.useState<DidSweepSnapshot | null>(null);
@@ -604,6 +633,16 @@ export function DidSweepScreen(_props: Props): React.JSX.Element {
               </Text>
             </Pressable>
           ) : null}
+
+          {/* Ticket P4p G3: opened from the Signal Finder with a range to
+              scan -- the range is prefilled above and the target address was
+              moved to the ECU that range belongs to, which the driver is told
+              rather than left to discover in Settings. */}
+          {scanEcuApplied === null ? null : (
+            <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+              Signal Finder scan: target address set to 0x{formatHexByte(scanEcuApplied)}
+            </Text>
+          )}
 
           {rangeError === null ? null : (
             <Text style={styles.errorBanner} maxFontSizeMultiplier={1.3} accessibilityLiveRegion="polite">

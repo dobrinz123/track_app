@@ -135,6 +135,21 @@ export interface SignalFinderScreenStrings {
    * meaningless' (no hard block)."
    */
   warningEngineNotDetected: string;
+  /**
+   * Ticket P4p G3 (binding, field test 9): a Find row whose plan is empty
+   * because its discovery range was never swept stops being a dead end -- its
+   * reason becomes the ACTION that fixes it, e.g. "Scan 0x29 58F3–6FFF (≈ 8
+   * min, engine off)", opening the existing DID sweep with that exact range
+   * prefilled. The engine state is stated because a discovery sweep needs no
+   * driver action at all.
+   */
+  scanRange: (ecu: string, range: string, minutes: number) => string;
+  scanRangeA11y: (ecu: string, range: string) => string;
+  /** Ticket P4p G5: how many DIDs earlier completed finds ruled out for this target. */
+  ruledOut: (count: number) => string;
+  /** Ticket P4p G5: the control that puts them all back in play. */
+  retestAll: string;
+  retestAllA11y: (target: string) => string;
 }
 
 const EN: SignalFinderScreenStrings = {
@@ -221,6 +236,11 @@ const EN: SignalFinderScreenStrings = {
   errorUnknown: 'The find could not be completed. The details are in the shared JSON.',
   bannerShareFailed: 'Sharing failed. The details are in the shared JSON.',
   warningEngineNotDetected: 'engine not detected running — results may be meaningless',
+  scanRange: (ecu, range, minutes) => `Scan ${ecu} ${range} (≈ ${minutes} min, engine off)`,
+  scanRangeA11y: (ecu, range) => `Scan ${ecu} ${range} with the DID sweep`,
+  ruledOut: (count) => `${count} ruled out from earlier finds`,
+  retestAll: 'Re-test all',
+  retestAllA11y: (target) => `Re-test every DID ruled out for ${target}`,
 };
 
 const RO: SignalFinderScreenStrings = {
@@ -307,6 +327,11 @@ const RO: SignalFinderScreenStrings = {
   errorUnknown: 'Căutarea nu a putut fi finalizată. Detaliile sunt în JSON-ul partajat.',
   bannerShareFailed: 'Partajarea a eșuat. Detaliile sunt în JSON-ul partajat.',
   warningEngineNotDetected: 'motor nedetectat pornit — rezultatele pot fi eronate',
+  scanRange: (ecu, range, minutes) => `Scanează ${ecu} ${range} (≈ ${minutes} min, motor oprit)`,
+  scanRangeA11y: (ecu, range) => `Scanează ${ecu} ${range} cu scanarea de DID-uri`,
+  ruledOut: (count) => `${count} excluse din căutările anterioare`,
+  retestAll: 'Testează din nou tot',
+  retestAllA11y: (target) => `Testează din nou fiecare DID exclus pentru ${target}`,
 };
 
 export const SIGNAL_FINDER_SCREEN_STRINGS: Readonly<Record<SignalFinderUiLanguage, SignalFinderScreenStrings>> = {

@@ -721,6 +721,14 @@ export interface VehicleProfileBindingStore {
   /** One channel's binding, or `null`. */
   getBinding(profileId: string, channel: string): Promise<VehicleProfileBinding | null>;
   deleteBinding(profileId: string, channel: string): Promise<void>;
+  /**
+   * Ticket P4p G1: EVERY profile's bindings, ordered by (profile, channel).
+   * Read once, by `composition.ts`'s one-time initial-profile heuristic, which
+   * has to compare what two profiles carry for the same channel. Optional so
+   * every existing test double of this interface keeps compiling unchanged;
+   * a store that does not implement it simply gets no migration.
+   */
+  listAllBindings?(): Promise<VehicleProfileBinding[]>;
 }
 
 export function createInMemoryVehicleProfileBindingStore(): VehicleProfileBindingStore {
@@ -742,6 +750,13 @@ export function createInMemoryVehicleProfileBindingStore(): VehicleProfileBindin
     },
     async deleteBinding(profileId, channel): Promise<void> {
       rows.delete(keyOf(profileId, channel));
+    },
+    async listAllBindings(): Promise<VehicleProfileBinding[]> {
+      return [...rows.values()]
+        .map((row) => ({ ...row }))
+        .sort((a, b) =>
+          a.profileId < b.profileId ? -1 : a.profileId > b.profileId ? 1 : a.channel < b.channel ? -1 : a.channel > b.channel ? 1 : 0,
+        );
     },
   };
 }
@@ -817,10 +832,138 @@ export function createSqlVehicleProfileBindingStore(db: SqlDatabase): VehiclePro
     async deleteBinding(profileId, channel): Promise<void> {
       await db.runAsync('DELETE FROM vehicle_profile_bindings WHERE profile_id = ? AND channel = ?', [profileId, channel]);
     },
+    async listAllBindings(): Promise<VehicleProfileBinding[]> {
+      const rows = await db.getAllAsync<BindingRow>(
+        'SELECT * FROM vehicle_profile_bindings ORDER BY profile_id ASC, channel ASC',
+      );
+      return rows.map(rowToBinding);
+    },
   };
 }
 
 /** Same `db !== null` ternary convention as {@link createDidSweepStore} -- the web preview gets the in-memory implementation. */
 export function createVehicleProfileBindingStore(db: SqlDatabase | null): VehicleProfileBindingStore {
   return db === null ? createInMemoryVehicleProfileBindingStore() : createSqlVehicleProfileBindingStore(db);
+}
+
+// ---------------------------------------------------------------------------
+// Signal Finder -- RULED-OUT DIDs (ticket P4p G5, binding; user request after
+// field test 9: "the steering finds re-tested the same known DIDs and found
+// nothing -- never offer them again").
+//
+// A DID that a COMPLETED find (a full metronome, not a stopped run) scored
+// `unrelated` for a target is negative EVIDENCE about that target, and it is
+// worth exactly as much next time. It is remembered here and excluded from
+// that target's future plans until the user asks for a re-test.
+//
+// Per (profile, target): a DID ruled out for `steeringAngle` says nothing
+// about `brakePressure`, and a profile's exclusions are its own -- the same
+// scoping `vehicle_profile_bindings` already uses. Kept in its own table (and
+// its own store interface) so every existing `DidSweepStore` /
+// `VehicleProfileBindingStore` implementation and double compiles unchanged.
+// ---------------------------------------------------------------------------
+
+export interface SignalFinderRuledOutRecord {
+  /** The vehicle profile the find ran under (`'generic'`, `'toyota-supra-b58'`, ...). */
+  profileId: string;
+  /** A `SignalTargetId` -- TEXT, so a target added later needs no migration. */
+  targetId: string;
+  ecu: number;
+  did: number;
+  /** The verdict that ruled it out. Only `'unrelated'` is written today; stored so a later rule can be told apart from this one. */
+  verdict: string;
+  /** The finder session that produced the verdict -- the evidence trail back to an export. */
+  sessionId: string;
+  ruledOutAtUtc: string;
+}
+
+export interface SignalFinderRuledOutStore {
+  /** Inserts or REPLACES each `(profileId, targetId, ecu, did)` -- re-ruling the same DID never accumulates rows. */
+  addRuledOut(records: readonly SignalFinderRuledOutRecord[]): Promise<void>;
+  /** Everything ruled out for one target of one profile, ordered by (ecu, did). */
+  listRuledOut(profileId: string, targetId: string): Promise<SignalFinderRuledOutRecord[]>;
+  /** The "Re-test all" control: drops one target's exclusions, and only that target's. */
+  clearRuledOut(profileId: string, targetId: string): Promise<void>;
+}
+
+function ruledOutKey(profileId: string, targetId: string, ecu: number, did: number): string {
+  return `${profileId} ${targetId} ${ecu} ${did}`;
+}
+
+function sortRuledOut(records: SignalFinderRuledOutRecord[]): SignalFinderRuledOutRecord[] {
+  return records.sort((a, b) => a.ecu - b.ecu || a.did - b.did);
+}
+
+export function createInMemorySignalFinderRuledOutStore(): SignalFinderRuledOutStore {
+  const rows = new Map<string, SignalFinderRuledOutRecord>();
+  return {
+    async addRuledOut(records): Promise<void> {
+      for (const record of records) {
+        rows.set(ruledOutKey(record.profileId, record.targetId, record.ecu, record.did), { ...record });
+      }
+    },
+    async listRuledOut(profileId, targetId): Promise<SignalFinderRuledOutRecord[]> {
+      return sortRuledOut(
+        [...rows.values()]
+          .filter((row) => row.profileId === profileId && row.targetId === targetId)
+          .map((row) => ({ ...row })),
+      );
+    },
+    async clearRuledOut(profileId, targetId): Promise<void> {
+      for (const [key, row] of [...rows.entries()]) {
+        if (row.profileId === profileId && row.targetId === targetId) rows.delete(key);
+      }
+    },
+  };
+}
+
+interface RuledOutRow {
+  profile_id: string;
+  target_id: string;
+  ecu: number;
+  did: number;
+  verdict: string;
+  session_id: string;
+  ruled_out_at_utc: string;
+}
+
+export function createSqlSignalFinderRuledOutStore(db: SqlDatabase): SignalFinderRuledOutStore {
+  return {
+    async addRuledOut(records): Promise<void> {
+      for (const record of records) {
+        await db.runAsync(
+          `INSERT INTO signal_finder_ruled_out (profile_id, target_id, ecu, did, verdict, session_id, ruled_out_at_utc)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(profile_id, target_id, ecu, did) DO UPDATE SET
+             verdict = excluded.verdict,
+             session_id = excluded.session_id,
+             ruled_out_at_utc = excluded.ruled_out_at_utc`,
+          [record.profileId, record.targetId, record.ecu, record.did, record.verdict, record.sessionId, record.ruledOutAtUtc],
+        );
+      }
+    },
+    async listRuledOut(profileId, targetId): Promise<SignalFinderRuledOutRecord[]> {
+      const rows = await db.getAllAsync<RuledOutRow>(
+        'SELECT * FROM signal_finder_ruled_out WHERE profile_id = ? AND target_id = ? ORDER BY ecu ASC, did ASC',
+        [profileId, targetId],
+      );
+      return rows.map((row) => ({
+        profileId: row.profile_id,
+        targetId: row.target_id,
+        ecu: row.ecu,
+        did: row.did,
+        verdict: row.verdict,
+        sessionId: row.session_id,
+        ruledOutAtUtc: row.ruled_out_at_utc,
+      }));
+    },
+    async clearRuledOut(profileId, targetId): Promise<void> {
+      await db.runAsync('DELETE FROM signal_finder_ruled_out WHERE profile_id = ? AND target_id = ?', [profileId, targetId]);
+    },
+  };
+}
+
+/** Same `db !== null` ternary convention as {@link createDidSweepStore} -- the web preview gets the in-memory implementation. */
+export function createSignalFinderRuledOutStore(db: SqlDatabase | null): SignalFinderRuledOutStore {
+  return db === null ? createInMemorySignalFinderRuledOutStore() : createSqlSignalFinderRuledOutStore(db);
 }

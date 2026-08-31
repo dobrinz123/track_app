@@ -346,3 +346,60 @@ describe('SqlSettingsStore language default (P4l-FIX4 N7)', () => {
     expect((await storeWith({ language: 7 }, 'en-US')).getSettings().language).toBe('en');
   });
 });
+
+/**
+ * Ticket P4p G1 (binding, field test 9 BUG-A): the app-level
+ * `activeVehicleProfileId`. Two things have to hold at hydration: a
+ * present-but-malformed value must never leave the app polling an
+ * unresolvable profile (repaired to `'generic'`, the same defensive
+ * discipline `developerModeEnabled`/`suggestionsEnabled` above already
+ * follow), and hydration must report whether the ROW itself ever carried a
+ * choice -- that is what the one-time migration heuristic keys off, so a
+ * user who has chosen is never overridden.
+ */
+describe('SqlSettingsStore activeVehicleProfileId (P4p G1)', () => {
+  async function storeWith(row: unknown | undefined) {
+    const db = await createSqlJsDatabase();
+    await SqlSessionRepository.create(db);
+    if (row !== undefined) {
+      await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+        'app-settings',
+        JSON.stringify(row),
+      ]);
+    }
+    return SqlSettingsStore.create(db);
+  }
+
+  it('hydrates to generic, and reports that the row never carried a choice', async () => {
+    const store = await storeWith(undefined);
+    expect(store.getSettings().activeVehicleProfileId).toBe('generic');
+    expect(store.activeVehicleProfileIdWasStored).toBe(false);
+  });
+
+  it('keeps a stored choice and reports it AS stored', async () => {
+    const store = await storeWith({ activeVehicleProfileId: 'toyota-supra-b58' });
+    expect(store.getSettings().activeVehicleProfileId).toBe('toyota-supra-b58');
+    expect(store.activeVehicleProfileIdWasStored).toBe(true);
+  });
+
+  it('repairs a malformed value back to generic, and does NOT count it as a stored choice', async () => {
+    for (const bad of [7, '', '   ', null, { id: 'supra' }]) {
+      const store = await storeWith({ activeVehicleProfileId: bad });
+      expect(store.getSettings().activeVehicleProfileId).toBe('generic');
+      expect(store.activeVehicleProfileIdWasStored).toBe(false);
+    }
+  });
+
+  it('round-trips a chosen profile across a simulated app restart', async () => {
+    const raw = await createRawSqlJsDatabase();
+    const db1 = wrapExistingSqlJsDatabase(raw);
+    await SqlSessionRepository.create(db1);
+    const store1 = await SqlSettingsStore.create(db1);
+    store1.update({ activeVehicleProfileId: 'toyota-supra-b58' });
+    await flush();
+
+    const store2 = await SqlSettingsStore.create(wrapExistingSqlJsDatabase(raw));
+    expect(store2.getSettings().activeVehicleProfileId).toBe('toyota-supra-b58');
+    expect(store2.activeVehicleProfileIdWasStored).toBe(true);
+  });
+});

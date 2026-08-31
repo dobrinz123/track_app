@@ -45,8 +45,19 @@ import type { SqlDatabase } from '@circuit/core';
  * needs no `ALTER TABLE` and no data migration; the version row simply moves
  * to 3. It is deliberately NOT keyed by `run_id`: a binding outlives the
  * sweep run that discovered it (and survives the five-run retention).
+ *
+ * Ticket P4p G5 (binding, user request after field test 9: "the steering
+ * finds re-tested the same known DIDs and found nothing -- never offer them
+ * again"): schema v4 adds `signal_finder_ruled_out` -- the (ecu, did) pairs a
+ * COMPLETED find scored `unrelated` for one target of one profile, with the
+ * verdict, the finder session that produced it and the timestamp. Keyed by
+ * (`profile_id`, `target_id`, `ecu`, `did`) so re-ruling the same DID
+ * REPLACES rather than accumulates, and so a DID ruled out for one target is
+ * untouched for every other. Another plain `CREATE TABLE IF NOT EXISTS`
+ * addition -- no column added to any existing table, no data migration; the
+ * version row simply moves to 4.
  */
-export const DID_SWEEP_SCHEMA_VERSION = 3;
+export const DID_SWEEP_SCHEMA_VERSION = 4;
 
 const DID_SWEEP_DDL = `
 CREATE TABLE IF NOT EXISTS did_sweep_schema_migrations (
@@ -123,6 +134,19 @@ CREATE TABLE IF NOT EXISTS vehicle_profile_bindings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_vehicle_profile_bindings_profile ON vehicle_profile_bindings (profile_id);
+
+CREATE TABLE IF NOT EXISTS signal_finder_ruled_out (
+  profile_id TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  ecu INTEGER NOT NULL,
+  did INTEGER NOT NULL,
+  verdict TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  ruled_out_at_utc TEXT NOT NULL,
+  PRIMARY KEY (profile_id, target_id, ecu, did)
+);
+
+CREATE INDEX IF NOT EXISTS idx_signal_finder_ruled_out_target ON signal_finder_ruled_out (profile_id, target_id);
 `;
 
 /** Applies `DID_SWEEP_DDL` and records/bumps the schema version row. Safe to call on every app launch (idempotent), and safe to call more than once against the same `db` within a single launch. */

@@ -38,7 +38,7 @@ import type { PersonalBestEntry, SessionHistoryStore, StoredSession } from './mo
 import { MockSessionHistoryStore } from './mockHistory';
 import { SqlSessionHistoryStore } from './sqlSessionHistoryStore';
 import type { AppSettings, SettingsStore } from './settingsStore';
-import { InMemorySettingsStore } from './settingsStore';
+import { InMemorySettingsStore, chooseInitialActiveVehicleProfileId } from './settingsStore';
 import { RealSessionFacade, type RealSessionFacadeCallbacks } from './realFacade';
 import { ReplayTimeSource, ReplayTimestampedLocationProvider, ScaledReplayClock } from './liveTimestampedProvider';
 import { TMR_CIRCUIT_PROFILE, TMR_CORNERS, TMR_RUNTIME_PROFILE } from './tmrProfile';
@@ -599,14 +599,21 @@ const telemetryIsDev = typeof __DEV__ !== 'undefined' ? __DEV__ : false;
 // but the underlying SQLite read is async -- so this composition layer keeps
 // a CACHED snapshot for it to read, refreshed asynchronously.
 //
-// Which profile: the Signal Finder has no persisted profile SETTING yet
-// (`SignalFinderScreen.tsx`'s own `useState('generic')`) -- this is that
-// SAME default, so a binding confirmed from the screen's default state is
-// picked up without the user ever choosing a profile chip. When a persisted
-// vehicle-profile setting exists, this should read THAT instead of a fixed
-// constant.
+// Which profile: ticket P4p G1 (binding, field test 9 BUG-A) replaced the
+// hard-coded `'generic'` with the app-level `activeVehicleProfileId` setting.
+// Bindings have always been stored PER PROFILE, and the field exports of
+// 2026-08-31 show both stores side by side: `generic` carried
+// brakePressure = 0x12/0x4002 (a DME two-level flag) while the user's own
+// engine-running confirm, 0x12/0x58B7, lived on `toyota-supra-b58`. Reading a
+// fixed `'generic'` here is exactly why the monitor showed raw 131/155 =
+// 0/100 %. The cache now holds ONE profile's bindings -- the active one -- and
+// is re-read whenever that setting changes (see the subscription below).
 // ---------------------------------------------------------------------------
-const VEHICLE_PROFILE_ID_FOR_TELEMETRY = 'generic';
+
+/** The vehicle profile every binding read in this module is scoped to. */
+export function getActiveVehicleProfileId(): string {
+  return settingsStore.getSettings().activeVehicleProfileId;
+}
 
 let vehicleProfileBindingsCache: readonly VehicleProfileBindingLike[] = [];
 
@@ -625,7 +632,7 @@ let vehicleProfileBindingsCache: readonly VehicleProfileBindingLike[] = [];
 export async function refreshVehicleProfileBindingsCache(): Promise<void> {
   try {
     const store = createVehicleProfileBindingStore(getTelemetryReadDb());
-    vehicleProfileBindingsCache = await store.listBindings(VEHICLE_PROFILE_ID_FOR_TELEMETRY);
+    vehicleProfileBindingsCache = await store.listBindings(getActiveVehicleProfileId());
   } catch (error) {
     console.warn('[composition] could not refresh the vehicle profile bindings cache', error);
   }
@@ -634,6 +641,51 @@ export async function refreshVehicleProfileBindingsCache(): Promise<void> {
 /** Test/diagnostic visibility into the cache above. */
 export function getVehicleProfileBindingsCache(): readonly VehicleProfileBindingLike[] {
   return vehicleProfileBindingsCache;
+}
+
+/**
+ * Ticket P4p G1 (binding): a profile SWITCH (the Signal Finder's chip writes
+ * the setting) invalidates the cache immediately -- otherwise the provider
+ * would keep polling the previous profile's DIDs until something else happened
+ * to refresh it. Registered once, at module load, on the STABLE
+ * `settingsStore` wrapper, so it survives bootstrap's inner store swap.
+ */
+let lastKnownActiveVehicleProfileId = settingsStore.getSettings().activeVehicleProfileId;
+settingsStore.subscribe((settings) => {
+  if (settings.activeVehicleProfileId === lastKnownActiveVehicleProfileId) return;
+  lastKnownActiveVehicleProfileId = settings.activeVehicleProfileId;
+  vehicleProfileBindingsCache = [];
+  void refreshVehicleProfileBindingsCache();
+});
+
+/**
+ * Ticket P4p G1 (binding), the ONE-TIME initial-profile migration. Runs from
+ * `runBootstrap()` immediately after settings hydrate, and only while the
+ * persisted row never carried a profile choice of its own
+ * (`SqlSettingsStore.activeVehicleProfileIdWasStored`). The RULE itself is
+ * pure and lives in `settingsStore.ts`
+ * (`chooseInitialActiveVehicleProfileId`); this function only supplies the
+ * persisted bindings, applies the result and LOGS it. Nothing is ever
+ * deleted: the other profile's bindings stay exactly where they are, and the
+ * user can switch back from the Signal Finder's chip at any time.
+ */
+export async function applyInitialActiveVehicleProfile(store: SqlSettingsStore): Promise<string | null> {
+  if (store.activeVehicleProfileIdWasStored) return null;
+  try {
+    const bindingStore = createVehicleProfileBindingStore(getTelemetryReadDb());
+    const all = await bindingStore.listAllBindings?.();
+    if (all === undefined) return null;
+    const chosen = chooseInitialActiveVehicleProfileId(all);
+    if (chosen === null || chosen === store.getSettings().activeVehicleProfileId) return null;
+    console.info(
+      `[composition] first run with an active vehicle profile setting: activating "${chosen}" -- it carries field-confirmed bindings for channels the generic profile also has (nothing was deleted; change it from the Signal Finder)`,
+    );
+    store.update({ activeVehicleProfileId: chosen });
+    return chosen;
+  } catch (error) {
+    console.warn('[composition] could not decide an initial active vehicle profile', error);
+    return null;
+  }
 }
 
 const baseTelemetryProvider: TelemetryProvider = createTelemetryProvider({
@@ -1735,6 +1787,15 @@ async function runBootstrap(): Promise<void> {
     if (db !== null) {
       const settings = await SqlSettingsStore.create(db);
       settingsWrapper.setInner(settings);
+      // Ticket P4p G1 (binding): the ONE-TIME initial-profile migration, run
+      // here because it needs BOTH the hydrated settings (did the row ever
+      // carry a choice?) and the persisted bindings. Awaited -- the cache
+      // refresh right after it must read the profile this decided, and the
+      // whole thing is bounded by two small SQLite reads. Never throws.
+      await applyInitialActiveVehicleProfile(settings);
+      // The prime above ran before settings existed, so it read the DEFAULT
+      // profile; re-read now that the ACTIVE one is known.
+      await refreshVehicleProfileBindingsCache();
     }
 
     // F3 fix: build the production controller/facade now (so `controller`

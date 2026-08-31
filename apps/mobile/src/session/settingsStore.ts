@@ -222,6 +222,81 @@ export interface AppSettings {
    * ticket rather than being forced to English.
    */
   language: AppLanguage;
+  /**
+   * Ticket P4p G1 (binding, field test 9 BUG-A): the ONE vehicle profile the
+   * whole app works against -- the Signal Finder's target catalog AND the
+   * confirmed bindings `telemetryProvider.ts` polls
+   * (`composition.ts`'s binding cache reads `listBindings(THIS id)`).
+   *
+   * Bindings have always been stored per profile
+   * (`vehicle_profile_bindings.profile_id`), but nothing persisted WHICH
+   * profile the app was using: the Signal Finder screen defaulted its chip to
+   * `'generic'` in React state, and the composition layer hard-coded
+   * `'generic'` for telemetry. Field test 9: the user confirmed
+   * brakePressure = 0x12/0x58B7 under `toyota-supra-b58` (export
+   * `2026-08-31-steeringAngle-2.json`) while the monitor kept polling
+   * 0x12/0x4002 from the generic profile (export `-1.json`) and showed a
+   * meaningless 0/100 %.
+   *
+   * Defaults to `'generic'` -- the hypothesis-free catalog. An id with no
+   * bundled catalog resolves back to the generic catalog at read time
+   * (`resolveSignalTargetCatalog`), exactly like `selectedCircuitId` does.
+   */
+  activeVehicleProfileId: string;
+}
+
+/**
+ * Ticket P4p G1: the only thing the initial-profile heuristic below needs to
+ * know about a persisted binding. Deliberately NOT
+ * `VehicleProfileBinding` (`persistence/didSweepStore.ts`): this module is the
+ * settings vocabulary and must not depend on the persistence layer.
+ */
+export interface VehicleProfileBindingSummary {
+  profileId: string;
+  channel: string;
+  status: string;
+}
+
+/** The profile id every install starts on, and the one an unresolvable id falls back to. */
+export const GENERIC_VEHICLE_PROFILE_ID = 'generic';
+
+/**
+ * Ticket P4p G1 (binding): the ONE-TIME migration heuristic, run only on the
+ * first launch after this setting existed (i.e. only when the persisted
+ * settings row never carried a choice of its own -- see
+ * `SqlSettingsStore.activeVehicleProfileIdWasStored`) and never afterwards.
+ *
+ * The situation it exists for is exactly field test 9's: the user confirmed
+ * the same CHANNEL under two profiles, and the newer, engine-running confirm
+ * lives on the car-specific profile while the app was reading generic. So:
+ * a non-generic profile is preferred when it carries `field-confirmed`
+ * bindings AND generic carries a binding for at least one of the SAME
+ * channels -- the only case where the two stores actually contradict each
+ * other about a channel the monitor polls.
+ *
+ * `null` means "no migration" (keep `'generic'`): nothing confirmed, only
+ * generic confirmed, or a car profile whose channels generic never touched
+ * (nothing contradicts, so nothing is guessed). Ties break on the number of
+ * overlapping field-confirmed channels, then alphabetically, so the result is
+ * deterministic. Pure -- it decides, it never writes, and NOTHING is ever
+ * deleted either way.
+ */
+export function chooseInitialActiveVehicleProfileId(
+  bindings: readonly VehicleProfileBindingSummary[],
+): string | null {
+  const genericChannels = new Set(
+    bindings.filter((binding) => binding.profileId === GENERIC_VEHICLE_PROFILE_ID).map((binding) => binding.channel),
+  );
+  if (genericChannels.size === 0) return null;
+  const overlapByProfile = new Map<string, number>();
+  for (const binding of bindings) {
+    if (binding.profileId === GENERIC_VEHICLE_PROFILE_ID) continue;
+    if (binding.status !== 'field-confirmed') continue;
+    if (!genericChannels.has(binding.channel)) continue;
+    overlapByProfile.set(binding.profileId, (overlapByProfile.get(binding.profileId) ?? 0) + 1);
+  }
+  const ranked = [...overlapByProfile.entries()].sort((a, b) => (b[1] - a[1]) || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return ranked[0]?.[0] ?? null;
 }
 
 /**
@@ -291,6 +366,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   enetAutoDiscover: true,
   developerModeEnabled: false,
   language: 'en',
+  activeVehicleProfileId: GENERIC_VEHICLE_PROFILE_ID,
 };
 
 /**

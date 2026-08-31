@@ -15,6 +15,7 @@ import {
 import { useSettings } from '../hooks/useSettings';
 import {
   brakeSwitchRowLabel,
+  formatActiveVehicleProfileDisplay,
   formatBrakePctRawDisplay,
   formatBrakeSwitchDisplay,
   shouldShowBrakeBindingRestartHint,
@@ -321,6 +322,21 @@ export function TelemetryScreen(_props: Props): React.JSX.Element {
                   </Text>
                 </View>
               ) : null}
+              {/* Ticket P4p G1 (binding, field test 9 BUG-A): WHICH vehicle
+                  profile's confirmed bindings this monitor is polling. The
+                  brake rows come from that profile alone, and the field bug
+                  was precisely that the app read a different profile than the
+                  one the user had confirmed under -- so the monitor now says
+                  which one, by name and by id. Set from the Signal Finder's
+                  profile chip. */}
+              <View style={styles.channelRow}>
+                <Text style={styles.channelLabel} maxFontSizeMultiplier={1.3}>
+                  Vehicle profile
+                </Text>
+                <Text style={styles.channelValue} maxFontSizeMultiplier={1.3}>
+                  {formatActiveVehicleProfileDisplay(settings.activeVehicleProfileId, settings.language)}
+                </Text>
+              </View>
               <View style={styles.channelRow}>
                 <Text style={styles.channelLabel} maxFontSizeMultiplier={1.3}>
                   Phone network

@@ -22,6 +22,13 @@ export type RootStackParamList = {
   Telemetry: undefined;
   DevReplay: undefined;
   DidProbe: undefined;
-  DidSweep: undefined;
+  /**
+   * Ticket P4p G3 (binding, field test 9): the DID sweep can now be opened
+   * WITH a range to sweep -- the Signal Finder's "Scan 0x29 58F3–6FFF" button
+   * hands over the target's own unswept discovery range instead of leaving the
+   * driver to type it in. All fields optional: the screen is still opened
+   * bare from Settings and then behaves exactly as it always did.
+   */
+  DidSweep: { fromDid?: number; toDid?: number; ecu?: number } | undefined;
   SignalFinder: undefined;
 };

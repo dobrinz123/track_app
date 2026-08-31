@@ -26,6 +26,14 @@ export type DidAnswer = Uint8Array | 'nrc' | null;
 export interface SignalFinderScript {
   /** `(ecu, did, tMs)` where `tMs` is milliseconds since this transport's FIRST request. */
   answer(ecu: number, did: number, tMs: number): DidAnswer;
+  /**
+   * Ticket P4p G2: the standard mode-01 side of the same bus -- what an ECU
+   * answers for `01 <pid>` (the finder reads rpm with PID 0x0C at probe time).
+   * The returned bytes are the DATA after the echoed PID; `'nrc'`/`null`
+   * behave exactly as they do for a DID read. Omitted -> every mode-01
+   * request is met with silence.
+   */
+  answerObd?(ecu: number, pid: number, tMs: number): DidAnswer;
 }
 
 export function bytes(hex: string): Uint8Array {
@@ -40,6 +48,8 @@ export class MultiEcuFakeTransport implements ObdTransport {
   closeCalls = 0;
   /** Every `(ecu, did)` this transport was asked for, in order. */
   readonly requests: Array<{ ecu: number; did: number; tMs: number }> = [];
+  /** P4p G2: every mode-01 `(ecu, pid)` request, in order -- the finder's own rpm read is expected to be exactly one of these. */
+  readonly obdRequests: Array<{ ecu: number; pid: number }> = [];
   keepAliveSendCount = 0;
   private firstRequestAtMs: number | null = null;
   private readonly dataListeners = new Set<(chunk: string) => void>();
@@ -69,6 +79,19 @@ export class MultiEcuFakeTransport implements ObdTransport {
       const pdu = frame.payload;
       if ((pdu[0] ?? 0) === 0x3e) {
         this.keepAliveSendCount += 1;
+        continue;
+      }
+      if ((pdu[0] ?? 0) === 0x01) {
+        // P4p G2: a standard OBD mode-01 request (`01 <pid>`) -- answered
+        // `41 <pid> ...data`, exactly like a real DME over HSFZ.
+        const obdEcu = frame.target;
+        const pid = pdu[1] ?? 0;
+        this.obdRequests.push({ ecu: obdEcu, pid });
+        const obdAnswer = this.script.answerObd?.(obdEcu, pid, Date.now() - (this.firstRequestAtMs ?? Date.now())) ?? null;
+        if (obdAnswer === null) continue;
+        const obdPayload =
+          obdAnswer === 'nrc' ? Uint8Array.from([0x7f, 0x01, 0x31]) : Uint8Array.from([0x41, pid, ...obdAnswer]);
+        setTimeout(() => this.deliver(obdEcu, obdPayload), this.opts.responseDelayMs ?? 5);
         continue;
       }
       if ((pdu[0] ?? 0) !== 0x22) continue;
