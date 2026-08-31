@@ -1,0 +1,3486 @@
+{
+  "schemaVersion": 5,
+  "kind": "trace-signal-finder",
+  "generatedAtUtc": "2026-08-31T11:42:28.851Z",
+  "session": {
+    "sessionId": "signal-finder-1788176493716-pe2juf",
+    "profileId": "toyota-supra-b58",
+    "targetId": "steeringAngle",
+    "targetLabel": "Steering angle",
+    "engineRequirement": "running",
+    "startedAtUtc": "2026-08-31T11:41:33.716Z",
+    "measuredReqPerSec": 12.300123001230013,
+    "rateSource": "measured",
+    "rounds": 2,
+    "budget": 12
+  },
+  "metronome": {
+    "totalMs": 21000,
+    "pollDurationMs": 21700,
+    "settleMs": 700,
+    "repetitions": 3,
+    "expectedEdges": 6,
+    "steps": [
+      {
+        "index": 0,
+        "kind": "baseline",
+        "repetition": 0,
+        "startMs": 0,
+        "endMs": 3000,
+        "prompt": "Hold still — wheel centred"
+      },
+      {
+        "index": 1,
+        "kind": "press",
+        "repetition": 1,
+        "startMs": 3000,
+        "endMs": 6000,
+        "prompt": "TURN the wheel (left, then right)"
+      },
+      {
+        "index": 2,
+        "kind": "release",
+        "repetition": 1,
+        "startMs": 6000,
+        "endMs": 9000,
+        "prompt": "RETURN to centre"
+      },
+      {
+        "index": 3,
+        "kind": "press",
+        "repetition": 2,
+        "startMs": 9000,
+        "endMs": 12000,
+        "prompt": "TURN the wheel (left, then right)"
+      },
+      {
+        "index": 4,
+        "kind": "release",
+        "repetition": 2,
+        "startMs": 12000,
+        "endMs": 15000,
+        "prompt": "RETURN to centre"
+      },
+      {
+        "index": 5,
+        "kind": "press",
+        "repetition": 3,
+        "startMs": 15000,
+        "endMs": 18000,
+        "prompt": "TURN the wheel (left, then right)"
+      },
+      {
+        "index": 6,
+        "kind": "release",
+        "repetition": 3,
+        "startMs": 18000,
+        "endMs": 21000,
+        "prompt": "RETURN to centre"
+      }
+    ]
+  },
+  "passes": [
+    {
+      "ecuHex": "0x29",
+      "didHex": [
+        "0x500B",
+        "0x500C",
+        "0x5002",
+        "0x4100",
+        "0x4101",
+        "0x4102",
+        "0x4103",
+        "0x4104",
+        "0x4105",
+        "0x4106",
+        "0x4107",
+        "0x4108",
+        "0x4109",
+        "0x410A",
+        "0x410B",
+        "0x410C",
+        "0x410D",
+        "0x410E",
+        "0x410F",
+        "0x4110",
+        "0x4111",
+        "0x4112"
+      ],
+      "confirmedDidHex": [],
+      "hypothesisDidHex": [],
+      "changedDidHex": [
+        "0x500B",
+        "0x500C",
+        "0x5002"
+      ],
+      "cachedDidHex": [
+        "0x4100",
+        "0x4101",
+        "0x4102",
+        "0x4103",
+        "0x4104",
+        "0x4105",
+        "0x4106",
+        "0x4107",
+        "0x4108",
+        "0x4109",
+        "0x410A",
+        "0x410B",
+        "0x410C",
+        "0x410D",
+        "0x410E",
+        "0x410F",
+        "0x4110",
+        "0x4111",
+        "0x4112"
+      ]
+    }
+  ],
+  "candidates": [
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "verdict": "unrelated",
+      "matchedEdges": 1,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 2,
+      "byteOffset": 4,
+      "correlationSign": 1,
+      "restValueHex": "0000015A2101010100580A0800001B1D480A28FFFF",
+      "lastRawHex": "0000015A3501010100580A0800001B1D480A28FFFF",
+      "min": 32,
+      "max": 53,
+      "length": 21,
+      "netEdges": 1,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "positive",
+      "verdictCapReason": null,
+      "sampleCount": 23,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "12",
+      "lastRawHex": "12",
+      "min": 18,
+      "max": 18,
+      "length": 1,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 23,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "1B",
+      "lastRawHex": "1B",
+      "min": 27,
+      "max": 27,
+      "length": 1,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 23,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "03E8",
+      "lastRawHex": "03E8",
+      "min": 1000,
+      "max": 1000,
+      "length": 2,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 23,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "08CA",
+      "lastRawHex": "08CA",
+      "min": 2250,
+      "max": 2250,
+      "length": 2,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 23,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "08E3",
+      "lastRawHex": "08E3",
+      "min": 2275,
+      "max": 2275,
+      "length": 2,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 23,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "08B1",
+      "lastRawHex": "08B1",
+      "min": 2225,
+      "max": 2225,
+      "length": 2,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 22,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "0898",
+      "lastRawHex": "0898",
+      "min": 2200,
+      "max": 2200,
+      "length": 2,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 22,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4107",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "2A",
+      "lastRawHex": "2A",
+      "min": 42,
+      "max": 42,
+      "length": 1,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 17,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4108",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "2B",
+      "lastRawHex": "2B",
+      "min": 43,
+      "max": 43,
+      "length": 1,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 17,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4109",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "28",
+      "lastRawHex": "28",
+      "min": 40,
+      "max": 40,
+      "length": 1,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 17,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410A",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "26",
+      "lastRawHex": "26",
+      "min": 38,
+      "max": 38,
+      "length": 1,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 17,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410B",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "1D",
+      "lastRawHex": "1D",
+      "min": 29,
+      "max": 29,
+      "length": 1,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 17,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410C",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "FF",
+      "lastRawHex": "FF",
+      "min": 255,
+      "max": 255,
+      "length": 1,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 16,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410D",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "01",
+      "lastRawHex": "01",
+      "min": 1,
+      "max": 1,
+      "length": 1,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 17,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410E",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "00",
+      "lastRawHex": "00",
+      "min": 0,
+      "max": 0,
+      "length": 1,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 17,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410F",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "00",
+      "lastRawHex": "00",
+      "min": 0,
+      "max": 0,
+      "length": 1,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 17,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4110",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "07D0",
+      "lastRawHex": "07D0",
+      "min": 2000,
+      "max": 2000,
+      "length": 2,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 17,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4111",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "07D0",
+      "lastRawHex": "07D0",
+      "min": 2000,
+      "max": 2000,
+      "length": 2,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 16,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4112",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "FF",
+      "lastRawHex": "FF",
+      "min": 255,
+      "max": 255,
+      "length": 1,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 16,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "0002",
+      "lastRawHex": "0002",
+      "min": 2,
+      "max": 2,
+      "length": 2,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 23,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "verdict": "unrelated",
+      "matchedEdges": 0,
+      "expectedEdges": 6,
+      "baselineChanges": 0,
+      "responseBaselineChanges": 0,
+      "byteOffset": null,
+      "correlationSign": 0,
+      "restValueHex": "04",
+      "lastRawHex": "04",
+      "min": 4,
+      "max": 4,
+      "length": 1,
+      "netEdges": 0,
+      "extraTransitions": 0,
+      "didBaselineChanges": 0,
+      "bipolarSides": "none",
+      "verdictCapReason": "never-moved",
+      "sampleCount": 23,
+      "windowsBelowMinimum": 0,
+      "insufficientReason": null,
+      "sparse": false,
+      "windowMatchedEdges": 3,
+      "flagBit": null,
+      "gradedEvidence": null
+    }
+  ],
+  "noResponse": [],
+  "notRead": [
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5003"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5004"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5008"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500E"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5023"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5024"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5026"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5027"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x502F"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5040"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5041"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5043"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5046"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5050"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5051"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5055"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5058"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5059"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5107"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5108"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5109"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x510A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x510C"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x510D"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5057"
+    }
+  ],
+  "silent": {
+    "ecus": [],
+    "dids": []
+  },
+  "samples": [
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 29,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 59,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 344,
+      "rawHex": "0000015A2001010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 409,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 479,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 540,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 844,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 909,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 979,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 1039,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 1079,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 1109,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 1179,
+      "rawHex": "0000015A2101010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 1263,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 1329,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 1594,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 1659,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 1730,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 1790,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 1859,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 2009,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 2059,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 2344,
+      "rawHex": "0000015A2201010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 2410,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 2479,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 2544,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 2609,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 2679,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 2739,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 2809,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 2949,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 2979,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 3040,
+      "rawHex": "0000015A2301010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 3109,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 3179,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 3240,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 3309,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 3594,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 3659,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 3729,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 3879,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 3919,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 3989,
+      "rawHex": "0000015A2401010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 4059,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 4344,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 4409,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 4479,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 4550,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 4610,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 4680,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 4809,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 4850,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 4914,
+      "rawHex": "0000015A2501010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 4979,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 5039,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 5109,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 5179,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 5239,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 5309,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 5595,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 5750,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 5779,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 5839,
+      "rawHex": "0000015A2601010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 5908,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 5979,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 6043,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 6111,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 6179,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 6240,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 6309,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 6689,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 6729,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 6789,
+      "rawHex": "0000015A2701010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 6859,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 6931,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 6991,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 7059,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 7344,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 7409,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 7479,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 7609,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 7657,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 7730,
+      "rawHex": "0000015A2801010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 7790,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 7859,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 7929,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 7990,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 8067,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 8344,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 8419,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 8549,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 8579,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 8844,
+      "rawHex": "0000015A2901010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 8908,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 9019,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 9089,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 9159,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 9230,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 9290,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 9361,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 9479,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 9509,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 9579,
+      "rawHex": "0000015A2A01010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 9849,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 9908,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 9979,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 10041,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 10108,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 10179,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 10239,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 10419,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 10469,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 10541,
+      "rawHex": "0000015A2B01010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 10610,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 10678,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 10746,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 10808,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 11100,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 11159,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 11229,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 11349,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 11379,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 11439,
+      "rawHex": "0000015A2C01010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 11509,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 11579,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 11849,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 11908,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 11980,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 12038,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 12109,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 12279,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 12308,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 12599,
+      "rawHex": "0000015A2C01010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 12669,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 12749,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 12808,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 13106,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 13178,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 13239,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 13309,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 13348,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 13379,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 13439,
+      "rawHex": "0000015A2E01010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 13508,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 13579,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 13858,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 13929,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 13988,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 14066,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 14349,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 14379,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 14409,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 14479,
+      "rawHex": "0000015A2F01010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 14539,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 14611,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 14679,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 14739,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 14808,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 15104,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 15179,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 15309,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 15369,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 15430,
+      "rawHex": "0000015A3001010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 15489,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 15559,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 15849,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 15908,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 15979,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 16038,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 16115,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 16249,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 16279,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 16339,
+      "rawHex": "0000015A3001010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 16408,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 16479,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 16542,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 16623,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 16699,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 16762,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 16829,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 17189,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 17229,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 17289,
+      "rawHex": "0000015A3101010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 17360,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 17429,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 17489,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 17558,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 17849,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 17908,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 17978,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 18119,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 18158,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 18229,
+      "rawHex": "0000015A3201010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 18299,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 18358,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 18428,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 18488,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 18558,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 18849,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 18919,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 19049,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 19079,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 19349,
+      "rawHex": "0000015A3301010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 19408,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 19499,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 19562,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 19854,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 19928,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 19999,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 20059,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 20099,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 20143,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 20208,
+      "rawHex": "0000015A3401010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 20279,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 20349,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 20408,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 20479,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 20550,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4105",
+      "tMs": 20609,
+      "rawHex": "08B1"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4106",
+      "tMs": 20679,
+      "rawHex": "0898"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500B",
+      "tMs": 21050,
+      "rawHex": "0002"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "tMs": 21079,
+      "rawHex": "04"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x5002",
+      "tMs": 21397,
+      "rawHex": "0000015A3501010100580A0800001B1D480A28FFFF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4100",
+      "tMs": 21458,
+      "rawHex": "12"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4101",
+      "tMs": 21530,
+      "rawHex": "1B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4102",
+      "tMs": 21599,
+      "rawHex": "03E8"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4103",
+      "tMs": 21659,
+      "rawHex": "08CA"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4104",
+      "tMs": 21743,
+      "rawHex": "08E3"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4107",
+      "tMs": 58,
+      "rawHex": "2A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4108",
+      "tMs": 128,
+      "rawHex": "2B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4109",
+      "tMs": 191,
+      "rawHex": "28"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410A",
+      "tMs": 478,
+      "rawHex": "26"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410B",
+      "tMs": 548,
+      "rawHex": "1D"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410C",
+      "tMs": 608,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410D",
+      "tMs": 679,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410E",
+      "tMs": 752,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410F",
+      "tMs": 828,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4110",
+      "tMs": 888,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4111",
+      "tMs": 958,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4112",
+      "tMs": 1233,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4107",
+      "tMs": 1288,
+      "rawHex": "2A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4108",
+      "tMs": 1358,
+      "rawHex": "2B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4109",
+      "tMs": 1428,
+      "rawHex": "28"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410A",
+      "tMs": 1488,
+      "rawHex": "26"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410B",
+      "tMs": 1589,
+      "rawHex": "1D"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410C",
+      "tMs": 1657,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410D",
+      "tMs": 1728,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410E",
+      "tMs": 1789,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410F",
+      "tMs": 1858,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4110",
+      "tMs": 1929,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4111",
+      "tMs": 1987,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4112",
+      "tMs": 2073,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4107",
+      "tMs": 2483,
+      "rawHex": "2A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4108",
+      "tMs": 2538,
+      "rawHex": "2B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4109",
+      "tMs": 2608,
+      "rawHex": "28"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410A",
+      "tMs": 2677,
+      "rawHex": "26"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410B",
+      "tMs": 2740,
+      "rawHex": "1D"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410C",
+      "tMs": 2808,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410D",
+      "tMs": 2887,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410E",
+      "tMs": 2959,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410F",
+      "tMs": 3233,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4110",
+      "tMs": 3288,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4111",
+      "tMs": 3358,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4112",
+      "tMs": 3428,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4107",
+      "tMs": 3488,
+      "rawHex": "2A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4108",
+      "tMs": 3559,
+      "rawHex": "2B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4109",
+      "tMs": 3628,
+      "rawHex": "28"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410A",
+      "tMs": 3688,
+      "rawHex": "26"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410B",
+      "tMs": 3983,
+      "rawHex": "1D"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410C",
+      "tMs": 4039,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410D",
+      "tMs": 4117,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410E",
+      "tMs": 4187,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410F",
+      "tMs": 4483,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4110",
+      "tMs": 4537,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4111",
+      "tMs": 4607,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4112",
+      "tMs": 4677,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4107",
+      "tMs": 4747,
+      "rawHex": "2A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4108",
+      "tMs": 4807,
+      "rawHex": "2B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4109",
+      "tMs": 4878,
+      "rawHex": "28"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410A",
+      "tMs": 4937,
+      "rawHex": "26"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410B",
+      "tMs": 5234,
+      "rawHex": "1D"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410C",
+      "tMs": 5288,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410D",
+      "tMs": 5359,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410E",
+      "tMs": 5448,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410F",
+      "tMs": 5733,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4110",
+      "tMs": 5798,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4111",
+      "tMs": 5859,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4112",
+      "tMs": 5928,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4107",
+      "tMs": 5988,
+      "rawHex": "2A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4108",
+      "tMs": 6057,
+      "rawHex": "2B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4109",
+      "tMs": 6128,
+      "rawHex": "28"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410A",
+      "tMs": 6188,
+      "rawHex": "26"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410B",
+      "tMs": 6483,
+      "rawHex": "1D"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410C",
+      "tMs": 6539,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410D",
+      "tMs": 6607,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410E",
+      "tMs": 6678,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410F",
+      "tMs": 6743,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4110",
+      "tMs": 6807,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4111",
+      "tMs": 6877,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4112",
+      "tMs": 6938,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4107",
+      "tMs": 7233,
+      "rawHex": "2A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4108",
+      "tMs": 7290,
+      "rawHex": "2B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4109",
+      "tMs": 7358,
+      "rawHex": "28"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410A",
+      "tMs": 7428,
+      "rawHex": "26"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410B",
+      "tMs": 7498,
+      "rawHex": "1D"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410C",
+      "tMs": 7558,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410D",
+      "tMs": 7630,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410E",
+      "tMs": 7688,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410F",
+      "tMs": 7983,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4110",
+      "tMs": 8047,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4111",
+      "tMs": 8109,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4112",
+      "tMs": 8179,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4107",
+      "tMs": 8238,
+      "rawHex": "2A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4108",
+      "tMs": 8307,
+      "rawHex": "2B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4109",
+      "tMs": 8378,
+      "rawHex": "28"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410A",
+      "tMs": 8437,
+      "rawHex": "26"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410B",
+      "tMs": 8733,
+      "rawHex": "1D"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410C",
+      "tMs": 8788,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410D",
+      "tMs": 8858,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410E",
+      "tMs": 8928,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410F",
+      "tMs": 8988,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4110",
+      "tMs": 9060,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4111",
+      "tMs": 9127,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4112",
+      "tMs": 9188,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4107",
+      "tMs": 9483,
+      "rawHex": "2A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4108",
+      "tMs": 9537,
+      "rawHex": "2B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4109",
+      "tMs": 9611,
+      "rawHex": "28"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410A",
+      "tMs": 9702,
+      "rawHex": "26"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410B",
+      "tMs": 9985,
+      "rawHex": "1D"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410C",
+      "tMs": 10048,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410D",
+      "tMs": 10108,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410E",
+      "tMs": 10189,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410F",
+      "tMs": 10483,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4110",
+      "tMs": 10548,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4111",
+      "tMs": 10608,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4112",
+      "tMs": 10678,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4107",
+      "tMs": 10748,
+      "rawHex": "2A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4108",
+      "tMs": 10808,
+      "rawHex": "2B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4109",
+      "tMs": 10878,
+      "rawHex": "28"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410A",
+      "tMs": 10938,
+      "rawHex": "26"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410B",
+      "tMs": 11233,
+      "rawHex": "1D"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410C",
+      "tMs": 11300,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410D",
+      "tMs": 11359,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410E",
+      "tMs": 11428,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410F",
+      "tMs": 11498,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4110",
+      "tMs": 11558,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4111",
+      "tMs": 11628,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4112",
+      "tMs": 11698,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4107",
+      "tMs": 11983,
+      "rawHex": "2A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4108",
+      "tMs": 12048,
+      "rawHex": "2B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4109",
+      "tMs": 12108,
+      "rawHex": "28"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410A",
+      "tMs": 12188,
+      "rawHex": "26"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410B",
+      "tMs": 12483,
+      "rawHex": "1D"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410D",
+      "tMs": 12931,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410E",
+      "tMs": 12998,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410F",
+      "tMs": 13061,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4110",
+      "tMs": 13127,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4111",
+      "tMs": 13198,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4112",
+      "tMs": 13492,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4107",
+      "tMs": 13557,
+      "rawHex": "2A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4108",
+      "tMs": 13628,
+      "rawHex": "2B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4109",
+      "tMs": 13699,
+      "rawHex": "28"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410A",
+      "tMs": 13983,
+      "rawHex": "26"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410B",
+      "tMs": 14047,
+      "rawHex": "1D"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410C",
+      "tMs": 14119,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410D",
+      "tMs": 14188,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410E",
+      "tMs": 14483,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410F",
+      "tMs": 14548,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4110",
+      "tMs": 14608,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4111",
+      "tMs": 14678,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4112",
+      "tMs": 14748,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4107",
+      "tMs": 14808,
+      "rawHex": "2A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4108",
+      "tMs": 14878,
+      "rawHex": "2B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4109",
+      "tMs": 14948,
+      "rawHex": "28"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410A",
+      "tMs": 15238,
+      "rawHex": "26"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410B",
+      "tMs": 15310,
+      "rawHex": "1D"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410C",
+      "tMs": 15379,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410D",
+      "tMs": 15448,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410E",
+      "tMs": 15742,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410F",
+      "tMs": 15808,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4110",
+      "tMs": 15878,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4111",
+      "tMs": 15948,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4112",
+      "tMs": 16238,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4107",
+      "tMs": 16328,
+      "rawHex": "2A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4108",
+      "tMs": 16399,
+      "rawHex": "2B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4109",
+      "tMs": 16468,
+      "rawHex": "28"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410A",
+      "tMs": 16740,
+      "rawHex": "26"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410B",
+      "tMs": 16808,
+      "rawHex": "1D"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410C",
+      "tMs": 16880,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410D",
+      "tMs": 16948,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410E",
+      "tMs": 17238,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410F",
+      "tMs": 17308,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4110",
+      "tMs": 17378,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4111",
+      "tMs": 17448,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4112",
+      "tMs": 17795,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4107",
+      "tMs": 17858,
+      "rawHex": "2A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4108",
+      "tMs": 17928,
+      "rawHex": "2B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4109",
+      "tMs": 18002,
+      "rawHex": "28"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410A",
+      "tMs": 18058,
+      "rawHex": "26"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410B",
+      "tMs": 18128,
+      "rawHex": "1D"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410C",
+      "tMs": 18199,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410D",
+      "tMs": 18488,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410E",
+      "tMs": 18568,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410F",
+      "tMs": 18628,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4110",
+      "tMs": 18698,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4111",
+      "tMs": 18988,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4112",
+      "tMs": 19059,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4107",
+      "tMs": 19128,
+      "rawHex": "2A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4108",
+      "tMs": 19198,
+      "rawHex": "2B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4109",
+      "tMs": 19498,
+      "rawHex": "28"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410A",
+      "tMs": 19568,
+      "rawHex": "26"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410B",
+      "tMs": 19628,
+      "rawHex": "1D"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410C",
+      "tMs": 19699,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410D",
+      "tMs": 19993,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410E",
+      "tMs": 20061,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410F",
+      "tMs": 20128,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4110",
+      "tMs": 20198,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4111",
+      "tMs": 20488,
+      "rawHex": "07D0"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4112",
+      "tMs": 20568,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4107",
+      "tMs": 20628,
+      "rawHex": "2A"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4108",
+      "tMs": 20698,
+      "rawHex": "2B"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4109",
+      "tMs": 20988,
+      "rawHex": "28"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410A",
+      "tMs": 21069,
+      "rawHex": "26"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410B",
+      "tMs": 21128,
+      "rawHex": "1D"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410C",
+      "tMs": 21200,
+      "rawHex": "FF"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410D",
+      "tMs": 21488,
+      "rawHex": "01"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410E",
+      "tMs": 21559,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x410F",
+      "tMs": 21628,
+      "rawHex": "00"
+    },
+    {
+      "ecuHex": "0x29",
+      "didHex": "0x4110",
+      "tMs": 21698,
+      "rawHex": "07D0"
+    }
+  ],
+  "confirmedBindings": [
+    {
+      "channel": "brakePressure",
+      "ecuHex": "0x12",
+      "didHex": "0x58B7",
+      "length": 1,
+      "decode": "u8 hPa (as listed; coarse — verify)",
+      "status": "field-confirmed",
+      "updatedAtUtc": "2026-08-31T11:39:06.993Z"
+    },
+    {
+      "channel": "brakeSwitch",
+      "ecuHex": "0x29",
+      "didHex": "0x500C",
+      "length": 1,
+      "decode": "bit0 (0x04 released → 0x05 pressed)",
+      "status": "field-confirmed",
+      "updatedAtUtc": "2026-08-30T09:58:58.281Z"
+    }
+  ],
+  "nextStep": {
+    "ecu": 41,
+    "fromDid": 22771,
+    "toDid": 28671,
+    "didCount": 5901,
+    "estimatedMinutes": 7.995855,
+    "engineRequirement": "off-ok",
+    "note": "test 4 stopped at 0x58F2; 0x29 is the only ECU that carried a confirmed brake bit",
+    "ecuHex": "0x29",
+    "fromDidHex": "0x58F3",
+    "toDidHex": "0x6FFF"
+  },
+  "diagnostics": {
+    "rawError": null,
+    "timeoutInclusiveReqPerSec": 11.001100110011,
+    "adapterTeardownPending": false
+  },
+  "replaced": []
+}
