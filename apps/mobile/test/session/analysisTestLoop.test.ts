@@ -57,7 +57,7 @@ describe('P5d T3 -- the analysis screen on a learned (test loop) circuit', () =>
     expect(state.view.corners[0]!.detail.observations.length).toBeGreaterThan(0);
   });
 
-  it('names it a test loop and states the ad-hoc geometry, in both languages', async () => {
+  it('names it a learned circuit and states the ad-hoc geometry, in both languages', async () => {
     const source = sourceFor(learnedCircuit());
     const en = await readyState(source, 'en');
     const ro = await readyState(source, 'ro');
@@ -66,8 +66,8 @@ describe('P5d T3 -- the analysis screen on a learned (test loop) circuit', () =>
     expect(ro.status).toBe('ready');
     if (en.status !== 'ready' || ro.status !== 'ready') return;
 
-    expect(en.view.testLoopBadge).toBe('Test loop');
-    expect(ro.view.testLoopBadge).toBe('Buclă de test');
+    expect(en.view.testLoopBadge).toBe('Learned circuit');
+    expect(ro.view.testLoopBadge).toBe('Circuit învățat');
     expect(en.view.testLoopNote).toBeTruthy();
     expect(ro.view.testLoopNote).toBeTruthy();
     expect(ro.view.testLoopNote).not.toBe(en.view.testLoopNote);

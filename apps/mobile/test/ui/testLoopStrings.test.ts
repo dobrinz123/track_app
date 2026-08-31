@@ -54,6 +54,34 @@ describe('P5d -- the Test Loop string table', () => {
     }
   });
 
+  it('is framed around learning a REAL circuit, not a street test (P5d-FIX6)', () => {
+    // The user taps "New circuit" to learn a racetrack the app does not ship.
+    // Nothing they read may present that as a street-testing feature.
+    expect(TEST_LOOP_STRINGS.en.screenTitle).toBe('New circuit');
+    expect(TEST_LOOP_STRINGS.ro.screenTitle).toBe('Circuit nou');
+    expect(TEST_LOOP_STRINGS.en.historyLabel).toBe('Learned circuit');
+    expect(TEST_LOOP_STRINGS.ro.historyLabel).toBe('Circuit învățat');
+    for (const language of ['en', 'ro'] as const) {
+      const strings = TEST_LOOP_STRINGS[language];
+      const surface = [
+        strings.screenTitle,
+        strings.entryTitle,
+        strings.entrySubtitle,
+        strings.intro,
+        strings.howItWorks,
+        strings.historyLabel,
+        strings.learnedHint,
+      ].join(' ');
+      expect(surface.toLowerCase()).not.toContain('test loop');
+      expect(surface.toLowerCase()).not.toContain('buclă de test');
+      // ...and the circuit IS what the intro is about.
+      expect(strings.intro.toLowerCase()).toMatch(/circuit/);
+      // The street case survives as an explicitly scoped, legal-only note.
+      expect(strings.streetNote.length).toBeGreaterThan(30);
+      expect(strings.streetNote.toUpperCase()).toMatch(/LEGAL/);
+    }
+  });
+
   it('says the safety line and the honesty line in both languages', () => {
     for (const language of ['en', 'ro'] as const) {
       const strings = TEST_LOOP_STRINGS[language];

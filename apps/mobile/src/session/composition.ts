@@ -75,6 +75,10 @@ import {
 import { TestLoopController, type TestLoopSnapshot } from './testLoopController';
 import { TestLoopLocationProvider } from './testLoopProvider';
 import { TEST_LOOP_OUT_LAP_NUMBER, learnedCoachingEnabled } from './testLoopGuards';
+// Driver-facing wording lives in the strings table, even when composition is
+// the one minting it (ticket P5d-FIX6): a learned circuit's provisional name
+// is something the driver reads.
+import { defaultLearnedCircuitName } from '../ui/screens/testLoopStrings';
 import { createLifecycleLock } from './lifecycleLock';
 import type { DevReplayScenario } from './devReplayScenarios';
 import { startVoiceCoach } from './voiceCoach';
@@ -2138,7 +2142,8 @@ function publishLearnedCircuits(): void {
 const testLoopController = new TestLoopController({
   nowUtc: () => new Date().toISOString(),
   makeCircuitId: () => `learned-${newLearnedCircuitId()}`,
-  makeDisplayName: (createdAtUtc) => `Test loop ${createdAtUtc.slice(0, 10)}`,
+  makeDisplayName: (createdAtUtc) =>
+    defaultLearnedCircuitName(settingsStore.getSettings().language, createdAtUtc),
   onLearned: (circuit) => adoptLearnedCircuit(circuit),
 });
 

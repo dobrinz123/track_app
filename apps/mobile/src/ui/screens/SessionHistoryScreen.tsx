@@ -28,6 +28,9 @@ export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
   const analysisStrings = resolveAnalysisScreenStrings(settings.language);
   const testLoopStrings = resolveTestLoopStrings(settings.language);
   const learnedCircuit = selected.profile.geometryStatus === 'ad-hoc';
+  // P5d-FIX6: a learned circuit is shown by the NAME the driver gave it; the
+  // generic label is only the fallback for one that was never named.
+  const learnedRowLabel = selected.profile.displayName.trim() || testLoopStrings.historyLabel;
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -71,7 +74,7 @@ export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
                     {formatDateUtc(session.displayDateUtc)}
                   </Text>
                   <Text style={styles.sessionMeta} maxFontSizeMultiplier={1.3}>
-                    {learnedCircuit ? `${testLoopStrings.historyLabel} · ` : ''}
+                    {learnedCircuit ? `${learnedRowLabel} · ` : ''}
                     {session.laps.length} laps · best <TimeDisplayInline ms={bestMs} />
                   </Text>
                 </View>

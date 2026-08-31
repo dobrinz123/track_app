@@ -37,7 +37,8 @@ export interface AnalysisScreenStrings {
   loading: string;
   loadingHint: string;
   /**
-   * Ticket P5d T3: this session was driven on a LEARNED (test loop) circuit.
+   * Ticket P5d T3 (wording P5d-FIX6): this session was driven on a circuit
+   * this phone LEARNED from a recognition lap, not on a catalog circuit.
    * The badge names it; the note says the geometry was learned from one lap
    * and is therefore never advised on.
    */
@@ -136,7 +137,7 @@ const EN: AnalysisScreenStrings = {
     'Observations + the suggestions you were shown — every one inside what your own clean laps already did.',
   loading: 'Analysing your laps…',
   loadingHint: 'Everything runs on this phone; nothing is sent anywhere.',
-  testLoopBadge: 'Test loop',
+  testLoopBadge: 'Learned circuit',
   testLoopGeometryNote:
     'Ad-hoc geometry: this track was learned from a single lap on this phone, not surveyed. The numbers are what you did; no advice is derived from them.',
   sessionNotFound: 'That session is no longer stored on this phone.',
@@ -237,7 +238,7 @@ const RO: AnalysisScreenStrings = {
     'Observații + sugestiile care ți-au fost arătate — toate în limita a ce au făcut deja tururile tale curate.',
   loading: 'Îți analizez tururile…',
   loadingHint: 'Totul rulează pe acest telefon; nu se trimite nimic nicăieri.',
-  testLoopBadge: 'Buclă de test',
+  testLoopBadge: 'Circuit învățat',
   testLoopGeometryNote:
     'Geometrie ad-hoc: traseul a fost învățat dintr-un singur tur pe acest telefon, nu măsurat. Cifrele arată ce ai făcut; din ele nu se derivă niciun sfat.',
   sessionNotFound: 'Sesiunea nu mai este salvată pe acest telefon.',

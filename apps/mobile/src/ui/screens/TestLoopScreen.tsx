@@ -96,6 +96,13 @@ export function TestLoopScreen({ navigation }: Props): React.JSX.Element {
           <Text style={styles.warnText} maxFontSizeMultiplier={1.3}>
             {strings.intro}
           </Text>
+          {
+            // P5d-FIX6: the public-road case is a scoped, secondary note under
+            // the racetrack framing -- never the headline.
+          }
+          <Text style={styles.muted} maxFontSizeMultiplier={1.3}>
+            {strings.streetNote}
+          </Text>
         </View>
         <Text style={styles.body} maxFontSizeMultiplier={1.3}>
           {strings.howItWorks}
@@ -308,6 +315,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
     padding: spacing.md,
+    gap: spacing.sm,
   },
   warnText: { ...typography.body, color: colors.textPrimary },
   cardTitle: { ...typography.subtitle, color: colors.textPrimary },

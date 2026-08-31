@@ -20,8 +20,14 @@ export interface TestLoopStrings {
   entryA11y: string;
   /** The mode's own screen. */
   screenTitle: string;
-  /** The safety line. Legal, low speed, public road -- said before anything else. */
+  /** What this mode is FOR: learning a real circuit the app does not ship. */
   intro: string;
+  /**
+   * The secondary case, scoped and legal-only: the same learning works on a
+   * loop of public road. Deliberately a separate, smaller line -- it is not
+   * what the feature is for.
+   */
+  streetNote: string;
   howItWorks: string;
   /** The standing promise of this mode. */
   cuesOff: string;
@@ -79,13 +85,16 @@ export interface TestLoopStrings {
 
 const EN: TestLoopStrings = {
   entryTitle: 'New circuit — learn the track',
-  entrySubtitle: 'Drive one lap of any loop and the app builds the circuit from it.',
-  entryA11y: 'New circuit. Learn a track by driving one lap of it.',
-  screenTitle: 'Test loop',
+  entrySubtitle:
+    'On a circuit the app does not know yet? Drive one recognition lap and TRACE learns it.',
+  entryA11y: 'New circuit. Learn a track by driving one recognition lap of it.',
+  screenTitle: 'New circuit',
   intro:
-    'For LEGAL, low-speed testing only. Stay within the speed limit, obey every traffic rule, and never use this on a public road as a race. It exists so the analysis can be tried out without a trackday.',
+    'On a circuit that is not in the app? Drive one recognition lap and TRACE learns it: the start line, the track and the corners. On the next lap you are already being timed.',
+  streetNote:
+    'It also works on a loop of public road -- LEGALLY only, at low speed, obeying every traffic rule. That is for trying the analysis out, never for going fast.',
   howItWorks:
-    'Start, drive one full loop, and come back past where you started. That first lap becomes the track; the laps after it are timed against it.',
+    'Start at the line you want as start/finish, drive one full lap, and come back past it. That first lap becomes the track; from the next one you are timed.',
   cuesOff: 'No coaching cues and no voice in this mode — the geometry has not been validated.',
   start: 'Start learning',
   startA11y: 'Start learning the track from this lap',
@@ -139,7 +148,7 @@ const EN: TestLoopStrings = {
   deleteRefused: (sessions) =>
     `This circuit still has ${sessions} recorded ${sessions === 1 ? 'session' : 'sessions'}. Delete those first — without the geometry they could no longer be analysed.`,
   deleted: 'Circuit deleted.',
-  historyLabel: 'Test loop',
+  historyLabel: 'Learned circuit',
   timingStarted: 'Recording and timing continue without interruption — the learning lap is stored as the out lap.',
   openDashboard: 'Open timing screen',
   openDashboardA11y: 'Open the timing screen for the session already running',
@@ -149,13 +158,16 @@ const EN: TestLoopStrings = {
 
 const RO: TestLoopStrings = {
   entryTitle: 'Circuit nou — învață traseul',
-  entrySubtitle: 'Condu un tur al oricărei bucle, iar aplicația construiește circuitul din el.',
-  entryA11y: 'Circuit nou. Învață un traseu conducând un tur.',
-  screenTitle: 'Buclă de test',
+  entrySubtitle:
+    'Ești pe un circuit care nu e în aplicație? Condu un tur de recunoaștere și TRACE îl învață.',
+  entryA11y: 'Circuit nou. Învață un traseu conducând un tur de recunoaștere.',
+  screenTitle: 'Circuit nou',
   intro:
-    'Doar pentru testare LEGALĂ, la viteză mică. Respectă limita de viteză și toate regulile de circulație și nu folosi asta ca pe o cursă pe drum public. Există ca să poți încerca analiza fără o zi de circuit.',
+    'Ești pe un circuit care nu e în aplicație? Condu un tur de recunoaștere și TRACE îl învață: linia de start, traseul și virajele. Turul următor ești deja cronometrat.',
+  streetNote:
+    'Poți încerca și pe un traseu în buclă de pe drum public — doar LEGAL, cu viteze mici și respectând toate regulile de circulație.',
   howItWorks:
-    'Pornește, condu o buclă completă și treci înapoi pe lângă locul de plecare. Primul tur devine traseul; turele următoare sunt cronometrate pe el.',
+    'Pornește de la linia pe care o vrei start/sosire, condu un tur complet și treci înapoi pe la ea. Primul tur devine traseul; din turul următor ești cronometrat.',
   cuesOff: 'Fără indicații și fără voce în acest mod — geometria nu este validată.',
   start: 'Începe învățarea',
   startA11y: 'Începe învățarea traseului din acest tur',
@@ -209,7 +221,7 @@ const RO: TestLoopStrings = {
   deleteRefused: (sessions) =>
     `Circuitul are încă ${sessions} ${sessions === 1 ? 'sesiune înregistrată' : 'sesiuni înregistrate'}. Șterge-le mai întâi — fără geometrie nu ar mai putea fi analizate.`,
   deleted: 'Circuit șters.',
-  historyLabel: 'Buclă de test',
+  historyLabel: 'Circuit învățat',
   timingStarted: 'Înregistrarea și cronometrarea continuă fără întrerupere — turul de învățare este salvat ca tur de ieșire.',
   openDashboard: 'Deschide ecranul de cronometrare',
   openDashboardA11y: 'Deschide ecranul de cronometrare al sesiunii deja pornite',
@@ -222,6 +234,19 @@ export const TEST_LOOP_STRINGS: Readonly<Record<TestLoopUiLanguage, TestLoopStri
   en: EN,
   ro: RO,
 };
+
+/**
+ * The provisional name a just-learned circuit carries until the driver saves it
+ * under their own (ticket P5d-FIX6). Composition mints it, so it lives here
+ * with the rest of the driver-facing wording rather than as English in a
+ * wiring module.
+ */
+export function defaultLearnedCircuitName(
+  language: string | null | undefined,
+  createdAtUtc: string,
+): string {
+  return `${resolveTestLoopStrings(language).historyLabel} ${createdAtUtc.slice(0, 10)}`;
+}
 
 /** The table for the app's `language` setting; anything unknown reads as English. */
 export function resolveTestLoopStrings(language: string | null | undefined): TestLoopStrings {
