@@ -101,7 +101,7 @@
       "length": 1,
       "decode": "u8, 0 at rest -> up to 64 observed with a firm press at idle (public table says hPa; scale unverified — treat as 0..max ratio)",
       "status": "field-confirmed",
-      "provenance": "same page ('Current brake pressure'); test 4 sweep: answers 0x00 (engine off); not observed in a brake phase; test 7 2026-08-30 (engine running, idle): found 6/6 edges, raw 00 -> 0..64, 0 baseline changes; CONFIRMED by the user (binding brakePressure = 0x12/0x58B7). Not yet visible in the Telemetry monitor: the provider resolved ONE brake binding (pressure preferred, switch dropped) and the monitor session was not restarted — P4n."
+      "provenance": "same page ('Current brake pressure'); test 4 sweep: answers 0x00 (engine off); not observed in a brake phase; test 7 2026-08-30 (engine running, idle): found 6/6 edges, raw 00 -> 0..64, 0 baseline changes; CONFIRMED by the user (binding brakePressure = 0x12/0x58B7). Not yet visible in the Telemetry monitor: the provider resolved ONE brake binding (pressure preferred, switch dropped) and the monitor session was not restarted — P4n.; test 10 2026-08-31 (build 10, active-profile fix): WORKS in the live Telemetry monitor first try — graded pressure varying with pedal force (user-confirmed)."
     },
     {
       "channel": "longG",
