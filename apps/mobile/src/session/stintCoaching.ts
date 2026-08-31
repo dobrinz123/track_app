@@ -134,6 +134,14 @@ export function createStintRunner(deps: StintRunnerDeps): StintRunner {
    * ONE projection cache per outing (E11). A lap's projection never changes
    * once its trace is written, so a boundary pass projects only the lap that
    * just completed; the cache is dropped whenever the outing changes.
+   *
+   * P11 residual (Codex P5c-REV2 finding 11, LOW, accepted — not fixed by
+   * this ticket): only the PER-LAP projection is cached here. `compute()`
+   * below still re-runs the session-wide coverage/strip pass and
+   * `runSessionAnalysis` over every lap on EVERY boundary, so the cumulative
+   * work across an outing stays O(laps²) rather than incremental. Accepted
+   * for now; a real fix would cache/update the envelope and insights
+   * themselves per lap, not just each lap's projected samples.
    */
   let projectionCache: LapProjectionCache = createLapProjectionCache();
   let projectionSessionId: string | null = null;
@@ -392,6 +400,18 @@ export interface StintCoach {
   recordShown: (sessionId: string, shown: readonly PitSuggestion[]) => void;
   /** What is waiting for the next lap boundary, for tests and diagnostics. */
   pendingUpdates: () => CueUpdate[];
+  /**
+   * Ticket P5c-FIX2 L16 (Codex P5c-REV2 finding 16, LOW). Explicitly discards
+   * whatever the LAST pass queued for the NEXT lap boundary, logging why --
+   * never silently. Call this from the coach's own lifecycle reset points (a
+   * session ending, a new session or recovery starting) so a batch that never
+   * reached a boundary cannot be carried into whatever comes next and then
+   * dropped there without a trace. Every OTHER discard this module performs
+   * (suggestions turned off mid-flight, the context moving on before a pass
+   * settles) routes through the same logged path — this is simply the one a
+   * caller outside the module can reach.
+   */
+  cancelPending: (reason: string) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -477,6 +497,28 @@ export function createStintCoach(deps: StintCoachDeps): StintCoach {
   const report = deps.onError ?? ((error: unknown) => console.warn('[stintCoaching]', error));
   let pending: PendingApply | null = null;
 
+  /** One human-readable line for a discarded batch, used everywhere one is thrown away. */
+  function describeDiscard(discarded: PendingApply, reason: string): string {
+    return (
+      `[stintCoaching] discarded ${discarded.updates.length} queued cue update(s) for session ` +
+      `${discarded.sessionId} (computed at lap ${discarded.computedAtLapCount}): ${reason}`
+    );
+  }
+
+  /**
+   * Ticket P5c-FIX2 L16 (Codex P5c-REV2 finding 16, LOW): the public discard
+   * path (`StintCoach.cancelPending`, called from the coach's own lifecycle
+   * reset). Every OTHER discard below already logs at the point it decides to
+   * throw a batch away, with `pending` already local to that branch; this one
+   * exists for a caller outside the module, so it reads `pending` itself.
+   */
+  function discardPending(reason: string): void {
+    if (pending === null) return;
+    const discarded = pending;
+    pending = null;
+    report(new Error(describeDiscard(discarded, reason)));
+  }
+
   async function analyse(
     sessionId: string,
     completedLapCount: number,
@@ -495,17 +537,37 @@ export function createStintCoach(deps: StintCoachDeps): StintCoach {
   function applyPending(sessionId: string, completedLapCount: number): AppliedCueUpdate[] {
     const queued = pending;
     if (queued === null) return [];
-    pending = null;
-    if (queued.sessionId !== sessionId) return [];
-    if (completedLapCount <= queued.computedAtLapCount) {
-      // Not a later boundary yet -- keep waiting rather than applying mid-lap.
-      pending = queued;
+    if (queued.sessionId !== sessionId) {
+      // L16: previously silent -- exactly the "next session mismatch" gap
+      // Codex P5c-REV2 finding 16 named. A batch queued for one session that
+      // never saw its boundary before a DIFFERENT session's first one arrives
+      // is discarded here, now with a reason instead of without a trace.
+      pending = null;
+      report(new Error(describeDiscard(queued, `the next boundary belongs to a different session (${sessionId})`)));
       return [];
     }
-    if (!deps.suggestionsEnabled()) return [];
+    if (completedLapCount <= queued.computedAtLapCount) {
+      // Not a later boundary yet -- keep waiting rather than applying mid-lap.
+      return [];
+    }
+    pending = null;
+    if (!deps.suggestionsEnabled()) {
+      report(new Error(describeDiscard(queued, 'suggestions were turned off before this boundary')));
+      return [];
+    }
     const live = deps.cueContext();
-    if (live === null || live.sessionId === null) return [];
-    if (!sameContext(live, queued.request.context)) return [];
+    if (live === null || live.sessionId === null) {
+      report(new Error(describeDiscard(queued, 'no session is live at this boundary')));
+      return [];
+    }
+    if (!sameContext(live, queued.request.context)) {
+      report(
+        new Error(
+          describeDiscard(queued, 'the live context (session/generation/stint) moved on before this boundary'),
+        ),
+      );
+      return [];
+    }
     try {
       const applied = deps.applyCueUpdates(queued.updates, queued.request);
       deps.journal.recordCueUpdates(sessionId, applied, live.stintIndex);
@@ -521,7 +583,7 @@ export function createStintCoach(deps: StintCoachDeps): StintCoach {
       // The gate comes BEFORE any work at all: with suggestions off, a lap
       // boundary costs exactly one boolean read (ticket P5c-B D5).
       if (!deps.suggestionsEnabled()) {
-        pending = null;
+        discardPending('suggestions are off at the start of this boundary');
         return { status: 'disabled', applied: [], queued: [], suggestions: null, run: null };
       }
       // What the PREVIOUS boundary queued lands here, at a boundary, or not at all.
@@ -546,7 +608,7 @@ export function createStintCoach(deps: StintCoachDeps): StintCoach {
         now.sessionId !== sessionId ||
         !sameContext(startedAt, now)
       ) {
-        pending = null;
+        discardPending('the live context (setting/session/generation/stint) moved on while this pass ran');
         return { status: 'superseded', applied, queued: [], suggestions: null, run };
       }
 
@@ -613,6 +675,10 @@ export function createStintCoach(deps: StintCoachDeps): StintCoach {
 
     pendingUpdates() {
       return pending === null ? [] : [...pending.updates];
+    },
+
+    cancelPending(reason) {
+      discardPending(reason);
     },
   };
 }

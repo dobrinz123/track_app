@@ -1053,15 +1053,31 @@ export class SessionController {
     // previous cue for at most `COACH_CUE_FLICKER_HOLD_MS` (bridging a single
     // brief quality/matching gap) before clearing.
     if (this.coachEngine !== null) {
-      const inPit = this.core.state.state === 'inPit' || (result.match?.onPitLane ?? false);
-      // Ticket P5c-FIX1 E10 (Codex P5c-REV1 finding 10): the STINT boundary.
-      // The detector is the one the pipeline already computes -- the
-      // hysteresis-debounced `inPit` session state, or the per-match
-      // `onPitLane` flag, exactly the pair the cue suppression above trusts --
-      // so no second, weaker speed/time heuristic is introduced. Leaving the
-      // pit lane starts the next stint: the one-change-per-corner allowance
-      // re-arms, while every cue stays where the driver's own evidence put it.
-      if (inPit) {
+      // H13 fix (Codex P5c-REV2 finding 13, HIGH -- the same gap ticket
+      // P5c-FIX1 E10 accepted at LOW severity, Codex P5c-REV1 finding 10, is
+      // now closed here rather than carried as a residual). The STINT
+      // boundary -- the one-change-per-corner allowance re-arming -- must
+      // react ONLY to the pipeline's hysteresis-debounced `inPit` SESSION
+      // STATE: a confirmed pit-entry-then-exit sequence, gated behind a real
+      // gate crossing plus >=2 consecutive on-pit-lane matches
+      // (`pipelineCore.ts`'s `pitEvidenceSamples`). The raw per-match
+      // `onPitLane` flag the cue-suppression branch below still ORs in is a
+      // single-sample GEOMETRIC proximity test with NO debounce at all
+      // (`track-matcher.ts`'s `isOnPitLane` -- true whenever the fix sits
+      // closer to the pit-lane polyline than to the centerline, which a
+      // pit lane running alongside a straight makes a perfectly ordinary
+      // wide line, or a moment's GPS jitter, produce). Trusting that flag for
+      // the LATCH (as the pre-FIX2 code did, via the same `inPit` OR) let one
+      // noisy sample latch and the very next un-latch, calling `beginStint()`
+      // and re-arming the allowance with no real pit stop at all.
+      const confirmedInPit = this.core.state.state === 'inPit';
+      // Display suppression stays the conservative OR: showing no
+      // racing-line advice the instant a raw pit-proximity signal fires,
+      // even before it is confirmed, is always the SAFE direction to err --
+      // unlike re-arming the allowance, which must never happen on
+      // unconfirmed evidence.
+      const inPit = confirmedInPit || (result.match?.onPitLane ?? false);
+      if (confirmedInPit) {
         this.inPitLatched = true;
       } else if (this.inPitLatched) {
         this.inPitLatched = false;

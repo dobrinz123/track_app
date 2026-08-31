@@ -68,6 +68,7 @@ export { buildReport, cueUpdateLine, pitSuggestionLine, renderReport } from './r
 export type { CoachReport, ReportLanguage, ReportSection } from './reportText';
 
 export {
+  BLOCKING_LIMITATION_CODES,
   MAX_BRAKE_LATER_M,
   MAX_MIN_SPEED_GAIN_KPH,
   MIN_CLEAN_LAPS_FOR_SUGGESTIONS,

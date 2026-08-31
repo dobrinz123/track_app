@@ -65,6 +65,24 @@ export const MOTORPARK_CIRCUIT_PROFILE: CircuitProfile = motorpark.profile;
 export const MOTORPARK_RUNTIME_PROFILE: RuntimeProfile = motorpark.runtime;
 export const MOTORPARK_CORNERS: Corner[] = motorpark.corners;
 
+/**
+ * M15 hardening (Codex P5c-REV2 finding 15, MEDIUM): freeze both bundled
+ * profiles so `geometryStatus` -- the ONLY field the suggestion engine's
+ * safety gate reads to decide whether a circuit's corner geometry may be
+ * advised on at all (`analysisAssembly.ts`'s `context.geometryValidated`) --
+ * can never be mutated IN PLACE once the catalog is built. These two objects
+ * are the single shared source of truth every screen, controller and
+ * analysis pass reads for the rest of the app's lifetime; nothing here ever
+ * legitimately needs to flip that field at runtime -- the only sanctioned way
+ * `geometryStatus` changes is a NEW, re-reviewed catalog asset at build time.
+ * A caller that wants a DIFFERENT status for one scenario (the test suite's
+ * `withValidatedGeometry`) builds its own spread COPY -- a distinct object
+ * this freeze does not reach and was never meant to -- rather than editing
+ * the shared singleton every other caller still trusts.
+ */
+Object.freeze(TMR_CIRCUIT_PROFILE);
+Object.freeze(MOTORPARK_CIRCUIT_PROFILE);
+
 /** Bundled circuits: Transilvania Motor Ring + MotorPark România (session/tmrProfile.ts, above). */
 const ENTRIES: ReadonlyMap<string, BundledCircuit> = new Map([
   [TMR_CIRCUIT_PROFILE.circuitId, { profile: TMR_CIRCUIT_PROFILE, runtime: TMR_RUNTIME_PROFILE, corners: TMR_CORNERS }],

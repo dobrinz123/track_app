@@ -53,6 +53,20 @@ describe('P5b B2 -- assembling the analysis input from a stored session', () => 
         expect(assembled.context.geometryValidated).toBe(circuit.profile.geometryStatus === 'official');
       });
 
+      it('M15 (Codex P5c-REV2 finding 15): an in-place mutation attempt on the bundled profile does not open the gate', () => {
+        expect(circuit.profile.geometryStatus).not.toBe('official');
+        expect(() => {
+          // The type does not mark this field readonly; the catalog's own
+          // freeze (M15, `circuitCatalog.ts`) -- not this assembly function
+          // -- is what turns the assignment into a runtime throw.
+          circuit.profile.geometryStatus = 'official';
+        }).toThrow(TypeError);
+
+        const session = driveSession(circuit, { laps: 2 });
+        const assembled = assembleSessionAnalysis(circuit, session.recordings);
+        expect(assembled.context.geometryValidated).toBe(false);
+      });
+
       it('reports the channels the recording carries, and only those', () => {
         const pedalOnly = assembleSessionAnalysis(
           circuit,

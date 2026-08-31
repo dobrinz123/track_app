@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { Corner, LocationSample, SessionMachineSnapshot } from '../../src/contracts';
+import type { CircuitProfile, Corner, LocationSample, SessionMachineSnapshot } from '../../src/contracts';
 import {
   CUE_POSITION_TOLERANCE_M,
   SessionController,
@@ -15,8 +15,16 @@ import {
   type CueUpdate,
 } from '../../src/coaching';
 import { analyzeCorners } from '../../src/corners';
-import { cleanRecognitionLap, pbImprovementSession, pitLaneTransitLap } from '../../src/fixtures';
+import {
+  cleanRecognitionLap,
+  pbImprovementSession,
+  pitLaneTransitLap,
+  runtimeFor,
+  sampleAtLapDistance,
+} from '../../src/fixtures';
+import { polylineCumulative } from '../../src/geometry';
 import { InMemorySessionRepository } from '../../src/persistence';
+import type { ProjectedGate, RuntimeProfile } from '../../src/profile';
 
 import { FakeClock, FakeLocationProvider, FakeWatchdogScheduler, tmr } from './testSupport';
 
@@ -54,8 +62,9 @@ const RESTORED_SNAPSHOT: SessionMachineSnapshot = {
   },
 };
 
-function setup(coachingEnabled: boolean) {
-  const { profile, runtime } = tmr();
+function setup(coachingEnabled: boolean, runtimeOverride?: RuntimeProfile) {
+  const { profile, runtime: tmrRuntime } = tmr();
+  const runtime = runtimeOverride ?? tmrRuntime;
   const provider = new FakeLocationProvider();
   const clock = new FakeClock(1_000_000);
   const scheduler = new FakeWatchdogScheduler();
@@ -91,8 +100,8 @@ function setup(coachingEnabled: boolean) {
   return { profile, controller, states, feed, logged };
 }
 
-async function armed(coachingEnabled: boolean) {
-  const rig = setup(coachingEnabled);
+async function armed(coachingEnabled: boolean, runtimeOverride?: RuntimeProfile) {
+  const rig = setup(coachingEnabled, runtimeOverride);
   await rig.controller.start('calibration');
   rig.feed(cleanRecognitionLap(rig.profile, 901));
   rig.controller.acceptCalibration();
@@ -593,6 +602,100 @@ describe('SessionController — the stint boundary re-arms the allowance (E10)',
   });
 });
 
+/** A `ProjectedGate` placeholder that sits nowhere near anything this file
+ * feeds -- so overriding `runtime.pitLane` with a synthetic one never also
+ * injects a live entry/exit gate the crossing detector could fire on. */
+function farAwayGate(id: string, kind: 'pitEntry' | 'pitExit'): ProjectedGate {
+  return {
+    gate: { id, kind, a: { lat: 0, lon: 0 }, b: { lat: 0, lon: 0.0001 } },
+    a: { e: 1_000_000, n: 1_000_000 },
+    b: { e: 1_000_001, n: 1_000_000 },
+    distanceM: 0,
+  };
+}
+
+/**
+ * A synthetic pit lane, laterally offset from the REAL TMR centerline at one
+ * short stretch far from the real S/F and sector gates (H13 repro). Its own
+ * entry/exit gates are placed far away (never crossed by anything this file
+ * feeds), so the pipeline's crossing-based `pendingPitEntryProgressM`/
+ * `pitEvidenceSamples` accumulation (`pipelineCore.ts`) NEVER engages here --
+ * exactly isolating the raw, single-sample `TrackMatcher.isOnPitLane` flag
+ * from the debounced session-state transition it is otherwise coupled to.
+ */
+function flappingPitLane(profile: CircuitProfile, atDistanceM: number, offsetM: number) {
+  const runtime = runtimeFor(profile);
+  const points = [atDistanceM - 30, atDistanceM, atDistanceM + 30].map((distanceM) => {
+    const sample = sampleAtLapDistance(profile, distanceM, 0, { lateralOffsetM: offsetM });
+    return runtime.projection.toLocal({ lat: sample.lat, lon: sample.lon });
+  });
+  return {
+    polyline: points,
+    cumulativeDistancesM: polylineCumulative(points),
+    entryGate: farAwayGate('fake-pit-entry', 'pitEntry'),
+    exitGate: farAwayGate('fake-pit-exit', 'pitExit'),
+  };
+}
+
+/**
+ * Ticket P5c-FIX2 H13 (Codex P5c-REV2 finding 13, HIGH). A driver simply
+ * running a few metres wide of the racing line near a pit lane that
+ * parallels the straight -- or one moment of GPS jitter -- can flip the raw,
+ * undebounced `onPitLane` match flag true for a single sample and false the
+ * next, with the session state never leaving `timing`. That must never
+ * re-arm the one-change-per-corner allowance.
+ */
+describe('SessionController — a noisy raw onPitLane flag never re-arms the stint (H13)', () => {
+  it('one blip on/off the pit-lane geometry, with no real pit-entry/exit, changes nothing', async () => {
+    const { profile: tmrProfile } = tmr();
+    const baseRuntime = runtimeFor(tmrProfile);
+    // Safely between S/F and sector 1 -- nowhere near TMR's real pit gates.
+    const blipDistanceM = (baseRuntime.sectorGates[0]?.distanceM ?? 1_000) / 2;
+    const runtimeOverride: RuntimeProfile = {
+      ...baseRuntime,
+      pitLane: flappingPitLane(tmrProfile, blipDistanceM, 8),
+    };
+
+    const { controller, feed } = await armed(true, runtimeOverride);
+    const before = cueOfVoice(controller, 'brake');
+    const firstTarget = before.brakeStartM - 4;
+    expect(
+      controller.applyCueUpdates(
+        [update({ cornerId: before.cornerId, fromM: before.brakeStartM, toM: firstTarget })],
+        request(controller, entriesFor(before.cornerId, firstTarget)),
+      ),
+    ).toHaveLength(1);
+    const stintBefore = controller.cueContext().stintIndex;
+
+    // Normal on-line sample, ONE blip laterally onto the synthetic pit-lane
+    // geometry (onPitLane flips true for exactly one sample), then straight
+    // back on line. The session state must stay OFF `inPit` throughout --
+    // no real pit-entry gate was ever crossed.
+    let t = 2_000_000;
+    const step = (distanceM: number, offsetM = 0) => {
+      const s = sampleAtLapDistance(tmrProfile, distanceM, t, { lateralOffsetM: offsetM });
+      t += 750;
+      return s;
+    };
+    feed([
+      step(blipDistanceM - 60),
+      step(blipDistanceM - 30),
+      step(blipDistanceM, 8), // the blip: onPitLane -> true for this one sample
+      step(blipDistanceM + 30),
+      step(blipDistanceM + 60),
+    ]);
+    await controller.flush();
+
+    expect(controller.cueContext().stintIndex).toBe(stintBefore);
+    // The corner has NOT re-armed: its one change this stint is still spent.
+    const secondAttempt = controller.applyCueUpdates(
+      [update({ cornerId: before.cornerId, fromM: firstTarget, toM: firstTarget - 3 })],
+      request(controller, entriesFor(before.cornerId, firstTarget - 3)),
+    );
+    expect(secondAttempt).toEqual([]);
+  });
+});
+
 describe('SessionController — the cue position tolerance is tight (E2)', () => {
   it('accepts a cue reading that differs by less than the tolerance', async () => {
     const { controller } = await armed(true);
@@ -605,5 +708,48 @@ describe('SessionController — the cue position tolerance is tight (E2)', () =>
     expect(applied).toHaveLength(1);
     // The APPLIED numbers are the controller's own, not the caller's reading.
     expect(applied[0]?.fromM).toBeCloseTo(before.brakeStartM, 6);
+  });
+
+  // Ticket P5c-FIX2 L17 (Codex P5c-REV2 finding 17, LOW): the prior test suite
+  // only ever exercised ACCEPTANCE below the tolerance. These pin the OTHER
+  // side of the same boundary.
+  it('rejects a cue reading just ABOVE the tolerance (cue-moved-underneath)', async () => {
+    const { controller } = await armed(true);
+    const before = cueOfVoice(controller, 'brake');
+    const drifted = before.brakeStartM + CUE_POSITION_TOLERANCE_M + 0.01;
+    const applied = controller.applyCueUpdates(
+      [update({ cornerId: before.cornerId, fromM: drifted, toM: drifted - 5 })],
+      request(controller, entriesFor(before.cornerId, drifted - 5)),
+    );
+    expect(applied).toEqual([]);
+    expect(controller.cueUpdateRejections()).toContain('cue-moved-underneath');
+  });
+});
+
+describe('SessionController — the MAX_BRAKE_LATER_M clamp edge is exact (L17)', () => {
+  it('accepts a step of EXACTLY MAX_BRAKE_LATER_M', async () => {
+    const { controller } = await armed(true);
+    const before = cueOfVoice(controller, 'brake');
+    const target = before.brakeStartM - MAX_BRAKE_LATER_M;
+    const applied = controller.applyCueUpdates(
+      [update({ cornerId: before.cornerId, fromM: before.brakeStartM, toM: target })],
+      request(controller, entriesFor(before.cornerId, target)),
+    );
+    expect(applied).toHaveLength(1);
+    expect(applied[0]?.toM).toBeCloseTo(target, 6);
+  });
+
+  it('rejects a step of MAX_BRAKE_LATER_M + 0.01 (beyond-bound)', async () => {
+    const { controller } = await armed(true);
+    const before = cueOfVoice(controller, 'brake');
+    const target = before.brakeStartM - (MAX_BRAKE_LATER_M + 0.01);
+    const applied = controller.applyCueUpdates(
+      [update({ cornerId: before.cornerId, fromM: before.brakeStartM, toM: target })],
+      request(controller, entriesFor(before.cornerId, target)),
+    );
+    expect(applied).toEqual([]);
+    expect(controller.cueUpdateRejections()).toContain('beyond-bound');
+    const after = controller.activeCues().find((cue) => cue.cornerId === before.cornerId);
+    expect(after?.brakeStartM).toBeCloseTo(before.brakeStartM, 6);
   });
 });

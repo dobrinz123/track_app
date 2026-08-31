@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  BLOCKING_LIMITATION_CODES,
   analyzeSession,
   blockedCornersFromInsights,
   computeSuggestions,
@@ -9,6 +10,7 @@ import {
   suggestionsFromInsights,
   verifyCueEvidence,
   type ActiveCue,
+  type LimitationCode,
   type SessionInsights,
 } from '../../src/coaching';
 
@@ -162,6 +164,37 @@ describe('the per-corner honesty gates (E4)', () => {
       cues: earlyCues(insights),
     });
     expect(withoutFlag.gate).toBe('open');
+  });
+});
+
+describe('P4 (Codex P5c-REV1 finding 4) — every LimitationCode is an explicit, reviewed blocking decision', () => {
+  it('the blocking set is typed against LimitationCode, not a string flag checked ad hoc', () => {
+    // A `Record<LimitationCode, boolean>` literal forces every CURRENT member
+    // of the type to appear here -- add a new code to `LimitationCode`
+    // without a line in this table and TS refuses to compile this test file,
+    // rather than the honesty gate silently deciding nothing for it at
+    // runtime. `GEOMETRY_UNVALIDATED` blocks the WHOLE session through the
+    // separate, session-wide `geometryValidated` gate (E4) -- never through
+    // this per-corner set -- so it is deliberately `false` here.
+    const expectedBlocking: Record<LimitationCode, boolean> = {
+      NO_CLEAN_LAPS: false,
+      FEW_CLEAN_LAPS: false,
+      UNVERIFIED_LAPS: true,
+      UNSUPPORTED_CHANNELS: false,
+      MISSING_CHANNELS: false,
+      GNSS_QUALITY: true,
+      GEOMETRY_UNVALIDATED: false,
+      CORNER_COVERAGE: true,
+      TIME_INTEGRATION_DRIFT: false,
+    };
+    for (const code of Object.keys(expectedBlocking) as LimitationCode[]) {
+      expect(BLOCKING_LIMITATION_CODES.has(code)).toBe(expectedBlocking[code]);
+    }
+    // And the set contains ONLY codes this table accounts for -- no member
+    // sneaks in some other way.
+    for (const code of BLOCKING_LIMITATION_CODES) {
+      expect(expectedBlocking[code]).toBe(true);
+    }
   });
 });
 

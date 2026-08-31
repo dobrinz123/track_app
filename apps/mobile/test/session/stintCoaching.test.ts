@@ -63,6 +63,8 @@ interface Rig {
   coach: ReturnType<typeof createStintCoach>;
   journal: ReturnType<typeof createSuggestionJournal>;
   runner: ReturnType<typeof createStintRunner>;
+  /** Everything `onError` was called with -- L16's "never silently" proof. */
+  errors: unknown[];
 }
 
 function rig(options: { laps: number; enabled: boolean; loadFails?: boolean }): Rig {
@@ -84,6 +86,7 @@ function rig(options: { laps: number; enabled: boolean; loadFails?: boolean }): 
     coach: undefined as unknown as Rig['coach'],
     journal: createSuggestionJournal(),
     runner: undefined as unknown as Rig['runner'],
+    errors: [],
   };
   state.runner = createStintRunner({
     loadCompletedLaps: async () => {
@@ -118,7 +121,7 @@ function rig(options: { laps: number; enabled: boolean; loadFails?: boolean }): 
       });
       return out;
     },
-    onError: () => undefined,
+    onError: (error) => state.errors.push(error),
   });
   return state;
 }
@@ -243,6 +246,59 @@ describe('stint coaching — the live cue path (D2, applied at a boundary per E1
     const outcome = await boundary(state, 4);
     expect(outcome.status).toBe('error');
     expect(state.applied).toEqual([]);
+  });
+});
+
+describe('stint coaching — a queued batch is never silently discarded (L16, Codex P5c-REV2 finding 16)', () => {
+  it('cancelPending() explicitly discards a queued batch, with a log entry naming why', async () => {
+    const state = rig({ laps: 4, enabled: true });
+    const queued = await boundary(state, 4);
+    expect(queued.status).toBe('queued');
+    expect(state.coach.pendingUpdates().length).toBeGreaterThan(0);
+    expect(state.errors).toEqual([]);
+
+    state.coach.cancelPending('session ended');
+
+    expect(state.coach.pendingUpdates()).toEqual([]);
+    expect(state.errors).toHaveLength(1);
+    expect(String(state.errors[0])).toContain('discarded');
+    expect(String(state.errors[0])).toContain('session ended');
+
+    // The batch is truly gone: the NEXT boundary applies nothing from it.
+    const next = await boundary(state, 5);
+    expect(next.applied).toEqual([]);
+    expect(state.applied).toEqual([]);
+  });
+
+  it('cancelling with nothing queued is a silent no-op (nothing to discard, nothing to log)', () => {
+    const state = rig({ laps: 4, enabled: true });
+    state.coach.cancelPending('session ended');
+    expect(state.errors).toEqual([]);
+  });
+
+  it('a session mismatch at the NEXT boundary discards the stale batch WITH a log entry', async () => {
+    const state = rig({ laps: 4, enabled: true });
+    const queued = await boundary(state, 4);
+    expect(queued.status).toBe('queued');
+    expect(state.errors).toEqual([]);
+
+    // A DIFFERENT session's boundary arrives before this one ever landed.
+    const outcome = await state.coach.onLapCompleted('a-different-session', 1);
+    expect(outcome.applied).toEqual([]);
+    expect(state.coach.pendingUpdates()).toEqual([]);
+    expect(state.errors.some((error) => String(error).includes('different session'))).toBe(true);
+  });
+
+  it('suggestions turning off mid-boundary discards the queued batch WITH a log entry', async () => {
+    const state = rig({ laps: 4, enabled: true });
+    const queued = await boundary(state, 4);
+    expect(queued.status).toBe('queued');
+
+    state.enabled = false;
+    const outcome = await boundary(state, 5);
+    expect(outcome.status).toBe('disabled');
+    expect(state.coach.pendingUpdates()).toEqual([]);
+    expect(state.errors.some((error) => String(error).includes('discarded'))).toBe(true);
   });
 });
 

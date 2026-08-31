@@ -80,6 +80,41 @@ describe('circuitCatalog corners (ticket CN-W3: catalog entries carry {profile, 
   });
 });
 
+describe('the bundled geometry status cannot be mutated in place (M15, Codex P5c-REV2 finding 15)', () => {
+  it('MotorPark: an in-place mutation attempt on the shared singleton is rejected, not silently applied', () => {
+    expect(MOTORPARK_CIRCUIT_PROFILE.geometryStatus).toBe('community-derived');
+    expect(Object.isFrozen(MOTORPARK_CIRCUIT_PROFILE)).toBe(true);
+    expect(() => {
+      // The type does not mark this field readonly; freezing turns the
+      // assignment into a runtime throw regardless.
+      MOTORPARK_CIRCUIT_PROFILE.geometryStatus = 'official';
+    }).toThrow(TypeError);
+    // The mutation attempt left no trace: the catalog still reports the
+    // true, un-advised status, straight from the object every real caller
+    // shares.
+    expect(circuitCatalog.get(MOTORPARK_CIRCUIT_PROFILE.circuitId)!.profile.geometryStatus).toBe(
+      'community-derived',
+    );
+  });
+
+  it('TMR: the same protection applies to the other bundled circuit', () => {
+    expect(Object.isFrozen(TMR_CIRCUIT_PROFILE)).toBe(true);
+    expect(() => {
+      TMR_CIRCUIT_PROFILE.geometryStatus = 'official';
+    }).toThrow(TypeError);
+  });
+
+  it("a test double's own spread copy is unaffected -- a DIFFERENT object, never the frozen singleton", () => {
+    // The sanctioned pattern (`analysisHarness.ts`'s `withValidatedGeometry`):
+    // a caller that wants a different status for a scenario builds a fresh
+    // object rather than editing the shared one. Freezing the catalog must
+    // not stand in the way of that.
+    const override = { ...MOTORPARK_CIRCUIT_PROFILE, geometryStatus: 'official' as const };
+    expect(override.geometryStatus).toBe('official');
+    expect(MOTORPARK_CIRCUIT_PROFILE.geometryStatus).toBe('community-derived');
+  });
+});
+
 describe('resolveSelectedCircuit (ticket CN-W3)', () => {
   it('returns the bundled entry matching a known selectedCircuitId', () => {
     const resolved = resolveSelectedCircuit({ selectedCircuitId: MOTORPARK_CIRCUIT_PROFILE.circuitId });

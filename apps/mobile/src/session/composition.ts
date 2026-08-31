@@ -1314,6 +1314,9 @@ function initializeSessionStage(sessionId: string, startedAtUtc: string): void {
   suggestionJournal.clear(sessionId);
   stintRunner?.clear();
   stintTraceCache.clear();
+  // P5c-FIX2 L16 wiring (LEAD): a batch queued by a PREVIOUS session must not
+  // survive into this one -- discard it loudly through the coach's own path.
+  stintCoach?.cancelPending(`session-started:${sessionId}`);
   lastStintLapCount = 0;
   stintBoundaries?.reset();
 }
@@ -1337,6 +1340,9 @@ function productionFacadeCallbacks(circuitId: string): RealSessionFacadeCallback
       startTelemetryRecording(sessionId);
     },
     onSessionEnded: () => {
+      // P5c-FIX2 L16 wiring (LEAD): the session is over -- a queued cue-update
+      // batch may never be applied later; discard it loudly, never silently.
+      stintCoach?.cancelPending('session-ended');
       // F2 fix (WPT3, binding): both kicked off independently (neither
       // awaits/depends on the other), then joined via `Promise.allSettled`
       // so an error in either is isolated -- a rejected `controllerPersistence`

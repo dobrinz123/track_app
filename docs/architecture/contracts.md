@@ -876,3 +876,9 @@ R2-3 **Trackday flow (user-ratified revision of the V1-suggestions-off rule)**:
       suggestions beyond the demonstrated envelope stay capped by the same bounds and are presented, not applied.
   (c) The final exported report stays observations + the pit suggestions that were shown.
   Honesty gates unchanged (insufficient data → nothing is suggested and the report says why).
+R2-3 note (M14, Codex P5c-REV2 finding 14, document only): the `sealCueEvidence` checksum
+  (`packages/core/src/coaching/suggestions.ts`) is same-process integrity, not authenticity — it
+  catches a truncated/reordered/edited evidence set in transit, never a caller in the same process
+  fabricating evidence from nothing; the real defence is that evidence creation stays a
+  controller-owned capability and every bound is re-derived from it at apply time, not trusted from
+  the caller's own numbers.

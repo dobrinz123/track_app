@@ -1,5 +1,5 @@
 import type { CornerEnvelope, DemonstratedEnvelope } from './envelope';
-import type { SessionInsights } from './sessionInsights';
+import type { LimitationCode, SessionInsights } from './sessionInsights';
 
 /**
  * The bounded suggestion engine — `contracts.md` "Phase 5 REVISION 2" R2-3
@@ -431,25 +431,46 @@ export function suggestionsFromInsights(
 }
 
 /**
- * Ticket P5c-FIX1 E4 — the honesty gates the analysis already computed, read
- * as a suggestion gate instead of being discarded.
+ * P4 (Codex P5c-REV1 finding 4, HIGH/PARTIAL across several reviews; closed
+ * here). Every `LimitationCode` this honesty gate treats as BLOCKING is an
+ * explicit member of this set, typed against the exact union the analysis
+ * engine emits (`LimitationCode`, `sessionInsights.ts`) — never a loose
+ * string compared ad hoc at each call site. A code added to `LimitationCode`
+ * later without a decision here silently does NOT block anything (the safe
+ * default), and `suggestionsHonesty.test.ts` enumerates every member of the
+ * type so that omission is a visible, named gap in a test rather than
+ * something only a future incident would surface.
  *
- *  - `CORNER_COVERAGE`: no lap produced a usable measurement in that corner.
- *  - `UNVERIFIED_LAPS` / `GNSS_QUALITY`: the named laps could not be checked or
+ *  - `CORNER_COVERAGE`: no lap produced a usable measurement in that corner —
+ *    blocks the corner directly.
+ *  - `UNVERIFIED_LAPS` / `GNSS_QUALITY`: the named LAPS could not be checked or
  *    were recorded through poor GNSS. A corner whose demonstrated envelope
  *    RESTS on one of those laps is bounded by evidence the engine itself will
  *    not vouch for, so it is blocked — corner by corner, not session-wide.
+ */
+export const BLOCKING_LIMITATION_CODES: ReadonlySet<LimitationCode> = new Set<LimitationCode>([
+  'CORNER_COVERAGE',
+  'UNVERIFIED_LAPS',
+  'GNSS_QUALITY',
+]);
+
+/**
+ * Ticket P5c-FIX1 E4 — the honesty gates the analysis already computed, read
+ * as a suggestion gate instead of being discarded. See
+ * {@link BLOCKING_LIMITATION_CODES} for which codes participate and why.
  */
 export function blockedCornersFromInsights(insights: SessionInsights): number[] {
   const blocked = new Set<number>();
   const untrustedLaps = new Set<number>();
   for (const limitation of insights.limitations) {
+    if (!BLOCKING_LIMITATION_CODES.has(limitation.code)) continue;
     if (limitation.code === 'CORNER_COVERAGE') {
       for (const cornerId of limitation.cornerIds ?? []) blocked.add(cornerId);
+      continue;
     }
-    if (limitation.code === 'UNVERIFIED_LAPS' || limitation.code === 'GNSS_QUALITY') {
-      for (const lapNumber of limitation.lapNumbers ?? []) untrustedLaps.add(lapNumber);
-    }
+    // The remaining blocking codes (`UNVERIFIED_LAPS`, `GNSS_QUALITY`) name
+    // LAPS, not corners directly -- resolved to corners below.
+    for (const lapNumber of limitation.lapNumbers ?? []) untrustedLaps.add(lapNumber);
   }
   if (untrustedLaps.size > 0) {
     for (const corner of insights.envelope.corners) {
@@ -520,7 +541,25 @@ export function cueEvidenceChecksum(input: Omit<CueUpdateEvidence, 'checksum'>):
   return hash.toString(16).padStart(8, '0');
 }
 
-/** Seals an evidence set so the cue source can detect a mutated/stale one. */
+/**
+ * Seals an evidence set so the cue source can detect a mutated/stale one.
+ *
+ * M14 (document only, Codex P5c-REV2 finding 14, MEDIUM): the FNV-1a checksum
+ * this produces is SAME-PROCESS INTEGRITY, not authenticity. It is not keyed,
+ * not secret, and anyone holding this module can recompute it over entries of
+ * their own choosing -- it proves an evidence set was not truncated, reordered
+ * or partially edited AFTER it was sealed, in THIS process, nothing more. It
+ * is not, and is not meant to be, a defence against a caller in the SAME
+ * process fabricating evidence from nothing and sealing it correctly; the
+ * real defence against that is architectural, not cryptographic --
+ * `SessionController` only ever calls this from evidence it derived itself
+ * (`cueEvidenceFromInsights`, fed by the deterministic analysis engine), and
+ * every bound `applyCueUpdates` accepts is re-derived from the sealed
+ * `entries` at apply time rather than trusted from the caller's own numbers.
+ * Keeping evidence creation a controller-owned capability (never exposed to a
+ * caller as "seal whatever you like") is what actually keeps this honest;
+ * this checksum only catches accidental corruption in transit.
+ */
 export function sealCueEvidence(input: Omit<CueUpdateEvidence, 'checksum'>): CueUpdateEvidence {
   return { ...input, entries: [...input.entries], checksum: cueEvidenceChecksum(input) };
 }
