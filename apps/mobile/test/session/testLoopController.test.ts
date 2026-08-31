@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { LocationSample, TestLoopCircuit } from '@circuit/core';
+import { detectLoopClosure, type LocationSample, type TestLoopCircuit } from '@circuit/core';
 
 import { TestLoopController } from '../../src/session/testLoopController';
 import { rectangleLoopSamples, uTurnSamples } from '../support/testLoopTraces';
@@ -180,6 +180,32 @@ describe('TestLoopController (P5d T2, T5, P5d-FIX1 H3)', () => {
 
     expect(controller.snapshot().phase).toBe('learned');
     expect(controller.snapshot().learned!.lengthM).toBeGreaterThan(600);
+  });
+
+it('re-anchors after an implausible jump exactly as the core does (P5d-FIX4 G2)', async () => {
+    // The divergence the reviewer describes: a good-accuracy fix that is
+    // simply impossible (500 m in one second). The core rejects it AND
+    // re-anchors on it, so the fix that follows is measured from THERE and is
+    // itself rejected. A controller that did not re-anchor would accept that
+    // next fix, consume the exit edge on it, and ask the core for a closure
+    // the core refuses -- wedging the learn phase for another whole lap.
+    const exitIndex = firstExitIndex(ONE_LAP_PLUS_EXIT);
+    const head = ONE_LAP_PLUS_EXIT.slice(0, exitIndex);
+    const tail = ONE_LAP_PLUS_EXIT.slice(exitIndex);
+    const last = head[head.length - 1]!;
+    const jump = { ...last, tMono: last.tMono + 1000, lat: last.lat + 0.005 };
+
+    const controller = makeController();
+    controller.start();
+    for (const sample of [...head, jump, ...tail]) controller.feed(sample);
+    await settle();
+
+    expect(controller.snapshot().phase).toBe('learned');
+
+    // ...and the core, given the SAME trace, closes the loop too: the two
+    // agree about which fixes count, because they run the same rule.
+    const closure = detectLoopClosure([...head, jump, ...tail]);
+    expect(closure.closed).toBe(true);
   });
 
   it('ends a never-closed loop gracefully, naming what was missing (T5)', () => {

@@ -135,6 +135,63 @@ export interface QualifiedTrack {
   rejected: number;
 }
 
+/** What the quality gate decided about one fix, and what it means for the anchor. */
+export interface QualifyStepVerdict {
+  /** True when the fix is evidence: it counts towards distance, departure and closure. */
+  accepted: boolean;
+  /**
+   * True when the fix becomes the new anchor the NEXT fix is measured from.
+   * An implausible jump is not accepted, but the car IS somewhere: the anchor
+   * moves to it, so the next fix is judged against where the receiver now
+   * thinks the car is, not against a position it has already abandoned.
+   */
+  reanchor: boolean;
+  reason: 'accepted' | 'accuracy' | 'stationary' | 'jump';
+}
+
+/**
+ * P5d-FIX4 G2 (Codex P5d-REV4 HIGH) -- the ONE quality rule of Test Loop mode,
+ * for one fix against the previous anchor.
+ *
+ * It lives here, exported, because two places need it and they must never
+ * drift: `qualifyTrack` below (the closure decision and the geometry) and the
+ * app's own learn-phase controller, which watches the same fixes live to know
+ * when to ask for a closure. When the two disagreed by so much as the
+ * re-anchor rule, the controller could ask for a closure the core then
+ * refused -- and the learn phase wedged until the driver had gone round again.
+ */
+export function qualifyStep(
+  sample: LocationSample,
+  previous: LocationSample | null,
+  config: Pick<
+    TestLoopConfig,
+    'maxAccuracyM' | 'minSpeedMps' | 'maxSegmentSpeedMps' | 'maxSegmentM'
+  >,
+): QualifyStepVerdict {
+  const accuracyM = sample.accuracyM;
+  if (accuracyM !== undefined && Number.isFinite(accuracyM) && accuracyM > config.maxAccuracyM) {
+    return { accepted: false, reanchor: false, reason: 'accuracy' };
+  }
+  const speedMps = sample.speedMps;
+  if (speedMps !== undefined && Number.isFinite(speedMps) && speedMps < config.minSpeedMps) {
+    return { accepted: false, reanchor: false, reason: 'stationary' };
+  }
+  if (previous === null) return { accepted: true, reanchor: true, reason: 'accepted' };
+
+  const gapMs = sample.tMono - previous.tMono;
+  const plausibleM =
+    gapMs > 0
+      ? Math.min(config.maxSegmentM, (config.maxSegmentSpeedMps * gapMs) / 1000)
+      : config.maxSegmentM;
+  const projection = createProjection({ lat: previous.lat, lon: previous.lon });
+  const local = projection.toLocal({ lat: sample.lat, lon: sample.lon });
+  const segmentM = Math.hypot(local.e, local.n);
+  if (segmentM > plausibleM) {
+    return { accepted: false, reanchor: true, reason: 'jump' };
+  }
+  return { accepted: true, reanchor: true, reason: 'accepted' };
+}
+
 /**
  * P5d-FIX1 item 4: the quality gate. A fix is kept when it is accurate
  * enough AND moving; the SEGMENT to the previous kept fix is counted only
@@ -158,35 +215,17 @@ export function qualifyTrack(
   for (let index = 0; index < samples.length; index += 1) {
     const sample = samples[index];
     if (sample === undefined) continue;
-    const accuracyM = sample.accuracyM;
-    if (accuracyM !== undefined && Number.isFinite(accuracyM) && accuracyM > config.maxAccuracyM) {
-      rejected += 1;
-      continue;
-    }
-    const speedMps = sample.speedMps;
-    if (speedMps !== undefined && Number.isFinite(speedMps) && speedMps < config.minSpeedMps) {
-      rejected += 1;
-      continue;
-    }
+    // P5d-FIX4 G2: ONE rule, shared with the app's learn-phase controller.
+    const verdict = qualifyStep(sample, previous?.sample ?? null, config);
     const point = projection.toLocal({ lat: sample.lat, lon: sample.lon });
-
-    if (previous !== null) {
-      const segmentM = distance(previous.point, point);
-      const gapMs = sample.tMono - previous.sample.tMono;
-      const plausibleM =
-        gapMs > 0
-          ? Math.min(config.maxSegmentM, (config.maxSegmentSpeedMps * gapMs) / 1000)
-          : config.maxSegmentM;
-      if (segmentM > plausibleM) {
-        // A teleport: neither the jump nor the fix behind it is evidence of
-        // driving. Re-anchor on it (the car IS somewhere) but count nothing.
-        rejected += 1;
-        previous = { point, sample };
-        continue;
-      }
-      cumulativeM += segmentM;
+    if (!verdict.accepted) {
+      rejected += 1;
+      // A jump re-anchors (the car is somewhere) but contributes no distance;
+      // an inaccurate or stationary fix leaves the anchor where it was.
+      if (verdict.reanchor) previous = { point, sample };
+      continue;
     }
-
+    if (previous !== null) cumulativeM += distance(previous.point, point);
     previous = { point, sample };
     fixes.push({ sourceIndex: index, point, cumulativeM, sample });
   }

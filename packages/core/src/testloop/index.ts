@@ -18,6 +18,7 @@ export {
   evaluateLoopClosure,
   headingDifferenceDeg,
   qualifiedLapSamples,
+  qualifyStep,
   qualifyTrack,
   toLocalTrack,
 } from './loopClosure';
@@ -27,6 +28,7 @@ export type {
   LoopClosureResult,
   QualifiedFix,
   QualifiedTrack,
+  QualifyStepVerdict,
 } from './loopClosure';
 
 export { buildLoopCentreline, overlapFractionOf } from './centreline';

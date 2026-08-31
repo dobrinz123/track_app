@@ -376,6 +376,91 @@ describe('interrupted adoption is repaired at the next launch (P5d-FIX3 F10)', (
     warn.mockRestore();
   });
 
+it('is repaired by exactly ONE launch: a second finds nothing to do (P5d-FIX4 G1)', async () => {
+    await boot(db); // the tables a real device already has
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'testLoopAdoption',
+      JSON.stringify({
+        id: 'journal-1',
+        circuitId: 'learned-ghost',
+        stage: 'session-started',
+        sessionId: 's-ghost',
+        attempts: 0,
+      }),
+    ]);
+
+    const first = await boot(db);
+    let firstNotice: string | null = null;
+    first.subscribeRecoveryNotice((value) => {
+      firstNotice = value;
+    })();
+    expect(firstNotice).not.toBeNull();
+    expect(await journalRow()).toBeNull();
+
+    const second = await boot(db);
+    let secondNotice: string | null = null;
+    second.subscribeRecoveryNotice((value) => {
+      secondNotice = value;
+    })();
+    expect(secondNotice).toBeNull();
+  });
+
+  it('keeps a claimed journal, with the attempt counted, when the repair itself fails', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await boot(db);
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'testLoopAdoption',
+      JSON.stringify({
+        id: 'journal-2',
+        circuitId: 'learned-ghost',
+        stage: 'session-started',
+        sessionId: 's-ghost',
+        attempts: 0,
+      }),
+    ]);
+    // The rollback cannot finish: one of the tables it must clean up is gone.
+    await db.execAsync('DROP TABLE telemetry_samples');
+
+    await boot(db);
+
+    const survivor = await journalRow();
+    expect(survivor).not.toBeNull();
+    const parsed = JSON.parse(survivor!) as { attempts: number; id: string };
+    expect(parsed.id).toBe('journal-2');
+    expect(parsed.attempts).toBe(1);
+    warn.mockRestore();
+  });
+
+  it('deletes the orphan session outright rather than completing it (P5d-FIX4 G3)', async () => {
+    await boot(db);
+    await db.runAsync(
+      'INSERT INTO sessions (sessionId, userId, circuitId, layoutId, layoutVersion, startedAtUtc) VALUES (?, ?, ?, ?, ?, ?)',
+      ['s-ghost', 'local', 'learned-ghost', 'learned', 1, '2026-08-31T10:00:00.000Z'],
+    );
+    await db.runAsync('INSERT INTO checkpoints (sessionId, payload) VALUES (?, ?)', [
+      's-ghost',
+      '{}',
+    ]);
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'testLoopAdoption',
+      JSON.stringify({
+        id: 'journal-3',
+        circuitId: 'learned-ghost',
+        stage: 'session-started',
+        sessionId: 's-ghost',
+        attempts: 0,
+      }),
+    ]);
+
+    await boot(db);
+
+    expect(await db.getAllAsync('SELECT sessionId FROM sessions WHERE sessionId = ?', ['s-ghost'])).toHaveLength(0);
+    expect(
+      await db.getAllAsync('SELECT sessionId FROM checkpoints WHERE sessionId = ?', ['s-ghost']),
+    ).toHaveLength(0);
+    expect(await journalRow()).toBeNull();
+  });
+
   it('rolls a half-adopted circuit back when its geometry never landed', async () => {
     const seed = await boot(db);
     expect(seed.listLearnedCircuits()).toHaveLength(0);

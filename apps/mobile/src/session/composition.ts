@@ -62,6 +62,15 @@ import {
   type LearnedCircuitRecord,
   type RemoveLearnedCircuitResult,
 } from './learnedCircuitStore';
+import {
+  ADOPTION_JOURNAL_KEY,
+  claimAdoptionJournal,
+  clearClaimedJournal,
+  deleteOrphanSession,
+  newJournalId,
+  writeAdoptionJournal,
+  type AdoptionStage,
+} from './adoptionJournal';
 import { TestLoopController, type TestLoopSnapshot } from './testLoopController';
 import { TestLoopLocationProvider } from './testLoopProvider';
 import { TEST_LOOP_OUT_LAP_NUMBER, learnedCoachingEnabled } from './testLoopGuards';
@@ -2187,81 +2196,72 @@ function tearDownLearnPhase(): Promise<void> {
 }
 
 /**
- * P5d-FIX3 F10 (Codex P5d-REV3 HIGH) -- the adoption journal, on disk.
- *
- * The in-memory ledger makes a RETRY resumable; it cannot survive the process
- * being killed, and the window it covers contains real, durable side effects:
- * a learned circuit row, a selected circuit, a started session. A launch that
- * finds a half-adopted state must be able to tell which of those landed and
- * either finish the job or undo it -- never leave an orphan row behind, and
- * never say nothing about it.
- *
- * One additive `settings` row (the same table the active-session pointer uses),
- * written BEFORE the first side effect and advanced per completed step.
+ * P5d-FIX3 F10 / P5d-FIX4 G1 -- the Test Loop adoption journal lives in
+ * `adoptionJournal.ts` (claim, compare-and-delete, attempt budget, orphan
+ * deletion). These are the two thin bindings the adoption path itself needs.
  */
-const ADOPTION_JOURNAL_KEY = 'testLoopAdoption';
 
-type AdoptionStage = 'staged' | 'stored' | 'selected' | 'session-started' | 'recording' | 'out-lap';
+/** The journal identity of the adoption currently in flight. */
+let adoptionJournalId: string | null = null;
 
-interface AdoptionJournal {
+async function stageAdoptionJournal(journal: {
   circuitId: string;
   stage: AdoptionStage;
   sessionId?: string;
-}
-
-async function writeAdoptionJournal(journal: AdoptionJournal): Promise<void> {
+}): Promise<void> {
   if (db === null) return;
-  await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
-    ADOPTION_JOURNAL_KEY,
-    JSON.stringify(journal),
-  ]);
+  adoptionJournalId ??= newJournalId();
+  await writeAdoptionJournal(db, {
+    id: adoptionJournalId,
+    attempts: 0,
+    circuitId: journal.circuitId,
+    stage: journal.stage,
+    ...(journal.sessionId === undefined ? {} : { sessionId: journal.sessionId }),
+  });
 }
 
-async function clearAdoptionJournal(): Promise<void> {
+/** Clears the journal of a COMPLETED adoption (this process owns it outright). */
+async function clearOwnAdoptionJournal(): Promise<void> {
+  adoptionJournalId = null;
   if (db === null) return;
   await db.runAsync('DELETE FROM settings WHERE key = ?', [ADOPTION_JOURNAL_KEY]);
-}
-
-async function readAdoptionJournal(database: SqlDatabase): Promise<AdoptionJournal | null> {
-  const rows = await database.getAllAsync<{ value: string }>(
-    'SELECT value FROM settings WHERE key = ? LIMIT 1',
-    [ADOPTION_JOURNAL_KEY],
-  );
-  const raw = rows[0]?.value;
-  if (raw === undefined) return null;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== 'object' || parsed === null) return null;
-    const journal = parsed as Partial<AdoptionJournal>;
-    if (typeof journal.circuitId !== 'string' || typeof journal.stage !== 'string') return null;
-    return {
-      circuitId: journal.circuitId,
-      stage: journal.stage as AdoptionStage,
-      ...(typeof journal.sessionId === 'string' ? { sessionId: journal.sessionId } : {}),
-    };
-  } catch {
-    return null;
-  }
 }
 
 /**
  * Bootstrap repair: finish a half-adopted Test Loop, or undo it.
  *
- *  - the learned geometry IS on disk -> the expensive, irreversible half
- *    succeeded, so the adoption is COMPLETED here (the circuit is registered by
- *    the caller and selected below) and the driver is told the session it
- *    belonged to was interrupted;
- *  - the geometry is NOT there -> nothing usable survived, so the orphans are
- *    removed: any half-written circuit row, and the session that was started
- *    for it (closed the same way `discardRecovery()` closes one, so the next
- *    launch cannot offer to resume a session with no geometry behind it).
+ * P5d-FIX4 G1: the journal is CLAIMED first (a compare-and-swap on its own
+ * UUID), so of several launches racing over the same database exactly one
+ * repairs and the others do nothing. The journal is cleared only once the
+ * repair has fully succeeded, and only if it is still the row this launch
+ * claimed -- a slow launch can never wipe a newer adoption's journal. A repair
+ * that fails leaves the journal in place with its attempt counted; after
+ * `MAX_ADOPTION_REPAIR_ATTEMPTS` the app stops trying and says so.
+ *
+ *  - the learned geometry IS on disk -> the irreversible half succeeded, so the
+ *    adoption is COMPLETED here (registered by the caller, selected below);
+ *  - the geometry is NOT there -> the orphans are DELETED outright (P5d-FIX4
+ *    G3): the half-written circuit row, and the session that was started for
+ *    it, with its checkpoint, laps and telemetry, in one transaction.
  *
  * Runs before the production controller and the history store are built, so
  * the selection it settles is the one they are built for. Never throws.
  */
 async function repairInterruptedAdoption(database: SqlDatabase): Promise<void> {
-  const journal = await readAdoptionJournal(database);
-  if (journal === null) return;
+  const claim = await claimAdoptionJournal(database, newJournalId());
+  if (claim === null) return;
+  const journal = claim.journal;
+
+  if (claim.exhausted) {
+    // Three launches have now failed to repair this. Stop retrying, say so,
+    // and let the driver deal with a device that keeps refusing writes.
+    setRecoveryNotice(
+      'A test loop could not be repaired after several attempts and has been abandoned.',
+    );
+    await clearClaimedJournal(database, claim);
+    return;
+  }
+
   try {
     const entry = learnedCircuitStore?.get(journal.circuitId) ?? null;
     if (entry !== null) {
@@ -2274,12 +2274,8 @@ async function repairInterruptedAdoption(database: SqlDatabase): Promise<void> {
         `The test loop "${entry.profile.displayName}" was kept, but the session it started was interrupted.`,
       );
     } else {
-      if (journal.sessionId !== undefined && repository !== null) {
-        await repository.saveCheckpoint(
-          journal.sessionId,
-          { state: 'sessionComplete', lapNumber: 0, context: {} },
-          [],
-        );
+      if (journal.sessionId !== undefined) {
+        await deleteOrphanSession(database, journal.sessionId);
       }
       await setActiveSession(database, null);
       await database.runAsync('DELETE FROM learned_circuits WHERE circuit_id = ?', [
@@ -2292,10 +2288,12 @@ async function repairInterruptedAdoption(database: SqlDatabase): Promise<void> {
       );
     }
   } catch (error) {
+    // The journal STAYS -- with this attempt counted -- so the next launch can
+    // try again rather than leaving the half-adopted state unowned forever.
     console.warn('[composition] repairing an interrupted test-loop adoption failed', error);
-  } finally {
-    await clearAdoptionJournal();
+    return;
   }
+  await clearClaimedJournal(database, claim);
 }
 
 
@@ -2468,7 +2466,7 @@ async function adoptLearnedCircuit(circuit: TestLoopCircuit): Promise<void> {
     const ledger = (adoptionProgress ??= { circuitId: circuit.profile.circuitId });
     // P5d-FIX3 F10: the journal is on disk BEFORE the first side effect, so a
     // kill at any point below leaves a state the next launch can finish or undo.
-    await writeAdoptionJournal({ circuitId: ledger.circuitId, stage: 'staged' });
+    await stageAdoptionJournal({ circuitId: ledger.circuitId, stage: 'staged' });
 
     // 1. Keep it. A learned circuit that cannot be stored cannot be analysed
     //    after a restart, so this failing is a real failure, not a warning.
@@ -2492,7 +2490,7 @@ async function adoptLearnedCircuit(circuit: TestLoopCircuit): Promise<void> {
         ledger.storedProfile = profile;
       }
       publishLearnedCircuits();
-      await writeAdoptionJournal({ circuitId: ledger.storedProfile.circuitId, stage: 'stored' });
+      await stageAdoptionJournal({ circuitId: ledger.storedProfile.circuitId, stage: 'stored' });
     }
     const profile = ledger.storedProfile;
 
@@ -2509,7 +2507,7 @@ async function adoptLearnedCircuit(circuit: TestLoopCircuit): Promise<void> {
         await unlockedRebuildProductionController();
       }
       ledger.selected = true;
-      await writeAdoptionJournal({ circuitId: profile.circuitId, stage: 'selected' });
+      await stageAdoptionJournal({ circuitId: profile.circuitId, stage: 'selected' });
     }
     const ctrl = controller;
     if (ctrl === null) throw new Error('no production controller to run the learned circuit on');
@@ -2524,7 +2522,7 @@ async function adoptLearnedCircuit(circuit: TestLoopCircuit): Promise<void> {
       const startedSessionId = ctrl.diagnostics().sessionId;
       if (startedSessionId === null) throw new Error('the learned-circuit session did not start');
       ledger.sessionId = startedSessionId;
-      await writeAdoptionJournal({
+      await stageAdoptionJournal({
         circuitId: profile.circuitId,
         stage: 'session-started',
         sessionId: startedSessionId,
@@ -2549,7 +2547,7 @@ async function adoptLearnedCircuit(circuit: TestLoopCircuit): Promise<void> {
       }
       await flushTestLoopTelemetry();
       await releaseTestLoopGForce();
-      await writeAdoptionJournal({ circuitId: profile.circuitId, stage: 'recording', sessionId });
+      await stageAdoptionJournal({ circuitId: profile.circuitId, stage: 'recording', sessionId });
     }
 
     // 5. The learning lap is STORED as the session's out-lap trace (lap 0),
@@ -2559,7 +2557,7 @@ async function adoptLearnedCircuit(circuit: TestLoopCircuit): Promise<void> {
         await repository.saveTelemetry(sessionId, 0, learningSamples);
       }
       ledger.outLapSaved = true;
-      await writeAdoptionJournal({ circuitId: profile.circuitId, stage: 'out-lap', sessionId });
+      await stageAdoptionJournal({ circuitId: profile.circuitId, stage: 'out-lap', sessionId });
     }
 
     // 6. Finally, hand the whole backlog to the controller in order -- the
@@ -2573,7 +2571,7 @@ async function adoptLearnedCircuit(circuit: TestLoopCircuit): Promise<void> {
     testLoopHandoverActive = false;
     adoptionProgress = null;
     // The adoption is complete: nothing is left for a later launch to repair.
-    await clearAdoptionJournal();
+    await clearOwnAdoptionJournal();
   });
 }
 

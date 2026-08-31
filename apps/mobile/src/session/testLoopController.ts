@@ -3,6 +3,7 @@ import {
   detectLoopClosure,
   DEFAULT_TEST_LOOP_CONFIG,
   polylineLength,
+  qualifyStep,
   type LocationSample,
   type TestLoopCircuit,
   type TestLoopFailureReason,
@@ -179,7 +180,12 @@ export class TestLoopController {
     const start = this.qualifiedStart;
     this.samples.push(sample);
 
-    if (this.qualifies(sample)) {
+    // P5d-FIX4 G2: the SAME rule the core applies, called from the core --
+    // including its re-anchor behaviour, so the two can never disagree about
+    // which fixes count.
+    const verdict = qualifyStep(sample, this.lastQualified, DEFAULT_TEST_LOOP_CONFIG);
+    if (verdict.reanchor && !verdict.accepted) this.lastQualified = sample;
+    if (verdict.accepted) {
       const previous = this.lastQualified;
       if (previous !== null) this.travelled += haversineM(previous, sample);
       this.lastQualified = sample;
@@ -218,32 +224,7 @@ export class TestLoopController {
     this.emit();
   }
 
-  /**
-   * The same gate `qualifyTrack` applies in `@circuit/core` (P5d-FIX3 F8):
-   * accurate enough, actually moving, and reachable from the previous accepted
-   * fix at a plausible speed. Kept deliberately in step with that function --
-   * if the two ever disagree, the controller triggers a closure test the core
-   * then refuses, which is the exact bug this guards against.
-   */
-  private qualifies(sample: LocationSample): boolean {
-    const config = DEFAULT_TEST_LOOP_CONFIG;
-    const accuracyM = sample.accuracyM;
-    if (accuracyM !== undefined && Number.isFinite(accuracyM) && accuracyM > config.maxAccuracyM) {
-      return false;
-    }
-    const speedMps = sample.speedMps;
-    if (speedMps !== undefined && Number.isFinite(speedMps) && speedMps < config.minSpeedMps) {
-      return false;
-    }
-    const previous = this.lastQualified;
-    if (previous === null) return true;
-    const gapMs = sample.tMono - previous.tMono;
-    const plausibleM =
-      gapMs > 0
-        ? Math.min(config.maxSegmentM, (config.maxSegmentSpeedMps * gapMs) / 1000)
-        : config.maxSegmentM;
-    return haversineM(previous, sample) <= plausibleM;
-  }
+
 
   /**
    * Ends the learn phase. A loop that was learned stays learned; one that was
