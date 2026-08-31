@@ -882,3 +882,14 @@ R2-3 note (M14, Codex P5c-REV2 finding 14, document only): the `sealCueEvidence`
   fabricating evidence from nothing; the real defence is that evidence creation stays a
   controller-owned capability and every bound is re-derived from it at apply time, not trusted from
   the caller's own numbers.
+
+## Test Loop mode (Phase 5d, 2026-08-31 — binding)
+User need: the analysis pipeline must be testable ON THE STREET, without a trackday. A "Test loop" is an ad-hoc circuit:
+1. The user starts Test-loop mode anywhere; recording begins (GPS + IMU + all confirmed OBD channels, same pipeline as a session).
+2. LAP 1 DEFINES THE TRACK: when the driver returns within a closing radius of the start point (with heading roughly matching), lap 1's
+   trace becomes the centreline (resampled/smoothed); the S/F line is the start point perpendicular. Corners are DERIVED from the
+   centreline curvature + speed-drop windows (reuse the cornerMetrics window logic) into a synthetic catalog (ids C1..Cn, entry/apex/exit).
+3. Laps 2+ are timed and classified against that geometry exactly like a circuit session; the Analysis screen and exports work unchanged.
+4. Honesty: the synthetic profile is geometryStatus 'ad-hoc' (never 'official'); the trackday/suggestion stage stays gated; the report
+   header names it a Test loop. Data is a normal session in history (circuitId = generated test-loop id, persisted with its geometry).
+5. Safety: this is for LEGAL, low-speed testing — the mode's intro text says so; no cues/voice in test-loop mode.
