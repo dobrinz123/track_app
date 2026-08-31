@@ -150,6 +150,11 @@ export interface SignalFinderScreenStrings {
   /** Ticket P4p G5: the control that puts them all back in play. */
   retestAll: string;
   retestAllA11y: (target: string) => string;
+  /** Ticket P4q (binding): "VIN: <value>" in the vehicle profile section, once the one-shot ENET read has found one. */
+  vinLabel: (vin: string) => string;
+  /** Ticket P4q (binding): the dismissible "Detected from VIN — <label>" banner shown after auto-select fires. */
+  vinDetectedBanner: (profileLabel: string) => string;
+  vinDetectedDismissA11y: string;
 }
 
 const EN: SignalFinderScreenStrings = {
@@ -241,6 +246,9 @@ const EN: SignalFinderScreenStrings = {
   ruledOut: (count) => `${count} ruled out from earlier finds`,
   retestAll: 'Re-test all',
   retestAllA11y: (target) => `Re-test every DID ruled out for ${target}`,
+  vinLabel: (vin) => `VIN: ${vin}`,
+  vinDetectedBanner: (profileLabel) => `Detected from VIN — ${profileLabel}`,
+  vinDetectedDismissA11y: 'Dismiss the VIN detection banner',
 };
 
 const RO: SignalFinderScreenStrings = {
@@ -332,6 +340,9 @@ const RO: SignalFinderScreenStrings = {
   ruledOut: (count) => `${count} excluse din căutările anterioare`,
   retestAll: 'Testează din nou tot',
   retestAllA11y: (target) => `Testează din nou fiecare DID exclus pentru ${target}`,
+  vinLabel: (vin) => `VIN: ${vin}`,
+  vinDetectedBanner: (profileLabel) => `Detectat din VIN — ${profileLabel}`,
+  vinDetectedDismissA11y: 'Închide anunțul de detectare din VIN',
 };
 
 export const SIGNAL_FINDER_SCREEN_STRINGS: Readonly<Record<SignalFinderUiLanguage, SignalFinderScreenStrings>> = {

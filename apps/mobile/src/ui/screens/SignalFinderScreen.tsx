@@ -17,7 +17,17 @@ import {
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
-import { getTelemetryReadDb, refreshVehicleProfileBindingsCache, settingsStore, telemetryProvider } from '../../session/composition';
+import {
+  dismissVinAutoDetectNotice,
+  getTelemetryReadDb,
+  maybeDetectVehicleFromVin,
+  refreshVehicleProfileBindingsCache,
+  setActiveVehicleProfileIdExplicit,
+  settingsStore,
+  subscribeVinAutoDetectNotice,
+  telemetryProvider,
+  type VinAutoDetectNotice,
+} from '../../session/composition';
 import { useSettings } from '../hooks/useSettings';
 import { EnetTcpTransport } from '../../session/enetTcpTransport';
 import {
@@ -216,9 +226,28 @@ export function SignalFinderScreen(props: Props): React.JSX.Element {
   // "under" one profile while the monitor polls another's stale binding.
   const profileId = settings.activeVehicleProfileId;
   const setProfileId = (nextProfileId: string): void => {
-    settingsStore.update({ activeVehicleProfileId: nextProfileId });
+    // Ticket P4q (binding): an explicit chip tap goes through the ONE place
+    // that also marks "the user chose this app run" -- auto-select must
+    // never later override it.
+    setActiveVehicleProfileIdExplicit(nextProfileId);
   };
   const catalog = React.useMemo(() => resolveSignalTargetCatalog(profileId), [profileId]);
+
+  /**
+   * Ticket P4q (binding): "VIN: <value>" once known, and the dismissible
+   * "Detected from VIN — <label>" banner auto-select raises. The one-shot
+   * read itself is triggered here too ("when the Signal Finder screen
+   * opens") -- `maybeDetectVehicleFromVin` is idempotent per app run and
+   * never blocks/steals the adapter (see its own doc comment).
+   */
+  const [vinNotice, setVinNotice] = React.useState<VinAutoDetectNotice | null>(null);
+  React.useEffect(() => {
+    const unsubscribe = subscribeVinAutoDetectNotice(setVinNotice);
+    void maybeDetectVehicleFromVin();
+    return unsubscribe;
+  }, []);
+  const vinNoticeProfileLabel =
+    vinNotice === null ? '' : resolveSignalTargetCatalogLabel(resolveSignalTargetCatalog(vinNotice.profileId), settings.language);
 
   // Read inside the controller factory, which is built once -- a later
   // profile change rebuilds the controller (below) rather than going stale.
@@ -522,6 +551,10 @@ export function SignalFinderScreen(props: Props): React.JSX.Element {
           <Text style={styles.caption}>
             {resolveSignalTargetCatalogLabel(catalog, settings.language)} ({catalog.profileId})
           </Text>
+          {/* Ticket P4q (binding): "VIN: <value>" once the one-shot ENET read
+              has found one -- persisted, so it still shows on a later app
+              run even before that run has read one itself. */}
+          {settings.lastSeenVin !== null ? <Text style={styles.caption}>{strings.vinLabel(settings.lastSeenVin)}</Text> : null}
           <Pressable
             style={[styles.secondaryButton, sharing || bindings.length === 0 ? styles.buttonDisabled : null]}
             disabled={sharing || bindings.length === 0}
@@ -534,6 +567,23 @@ export function SignalFinderScreen(props: Props): React.JSX.Element {
         </View>
 
         {banner !== null ? <Text style={styles.banner}>{banner}</Text> : null}
+
+        {/* Ticket P4q (binding): "exactly ONE profile matches -> auto-select
+            ... with a dismissible banner". The chip above still overrides --
+            dismissing this only clears the notice, never the selection. */}
+        {vinNotice !== null ? (
+          <View style={styles.shareRow}>
+            <Text style={styles.banner}>{strings.vinDetectedBanner(vinNoticeProfileLabel)}</Text>
+            <Pressable
+              style={styles.secondaryButton}
+              onPress={() => dismissVinAutoDetectNotice()}
+              accessibilityRole="button"
+              accessibilityLabel={strings.vinDetectedDismissA11y}
+            >
+              <Text style={styles.secondaryButtonText}>×</Text>
+            </Pressable>
+          </View>
+        ) : null}
 
         {/* P4m-FIX3 Z6: the adapter never confirmed its own shutdown -- the next
             find waits for it, and the driver is told rather than left wondering

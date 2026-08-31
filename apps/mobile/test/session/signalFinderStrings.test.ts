@@ -184,6 +184,17 @@ describe('P4m-FIX2 Y7 -- profile labels and runtime errors are localized too', (
     expect(ro.notReadSilentDids(2)).not.toBe(en.notReadSilentDids(2));
   });
 
+  /** Ticket P4q (binding): the VIN label and the auto-detect banner exist in both languages. */
+  it('P4q: vinLabel and vinDetectedBanner render in both languages', () => {
+    expect(SIGNAL_FINDER_SCREEN_STRINGS.en.vinLabel('WBA12345678901234')).toBe('VIN: WBA12345678901234');
+    expect(SIGNAL_FINDER_SCREEN_STRINGS.ro.vinLabel('WBA12345678901234')).toBe('VIN: WBA12345678901234');
+    expect(SIGNAL_FINDER_SCREEN_STRINGS.en.vinDetectedBanner('Toyota GR Supra')).toBe('Detected from VIN — Toyota GR Supra');
+    expect(SIGNAL_FINDER_SCREEN_STRINGS.ro.vinDetectedBanner('Toyota GR Supra')).not.toBe(
+      SIGNAL_FINDER_SCREEN_STRINGS.en.vinDetectedBanner('Toyota GR Supra'),
+    );
+    expect(SIGNAL_FINDER_SCREEN_STRINGS.ro.vinDetectedDismissA11y).not.toBe(SIGNAL_FINDER_SCREEN_STRINGS.en.vinDetectedDismissA11y);
+  });
+
   it('the vehicle-profile catalogs carry a Romanian label, resolved by language', () => {
     for (const catalog of SIGNAL_TARGET_CATALOGS) {
       expect(resolveSignalTargetCatalogLabel(catalog, 'ro'), `${catalog.profileId} has no RO label`).not.toBe(

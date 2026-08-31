@@ -243,6 +243,16 @@ export interface AppSettings {
    * (`resolveSignalTargetCatalog`), exactly like `selectedCircuitId` does.
    */
   activeVehicleProfileId: string;
+  /**
+   * Ticket P4q (binding, user: "the app should know the car from OBD from
+   * the start if possible"): the VIN the ENET one-shot read
+   * (`@circuit/core`'s `vinRead.ts`, driven by `composition.ts`'s
+   * `maybeDetectVehicleFromVin`) last decoded successfully, persisted so the
+   * Signal Finder screen can show "VIN: <value>" even before this app run has
+   * read one itself. `null` = never read (or the last attempt found nothing
+   * usable) -- never a fabricated placeholder.
+   */
+  lastSeenVin: string | null;
 }
 
 /**
@@ -367,6 +377,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   developerModeEnabled: false,
   language: 'en',
   activeVehicleProfileId: GENERIC_VEHICLE_PROFILE_ID,
+  lastSeenVin: null,
 };
 
 /**

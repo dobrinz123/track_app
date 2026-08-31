@@ -6,13 +6,16 @@ import {
   engineNotDetectedRunning,
   estimateSweepMinutes,
   findSignalTarget,
+  matchVehicleProfilesByVin,
   nextDiscoveryStep,
   resolveSignalTargetCatalog,
   targetHypothesisEcus,
   resolveSignalActionVerbs,
   resolveSignalTargetLabel,
   resolveDiscoveryRangeNote,
+  vinMatchesPattern,
   type SignalRecentEngineSample,
+  type SignalTargetCatalog,
 } from '../../../src/telemetry/signalFinder';
 
 /**
@@ -300,5 +303,82 @@ describe('engineNotDetectedRunning (O5, pure predicate)', () => {
 
   it('a reading from the future (clock skew) is never trusted as fresh', () => {
     expect(engineNotDetectedRunning('running', sampleAge(850, -1), NOW)).toBe(true);
+  });
+});
+
+/**
+ * Ticket P4q (binding): VIN-based vehicle auto-detection. The Supra's own
+ * `vinPatterns` stays EMPTY -- the real WMI/VDS is never invented, only
+ * recorded from an actual car's first read -- so every test here builds its
+ * OWN fake catalogs rather than asserting a nonexistent Supra pattern.
+ */
+describe('VIN catalog matching (P4q)', () => {
+  it("the Supra catalog's vinPatterns starts EMPTY -- never an invented WMI", () => {
+    const supra = resolveSignalTargetCatalog('toyota-supra-b58');
+    expect(supra.vinPatterns).toEqual([]);
+  });
+
+  it('the generic catalog carries no vinPatterns at all', () => {
+    expect(GENERIC_SIGNAL_TARGET_CATALOG.vinPatterns ?? []).toEqual([]);
+  });
+
+  describe('vinMatchesPattern', () => {
+    it('matches a literal prefix (case-insensitive)', () => {
+      expect(vinMatchesPattern('WBA12345678901234', 'WBA')).toBe(true);
+      expect(vinMatchesPattern('wba12345678901234', 'WBA')).toBe(true);
+      expect(vinMatchesPattern('JTH12345678901234', 'WBA')).toBe(false);
+    });
+
+    it('matches a simple glob containing *', () => {
+      expect(vinMatchesPattern('WBA12CD3456789012', 'WBA*CD*')).toBe(true);
+      expect(vinMatchesPattern('WBA99ZZ3456789012', 'WBA*CD*')).toBe(false);
+    });
+
+    it('never matches an empty pattern', () => {
+      expect(vinMatchesPattern('WBA12345678901234', '')).toBe(false);
+    });
+
+    it('treats a glob as anchored (whole VIN), not merely contained', () => {
+      // No leading/trailing '*' -- 'WBA*01234' must match start to end: a
+      // VIN that starts with WBA and ends in 01234 matches...
+      expect(vinMatchesPattern('WBA123456789901234', 'WBA*01234')).toBe(true);
+      // ...but one that merely CONTAINS '01234' somewhere in the middle, with
+      // more characters trailing after it, does not (the '$' anchor).
+      expect(vinMatchesPattern('WBA1234567890123499', 'WBA*01234')).toBe(false);
+    });
+  });
+
+  describe('matchVehicleProfilesByVin', () => {
+    const catalogA: SignalTargetCatalog = { ...GENERIC_SIGNAL_TARGET_CATALOG, profileId: 'fake-a', vinPatterns: ['WBA'] };
+    const catalogB: SignalTargetCatalog = { ...GENERIC_SIGNAL_TARGET_CATALOG, profileId: 'fake-b', vinPatterns: ['JTH*'] };
+    const catalogNoPatterns: SignalTargetCatalog = { ...GENERIC_SIGNAL_TARGET_CATALOG, profileId: 'fake-none' };
+    const fakeCatalogs = [catalogA, catalogB, catalogNoPatterns];
+
+    it('returns exactly one match when exactly one catalog matches', () => {
+      expect(matchVehicleProfilesByVin('WBA00000000000001', fakeCatalogs)).toEqual([catalogA]);
+      expect(matchVehicleProfilesByVin('JTH00000000000001', fakeCatalogs)).toEqual([catalogB]);
+    });
+
+    it('returns [] when nothing matches', () => {
+      expect(matchVehicleProfilesByVin('ZZZ00000000000001', fakeCatalogs)).toEqual([]);
+    });
+
+    it('returns every match when more than one catalog matches (never picks one)', () => {
+      const overlapping: SignalTargetCatalog = { ...GENERIC_SIGNAL_TARGET_CATALOG, profileId: 'fake-overlap', vinPatterns: ['WBA'] };
+      const result = matchVehicleProfilesByVin('WBA00000000000001', [...fakeCatalogs, overlapping]);
+      expect(result.map((c) => c.profileId).sort()).toEqual(['fake-a', 'fake-overlap']);
+    });
+
+    it('a catalog with no vinPatterns never matches anything', () => {
+      expect(matchVehicleProfilesByVin('ANYTHING000000000', [catalogNoPatterns])).toEqual([]);
+    });
+
+    it("the real SUPRA_B58 catalog (empty vinPatterns) never matches, by construction", () => {
+      expect(matchVehicleProfilesByVin('WBA00000000000001', SIGNAL_TARGET_CATALOGS)).toEqual([]);
+    });
+
+    it('an empty VIN never matches anything', () => {
+      expect(matchVehicleProfilesByVin('', fakeCatalogs)).toEqual([]);
+    });
   });
 });

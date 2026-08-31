@@ -403,3 +403,45 @@ describe('SqlSettingsStore activeVehicleProfileId (P4p G1)', () => {
     expect(store2.activeVehicleProfileIdWasStored).toBe(true);
   });
 });
+
+/**
+ * Ticket P4q (binding): `lastSeenVin` -- the additive field the one-shot VIN
+ * read caches into persisted settings so the Signal Finder screen can show
+ * "VIN: <value>" even before this app run has read one itself.
+ */
+describe('SqlSettingsStore lastSeenVin (P4q)', () => {
+  it('defaults to null when nothing was ever persisted', async () => {
+    const db = await createSqlJsDatabase();
+    await SqlSessionRepository.create(db);
+    const store = await SqlSettingsStore.create(db);
+    expect(store.getSettings().lastSeenVin).toBeNull();
+    expect(DEFAULT_SETTINGS.lastSeenVin).toBeNull();
+  });
+
+  it('round-trips a read VIN across a simulated app restart', async () => {
+    const raw = await createRawSqlJsDatabase();
+    const db1 = wrapExistingSqlJsDatabase(raw);
+    await SqlSessionRepository.create(db1);
+    const store1 = await SqlSettingsStore.create(db1);
+
+    store1.update({ lastSeenVin: 'WBA12345678901234' });
+    expect(store1.getSettings().lastSeenVin).toBe('WBA12345678901234');
+    await flush();
+
+    const store2 = await SqlSettingsStore.create(wrapExistingSqlJsDatabase(raw));
+    expect(store2.getSettings().lastSeenVin).toBe('WBA12345678901234');
+  });
+
+  it('a persisted lastSeenVin of the wrong type is repaired back to null, never accepted verbatim', async () => {
+    const raw = await createRawSqlJsDatabase();
+    const db = wrapExistingSqlJsDatabase(raw);
+    await SqlSessionRepository.create(db);
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'app-settings',
+      JSON.stringify({ lastSeenVin: 12345 }),
+    ]);
+
+    const store = await SqlSettingsStore.create(db);
+    expect(store.getSettings().lastSeenVin).toBeNull();
+  });
+});

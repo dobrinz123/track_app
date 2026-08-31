@@ -16,7 +16,11 @@ import {
   InMemorySessionRepository,
   SessionController,
   deleteAllUserData,
+  matchVehicleProfilesByVin,
+  readVinFromChannel,
+  SIGNAL_TARGET_CATALOGS,
   type DeleteUserDataResult,
+  type SignalTargetCatalog,
 } from '@circuit/core';
 // Web detection WITHOUT importing react-native: its Flow-typed source breaks
 // vitest's parser, and `typeof document` distinguishes the three real runtime
@@ -48,6 +52,9 @@ import type { DevReplayScenario } from './devReplayScenarios';
 import { startVoiceCoach } from './voiceCoach';
 import { createTelemetryProvider, type TelemetryProvider, type VehicleProfileBindingLike } from './telemetryProvider';
 import { createVehicleProfileBindingStore } from '../persistence/didSweepStore';
+import { createRawUdsChannel } from './didSweepController';
+import { EnetTcpTransport } from './enetTcpTransport';
+import { enetAdapterReservation as sharedEnetAdapterReservation } from './enetAdapterReservation';
 import { createGForceProvider, type GForceProvider } from './gforceProvider';
 import { TelemetryRecorder } from '../persistence/telemetryRecorder';
 import { PASSTHROUGH_WRITE_GATE, type SqlWriteGate } from '../persistence/sqlWriteGate';
@@ -688,6 +695,174 @@ export async function applyInitialActiveVehicleProfile(store: SqlSettingsStore):
   }
 }
 
+// ---------------------------------------------------------------------------
+// VIN-based vehicle auto-detection (ticket P4q, binding). User: "the app
+// should know the car from OBD from the start if possible; if not, let the
+// user choose."
+//
+// ENET-only (Q1, binding): the ELM327 session (`elm327Session.ts`) has no
+// mode-09 (vehicle-info) support at all -- only mode-01 polling and a
+// service-21/22 custom-PID escape hatch -- so a VIN read is never attempted
+// on that path; `maybeDetectVehicleFromVin()` below is a no-op whenever
+// `adapterType !== 'enet'`.
+//
+// NEVER blocks or steals the adapter: it checks the SHARED reservation is
+// free and acquires its OWN token before opening anything; a busy adapter (a
+// sweep/telemetry/Signal-Finder session already running) makes this resolve
+// `null` immediately, WITHOUT marking detection "done" -- the next trigger
+// (another telemetry connect, another Signal Finder screen mount) gets to try
+// again. Once a read actually COMPLETES (VIN found or genuinely not), it is
+// cached for the rest of this app run -- "one-shot read... result cached per
+// app run" -- and persisted into `settings.lastSeenVin` so the Signal Finder
+// screen can show "VIN: <value>" even before a LATER run reads one again.
+// ---------------------------------------------------------------------------
+
+/** The DME address the VIN read is addressed to -- ISO 14229-1 DID 0xF190 (`@circuit/core`'s `vinRead.ts`). */
+const VIN_READ_ECU = 0x12;
+
+type VinDetectionState = 'idle' | 'attempting' | 'done';
+let vinDetectionState: VinDetectionState = 'idle';
+/** The result of the ONE completed attempt this app run has made (or will make) -- `null` before `vinDetectionState === 'done'`, and forever after if the read found nothing usable. */
+let cachedDetectedVin: string | null = null;
+
+/**
+ * Ticket P4q (binding): "auto-select NEVER overrides an explicit user choice
+ * from this app run" -- set the instant the user taps a profile chip
+ * (`setActiveVehicleProfileIdExplicit`, below), for the lifetime of this
+ * process. A profile the user picked in an EARLIER app run (persisted,
+ * ordinary settings hydration) does NOT set this -- only an explicit choice
+ * made THIS run blocks auto-select, exactly as the ticket words it.
+ */
+let userExplicitlyChoseVehicleProfileThisRun = false;
+
+/**
+ * Ticket P4q (binding): the ONE place a profile CHIP tap (or any other
+ * explicit UI choice) must go through -- never `settingsStore.update`
+ * directly -- so the explicit-choice flag above is set atomically with the
+ * setting itself. `SignalFinderScreen.tsx`'s profile chips call this.
+ */
+export function setActiveVehicleProfileIdExplicit(profileId: string): void {
+  userExplicitlyChoseVehicleProfileThisRun = true;
+  settingsStore.update({ activeVehicleProfileId: profileId });
+}
+
+/** Test/diagnostic visibility into the explicit-choice flag above. */
+export function hasUserExplicitlyChosenVehicleProfileThisRun(): boolean {
+  return userExplicitlyChoseVehicleProfileThisRun;
+}
+
+export interface VinAutoDetectNotice {
+  vin: string;
+  /** The profile auto-select just activated. The screen resolves its label from the catalog + the app's own language -- never a raw English string cached here. */
+  profileId: string;
+}
+
+let vinAutoDetectNotice: VinAutoDetectNotice | null = null;
+const vinAutoDetectNoticeListeners = new Set<(n: VinAutoDetectNotice | null) => void>();
+
+function setVinAutoDetectNotice(next: VinAutoDetectNotice | null): void {
+  vinAutoDetectNotice = next;
+  for (const listener of vinAutoDetectNoticeListeners) listener(next);
+}
+
+/** Ticket P4q (binding): the Signal Finder screen's dismissible "Detected from VIN — <label>" banner. Replays the current value synchronously on subscribe (same convention as `subscribeRecovery`/`subscribeBootstrapState` above). */
+export function subscribeVinAutoDetectNotice(cb: (n: VinAutoDetectNotice | null) => void): () => void {
+  vinAutoDetectNoticeListeners.add(cb);
+  cb(vinAutoDetectNotice);
+  return () => {
+    vinAutoDetectNoticeListeners.delete(cb);
+  };
+}
+
+/** The banner's dismiss control. Purely a UI acknowledgement -- does NOT undo the auto-selected profile (the chip still overrides, same as any other profile switch). */
+export function dismissVinAutoDetectNotice(): void {
+  setVinAutoDetectNotice(null);
+}
+
+/**
+ * Ticket P4q Q3 (binding): "exactly ONE profile matches -> auto-select ...
+ * zero or multiple matches -> nothing changes (manual choice). Auto-select
+ * never overrides a profile the user chose EXPLICITLY this app-run." A pure
+ * function of the match list and that one flag -- directly unit-testable
+ * without any catalog/settings/transport involved.
+ */
+export function decideVinAutoSelect(
+  matchingProfileIds: readonly string[],
+  userExplicitlyChoseThisRun: boolean,
+): string | null {
+  if (userExplicitlyChoseThisRun) return null;
+  if (matchingProfileIds.length !== 1) return null;
+  return matchingProfileIds[0] ?? null;
+}
+
+/**
+ * Ticket P4q Q2/Q3 (binding): matches `vin` against `catalogs` (default the
+ * real registry) and, on exactly one match (per {@link decideVinAutoSelect}),
+ * activates it as `activeVehicleProfileId` and raises the dismissible
+ * notice. `catalogs` is a test seam (mirrors `signalFinderController.ts`'s
+ * own `deps.catalog` override) -- production never passes it, and in
+ * practice never fires yet regardless: the Supra catalog's own `vinPatterns`
+ * starts EMPTY (Q2, binding) until a real VIN has been read from the actual
+ * car and a pattern added from it.
+ */
+export function applyVinAutoSelect(vin: string, catalogs: readonly SignalTargetCatalog[] = SIGNAL_TARGET_CATALOGS): void {
+  const matches = matchVehicleProfilesByVin(vin, catalogs);
+  const decision = decideVinAutoSelect(
+    matches.map((catalog) => catalog.profileId),
+    userExplicitlyChoseVehicleProfileThisRun,
+  );
+  if (decision === null) return;
+  settingsStore.update({ activeVehicleProfileId: decision });
+  setVinAutoDetectNotice({ vin, profileId: decision });
+}
+
+/**
+ * Ticket P4q Q1 (binding): the one-shot ENET VIN read -- "runs when the
+ * adapter reservation is free (e.g. when the Signal Finder screen opens or
+ * telemetry connects)". Safe to call from multiple trigger points and
+ * multiple times: after the FIRST attempt actually completes (found or not),
+ * every later call returns the cached result immediately without touching
+ * the adapter again. A call that finds the reservation held by someone else
+ * returns `null` WITHOUT marking detection done, so a later trigger still
+ * gets its own chance once the adapter frees up.
+ */
+export async function maybeDetectVehicleFromVin(): Promise<string | null> {
+  if (vinDetectionState !== 'idle') return cachedDetectedVin;
+  const settings = settingsStore.getSettings();
+  // Q1 (binding): ENET only -- the ELM327 session has no mode-09 support.
+  if (settings.adapterType !== 'enet') return null;
+  if (settings.enetHost.trim() === '') return null; // nothing configured to connect to.
+  if (sharedEnetAdapterReservation.holder() !== null) return null; // never steals a running flow's adapter.
+  const token = sharedEnetAdapterReservation.tryAcquire('signalFinder');
+  if (token === null) return null; // lost the race to acquire -- another trigger point retries later.
+
+  vinDetectionState = 'attempting';
+  const transport = new EnetTcpTransport({ host: settings.enetHost, port: settings.enetPort });
+  let vin: string | null = null;
+  try {
+    await transport.connect();
+    const channel = createRawUdsChannel(transport, settings.enetTesterAddress, VIN_READ_ECU);
+    vin = await readVinFromChannel(channel);
+  } catch (error) {
+    console.warn('[composition] the one-shot VIN read failed', error);
+    vin = null;
+  } finally {
+    await transport.close().catch(() => undefined);
+    sharedEnetAdapterReservation.release(token);
+  }
+
+  vinDetectionState = 'done';
+  cachedDetectedVin = vin;
+  if (vin !== null) {
+    // Q2 (binding): displayed/logged so a pattern can be added LATER from the
+    // real car -- never invented here.
+    console.info(`[composition] VIN detected: ${vin}`);
+    settingsStore.update({ lastSeenVin: vin });
+    applyVinAutoSelect(vin);
+  }
+  return vin;
+}
+
 const baseTelemetryProvider: TelemetryProvider = createTelemetryProvider({
   settingsStore,
   monotonicNow: () => telemetryClock.now(),
@@ -709,6 +884,16 @@ export const telemetryProvider: TelemetryProvider = {
   start(): void {
     void refreshVehicleProfileBindingsCache();
     baseTelemetryProvider.start();
+    // Ticket P4q (binding): one of this app's two VIN-detection trigger
+    // points ("when ... telemetry connects") -- fire-and-forget, and called
+    // AFTER `baseTelemetryProvider.start()` on purpose: that call may itself
+    // synchronously acquire the SAME shared reservation (owner `'provider'`)
+    // before yielding, and this must never race it for the claim -- "never
+    // blocks or steals the adapter from a running flow". `holder()` is
+    // therefore whatever telemetry's own start just left it as; a no-op
+    // (skipped, not marked done, so a LATER trigger still gets its own
+    // chance) whenever that reservation is held.
+    void maybeDetectVehicleFromVin();
   },
 };
 

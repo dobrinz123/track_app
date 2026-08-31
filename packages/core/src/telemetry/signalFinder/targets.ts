@@ -156,6 +156,18 @@ export interface SignalTargetCatalog {
    */
   labelRo?: string;
   targets: readonly SignalTargetDefinition[];
+  /**
+   * Ticket P4q (binding, user: "the app should know the car from OBD from
+   * the start if possible"): VIN prefixes/globs that identify this vehicle
+   * from a live read (UDS 0x22 DID 0xF190, `vinRead.ts`). Each entry is
+   * either a literal PREFIX (matched with `startsWith`) or a simple glob
+   * containing `*` (matched via {@link vinMatchesPattern}) -- both
+   * case-insensitive. Omitted/`[]` (every catalog's default, INCLUDING the
+   * Supra's) means "no known VIN evidence yet": the real WMI/VDS is never
+   * invented, only recorded from an actual car's first read -- see this
+   * catalog's own `vinPatterns: []` and its comment.
+   */
+  vinPatterns?: readonly string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +379,12 @@ const SUPRA_B58_CATALOG: SignalTargetCatalog = {
   profileId: 'toyota-supra-b58',
   label: 'Toyota GR Supra (A90/J29), BMW B58',
   labelRo: 'Toyota GR Supra (A90/J29), motor BMW B58',
+  // Ticket P4q (binding): EMPTY on purpose -- no VIN has ever been read from
+  // the user's own car through this app yet. After the first real ENET VIN
+  // read (`vinRead.ts`), the driver sees the raw VIN on the Signal Finder
+  // screen and the app logs it; a pattern is added here ONLY from that real,
+  // observed value -- never a guessed Toyota/BMW WMI code.
+  vinPatterns: [],
   targets: [
     {
       id: 'brakeSwitch',
@@ -727,6 +745,57 @@ export function engineNotDetectedRunning(
   const ageMs = nowMs - recentSample.tMonoMs;
   if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > ENGINE_SAMPLE_MAX_AGE_MS) return true;
   return recentSample.rpm === 0;
+}
+
+// ---------------------------------------------------------------------------
+// VIN-based vehicle auto-detection (ticket P4q, binding).
+// ---------------------------------------------------------------------------
+
+/** Escapes every regex metacharacter EXCEPT `*` (translated separately, below). */
+function escapeRegexExceptStar(text: string): string {
+  return text.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Ticket P4q (binding): does `pattern` (a `SignalTargetCatalog.vinPatterns`
+ * entry) match `vin`? Both sides are compared case-insensitively (VINs are
+ * conventionally upper-case, but a read/typed one might not be):
+ *
+ *  - no `*` in `pattern` -- a literal PREFIX match (`vin.startsWith(pattern)`);
+ *  - `pattern` contains `*` -- a simple GLOB, ANCHORED to the whole VIN (every
+ *    other character literal, `*` matching any run of characters, including
+ *    none) -- `'WBA*01'` must match start to end, never merely "contains".
+ *
+ * An empty pattern never matches anything (there is nothing to compare
+ * against) -- pure, no I/O, no catalog lookup.
+ */
+export function vinMatchesPattern(vin: string, pattern: string): boolean {
+  const normalizedVin = vin.trim().toUpperCase();
+  const normalizedPattern = pattern.trim().toUpperCase();
+  if (normalizedPattern.length === 0) return false;
+  if (!normalizedPattern.includes('*')) return normalizedVin.startsWith(normalizedPattern);
+  const regexSource = normalizedPattern
+    .split('*')
+    .map((segment) => escapeRegexExceptStar(segment))
+    .join('.*');
+  return new RegExp(`^${regexSource}$`).test(normalizedVin);
+}
+
+/**
+ * Ticket P4q (binding): every catalog whose `vinPatterns` contains an entry
+ * matching `vin` -- `[]` for an empty/blank `vin`, and `[]` for a catalog
+ * with no `vinPatterns` at all (the generic catalog, and every vehicle
+ * profile before its first real VIN read). Pure; the caller decides what
+ * "exactly one match" means for auto-select (`composition.ts`'s
+ * `maybeDetectVehicleFromVin`) -- this never picks a "best" match itself.
+ */
+export function matchVehicleProfilesByVin(
+  vin: string,
+  catalogs: readonly SignalTargetCatalog[] = SIGNAL_TARGET_CATALOGS,
+): SignalTargetCatalog[] {
+  const trimmedVin = vin.trim();
+  if (trimmedVin.length === 0) return [];
+  return catalogs.filter((catalog) => (catalog.vinPatterns ?? []).some((pattern) => vinMatchesPattern(trimmedVin, pattern)));
 }
 
 export interface NextDiscoveryStep {

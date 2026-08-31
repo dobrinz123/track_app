@@ -128,6 +128,13 @@ export class SqlSettingsStore implements SettingsStore {
     if (!rowHasActiveVehicleProfileId) {
       initial = { ...initial, activeVehicleProfileId: DEFAULT_SETTINGS.activeVehicleProfileId };
     }
+    // Ticket P4q (binding): a present-but-malformed persisted VIN (wrong
+    // type from a corrupt/legacy row) must never reach the Signal Finder
+    // screen or the VIN-matching logic -- repaired back to `null` (never read
+    // yet), the same defensive way the boolean/ENET fields above are.
+    if (typeof initial.lastSeenVin !== 'string' && initial.lastSeenVin !== null) {
+      initial = { ...initial, lastSeenVin: null };
+    }
     return new SqlSettingsStore(db, initial, rowHasActiveVehicleProfileId);
   }
 
