@@ -87,6 +87,14 @@ export class SqlSettingsStore implements SettingsStore {
     if (typeof initial.developerModeEnabled !== 'boolean') {
       initial = { ...initial, developerModeEnabled: false };
     }
+    // Ticket P5c-B (contracts.md R2-3): the trackday suggestion stage is
+    // opt-in, so a present-but-malformed persisted value must never be read
+    // as truthy and silently switch it on -- repaired back to `false` exactly
+    // like `developerModeEnabled` above. An install from before this setting
+    // existed carries no key at all and takes `DEFAULT_SETTINGS`' `false`.
+    if (typeof initial.suggestionsEnabled !== 'boolean') {
+      initial = { ...initial, suggestionsEnabled: false };
+    }
     // Ticket P4l-FIX1 F2 (binding), corrected by P4l-FIX4 N7: the language
     // DEFAULT comes from the device locale, applied here and only here --
     // whenever the persisted ROW did not itself carry a valid choice (no row

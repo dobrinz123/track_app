@@ -12,6 +12,7 @@ export type {
 
 export { SessionController } from './sessionController';
 export type {
+  AppliedCueUpdate,
   FacadeStateCore,
   SessionControllerConfig,
   SessionControllerDeps,

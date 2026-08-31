@@ -7,6 +7,7 @@ import type {
   TimeLossCause,
   TimeLossFinding,
 } from './sessionInsights';
+import type { CuePoint, CueUpdate, PitSuggestion } from './suggestions';
 import type { CoachingChannelId, CornerMetrics, LapAnomalyReason, LapCheckId, LapLabel } from './types';
 
 /**
@@ -776,4 +777,102 @@ export function buildReport(insights: SessionInsights, language: ReportLanguage)
 /** The whole report as plain text, in the requested language. */
 export function renderReport(insights: SessionInsights, language: ReportLanguage): string {
   return buildReport(insights, language).text;
+}
+
+// ---------------------------------------------------------------------------
+// Suggestion text (ticket P5c-B D1, contracts.md R2-3)
+// ---------------------------------------------------------------------------
+
+/**
+ * The ONLY sentences in this engine that name a change of driving, and they
+ * are bounded by construction: `computeSuggestions` never produces a target
+ * past what a clean lap of the same outing demonstrated, so every sentence
+ * below cites the driver's own lap as its evidence (safety-contract rule 6).
+ * The observation half of the report is unchanged and stays observations-only.
+ */
+const SUGGESTION_TEXT: Record<
+  ReportLanguage,
+  {
+    corner: (id: number) => string;
+    brakeLater: (typical: string, target: string, demonstrated: string, lap: number) => string;
+    liftLater: (typical: string, target: string, demonstrated: string, lap: number) => string;
+    carryMoreMinSpeed: (typical: string, target: string, demonstrated: string, lap: number) => string;
+    cueUpdate: (
+      point: string,
+      moved: string,
+      from: string,
+      to: string,
+      demonstrated: string,
+      lap: number,
+    ) => string;
+    cuePoints: Record<CuePoint, string>;
+  }
+> = {
+  ro: {
+    corner: (id) => `Virajul ${id}`,
+    brakeLater: (typical, target, demonstrated, lap) =>
+      `frânează mai târziu: de obicei frânezi la ${typical} înainte de viraj, iar în turul ${lap} ai frânat deja la ${demonstrated} — țintește ${target}.`,
+    liftLater: (typical, target, demonstrated, lap) =>
+      `ridică piciorul mai târziu: de obicei ridici la ${typical} înainte de viraj, iar în turul ${lap} ai ridicat la ${demonstrated} — țintește ${target}.`,
+    carryMoreMinSpeed: (typical, target, demonstrated, lap) =>
+      `du mai multă viteză prin viraj: de obicei cobori la ${typical}, iar în turul ${lap} ai trecut cu ${demonstrated} — țintește ${target}.`,
+    cueUpdate: (point, moved, from, to, demonstrated, lap) =>
+      `${point} s-a mutat cu ${moved} mai târziu, de la ${from} la ${to} înainte de viraj, pentru că în turul ${lap} ai făcut ${demonstrated}.`,
+    cuePoints: { brake: 'Reperul de frânare', lift: 'Reperul de ridicat piciorul' },
+  },
+  en: {
+    corner: (id) => `Corner ${id}`,
+    brakeLater: (typical, target, demonstrated, lap) =>
+      `brake later: you usually brake ${typical} before the corner, and on lap ${lap} you already braked at ${demonstrated} — aim for ${target}.`,
+    liftLater: (typical, target, demonstrated, lap) =>
+      `lift later: you usually lift ${typical} before the corner, and on lap ${lap} you lifted at ${demonstrated} — aim for ${target}.`,
+    carryMoreMinSpeed: (typical, target, demonstrated, lap) =>
+      `carry more speed through the corner: you usually drop to ${typical}, and on lap ${lap} you carried ${demonstrated} — aim for ${target}.`,
+    cueUpdate: (point, moved, from, to, demonstrated, lap) =>
+      `${point} moved ${moved} later, from ${from} to ${to} before the corner, because on lap ${lap} you did ${demonstrated}.`,
+    cuePoints: { brake: 'The brake cue', lift: 'The lift cue' },
+  },
+};
+
+/**
+ * One pit suggestion as a sentence, with its numbers and the lap that proves
+ * it. Never rendered while driving (R2-3a) and never for a suggestion the
+ * engine did not generate — this function only formats what it is given.
+ */
+export function pitSuggestionLine(suggestion: PitSuggestion, language: ReportLanguage): string {
+  const vocabulary = SUGGESTION_TEXT[language];
+  const format = (value: number): string =>
+    suggestion.unit === 'm' ? metres(value, language) : kph(value, language);
+  const typical = format(suggestion.typicalValue);
+  const target = format(suggestion.targetValue);
+  const demonstrated = format(suggestion.demonstratedValue);
+  const body =
+    suggestion.kind === 'brakeLater'
+      ? vocabulary.brakeLater(typical, target, demonstrated, suggestion.evidenceLapNumber)
+      : suggestion.kind === 'liftLater'
+        ? vocabulary.liftLater(typical, target, demonstrated, suggestion.evidenceLapNumber)
+        : vocabulary.carryMoreMinSpeed(
+            typical,
+            target,
+            demonstrated,
+            suggestion.evidenceLapNumber,
+          );
+  return `${vocabulary.corner(suggestion.cornerId)} — ${body}`;
+}
+
+/**
+ * One APPLIED cue move, with before, after and the demonstrating lap — the
+ * line the pit view and the exported report use to state what the app changed
+ * on the driver's behalf (R2-3a: the change is never silent).
+ */
+export function cueUpdateLine(update: CueUpdate, language: ReportLanguage): string {
+  const vocabulary = SUGGESTION_TEXT[language];
+  return `${vocabulary.corner(update.cornerId)} — ${vocabulary.cueUpdate(
+    vocabulary.cuePoints[update.point],
+    metres(update.movedLaterM, language),
+    metres(update.fromM, language),
+    metres(update.toM, language),
+    metres(update.demonstratedM, language),
+    update.evidenceLapNumber,
+  )}`;
 }

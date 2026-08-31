@@ -18,6 +18,7 @@ import type {
 } from '../contracts';
 import { CalibrationEngine, type CalibrationConfig } from '../calibration';
 import { CoachEngine, deriveBrakingZones } from '../coach';
+import { MAX_BRAKE_LATER_M, type ActiveCue, type CueUpdate } from '../coaching/suggestions';
 import type { RuntimeProfile } from '../profile';
 import { buildReferenceLap, shouldReplacePb } from '../reference';
 import { SessionPipelineCore, type PipelineCoreConfig } from './pipelineCore';
@@ -69,6 +70,23 @@ export interface FacadeStateCore {
    * lane or the next lap's display.
    */
   coachCue: CoachCue | null;
+  /**
+   * Ticket P5c-B D2 (contracts.md R2-3a): every brake/lift cue this session
+   * has moved on the driver's own demonstrated evidence, oldest first. Empty
+   * for the whole session whenever coaching is off, the driver has not opted
+   * into suggestions, or nothing was demonstrated worth moving to -- which is
+   * the default. A moved cue is never silent: this is the record the pit view
+   * and the exported report both read.
+   */
+  coachCueUpdates: AppliedCueUpdate[];
+}
+
+/** One {@link CueUpdate} the controller actually applied, with when it happened. */
+export interface AppliedCueUpdate extends CueUpdate {
+  /** `deps.clock.now()` at the moment the cue moved. */
+  appliedAtMono: number;
+  /** The session lap number that had just completed when it moved. */
+  appliedAfterLapNumber: number;
 }
 
 export interface SessionControllerDiagnostics {
@@ -89,6 +107,16 @@ export interface SessionControllerDiagnostics {
 export interface WatchdogScheduler {
   setInterval(fn: () => void, ms: number): unknown;
   clearInterval(handle: unknown): void;
+}
+
+/** Wrap-safe positive remainder -- lap distances are cyclic. */
+function modulo(value: number, modulus: number): number {
+  return ((value % modulus) + modulus) % modulus;
+}
+
+/** Distance forward along the lap from `fromM` to `toM`, metres. */
+function forwardDistance(fromM: number, toM: number, totalLengthM: number): number {
+  return modulo(toM - fromM, totalLengthM);
 }
 
 const defaultScheduler: WatchdogScheduler = {
@@ -276,6 +304,16 @@ export class SessionController {
   private coachCueSetAtMono: number | null = null;
   private coachZoneRefreshes = 0;
   /**
+   * Ticket P5c-B D2: per corner, the cue's own brake point as metres BEFORE
+   * the corner entry, once it has been moved on demonstrated evidence. Held
+   * separately from the derived zones so a mid-session zone refresh (a new PB
+   * landing, `refreshCoachZones`) re-derives everything else and then re-applies
+   * the driver's own move on top, instead of silently rolling it back.
+   * A corner present here has already used its ONE change for this stint.
+   */
+  private readonly cueOverridesByCorner = new Map<number, number>();
+  private appliedCueUpdatesLog: AppliedCueUpdate[] = [];
+  /**
    * Sync mechanism for MUST DO #5 (lap-number collision after recovery
    * resume). `SessionMachineSnapshot.lapNumber` (the reducer's own counter,
    * `statemachine/reducer.ts`) is intentionally unaware of restored history:
@@ -395,6 +433,7 @@ export class SessionController {
       laps: [...this.core.laps],
       speedKph: this.latestSpeedKph,
       coachCue: this.currentCue,
+      coachCueUpdates: [...this.appliedCueUpdatesLog],
     };
   }
 
@@ -460,6 +499,11 @@ export class SessionController {
     if (assignedSessionIdHere) {
       this.sessionId = `${this.deps.userId}--${randomToken()}`;
       this.sessionStartedAtUtc = new Date().toISOString();
+      // Ticket P5c-B D2: "one change per corner per stint" is scoped to the
+      // outing, so a brand-new session starts from the derived cues again --
+      // never carrying another outing's moves into this one.
+      this.cueOverridesByCorner.clear();
+      this.appliedCueUpdatesLog = [];
     }
 
     /** Undoes the session identity THIS call minted, so an aborted start leaves nothing for `checkpointNow()`/`endSession()` to persist later. A session id restored from a checkpoint (recovery) is never touched. */
@@ -1031,7 +1075,108 @@ export class SessionController {
     const zones: BrakingZone[] = deriveBrakingZones(reference, this.coachCorners, {
       totalLengthM: this.deps.circuitProfile.totalLengthM,
     });
-    this.coachEngine.configure(this.coachCorners, zones, options);
+    this.coachEngine.configure(this.coachCorners, this.withCueOverrides(zones), options);
+  }
+
+  /**
+   * Ticket P5c-B D2: re-applies the driver's own demonstrated cue moves on top
+   * of freshly derived zones. Nothing here invents a point -- an override is
+   * only ever a value `applyCueUpdates()` already validated against the
+   * demonstrated envelope and the safety bounds.
+   */
+  private withCueOverrides(zones: readonly BrakingZone[]): BrakingZone[] {
+    if (this.cueOverridesByCorner.size === 0) return [...zones];
+    const totalLengthM = this.deps.circuitProfile.totalLengthM;
+    return zones.map((zone) => {
+      const overrideM = this.cueOverridesByCorner.get(zone.cornerId);
+      const corner = this.coachCorners.find((entry) => entry.id === zone.cornerId);
+      if (overrideM === undefined || corner === undefined) return zone;
+      return {
+        ...zone,
+        brakeStartDistanceM: modulo(corner.entryDistanceM - overrideM, totalLengthM),
+        brakeCueAvailable: overrideM > 0,
+      };
+    });
+  }
+
+  /**
+   * The live coaching cue set, as metres BEFORE each corner's entry, ascending
+   * by corner id (ticket P5c-B D2). Empty whenever coaching is disabled. The
+   * `lift` slot is always `null`: the shipped cue engine has one cue point per
+   * corner (`CoachCue.kind` is `BRAKE` / `CORNER_AHEAD`), and the spoken
+   * "Lift." callout is that SAME point rendered differently by
+   * `voiceCoach.ts` -- so moving the brake point moves both callouts, with no
+   * new text and no new cue kind.
+   */
+  activeCues(): ActiveCue[] {
+    if (this.coachEngine === null) return [];
+    const totalLengthM = this.deps.circuitProfile.totalLengthM;
+    const zones = this.withCueOverrides(
+      deriveBrakingZones(this.currentReference, this.coachCorners, { totalLengthM }),
+    );
+    return [...this.coachCorners]
+      .sort((left, right) => left.id - right.id)
+      .map((corner) => {
+        const zone = zones.find((entry) => entry.cornerId === corner.id);
+        const usable = zone !== undefined && zone.brakeCueAvailable !== false;
+        const brakeStartM = usable
+          ? forwardDistance(zone.brakeStartDistanceM, corner.entryDistanceM, totalLengthM)
+          : 0;
+        return {
+          cornerId: corner.id,
+          brakeStartM: usable && brakeStartM > 0 ? brakeStartM : null,
+          liftPointM: null,
+        };
+      });
+  }
+
+  /**
+   * Applies bounded cue updates produced by `coaching/suggestions.ts`
+   * (contracts.md R2-3a). This is the LAST line of defence, not a pass-through:
+   * every update is re-checked here against the safety bounds before it can
+   * reach the cue engine, so a caller that computed one wrongly still cannot
+   * move a cue past what the driver demonstrated. An update is refused when
+   *
+   *  - coaching is off, or the corner is not in this session's coaching set;
+   *  - it targets anything but the live brake cue point;
+   *  - the corner already used its ONE change this stint;
+   *  - the step exceeds `MAX_BRAKE_LATER_M`, is not strictly later, or is not
+   *    finite;
+   *  - the target is PAST the demonstrated value it cites.
+   *
+   * Returns exactly the updates that were applied, in ascending corner order.
+   */
+  applyCueUpdates(updates: readonly CueUpdate[]): AppliedCueUpdate[] {
+    if (this.coachEngine === null || updates.length === 0) return [];
+    const appliedAfterLapNumber = this.snapshotState().lapNumber;
+    const appliedAtMono = this.deps.clock.now();
+    const applied: AppliedCueUpdate[] = [];
+    for (const update of [...updates].sort((left, right) => left.cornerId - right.cornerId)) {
+      if (update.point !== 'brake') continue;
+      if (this.cueOverridesByCorner.has(update.cornerId)) continue;
+      if (!this.coachCorners.some((corner) => corner.id === update.cornerId)) continue;
+      const { fromM, toM, demonstratedM } = update;
+      if (![fromM, toM, demonstratedM].every((value) => Number.isFinite(value))) continue;
+      if (toM <= 0 || toM >= fromM) continue;
+      if (fromM - toM > MAX_BRAKE_LATER_M) continue;
+      // Never past the driver's own evidence -- the whole point of R2-3.
+      if (toM < demonstratedM) continue;
+      this.cueOverridesByCorner.set(update.cornerId, toM);
+      applied.push({ ...update, appliedAtMono, appliedAfterLapNumber });
+    }
+    if (applied.length === 0) return [];
+    // `preserveEmitted`: a corner already driven past this lap must not become
+    // a fresh candidate again purely because its cue moved (same reasoning as
+    // the PB-refresh path above).
+    this.refreshCoachZones(this.currentReference, { preserveEmitted: true });
+    this.appliedCueUpdatesLog = [...this.appliedCueUpdatesLog, ...applied];
+    this.emit();
+    return applied;
+  }
+
+  /** Every cue move applied this session, oldest first (ticket P5c-B D2/D4). */
+  appliedCueUpdates(): AppliedCueUpdate[] {
+    return [...this.appliedCueUpdatesLog];
   }
 
   private async loadReferenceForSession(): Promise<void> {

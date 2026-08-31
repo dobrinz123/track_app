@@ -35,6 +35,7 @@ import { EnetTcpTransport } from '../../session/enetTcpTransport';
 import { getNetworkInfo } from '../../session/networkInfo';
 import { enetAdapterReservation } from '../../session/enetAdapterReservation';
 import Constants from 'expo-constants';
+import { SUGGESTION_SETTING_STRINGS } from './trackdayStrings';
 
 /** Session states that mean "there is an active session in progress" -- the delete-my-data control is hidden/disabled during all of these so it can never race a live write (M3 fix). */
 const ACTIVE_SESSION_STATES = new Set([
@@ -146,6 +147,7 @@ function DiagnosticsRow({ label, value }: { label: string; value: string }): Rea
 /** S12 — units, delta deadband, coverage bins (in-memory for now); About/licenses/attribution; delete-my-data (M3 fix). */
 export function SettingsScreen({ navigation }: Props): React.JSX.Element {
   const settings = useSettings(settingsStore);
+  const suggestionStrings = SUGGESTION_SETTING_STRINGS[settings.language];
   const facadeState = useFacadeState(facade);
   // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
   const isDev = typeof __DEV__ !== 'undefined' ? __DEV__ : false;
@@ -593,6 +595,35 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
               />
             </View>
           ) : null}
+          {
+            // Ticket P5c-B (contracts.md R2-3, user-ratified): the ONE opt-in
+            // for the whole trackday stage -- the between-stint pit view, its
+            // bounded per-corner suggestions, and the live brake-cue updates.
+            // Off by default, and its copy states the bounds the driver is
+            // agreeing to, in their own language.
+          }
+          <View style={styles.toggleRow}>
+            <View style={styles.toggleTextGroup}>
+              <Text style={styles.toggleTitle} maxFontSizeMultiplier={1.3}>
+                {suggestionStrings.title}
+              </Text>
+              <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                {suggestionStrings.help}
+              </Text>
+              <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                {suggestionStrings.helpBounds}
+              </Text>
+            </View>
+            <Switch
+              value={settings.suggestionsEnabled}
+              onValueChange={(value) => settingsStore.update({ suggestionsEnabled: value })}
+              trackColor={{ false: colors.border, true: colors.accentDim }}
+              thumbColor={settings.suggestionsEnabled ? colors.accent : colors.textMuted}
+              accessibilityRole="switch"
+              accessibilityLabel={suggestionStrings.a11y}
+              accessibilityState={{ checked: settings.suggestionsEnabled }}
+            />
+          </View>
         </View>
 
         <View style={styles.section}>

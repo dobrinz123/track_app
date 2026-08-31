@@ -19,6 +19,11 @@ import { LapDetailScreen } from '../screens/LapDetailScreen';
 // screen itself.
 import { AnalysisScreen } from '../screens/AnalysisScreen';
 import { resolveAnalysisScreenStrings } from '../screens/analysisStrings';
+// Ticket P5c-B D3: the between-stint pit view is an ordinary product screen,
+// registered in every build. Its ENTRY POINT on the driving dashboard is what
+// the `suggestionsEnabled` opt-in gates, not the route.
+import { PitViewScreen } from '../screens/PitViewScreen';
+import { resolvePitScreenStrings } from '../screens/trackdayStrings';
 import { useSettings } from '../hooks/useSettings';
 import { settingsStore } from '../../session/composition';
 import { PersonalBestScreen } from '../screens/PersonalBestScreen';
@@ -51,6 +56,7 @@ export function RootNavigator(): React.JSX.Element {
   // language its report is written in.
   const settings = useSettings(settingsStore);
   const analysisStrings = resolveAnalysisScreenStrings(settings.language);
+  const pitStrings = resolvePitScreenStrings(settings.language);
   return (
     <Stack.Navigator
       initialRouteName="CircuitSelection"
@@ -95,6 +101,11 @@ export function RootNavigator(): React.JSX.Element {
         name="Analysis"
         component={AnalysisScreen}
         options={{ title: analysisStrings.screenTitle }}
+      />
+      <Stack.Screen
+        name="PitView"
+        component={PitViewScreen}
+        options={{ title: pitStrings.screenTitle }}
       />
       <Stack.Screen name="PersonalBest" component={PersonalBestScreen} options={{ title: 'Personal Best' }} />
       <Stack.Screen name="Settings" component={SettingsScreen} options={{ title: 'Settings' }} />

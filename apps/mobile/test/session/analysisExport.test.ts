@@ -80,7 +80,7 @@ describe('P5b B4 -- the exported analysis report', () => {
     expect(ANALYSIS_EXPORT_KIND).toBe('trace-analysis-report');
     expect(doc.schemaVersion).toBe(ANALYSIS_EXPORT_SCHEMA_VERSION);
     // P5b-FIX1 C7: the standalone DTO (see `analysisExportV2.test.ts`).
-    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(2);
+    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(3);
     expect(doc.observationsOnly).toBe(true);
     expect(doc.generatedAtUtc).toBe(GENERATED_AT);
 

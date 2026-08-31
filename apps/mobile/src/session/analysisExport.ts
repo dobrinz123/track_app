@@ -1,6 +1,9 @@
 import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
+import { MAX_BRAKE_LATER_M, MAX_MIN_SPEED_GAIN_KPH, cueUpdateLine, pitSuggestionLine } from '@circuit/core';
 import type {
+  AppliedCueUpdate,
+  PitSuggestion,
   ChannelAvailability,
   CoachingChannelId,
   ConsistencyComponent,
@@ -54,7 +57,7 @@ import type { AnalysisScreenState, AnalysisUiLanguage } from './analysisViewMode
  * headers, section captions and the one-page budget.
  */
 
-export const ANALYSIS_EXPORT_SCHEMA_VERSION = 2;
+export const ANALYSIS_EXPORT_SCHEMA_VERSION = 3;
 export const ANALYSIS_EXPORT_KIND = 'trace-analysis-report';
 
 export interface AnalysisExportChannelCoverage {
@@ -200,13 +203,69 @@ export interface AnalysisExportAnalysis {
   limitations: Limitation[];
 }
 
+/** One cue move that was APPLIED during the session (ticket P5c-B D4). */
+export interface AnalysisExportCueUpdate {
+  cornerId: number;
+  point: 'brake' | 'lift';
+  /** Where the cue was, metres before the corner entry. */
+  fromM: number;
+  /** Where it moved to — never past `demonstratedM`. */
+  toM: number;
+  movedLaterM: number;
+  /** The latest point a clean lap of THIS session demonstrated. */
+  demonstratedM: number;
+  /** The clean lap that demonstrated it. */
+  evidenceLapNumber: number;
+  /** The lap that had completed when the cue moved. */
+  appliedAfterLapNumber: number;
+  /** The rendered sentence, in the driver's language. */
+  text: string;
+}
+
+/** One pit suggestion that was actually SHOWN to the driver (ticket P5c-B D4). */
+export interface AnalysisExportPitSuggestion {
+  cornerId: number;
+  kind: 'brakeLater' | 'liftLater' | 'carryMoreMinSpeed';
+  unit: 'm' | 'kph';
+  typicalValue: number;
+  demonstratedValue: number;
+  targetValue: number;
+  deltaValue: number;
+  evidenceLapNumber: number;
+  timeLossMs: number | null;
+  /** Always `true`: only what the driver was shown is ever exported. */
+  shown: true;
+  text: string;
+}
+
+/**
+ * The trackday record (contracts.md R2-3c). Present ONLY when the driver opted
+ * in AND something was actually shown or applied — otherwise the document is
+ * observations-only exactly as before. Everything in it is bounded by the
+ * driver's own demonstrated envelope; `bounds` states the caps in the document
+ * so a reader never has to trust the app for them.
+ */
+export interface AnalysisExportTrackday {
+  bounds: {
+    maxBrakeLaterM: number;
+    maxMinSpeedGainKph: number;
+    maxChangesPerCornerPerStint: 1;
+  };
+  cueUpdates: AnalysisExportCueUpdate[];
+  pitSuggestions: AnalysisExportPitSuggestion[];
+}
+
 export interface AnalysisExportDocument {
   kind: typeof ANALYSIS_EXPORT_KIND;
   schemaVersion: typeof ANALYSIS_EXPORT_SCHEMA_VERSION;
   generatedAtUtc: string;
   language: AnalysisUiLanguage;
-  /** V1 is observations only (contracts.md "Phase 5 REVISION"); nothing advisory is exported. */
-  observationsOnly: true;
+  /**
+   * True when nothing advisory is in this document — the default, and the only
+   * possibility while `suggestionsEnabled` is off. False exactly when
+   * {@link trackday} is present (contracts.md R2-3c).
+   */
+  observationsOnly: boolean;
   session: {
     sessionId: string;
     dateUtc: string;
@@ -242,9 +301,14 @@ export interface AnalysisExportDocument {
     sections: { id: string; heading: string; lines: string[] }[];
     text: string;
   };
+  /** Ticket P5c-B D4. Omitted entirely when nothing was suggested or applied. */
+  trackday?: AnalysisExportTrackday;
 }
 
 interface SummaryStrings {
+  /** Ticket P5c-B D4 — the two trackday captions. */
+  suggestions: string;
+  cueUpdates: string;
   observations: string;
   recordedOn: string;
   cornerTableHeader: string;
@@ -258,6 +322,8 @@ interface SummaryStrings {
 }
 
 const EN: SummaryStrings = {
+  suggestions: 'Suggestions (from your own clean laps)',
+  cueUpdates: 'Cues that moved during the session',
   observations: 'Observations',
   recordedOn: 'Session',
   cornerTableHeader: '| Corner | Time lost | Best through | Min speed | Exit |',
@@ -271,6 +337,8 @@ const EN: SummaryStrings = {
 };
 
 const RO: SummaryStrings = {
+  suggestions: 'Sugestii (din propriile tale tururi curate)',
+  cueUpdates: 'Repere mutate în timpul sesiunii',
   observations: 'Observații',
   recordedOn: 'Sesiune',
   cornerTableHeader: '| Viraj | Timp pierdut | Cel mai bun | Viteză minimă | Ieșire |',
@@ -349,6 +417,55 @@ export function analysisExportFileName(doc: AnalysisExportDocument, ext: 'json' 
 export interface AnalysisExportOptions {
   /** ISO-8601 UTC instant the export was produced (injected, never `Date.now()` inside). */
   generatedAtUtc: string;
+  /**
+   * Ticket P5c-B D4: what the trackday stage actually did during this session —
+   * the cue moves applied and the pit suggestions the driver was SHOWN. Omit
+   * (or pass two empty lists) and the document stays observations-only.
+   */
+  trackday?: {
+    cueUpdates: readonly AppliedCueUpdate[];
+    pitSuggestions: readonly PitSuggestion[];
+  };
+}
+
+/** Maps the trackday record into this document's own shape. `null` when empty. */
+function mapTrackday(
+  record: AnalysisExportOptions['trackday'],
+  language: AnalysisUiLanguage,
+): AnalysisExportTrackday | null {
+  if (record === undefined) return null;
+  if (record.cueUpdates.length === 0 && record.pitSuggestions.length === 0) return null;
+  return {
+    bounds: {
+      maxBrakeLaterM: MAX_BRAKE_LATER_M,
+      maxMinSpeedGainKph: MAX_MIN_SPEED_GAIN_KPH,
+      maxChangesPerCornerPerStint: 1,
+    },
+    cueUpdates: record.cueUpdates.map((update) => ({
+      cornerId: update.cornerId,
+      point: update.point,
+      fromM: update.fromM,
+      toM: update.toM,
+      movedLaterM: update.movedLaterM,
+      demonstratedM: update.demonstratedM,
+      evidenceLapNumber: update.evidenceLapNumber,
+      appliedAfterLapNumber: update.appliedAfterLapNumber,
+      text: cueUpdateLine(update, language),
+    })),
+    pitSuggestions: record.pitSuggestions.map((suggestion) => ({
+      cornerId: suggestion.cornerId,
+      kind: suggestion.kind,
+      unit: suggestion.unit,
+      typicalValue: suggestion.typicalValue,
+      demonstratedValue: suggestion.demonstratedValue,
+      targetValue: suggestion.targetValue,
+      deltaValue: suggestion.deltaValue,
+      evidenceLapNumber: suggestion.evidenceLapNumber,
+      timeLossMs: suggestion.timeLossMs,
+      shown: true,
+      text: pitSuggestionLine(suggestion, language),
+    })),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -533,12 +650,13 @@ export function buildAnalysisExportDocument(
   options: AnalysisExportOptions,
 ): AnalysisExportDocument {
   const { insights, assembled, source, report, view } = state;
+  const trackday = mapTrackday(options.trackday, view.language);
   return {
     kind: ANALYSIS_EXPORT_KIND,
     schemaVersion: ANALYSIS_EXPORT_SCHEMA_VERSION,
     generatedAtUtc: options.generatedAtUtc,
     language: view.language,
-    observationsOnly: true,
+    observationsOnly: trackday === null,
     session: {
       sessionId: source.sessionId,
       dateUtc: source.displayDateUtc,
@@ -585,6 +703,7 @@ export function buildAnalysisExportDocument(
       })),
       text: report.text,
     },
+    ...(trackday === null ? {} : { trackday }),
   };
 }
 
@@ -678,6 +797,22 @@ export function buildAnalysisSummaryMarkdown(doc: AnalysisExportDocument): strin
     const shown = rows.slice(0, 20);
     lines.push(...shown);
     if (rows.length > shown.length) lines.push(s.more(rows.length - shown.length));
+    lines.push('');
+  }
+
+  // Ticket P5c-B D4: the suggestions the driver was SHOWN, and the cues that
+  // moved, sit directly under the observations they came from -- so the
+  // one-pager reads as "here is what happened, and here is what was suggested
+  // inside it", never as advice on its own.
+  const trackday = doc.trackday;
+  if (trackday !== undefined && trackday.pitSuggestions.length > 0) {
+    lines.push(`## ${s.suggestions}`);
+    for (const suggestion of trackday.pitSuggestions) lines.push(`- ${suggestion.text}`);
+    lines.push('');
+  }
+  if (trackday !== undefined && trackday.cueUpdates.length > 0) {
+    lines.push(`## ${s.cueUpdates}`);
+    for (const update of trackday.cueUpdates) lines.push(`- ${update.text}`);
     lines.push('');
   }
 

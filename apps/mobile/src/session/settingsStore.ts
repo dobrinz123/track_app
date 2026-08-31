@@ -84,6 +84,18 @@ export interface AppSettings {
    */
   voiceCoachEnabled: boolean;
   /**
+   * Ticket P5c-B (contracts.md "Phase 5 REVISION 2" R2-3, user-ratified): the
+   * opt-in gate for the whole trackday suggestion stage — the between-stint
+   * pit view, its bounded per-corner suggestions, and the live brake-cue
+   * updates between laps. Defaults to `false`, and OFF means OFF everywhere:
+   * no lap boundary reads the recording, no cue ever moves, no suggestion is
+   * computed or exported, and the pit-view entry point is not shown. Turning
+   * it on never lifts a bound — a cue may still only move to a point a clean
+   * lap of the SAME outing already demonstrated, by at most 10 m / +3 km/h,
+   * once per corner per stint. Advice is never shown while driving.
+   */
+  suggestionsEnabled: boolean;
+  /**
    * Telemetry addendum (Phase 4 / P4a, docs/architecture/contracts.md).
    * Advisory/experimental: reads vehicle telemetry (RPM, speed, throttle,
    * coolant temperature) from a local WiFi OBD-II adapter, strictly
@@ -262,6 +274,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   coverageBins: { thresholds: [0.25, 0.5, 0.75, 1] },
   coachingEnabled: true,
   voiceCoachEnabled: false,
+  suggestionsEnabled: false,
   telemetryEnabled: false,
   telemetrySimulate: false,
   adapterHost: '192.168.0.10',

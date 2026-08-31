@@ -13,7 +13,7 @@ import {
   type AnalysisRunResult,
 } from '../../session/analysisViewModel';
 import { buildAnalysisExportDocument, shareAnalysisExport, shareAnalysisJson } from '../../session/analysisExport';
-import { facade, getAnalysisRunner, settingsStore } from '../../session/composition';
+import { facade, getAnalysisRunner, getTrackdayRecord, settingsStore } from '../../session/composition';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Analysis'>;
 
@@ -75,14 +75,25 @@ export function AnalysisScreen({ route }: Props): React.JSX.Element {
     async (json: boolean) => {
       if (state.status !== 'ready' || sharing) return;
       setSharing(true);
-      const doc = buildAnalysisExportDocument(state, { generatedAtUtc: new Date().toISOString() });
+      // Ticket P5c-B D4: the pit suggestions the driver was actually SHOWN and
+      // the cue moves applied during this session travel with the report. The
+      // journal is per launch, so a session analysed on a later launch exports
+      // its observations exactly as before -- never a fabricated record.
+      const trackday = getTrackdayRecord(sessionId);
+      const doc = buildAnalysisExportDocument(state, {
+        generatedAtUtc: new Date().toISOString(),
+        trackday: {
+          cueUpdates: trackday.cueUpdates,
+          pitSuggestions: trackday.shownPitSuggestions,
+        },
+      });
       const outcome = json ? await shareAnalysisJson(doc) : await shareAnalysisExport(doc);
       setShareNote(
         !outcome.ok ? strings.shareFailed : outcome.shared ? strings.shareDone : strings.shareUnavailable,
       );
       setSharing(false);
     },
-    [state, sharing, strings],
+    [state, sharing, strings, sessionId],
   );
 
   if (state.status === 'loading') {

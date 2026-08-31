@@ -10,6 +10,7 @@ import type {
   SessionState,
   LocalSessionRepository,
   SqlDatabase,
+  TelemetrySample,
 } from '@circuit/core';
 import {
   InMemorySessionRepository,
@@ -53,6 +54,16 @@ import { PASSTHROUGH_WRITE_GATE, type SqlWriteGate } from '../persistence/sqlWri
 import { createAnalysisRunner, sessionIsActive, type AnalysisRunner } from './analysisViewModel';
 import { createAnalysisSessionLoader } from './analysisSessionLoader';
 import { loadSessionTelemetryByLap } from '../persistence/telemetryRead';
+import type { AnalysisLapRecording } from './analysisAssembly';
+import {
+  createStintCoach,
+  createStintRunner,
+  createSuggestionJournal,
+  type SessionSuggestionRecord,
+  type StintCoach,
+  type StintRunner,
+  type StintSource,
+} from './stintCoaching';
 
 const DB_NAME = 'circuit-timer.db';
 /** Single-user local app -- no auth/account system exists (MVP scope, ADR-0001/0004). Stable so `sessionId` (`${userId}--<random>`) and stored data survive across launches. */
@@ -1031,6 +1042,12 @@ let productionControllerCircuitId: string | null = null;
  */
 let mostRecentSessionId: string | null = null;
 /**
+ * Ticket P5c-B: the ISO-8601 UTC instant `mostRecentSessionId` started, so the
+ * pit view can head itself with the outing's own date while it is still
+ * running (the history store only learns about a session once it has ended).
+ */
+let mostRecentSessionStartedAtUtc: string | null = null;
+/**
  * The `SessionController` currently backing `facade` -- the production one,
  * or (in `__DEV__`) `startDevReplaySession`'s replay controller. Tracked
  * separately from `controller` (which stays the production instance for its
@@ -1221,6 +1238,13 @@ function productionFacadeCallbacks(circuitId: string): RealSessionFacadeCallback
       if (db !== null) void setActiveSession(db, { sessionId, circuitId });
       // Ticket P5b B1: remembered for the post-session Analysis entry point.
       mostRecentSessionId = sessionId;
+      mostRecentSessionStartedAtUtc = new Date().toISOString();
+      // Ticket P5c-B: "one change per corner per STINT" is scoped to the
+      // outing, and so is everything the pit view reads -- a new session
+      // starts from a clean journal and an empty stint cache.
+      suggestionJournal.clear(sessionId);
+      stintRunner?.clear();
+      lastStintLapCount = 0;
       startTelemetryRecording(sessionId);
     },
     onSessionEnded: () => {
@@ -2664,3 +2688,150 @@ export function getAnalysisRunner(): AnalysisRunner {
   });
   return analysisRunner;
 }
+
+// ---------------------------------------------------------------------------
+// Ticket P5c-B (contracts.md "Phase 5 REVISION 2" R2-3, user-ratified): the
+// trackday stage -- bounded live cue updates between laps, and the interactive
+// between-stint pit view. The whole stage hangs off ONE setting,
+// `suggestionsEnabled`, which is OFF by default: with it off nothing below
+// reads a row, moves a cue, or shows an entry point.
+// ---------------------------------------------------------------------------
+
+/** One journal per launch: what moved, and what the driver was actually shown. */
+const suggestionJournal = createSuggestionJournal();
+
+let stintRunner: StintRunner | null = null;
+let stintCoach: StintCoach | null = null;
+/** Guards against a second pass being started while one is still running. */
+let stintPassInFlight = false;
+/** Completed laps the last lap-boundary pass was started for. */
+let lastStintLapCount = 0;
+
+/**
+ * The ACTIVE session's completed laps, assembled out of exactly the rows the
+ * post-session analysis already reads -- the live lap records from the facade,
+ * each lap's stored GNSS trace, and the decoded channels of the session. The
+ * lap in progress is never among them: `FacadeState.laps` holds only completed
+ * laps, which is precisely the read-only, "never disturb the running session"
+ * contract D3 asks for.
+ */
+async function loadActiveStint(sessionId: string): Promise<StintSource | null> {
+  if (sessionId !== mostRecentSessionId) return null;
+  const snapshot = currentFacadeState();
+  if (snapshot === null || snapshot.laps.length === 0) return null;
+  const circuit = resolveSelectedCircuit(settingsStore.getSettings());
+  const bundledCircuit = circuitCatalog.get(circuit.profile.circuitId);
+  if (bundledCircuit === null) return null;
+
+  let channelsByLap: ReadonlyMap<number, TelemetrySample[]> = new Map();
+  const readDb = getTelemetryReadDb();
+  if (readDb !== null) {
+    try {
+      channelsByLap = await loadSessionTelemetryByLap(readDb, sessionId);
+    } catch (error) {
+      // A missing channel read is not a failed analysis: the GPS-only tier-0
+      // pass still stands and the engine reports the channels as missing.
+      console.warn('[composition] stint channel read failed', error);
+    }
+  }
+
+  const recordings: AnalysisLapRecording[] = [];
+  for (const lap of [...snapshot.laps].sort((a, b) => a.lapNumber - b.lapNumber)) {
+    const locationSamples = (await repository?.loadTelemetry(sessionId, lap.lapNumber)) ?? [];
+    recordings.push({
+      lap: {
+        lapNumber: lap.lapNumber,
+        durationMs: lap.durationMs,
+        valid: lap.valid,
+        invalidReasons: lap.invalidReasons,
+        quality: lap.quality,
+      },
+      locationSamples,
+      telemetry: channelsByLap.get(lap.lapNumber) ?? [],
+      sectorTimes: lap.sectorTimes.map((sector) => ({
+        sectorIndex: sector.sectorIndex,
+        durationMs: sector.durationMs,
+      })),
+    });
+  }
+  return {
+    sessionId,
+    circuit: bundledCircuit,
+    displayDateUtc: mostRecentSessionStartedAtUtc ?? new Date().toISOString(),
+    recordings,
+  };
+}
+
+/** The shared stint runner -- one pass per (session, completed-lap count). */
+export function getStintRunner(): StintRunner {
+  if (stintRunner !== null) return stintRunner;
+  stintRunner = createStintRunner({ loadCompletedLaps: loadActiveStint });
+  return stintRunner;
+}
+
+/**
+ * The shared stint coach. `activeCues`/`applyCueUpdates` go to whichever
+ * controller is actually live (`activeController`), and `applyCueUpdates`
+ * re-validates every bound itself -- see `SessionController.applyCueUpdates`.
+ */
+export function getStintCoach(): StintCoach {
+  if (stintCoach !== null) return stintCoach;
+  stintCoach = createStintCoach({
+    runner: getStintRunner(),
+    journal: suggestionJournal,
+    suggestionsEnabled: () => settingsStore.getSettings().suggestionsEnabled,
+    activeCues: () => activeController?.activeCues() ?? [],
+    applyCueUpdates: (updates) => activeController?.applyCueUpdates(updates) ?? [],
+    onError: (error) => console.warn('[composition] stint coaching', error),
+  });
+  return stintCoach;
+}
+
+/** What the trackday stage did in `sessionId`: moves applied, suggestions shown. */
+export function getTrackdayRecord(sessionId: string): SessionSuggestionRecord {
+  return suggestionJournal.read(sessionId);
+}
+
+/** The session the pit view reads, or `null` when no session is running. */
+export function getActiveStintContext(): { sessionId: string; completedLapCount: number } | null {
+  const snapshot = currentFacadeState();
+  if (snapshot === null || !sessionIsActive(snapshot.sessionState)) return null;
+  if (mostRecentSessionId === null) return null;
+  return { sessionId: mostRecentSessionId, completedLapCount: snapshot.laps.length };
+}
+
+/** The facade's current state -- `subscribe()` always calls back synchronously. */
+function currentFacadeState(): FacadeState | null {
+  let snapshot: FacadeState | undefined;
+  const unsubscribe = facade.subscribe((s) => {
+    snapshot = s;
+  });
+  unsubscribe();
+  return snapshot ?? null;
+}
+
+// The LIVE half (R2-3a). Registered once at module load, like the telemetry
+// end-of-session side effect above, so it survives every facade swap. A lap
+// boundary is the only trigger: nothing is computed on the sample hot path,
+// and with `suggestionsEnabled` off `onLapCompleted` returns before it reads
+// anything at all.
+facade.subscribe((state) => {
+  const completedLapCount = state.laps.length;
+  if (!sessionIsActive(state.sessionState)) {
+    lastStintLapCount = 0;
+    return;
+  }
+  if (completedLapCount === 0 || completedLapCount === lastStintLapCount) return;
+  lastStintLapCount = completedLapCount;
+  if (stintPassInFlight) return;
+  const sessionId = mostRecentSessionId;
+  if (sessionId === null) return;
+  if (!settingsStore.getSettings().suggestionsEnabled) return;
+  stintPassInFlight = true;
+  void getStintCoach()
+    .onLapCompleted(sessionId, completedLapCount)
+    .catch((error: unknown) => console.warn('[composition] lap-boundary coaching failed', error))
+    .finally(() => {
+      stintPassInFlight = false;
+    });
+});

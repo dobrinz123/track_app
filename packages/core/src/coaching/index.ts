@@ -64,8 +64,30 @@ export type {
   TimeLossFinding,
 } from './sessionInsights';
 
-export { buildReport, renderReport } from './reportText';
+export { buildReport, cueUpdateLine, pitSuggestionLine, renderReport } from './reportText';
 export type { CoachReport, ReportLanguage, ReportSection } from './reportText';
+
+export {
+  MAX_BRAKE_LATER_M,
+  MAX_MIN_SPEED_GAIN_KPH,
+  MIN_CLEAN_LAPS_FOR_SUGGESTIONS,
+  MIN_CUE_MOVE_M,
+  MIN_SUGGESTION_SPEED_GAIN_KPH,
+  computeSuggestions,
+  suggestionsFromInsights,
+} from './suggestions';
+export type {
+  ActiveCue,
+  CuePoint,
+  CueUpdate,
+  PitSuggestion,
+  PitSuggestionKind,
+  SuggestionGate,
+  SuggestionInput,
+  SuggestionResult,
+  SuggestionSkip,
+  SuggestionSkipReason,
+} from './suggestions';
 
 export { ANALYSIS_CHANNELS, GRAVITY_MPS2 } from './types';
 export type {

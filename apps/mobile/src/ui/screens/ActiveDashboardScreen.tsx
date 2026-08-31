@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useKeepAwake } from 'expo-keep-awake';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -16,6 +16,7 @@ import { TelemetryStrip } from '../components/TelemetryStrip';
 import { facade, settingsStore } from '../../session/composition';
 import { useFacadeState } from '../hooks/useFacadeState';
 import { useSettings } from '../hooks/useSettings';
+import { resolvePitScreenStrings } from './trackdayStrings';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'ActiveDashboard'>;
 
@@ -32,6 +33,10 @@ export function ActiveDashboardScreen({ navigation }: Props): React.JSX.Element 
   useKeepAwake();
   const state = useFacadeState(facade);
   const settings = useSettings(settingsStore);
+  const pitStrings = resolvePitScreenStrings(settings.language);
+  // The car is stopped: the pit-lane state the pipeline already detects, or a
+  // paused session. The pit view is never one tap away at speed.
+  const stopped = state.sessionState === 'inPit' || state.sessionState === 'paused';
   const armedRef = useRef(false);
   const navigatedRef = useRef(false);
 
@@ -140,6 +145,27 @@ export function ActiveDashboardScreen({ navigation }: Props): React.JSX.Element 
           </View>
         </View>
 
+        {/* Ticket P5c-B D3 (contracts.md R2-3b): the ONLY new control on the
+            driving screen, and it is not shown at all unless the driver opted
+            into trackday suggestions. Advice never appears while driving --
+            this is a door to the between-stint view, so it is enabled only
+            once the car is stopped (`inPit`/`paused`) and there is at least
+            one completed lap to look at. */}
+        {settings.suggestionsEnabled && state.laps.length > 0 ? (
+          <Pressable
+            style={[styles.pitButton, !stopped && styles.pitButtonDisabled]}
+            onPress={() => navigation.navigate('PitView')}
+            disabled={!stopped}
+            accessibilityRole="button"
+            accessibilityLabel={pitStrings.entryButtonA11y}
+            accessibilityState={{ disabled: !stopped }}
+          >
+            <Text style={styles.pitButtonText} maxFontSizeMultiplier={1.2}>
+              {pitStrings.entryButton}
+            </Text>
+          </Pressable>
+        ) : null}
+
         <View style={styles.controlZone}>
           <LongPressButton
             label="Hold to End Session"
@@ -169,4 +195,14 @@ const styles = StyleSheet.create({
   bottomStatLabel: { ...typography.label, color: colors.textMuted, marginBottom: spacing.xs },
   speedPlaceholder: { ...typography.timeSmall, color: colors.textMuted },
   controlZone: { marginTop: spacing.sm },
+  pitButton: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+  },
+  pitButtonDisabled: { opacity: 0.4 },
+  pitButtonText: { ...typography.label, color: colors.textSecondary, letterSpacing: 1 },
 });
