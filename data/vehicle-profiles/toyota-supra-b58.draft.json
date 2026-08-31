@@ -149,7 +149,7 @@
       "ecu": "?",
       "did": "?",
       "status": "unknown",
-      "provenance": "not in DME 0x12 (0x1000–0x1FFF, 0x4000–0x4FFF, 0x5000–0x5FFF batches 0–6) nor in 0x29 0x4000–0x4FFF / 0x5000–0x58F2; DME 0x5422 (1 byte) had ONE 0x00 sample at the start of the steering phase (weak, likely transition); candidates: 0x29 0x58F3–0x6FFF, EPS 0x30, SZL 0x02/0x65 (public sources, unverified for G29/J29); PT-CAN 0x301 as last resort (needs CAN tap)"
+      "provenance": "not in DME 0x12 (0x1000–0x1FFF, 0x4000–0x4FFF, 0x5000–0x5FFF batches 0–6) nor in 0x29 0x4000–0x4FFF / 0x5000–0x58F2; DME 0x5422 (1 byte) had ONE 0x00 sample at the start of the steering phase (weak, likely transition); candidates: 0x29 0x58F3–0x6FFF, EPS 0x30, SZL 0x02/0x65 (public sources, unverified for G29/J29); PT-CAN 0x301 as last resort (needs CAN tap); test 9 2026-08-31 (build 9, engine running, wheel turned, 2 finder sessions): every known/cached DID static — 0x12/0x5422 RULED OUT (34 samples, all 0x00), 0x29 known range static; the ONLY untested space left is 0x29 0x58F3-0x6FFF (unswept) — user decision: never re-test the ruled-out values."
     }
   ],
   "nextFocusedTest": {
