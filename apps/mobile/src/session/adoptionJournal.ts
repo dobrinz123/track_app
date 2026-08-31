@@ -85,15 +85,20 @@ function parse(raw: string): AdoptionJournal | null {
   }
 }
 
-/** Writes (or overwrites) the journal for the adoption in progress. */
+/** Writes (or overwrites) the journal for the adoption in progress, returning the row it wrote. */
 export async function writeAdoptionJournal(
   db: SqlDatabase,
   journal: AdoptionJournal,
-): Promise<void> {
+): Promise<ClaimedAdoptionJournal> {
+  const serialized = JSON.stringify(journal);
   await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
     ADOPTION_JOURNAL_KEY,
-    JSON.stringify(journal),
+    serialized,
   ]);
+  // P5d-FIX5 H1: the caller keeps the EXACT row it wrote, so it can later
+  // clear that row and only that row (compare-and-delete) instead of deleting
+  // whatever journal happens to occupy the key by then.
+  return { journal, serialized, exhausted: false };
 }
 
 /** The journal as stored, or `null` when there is none (or it is unreadable). */
@@ -158,11 +163,23 @@ export async function clearClaimedJournal(
  * P5d-FIX4 G3: removes an orphan session outright -- its row, its laps, its
  * checkpoint and both kinds of telemetry -- in ONE transaction.
  *
- * The previous rollback marked the checkpoint `sessionComplete`, which left a
+* The previous rollback marked the checkpoint `sessionComplete`, which left a
  * session in the database that nobody ever drove: invisible on the selected
  * circuit's history, but real, and countable by anything that looks at the
  * table. A session whose geometry never landed is not a session.
+ *
+ * P5d-FIX5 M2: the active-session POINTER rows go in the same transaction --
+ * they are part of the same fact ("this session exists"), and clearing them
+ * separately afterwards left a window in which the pointer named a session
+ * that had already been deleted. They are cleared only when the pointer
+ * actually names THIS session; a pointer to some other session is untouched.
  */
+export const ACTIVE_SESSION_SETTINGS_KEYS = [
+  'activeSessionId',
+  'activeSessionCircuitId',
+  'activeSessionStartedAtUtc',
+] as const;
+
 export async function deleteOrphanSession(db: SqlDatabase, sessionId: string): Promise<void> {
   await db.withTransactionAsync(async () => {
     await db.runAsync('DELETE FROM telemetry WHERE sessionId = ?', [sessionId]);
@@ -170,5 +187,15 @@ export async function deleteOrphanSession(db: SqlDatabase, sessionId: string): P
     await db.runAsync('DELETE FROM checkpoints WHERE sessionId = ?', [sessionId]);
     await db.runAsync('DELETE FROM sessions WHERE sessionId = ?', [sessionId]);
     await db.runAsync('DELETE FROM telemetry_samples WHERE session_id = ?', [sessionId]);
+
+    const pointer = await db.getAllAsync<{ value: string }>(
+      'SELECT value FROM settings WHERE key = ? LIMIT 1',
+      [ACTIVE_SESSION_SETTINGS_KEYS[0]],
+    );
+    if (pointer[0]?.value === sessionId) {
+      for (const key of ACTIVE_SESSION_SETTINGS_KEYS) {
+        await db.runAsync('DELETE FROM settings WHERE key = ?', [key]);
+      }
+    }
   });
 }

@@ -110,6 +110,45 @@ describe('orphan session rollback (P5d-FIX4 G3)', () => {
     await migrateTelemetrySchema(db);
   });
 
+it('clears the session pointer settings in the SAME transaction (P5d-FIX5 M2)', async () => {
+    await db.runAsync(
+      'INSERT INTO sessions (sessionId, userId, circuitId, layoutId, layoutVersion, startedAtUtc) VALUES (?, ?, ?, ?, ?, ?)',
+      ['s-ghost', 'local', 'learned-ghost', 'learned', 1, '2026-08-31T10:00:00.000Z'],
+    );
+    for (const [key, value] of [
+      ['activeSessionId', 's-ghost'],
+      ['activeSessionCircuitId', 'learned-ghost'],
+      ['activeSessionStartedAtUtc', '2026-08-31T10:00:00.000Z'],
+    ]) {
+      await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [key, value]);
+    }
+
+    await deleteOrphanSession(db, 's-ghost');
+
+    const pointerRows = await db.getAllAsync<{ key: string }>(
+      "SELECT key FROM settings WHERE key IN ('activeSessionId', 'activeSessionCircuitId', 'activeSessionStartedAtUtc')",
+    );
+    expect(pointerRows).toHaveLength(0);
+  });
+
+  it('leaves a pointer that names a DIFFERENT session alone', async () => {
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'activeSessionId',
+      's-other',
+    ]);
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'activeSessionCircuitId',
+      'transilvania-motor-ring',
+    ]);
+
+    await deleteOrphanSession(db, 's-ghost');
+
+    const pointerRows = await db.getAllAsync<{ key: string; value: string }>(
+      "SELECT key, value FROM settings WHERE key = 'activeSessionId'",
+    );
+    expect(pointerRows[0]?.value).toBe('s-other');
+  });
+
   it('deletes the session, its checkpoint, its laps and its telemetry in one go', async () => {
     await db.runAsync(
       'INSERT INTO sessions (sessionId, userId, circuitId, layoutId, layoutVersion, startedAtUtc) VALUES (?, ?, ?, ?, ?, ?)',

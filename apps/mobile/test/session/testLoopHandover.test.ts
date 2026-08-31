@@ -376,7 +376,49 @@ describe('interrupted adoption is repaired at the next launch (P5d-FIX3 F10)', (
     warn.mockRestore();
   });
 
-it('is repaired by exactly ONE launch: a second finds nothing to do (P5d-FIX4 G1)', async () => {
+  it('a finishing adoption never clears a NEWER journal it does not own (P5d-FIX5 H1)', async () => {
+    const composition = await boot(db);
+    await composition.startTestLoop();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    // The adoption fails at its last step, leaving its own journal behind.
+    await db.execAsync('DROP TABLE telemetry');
+    const gnss = provider();
+    for (const sample of THREE_LAPS) {
+      gnss.push(sample);
+      await settle();
+    }
+    await settle();
+    expect(composition.testLoopSnapshot().phase).toBe('error');
+
+    // Another flow (a second launch, a later adoption) replaces the journal
+    // under the key while this one is still unfinished.
+    const newer = JSON.stringify({
+      id: 'journal-newer',
+      circuitId: 'learned-somebody-else',
+      stage: 'staged',
+      attempts: 0,
+    });
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'testLoopAdoption',
+      newer,
+    ]);
+
+    // The first adoption now finishes. It owns a journal that is no longer
+    // there, so it must clear NOTHING -- the newer journal is not its business.
+    await db.execAsync(
+      'CREATE TABLE IF NOT EXISTS telemetry (sessionId TEXT NOT NULL, lapNumber INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY (sessionId, lapNumber))',
+    );
+    composition.retryTestLoopAdoption();
+    await settle();
+    await settle();
+
+    expect(composition.testLoopSnapshot().phase).toBe('learned');
+    const survivor = await journalRow();
+    expect(survivor).toBe(newer);
+    warn.mockRestore();
+  });
+
+  it('is repaired by exactly ONE launch: a second finds nothing to do (P5d-FIX4 G1)', async () => {
     await boot(db); // the tables a real device already has
     await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
       'testLoopAdoption',

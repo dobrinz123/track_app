@@ -63,13 +63,14 @@ import {
   type RemoveLearnedCircuitResult,
 } from './learnedCircuitStore';
 import {
-  ADOPTION_JOURNAL_KEY,
   claimAdoptionJournal,
   clearClaimedJournal,
   deleteOrphanSession,
   newJournalId,
+  readAdoptionJournal,
   writeAdoptionJournal,
   type AdoptionStage,
+  type ClaimedAdoptionJournal,
 } from './adoptionJournal';
 import { TestLoopController, type TestLoopSnapshot } from './testLoopController';
 import { TestLoopLocationProvider } from './testLoopProvider';
@@ -2203,6 +2204,8 @@ function tearDownLearnPhase(): Promise<void> {
 
 /** The journal identity of the adoption currently in flight. */
 let adoptionJournalId: string | null = null;
+/** P5d-FIX5 H1: the exact journal row this adoption last wrote -- what it is allowed to clear. */
+let adoptionJournalOwned: ClaimedAdoptionJournal | null = null;
 
 async function stageAdoptionJournal(journal: {
   circuitId: string;
@@ -2211,7 +2214,19 @@ async function stageAdoptionJournal(journal: {
 }): Promise<void> {
   if (db === null) return;
   adoptionJournalId ??= newJournalId();
-  await writeAdoptionJournal(db, {
+  // P5d-FIX5 H1: the journal key holds ONE adoption. If another flow (a second
+  // launch's repair claim, a newer adoption) has taken it since this one last
+  // wrote, it is not ours to overwrite -- this adoption simply proceeds without
+  // a journal rather than destroying somebody else's.
+  const current = await readAdoptionJournal(db);
+  if (current !== null && current.id !== adoptionJournalId) {
+    adoptionJournalOwned = null;
+    console.warn(
+      '[composition] the adoption journal key is held by another flow -- continuing without journalling this adoption',
+    );
+    return;
+  }
+  adoptionJournalOwned = await writeAdoptionJournal(db, {
     id: adoptionJournalId,
     attempts: 0,
     circuitId: journal.circuitId,
@@ -2220,11 +2235,24 @@ async function stageAdoptionJournal(journal: {
   });
 }
 
-/** Clears the journal of a COMPLETED adoption (this process owns it outright). */
+/**
+ * Clears the journal of a COMPLETED adoption -- and ONLY the row this adoption
+ * itself wrote (P5d-FIX5 H1). A blind delete by key would take out whatever
+ * journal occupies it by then: a second launch's repair claim, or a newer
+ * adoption already in flight. If the row has moved on, it belongs to somebody
+ * else and is left exactly where it is.
+ */
 async function clearOwnAdoptionJournal(): Promise<void> {
+  const owned = adoptionJournalOwned;
   adoptionJournalId = null;
-  if (db === null) return;
-  await db.runAsync('DELETE FROM settings WHERE key = ?', [ADOPTION_JOURNAL_KEY]);
+  adoptionJournalOwned = null;
+  if (db === null || owned === null) return;
+  const cleared = await clearClaimedJournal(db, owned);
+  if (!cleared) {
+    console.warn(
+      '[composition] the adoption journal changed while an adoption was finishing -- leaving it to its owner',
+    );
+  }
 }
 
 /**
@@ -2274,10 +2302,12 @@ async function repairInterruptedAdoption(database: SqlDatabase): Promise<void> {
         `The test loop "${entry.profile.displayName}" was kept, but the session it started was interrupted.`,
       );
     } else {
+      // P5d-FIX5 M2: the session and its pointer rows go together, in one
+      // transaction -- there is no window where the pointer names a session
+      // that has already been deleted.
       if (journal.sessionId !== undefined) {
         await deleteOrphanSession(database, journal.sessionId);
       }
-      await setActiveSession(database, null);
       await database.runAsync('DELETE FROM learned_circuits WHERE circuit_id = ?', [
         journal.circuitId,
       ]);
