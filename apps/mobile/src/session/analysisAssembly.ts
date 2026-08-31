@@ -231,12 +231,68 @@ export interface AssembleOptions {
   maxChannelStalenessMs?: number;
   /** Minimum coverage a decoded channel needs. Default {@link ANALYSIS_MIN_CHANNEL_COVERAGE}. */
   minChannelCoverage?: number;
+  /**
+   * Ticket P5c-FIX1 E11 (Codex P5c-REV1 finding 11): a projection cache shared
+   * across the passes of ONE outing. A lap's projection is immutable once it
+   * has been recorded, so a lap-boundary pass re-projects only the lap that
+   * just completed and reads the rest back. Omit it and every pass projects
+   * everything, exactly as before.
+   */
+  projectionCache?: LapProjectionCache;
 }
 
 interface JoinedLap {
   lap: ClassifiableLap;
   samples: CornerLapSample[];
   sectorTimes?: readonly { sectorIndex: number; durationMs: number }[];
+}
+
+type ProjectedLap = { joined: JoinedLap } | { skipped: SkippedLap };
+
+/**
+ * Per-lap projections of ONE outing, keyed by lap number and fingerprinted by
+ * the recording itself — a lap re-read with more samples (or different
+ * channels) is re-projected rather than served stale.
+ */
+export interface LapProjectionCache {
+  entries: Map<number, { fingerprint: string; projected: ProjectedLap }>;
+  /** How many laps this cache has actually projected — the E11 counter. */
+  projections: number;
+}
+
+export function createLapProjectionCache(): LapProjectionCache {
+  return { entries: new Map(), projections: 0 };
+}
+
+/** What makes one stored lap's projection valid: its inputs, nothing else. */
+function recordingFingerprint(recording: AnalysisLapRecording): string {
+  const first = recording.locationSamples[0];
+  const last = recording.locationSamples[recording.locationSamples.length - 1];
+  return [
+    recording.lap.durationMs,
+    recording.lap.valid ? 1 : 0,
+    recording.locationSamples.length,
+    recording.telemetry.length,
+    first?.tMono ?? -1,
+    last?.tMono ?? -1,
+  ].join(':');
+}
+
+/** {@link projectRecording}, served from `options.projectionCache` when it can be. */
+function projectRecordingCached(
+  circuit: BundledCircuit,
+  recording: AnalysisLapRecording,
+  options: AssembleOptions,
+): ProjectedLap {
+  const cache = options.projectionCache;
+  if (cache === undefined) return projectRecording(circuit, recording, options);
+  const fingerprint = recordingFingerprint(recording);
+  const hit = cache.entries.get(recording.lap.lapNumber);
+  if (hit !== undefined && hit.fingerprint === fingerprint) return hit.projected;
+  const projected = projectRecording(circuit, recording, options);
+  cache.entries.set(recording.lap.lapNumber, { fingerprint, projected });
+  cache.projections += 1;
+  return projected;
 }
 
 /** The per-lap half of the pass: project one stored lap, join its channels. */
@@ -449,7 +505,7 @@ export function assembleSessionAnalysis(
   const skippedLaps: SkippedLap[] = [];
   const joined: JoinedLap[] = [];
   for (const recording of ordered(recordings)) {
-    const result = projectRecording(circuit, recording, options);
+    const result = projectRecordingCached(circuit, recording, options);
     if ('skipped' in result) skippedLaps.push(result.skipped);
     else joined.push(result.joined);
   }
@@ -477,7 +533,7 @@ export async function assembleSessionAnalysisChunked(
   const joined: JoinedLap[] = [];
   for (const recording of ordered(recordings)) {
     await yieldToUi('project');
-    const result = projectRecording(circuit, recording, options);
+    const result = projectRecordingCached(circuit, recording, options);
     if ('skipped' in result) skippedLaps.push(result.skipped);
     else joined.push(result.joined);
   }

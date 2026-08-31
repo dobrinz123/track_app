@@ -76,7 +76,14 @@ export type SuggestionSkipReason =
   | 'no-cue'
   | 'insufficient-data'
   | 'already-updated-this-stint'
-  | 'nothing-demonstrated-later';
+  | 'nothing-demonstrated-later'
+  /**
+   * Ticket P5c-FIX1 E4 (safety contract rule 5): this corner's own evidence
+   * did not survive an honesty gate — its channels did not cover it, or the
+   * laps that would prove it could not be verified. Nothing is suggested on
+   * evidence the engine itself does not trust.
+   */
+  | 'honesty-gate';
 
 export interface SuggestionSkip {
   cornerId: number;
@@ -116,9 +123,16 @@ export interface PitSuggestion {
 
 /**
  * `disabled` — the driver has not opted in; `insufficient-clean-laps` — the
- * outing has not produced the evidence yet; `open` — the engine ran.
+ * outing has not produced the evidence yet; `geometry-unvalidated` — the
+ * circuit's own geometry has never been validated on track (MotorPark today),
+ * so no corner reference point is trustworthy enough to advise on (safety
+ * contract rule 5, ticket P5c-FIX1 E4); `open` — the engine ran.
  */
-export type SuggestionGate = 'disabled' | 'insufficient-clean-laps' | 'open';
+export type SuggestionGate =
+  | 'disabled'
+  | 'insufficient-clean-laps'
+  | 'geometry-unvalidated'
+  | 'open';
 
 export interface SuggestionResult {
   gate: SuggestionGate;
@@ -146,6 +160,22 @@ export interface SuggestionInput {
   updatedCornerIds?: readonly number[];
   /** Per-corner time loss (ms) for ranking only; never used as a bound. */
   timeLossMsByCorner?: Readonly<Record<number, number | null>> | ReadonlyMap<number, number | null>;
+  /**
+   * Ticket P5c-FIX1 E4 — safety contract rule 5, the FIRST gate after the
+   * opt-in. `false` (the circuit's geometry has never been validated on track,
+   * MotorPark today) produces NOTHING at all: not a pit suggestion, not a cue
+   * update. Corner reference points derived from unvalidated geometry cannot
+   * bound anything, so nothing may be said about them. Defaults to `true` only
+   * because a caller that knows nothing about geometry is passing a synthetic
+   * envelope; every real caller goes through {@link suggestionsFromInsights}.
+   */
+  geometryValidated?: boolean;
+  /**
+   * Corners whose own evidence failed an honesty gate — the channels did not
+   * cover them, or the laps that would prove them could not be verified. They
+   * get no suggestion and no cue update (ticket P5c-FIX1 E4).
+   */
+  blockedCornerIds?: readonly number[];
 }
 
 const EMPTY: Omit<SuggestionResult, 'gate' | 'cleanLapCount'> = Object.freeze({
@@ -260,6 +290,11 @@ export function computeSuggestions(input: SuggestionInput): SuggestionResult {
   // The opt-in gate comes FIRST: with suggestions off, this function is
   // indistinguishable from not existing (ticket P5c-B D5).
   if (!input.enabled) return empty('disabled', cleanLapCount);
+  // E4: the honesty gates come before the evidence, not after it. Unvalidated
+  // geometry means every corner reference point is a guess, so there is
+  // nothing here that may be suggested on -- not even for a corner whose own
+  // laps look immaculate.
+  if (input.geometryValidated === false) return empty('geometry-unvalidated', cleanLapCount);
   if (cleanLapCount < MIN_CLEAN_LAPS_FOR_SUGGESTIONS) {
     return empty('insufficient-clean-laps', cleanLapCount);
   }
@@ -267,6 +302,7 @@ export function computeSuggestions(input: SuggestionInput): SuggestionResult {
   const cornersById = new Map<number, CornerEnvelope>(
     input.envelope.corners.map((corner) => [corner.cornerId, corner]),
   );
+  const blocked = new Set(input.blockedCornerIds ?? []);
   const alreadyUpdated = new Set(input.updatedCornerIds ?? []);
   const cueByCorner = new Map<number, ActiveCue>();
   for (const cue of input.cues) {
@@ -281,6 +317,10 @@ export function computeSuggestions(input: SuggestionInput): SuggestionResult {
   for (const cornerId of [...cueByCorner.keys()].sort((a, b) => a - b)) {
     const cue = cueByCorner.get(cornerId) as ActiveCue;
     const corner = cornersById.get(cornerId);
+    if (blocked.has(cornerId)) {
+      skipped.push({ cornerId, point: 'brake', reason: 'honesty-gate' });
+      continue;
+    }
     if (corner === undefined || !cornerHasEvidence(corner)) {
       skipped.push({ cornerId, point: 'brake', reason: 'insufficient-data' });
       continue;
@@ -327,6 +367,7 @@ export function computeSuggestions(input: SuggestionInput): SuggestionResult {
   // --- pit suggestions -----------------------------------------------------
   const pitSuggestions: PitSuggestion[] = [];
   for (const corner of [...input.envelope.corners].sort((a, b) => a.cornerId - b.cornerId)) {
+    if (blocked.has(corner.cornerId)) continue;
     if (!cornerHasEvidence(corner)) continue;
     const timeLossMs = readTimeLoss(input.timeLossMsByCorner, corner.cornerId);
     const byKind = new Map<PitSuggestionKind, PitSuggestion | null>([
@@ -384,5 +425,146 @@ export function suggestionsFromInsights(
       ? {}
       : { updatedCornerIds: options.updatedCornerIds }),
     timeLossMsByCorner,
+    geometryValidated: insights.geometryValidated,
+    blockedCornerIds: blockedCornersFromInsights(insights),
   });
+}
+
+/**
+ * Ticket P5c-FIX1 E4 — the honesty gates the analysis already computed, read
+ * as a suggestion gate instead of being discarded.
+ *
+ *  - `CORNER_COVERAGE`: no lap produced a usable measurement in that corner.
+ *  - `UNVERIFIED_LAPS` / `GNSS_QUALITY`: the named laps could not be checked or
+ *    were recorded through poor GNSS. A corner whose demonstrated envelope
+ *    RESTS on one of those laps is bounded by evidence the engine itself will
+ *    not vouch for, so it is blocked — corner by corner, not session-wide.
+ */
+export function blockedCornersFromInsights(insights: SessionInsights): number[] {
+  const blocked = new Set<number>();
+  const untrustedLaps = new Set<number>();
+  for (const limitation of insights.limitations) {
+    if (limitation.code === 'CORNER_COVERAGE') {
+      for (const cornerId of limitation.cornerIds ?? []) blocked.add(cornerId);
+    }
+    if (limitation.code === 'UNVERIFIED_LAPS' || limitation.code === 'GNSS_QUALITY') {
+      for (const lapNumber of limitation.lapNumbers ?? []) untrustedLaps.add(lapNumber);
+    }
+  }
+  if (untrustedLaps.size > 0) {
+    for (const corner of insights.envelope.corners) {
+      if (corner.evidenceLapIds.some((lapNumber) => untrustedLaps.has(lapNumber))) {
+        blocked.add(corner.cornerId);
+      }
+    }
+  }
+  return [...blocked].sort((a, b) => a - b);
+}
+
+// ---------------------------------------------------------------------------
+// Sealed evidence (ticket P5c-FIX1 E2)
+// ---------------------------------------------------------------------------
+
+/**
+ * ONE corner's demonstrated bound, as the analysis measured it. The cue source
+ * recomputes its clamp from THESE numbers; the numbers a {@link CueUpdate}
+ * carries about itself are never trusted (Codex P5c-REV1 finding 2).
+ */
+export interface CueEvidenceEntry {
+  cornerId: number;
+  point: CuePoint;
+  /** The latest point a clean lap of THIS outing demonstrated, metres before entry. */
+  demonstratedM: number;
+  evidenceLapNumber: number;
+  cleanLapCount: number;
+}
+
+/**
+ * The evidence one analysis pass produced, sealed to the outing, the cue
+ * source's own generation and the stint it was computed in. `checksum` is a
+ * plain integrity seal over exactly those fields: it makes a truncated, mutated
+ * or half-copied evidence set detectable at the point of use, and pins the
+ * evidence to the context it was computed for. It is not a secret and does not
+ * pretend to be one — the real defence is that the cue source recomputes every
+ * bound from `entries` rather than from the update.
+ */
+export interface CueUpdateEvidence {
+  sessionId: string;
+  /** The cue source's generation (a new/restored session mints a new one). */
+  generation: number;
+  /** The stint the evidence was computed in — a pit exit starts the next. */
+  stintIndex: number;
+  entries: CueEvidenceEntry[];
+  checksum: string;
+}
+
+/** Canonical, order-independent serialisation — the only thing hashed. */
+function canonicalEvidence(input: Omit<CueUpdateEvidence, 'checksum'>): string {
+  const entries = [...input.entries]
+    .map(
+      (entry) =>
+        `${entry.cornerId}|${entry.point}|${entry.demonstratedM}|${entry.evidenceLapNumber}|${entry.cleanLapCount}`,
+    )
+    .sort();
+  return [input.sessionId, input.generation, input.stintIndex, ...entries].join('\n');
+}
+
+/** FNV-1a, 32-bit, as lower-case hex. Deterministic and dependency-free. */
+export function cueEvidenceChecksum(input: Omit<CueUpdateEvidence, 'checksum'>): string {
+  const text = canonicalEvidence(input);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0');
+}
+
+/** Seals an evidence set so the cue source can detect a mutated/stale one. */
+export function sealCueEvidence(input: Omit<CueUpdateEvidence, 'checksum'>): CueUpdateEvidence {
+  return { ...input, entries: [...input.entries], checksum: cueEvidenceChecksum(input) };
+}
+
+/** True when `evidence` still hashes to its own checksum. */
+export function verifyCueEvidence(evidence: CueUpdateEvidence): boolean {
+  const { checksum, ...rest } = evidence;
+  return cueEvidenceChecksum(rest) === checksum;
+}
+
+/**
+ * The evidence of one finished analysis pass: every corner's demonstrated
+ * latest brake point AND latest lift point, so the cue source can validate a
+ * spoken "Lift." against the LIFT envelope rather than the braking one
+ * (ticket P5c-FIX1 E3, Codex P5c-REV1 finding 3).
+ */
+export function cueEvidenceFromInsights(
+  insights: SessionInsights,
+  context: { sessionId: string; generation: number; stintIndex: number },
+): CueUpdateEvidence {
+  const entries: CueEvidenceEntry[] = [];
+  const cleanLapCount = insights.envelope.cleanLapCount;
+  // E4 again, at the layer that actually moves a cue: unvalidated geometry
+  // seals an EMPTY evidence set, so even a caller that skipped
+  // `computeSuggestions` entirely has nothing the cue source will accept.
+  const blocked = new Set(
+    insights.geometryValidated
+      ? blockedCornersFromInsights(insights)
+      : insights.envelope.corners.map((corner) => corner.cornerId),
+  );
+  for (const corner of [...insights.envelope.corners].sort((a, b) => a.cornerId - b.cornerId)) {
+    if (blocked.has(corner.cornerId)) continue;
+    if (!cornerHasEvidence(corner)) continue;
+    for (const point of ['brake', 'lift'] as const) {
+      const demonstrated = demonstratedPoint(corner, point);
+      if (demonstrated === null) continue;
+      entries.push({
+        cornerId: corner.cornerId,
+        point,
+        demonstratedM: demonstrated.valueM,
+        evidenceLapNumber: demonstrated.lapNumber,
+        cleanLapCount,
+      });
+    }
+  }
+  return sealCueEvidence({ ...context, entries });
 }

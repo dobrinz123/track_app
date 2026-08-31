@@ -20,6 +20,7 @@ import type {
 } from '@circuit/core';
 
 import type { AnalysisScreenState, AnalysisUiLanguage } from './analysisViewModel';
+import { resolveAnalysisScreenStrings } from '../ui/screens/analysisStrings';
 
 /**
  * Post-session analysis export (ticket P5b B4, binding — contracts.md's
@@ -466,8 +467,15 @@ export interface AnalysisExportOptions {
    * Ticket P5c-B D4: what the trackday stage actually did during this session —
    * the cue moves applied and the pit suggestions the driver was SHOWN. Omit
    * (or pass two empty lists) and the document stays observations-only.
+   *
+   * Ticket P5c-FIX1 E9 (Codex P5c-REV1 finding 9): `enabled` is the
+   * `suggestionsEnabled` setting AS IT STANDS AT EXPORT TIME, and it is
+   * required — a caller has to state it rather than let a journal from earlier
+   * in the launch decide. `false` exports observations only, whatever the
+   * journal holds.
    */
   trackday?: {
+    enabled: boolean;
     cueUpdates: readonly AppliedCueUpdate[];
     pitSuggestions: readonly PitSuggestion[];
   };
@@ -479,6 +487,10 @@ function mapTrackday(
   language: AnalysisUiLanguage,
 ): AnalysisExportTrackday | null {
   if (record === undefined) return null;
+  // E9: the setting decides, at export time. A journal left over from when
+  // suggestions were on does not put a suggestion in a report the driver is
+  // exporting with them off.
+  if (!record.enabled) return null;
   if (record.cueUpdates.length === 0 && record.pitSuggestions.length === 0) return null;
   return {
     bounds: {
@@ -752,7 +764,13 @@ export function buildAnalysisExportDocument(
     report: {
       title: report.title,
       subtitle: report.subtitle,
-      observationsOnlyNote: view.observationsOnly,
+      // E9: the note has to match the document it heads. A report that carries
+      // suggestions says so, in the driver's own language, instead of opening
+      // with "Observations only" one section above them.
+      observationsOnlyNote:
+        trackday === null
+          ? view.observationsOnly
+          : resolveAnalysisScreenStrings(view.language).observationsWithSuggestions,
       disclaimer: report.disclaimer,
       sections: report.sections.map((section) => ({
         id: section.id,

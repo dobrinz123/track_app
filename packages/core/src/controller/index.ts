@@ -10,9 +10,12 @@ export type {
   SampleIngestResult,
 } from './pipelineCore';
 
-export { SessionController } from './sessionController';
+export { CUE_POSITION_TOLERANCE_M, SessionController, VOICE_LIFT_MAX_SEVERITY } from './sessionController';
 export type {
   AppliedCueUpdate,
+  CueUpdateContext,
+  CueUpdateRejection,
+  CueUpdateRequest,
   FacadeStateCore,
   SessionControllerConfig,
   SessionControllerDeps,

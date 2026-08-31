@@ -74,7 +74,19 @@ export interface PitView {
 }
 
 export type PitViewState =
-  | { status: 'ready'; view: PitView; analysis: StintAnalysis; suggestions: SuggestionResult }
+  | {
+      status: 'ready';
+      view: PitView;
+      analysis: StintAnalysis;
+      suggestions: SuggestionResult;
+      /**
+       * Ticket P5c-FIX1 E8 (Codex P5c-REV1 finding 8): the suggestion objects
+       * this view actually PUTS ON SCREEN — the focus corners' ones, and only
+       * those. The journal (and therefore the exported report) records exactly
+       * this list, never every suggestion the engine generated.
+       */
+      shownSuggestions: PitSuggestion[];
+    }
   | { status: 'unavailable'; reason: StintUnavailableReason; message: string }
   | { status: 'error'; message: string };
 
@@ -162,19 +174,23 @@ export function buildPitViewState(input: PitViewInput): PitViewState {
     updatesByCorner.set(update.cornerId, list);
   }
 
+  const shownSuggestions: PitSuggestion[] = [];
   const corners: PitCornerRow[] = [...analysisState.view.corners]
     .filter((corner) => corner.measured)
     .sort(byTimeLost)
     .slice(0, PIT_FOCUS_CORNER_LIMIT)
-    .map((corner) => ({
-      ...corner,
-      suggestions: (suggestionsByCorner.get(corner.cornerId) ?? []).map((suggestion) =>
-        pitSuggestionLine(suggestion, input.language),
-      ),
-      cueUpdates: (updatesByCorner.get(corner.cornerId) ?? []).map((update) =>
-        cueUpdateLine(update, input.language),
-      ),
-    }));
+    .map((corner) => {
+      const forCorner = suggestionsByCorner.get(corner.cornerId) ?? [];
+      // E8: rendered here, and therefore shown -- the export claims no more.
+      shownSuggestions.push(...forCorner);
+      return {
+        ...corner,
+        suggestions: forCorner.map((suggestion) => pitSuggestionLine(suggestion, input.language)),
+        cueUpdates: (updatesByCorner.get(corner.cornerId) ?? []).map((update) =>
+          cueUpdateLine(update, input.language),
+        ),
+      };
+    });
 
   const suggestionCount = corners.reduce((total, corner) => total + corner.suggestions.length, 0);
   const circuitName = analysis.insights.circuitName ?? analysis.insights.circuitId;
@@ -183,6 +199,7 @@ export function buildPitViewState(input: PitViewInput): PitViewState {
     status: 'ready',
     analysis,
     suggestions: input.suggestions,
+    shownSuggestions,
     view: {
       language: input.language,
       title: strings.screenTitle,

@@ -184,8 +184,12 @@ describe('P5-FIX2 W4 -- the screen draws marks and no engine prose (R2-2)', () =
   const source = readSource('../../src/ui/screens/AnalysisScreen.tsx');
 
   it('renders the mark row from the view model', () => {
+    // Ticket P5c-FIX1 E13: the marks moved into the SHARED component the pit
+    // view draws too, so the screen composes it and the component positions
+    // them -- one corner is drawn one way in this app.
     expect(source).toMatch(/detail\.visual/);
-    expect(source).toMatch(/mark\.position/);
+    expect(source).toMatch(/<CornerVisual/);
+    expect(readSource('../../src/ui/components/CornerVisual.tsx')).toMatch(/mark\.position/);
   });
 
   it('no longer renders the engine sentences in the expanded card', () => {

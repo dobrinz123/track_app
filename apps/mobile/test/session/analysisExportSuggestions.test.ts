@@ -26,6 +26,7 @@ import {
   buildAnalysisSummaryMarkdown,
 } from '../../src/session/analysisExport';
 import { buildAnalysisScreenState, createAnalysisRunner } from '../../src/session/analysisViewModel';
+import { ANALYSIS_SCREEN_STRINGS } from '../../src/ui/screens/analysisStrings';
 import { bundled, driveSession, TMR_CIRCUIT_ID } from '../support/analysisHarness';
 
 /**
@@ -99,7 +100,7 @@ describe('analysis export — the trackday record (D4)', () => {
     const state = await readyState('en');
     const doc = buildAnalysisExportDocument(state, {
       generatedAtUtc: GENERATED_AT,
-      trackday: { cueUpdates: [CUE_UPDATE], pitSuggestions: [SUGGESTION] },
+      trackday: { enabled: true, cueUpdates: [CUE_UPDATE], pitSuggestions: [SUGGESTION] },
     });
     expect(doc.observationsOnly).toBe(false);
     expect(doc.trackday?.bounds).toEqual({
@@ -136,7 +137,7 @@ describe('analysis export — the trackday record (D4)', () => {
     const state = await readyState('en');
     const doc = buildAnalysisExportDocument(state, {
       generatedAtUtc: GENERATED_AT,
-      trackday: { cueUpdates: [CUE_UPDATE], pitSuggestions: [SUGGESTION] },
+      trackday: { enabled: true, cueUpdates: [CUE_UPDATE], pitSuggestions: [SUGGESTION] },
     });
     for (const update of doc.trackday?.cueUpdates ?? []) {
       expect(update.toM).toBeGreaterThanOrEqual(update.demonstratedM);
@@ -155,7 +156,7 @@ describe('analysis export — the trackday record (D4)', () => {
     const state = await readyState('ro');
     const doc = buildAnalysisExportDocument(state, {
       generatedAtUtc: GENERATED_AT,
-      trackday: { cueUpdates: [CUE_UPDATE], pitSuggestions: [SUGGESTION] },
+      trackday: { enabled: true, cueUpdates: [CUE_UPDATE], pitSuggestions: [SUGGESTION] },
     });
     const markdown = buildAnalysisSummaryMarkdown(doc);
     expect(markdown).toContain('Sugestii');
@@ -169,5 +170,57 @@ describe('analysis export — the trackday record (D4)', () => {
       buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT }),
     );
     expect(withoutTrackday).not.toMatch(/suggest/i);
+  });
+});
+
+/**
+ * Ticket P5c-FIX1 E9 (Codex P5c-REV1 finding 9): the export reads the SETTING,
+ * not the journal, and the report's own header tells the truth about what the
+ * document then contains.
+ */
+describe('analysis export — the setting decides, at export time (E9)', () => {
+  it('exports observations only when suggestions are off, whatever the journal holds', async () => {
+    const state = await readyState('en');
+    const doc = buildAnalysisExportDocument(state, {
+      generatedAtUtc: GENERATED_AT,
+      trackday: { enabled: false, cueUpdates: [CUE_UPDATE], pitSuggestions: [SUGGESTION] },
+    });
+    expect(doc.trackday).toBeUndefined();
+    expect(doc.observationsOnly).toBe(true);
+    expect(JSON.stringify(doc)).not.toMatch(/suggest/i);
+    expect(buildAnalysisSummaryMarkdown(doc)).not.toMatch(/suggest/i);
+  });
+
+  it.each(['en', 'ro'] as const)(
+    'heads a report that DOES carry suggestions honestly in %s',
+    async (language) => {
+      const state = await readyState(language);
+      const withSuggestions = buildAnalysisExportDocument(state, {
+        generatedAtUtc: GENERATED_AT,
+        trackday: { enabled: true, cueUpdates: [CUE_UPDATE], pitSuggestions: [SUGGESTION] },
+      });
+      const observationsOnly = buildAnalysisExportDocument(state, {
+        generatedAtUtc: GENERATED_AT,
+      });
+      const expected = ANALYSIS_SCREEN_STRINGS[language].observationsWithSuggestions;
+      expect(withSuggestions.report.observationsOnlyNote).toBe(expected);
+      expect(withSuggestions.report.observationsOnlyNote).not.toBe(
+        observationsOnly.report.observationsOnlyNote,
+      );
+      expect(observationsOnly.report.observationsOnlyNote).toBe(
+        ANALYSIS_SCREEN_STRINGS[language].observationsOnly,
+      );
+      // The one-pager carries the honest header, immediately above the sections.
+      expect(buildAnalysisSummaryMarkdown(withSuggestions)).toContain(expected);
+    },
+  );
+
+  it('keeps RO and EN in step for the new header', () => {
+    for (const language of ['en', 'ro'] as const) {
+      expect(ANALYSIS_SCREEN_STRINGS[language].observationsWithSuggestions.length).toBeGreaterThan(0);
+    }
+    expect(ANALYSIS_SCREEN_STRINGS.ro.observationsWithSuggestions).not.toBe(
+      ANALYSIS_SCREEN_STRINGS.en.observationsWithSuggestions,
+    );
   });
 });

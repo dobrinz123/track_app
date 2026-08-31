@@ -56,10 +56,12 @@ import { createAnalysisSessionLoader } from './analysisSessionLoader';
 import { loadSessionTelemetryByLap } from '../persistence/telemetryRead';
 import type { AnalysisLapRecording } from './analysisAssembly';
 import {
+  createBoundaryScheduler,
   createStintCoach,
   createStintRunner,
   createSuggestionJournal,
   type SessionSuggestionRecord,
+  type BoundaryScheduler,
   type StintCoach,
   type StintRunner,
   type StintSource,
@@ -71,6 +73,8 @@ const LOCAL_USER_ID = 'local-driver';
 const ACTIVE_SESSION_SETTINGS_KEY = 'activeSessionId';
 /** M4 fix (contracts.md's "Multi-circuit selection — recovery amendment", binding): the circuit the session named by `ACTIVE_SESSION_SETTINGS_KEY` actually started on -- written/cleared in the SAME transaction as the session id (`setActiveSession` below), so bootstrap recovery never has to guess which bundled circuit a crashed, never-`endSession()`'d checkpoint belongs to. */
 const ACTIVE_SESSION_CIRCUIT_SETTINGS_KEY = 'activeSessionCircuitId';
+/** Ticket P5c-FIX1 E7: the instant the session named by `ACTIVE_SESSION_SETTINGS_KEY` started, written/cleared in the SAME transaction as the id -- so a RECOVERED outing can head its pit view with its own start date instead of the moment it was resumed. */
+const ACTIVE_SESSION_STARTED_SETTINGS_KEY = 'activeSessionStartedAtUtc';
 const ALGORITHM_VERSION = 1;
 
 function appVersion(): string {
@@ -1108,6 +1112,14 @@ async function getActiveSessionId(database: SqlDatabase): Promise<string | null>
   return rows[0]?.value ?? null;
 }
 
+/** Ticket P5c-FIX1 E7: companion read for `ACTIVE_SESSION_STARTED_SETTINGS_KEY` -- `null` for a session started before this key existed. */
+async function getActiveSessionStartedAtUtc(database: SqlDatabase): Promise<string | null> {
+  const rows = await database.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
+    ACTIVE_SESSION_STARTED_SETTINGS_KEY,
+  ]);
+  return rows[0]?.value ?? null;
+}
+
 /** M4 fix: companion read for `ACTIVE_SESSION_CIRCUIT_SETTINGS_KEY` -- `null` when absent (a legacy checkpoint written before this key existed, or nothing active). */
 async function getActiveSessionCircuitId(database: SqlDatabase): Promise<string | null> {
   const rows = await database.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
@@ -1131,12 +1143,13 @@ async function getActiveSessionCircuitId(database: SqlDatabase): Promise<string 
  */
 async function setActiveSession(
   database: SqlDatabase,
-  session: { sessionId: string; circuitId: string } | null,
+  session: { sessionId: string; circuitId: string; startedAtUtc?: string } | null,
 ): Promise<void> {
   await database.withTransactionAsync(async () => {
     if (session === null) {
       await database.runAsync('DELETE FROM settings WHERE key = ?', [ACTIVE_SESSION_SETTINGS_KEY]);
       await database.runAsync('DELETE FROM settings WHERE key = ?', [ACTIVE_SESSION_CIRCUIT_SETTINGS_KEY]);
+      await database.runAsync('DELETE FROM settings WHERE key = ?', [ACTIVE_SESSION_STARTED_SETTINGS_KEY]);
     } else {
       await database.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
         ACTIVE_SESSION_SETTINGS_KEY,
@@ -1146,6 +1159,12 @@ async function setActiveSession(
         ACTIVE_SESSION_CIRCUIT_SETTINGS_KEY,
         session.circuitId,
       ]);
+      if (session.startedAtUtc !== undefined) {
+        await database.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+          ACTIVE_SESSION_STARTED_SETTINGS_KEY,
+          session.startedAtUtc,
+        ]);
+      }
     }
   });
 }
@@ -1223,6 +1242,31 @@ function createProductionController(): SessionController {
 }
 
 /**
+ * Ticket P5c-FIX1 E7 (Codex P5c-REV1 finding 7): everything an outing needs
+ * initialized before its first lap boundary, in ONE place. A normal start
+ * reaches it through `onSessionStarted`; `resumeRecovery()` drives the
+ * controller directly and so calls it itself -- previously it did neither, and
+ * a recovered outing could compute no cues and open no valid pit view because
+ * `mostRecentSessionId` was still null.
+ *
+ * `startedAtUtc` is the outing's OWN start instant (the recovered session's,
+ * not "now") so the pit view heads itself with the right date.
+ */
+function initializeSessionStage(sessionId: string, startedAtUtc: string): void {
+  // Ticket P5b B1: remembered for the post-session Analysis entry point.
+  mostRecentSessionId = sessionId;
+  mostRecentSessionStartedAtUtc = startedAtUtc;
+  // Ticket P5c-B: "one change per corner per STINT" is scoped to the outing,
+  // and so is everything the pit view reads -- a session starts from a clean
+  // journal and an empty stint cache.
+  suggestionJournal.clear(sessionId);
+  stintRunner?.clear();
+  stintTraceCache.clear();
+  lastStintLapCount = 0;
+  stintBoundaries?.reset();
+}
+
+/**
  * Callbacks shared by every production `RealSessionFacade` (initial
  * bootstrap AND any later C1 terminal-state rebuild), so the
  * active-session-pointer/history-refresh wiring can never drift between
@@ -1235,16 +1279,9 @@ function createProductionController(): SessionController {
 function productionFacadeCallbacks(circuitId: string): RealSessionFacadeCallbacks {
   return {
     onSessionStarted: (sessionId) => {
-      if (db !== null) void setActiveSession(db, { sessionId, circuitId });
-      // Ticket P5b B1: remembered for the post-session Analysis entry point.
-      mostRecentSessionId = sessionId;
-      mostRecentSessionStartedAtUtc = new Date().toISOString();
-      // Ticket P5c-B: "one change per corner per STINT" is scoped to the
-      // outing, and so is everything the pit view reads -- a new session
-      // starts from a clean journal and an empty stint cache.
-      suggestionJournal.clear(sessionId);
-      stintRunner?.clear();
-      lastStintLapCount = 0;
+      const startedAtUtc = new Date().toISOString();
+      if (db !== null) void setActiveSession(db, { sessionId, circuitId, startedAtUtc });
+      initializeSessionStage(sessionId, startedAtUtc);
       startTelemetryRecording(sessionId);
     },
     onSessionEnded: () => {
@@ -2030,6 +2067,18 @@ export async function resumeRecovery(): Promise<boolean> {
       // on-device db are both still checked inside `startTelemetryRecording()`
       // itself) -- just called explicitly for the id already known here.
       startTelemetryRecording(info.sessionId);
+      // Ticket P5c-FIX1 E7 (Codex P5c-REV1 finding 7): the SAME initializer a
+      // normal start goes through -- previously nothing here set
+      // `mostRecentSessionId`, so a recovered outing computed no cues and
+      // could not open a valid pit view. The outing's OWN start instant is
+      // read back from the active-session row (written in the same
+      // transaction as its id), falling back to now for a session started
+      // before that key existed.
+      initializeSessionStage(
+        info.sessionId,
+        (database === null ? null : await getActiveSessionStartedAtUtc(database)) ??
+          new Date().toISOString(),
+      );
       setPendingRecovery(null);
       // C5 fix: the recovered session is active again -- keep the active-session
       // pointer (re-affirmed, in case it somehow drifted) rather than clearing
@@ -2702,10 +2751,22 @@ const suggestionJournal = createSuggestionJournal();
 
 let stintRunner: StintRunner | null = null;
 let stintCoach: StintCoach | null = null;
-/** Guards against a second pass being started while one is still running. */
-let stintPassInFlight = false;
 /** Completed laps the last lap-boundary pass was started for. */
 let lastStintLapCount = 0;
+/**
+ * Ticket P5c-FIX1 E6: retains a boundary that arrived while a pass was in
+ * flight and runs exactly one follow-up pass for it after that pass settles --
+ * the boundary is never simply dropped (which, after E1, would also strand the
+ * previous pass's queued cue moves).
+ */
+let stintBoundaries: BoundaryScheduler | null = null;
+/**
+ * Ticket P5c-FIX1 E11: per-lap GNSS traces of the outing being driven, so a
+ * lap-boundary pass loads only the lap that just completed instead of
+ * re-reading every lap of the outing from SQLite. Keyed by session + lap;
+ * emptied by `initializeSessionStage`.
+ */
+const stintTraceCache = new Map<string, LocationSample[]>();
 
 /**
  * The ACTIVE session's completed laps, assembled out of exactly the rows the
@@ -2737,7 +2798,18 @@ async function loadActiveStint(sessionId: string): Promise<StintSource | null> {
 
   const recordings: AnalysisLapRecording[] = [];
   for (const lap of [...snapshot.laps].sort((a, b) => a.lapNumber - b.lapNumber)) {
-    const locationSamples = (await repository?.loadTelemetry(sessionId, lap.lapNumber)) ?? [];
+    // Ticket P5c-FIX1 E11: a completed lap's GNSS trace never changes once it
+    // is written, so a lap-boundary pass READS only the lap that just
+    // completed; the rest come back from this cache. It is cleared with the
+    // rest of the stint stage whenever an outing starts (`initializeSessionStage`).
+    const traceKey = `${sessionId}|${lap.lapNumber}`;
+    let locationSamples = stintTraceCache.get(traceKey);
+    if (locationSamples === undefined) {
+      locationSamples = (await repository?.loadTelemetry(sessionId, lap.lapNumber)) ?? [];
+      // A lap with no stored trace yet is NOT cached: its write may still be
+      // in flight (E5), and the next pass has to look again.
+      if (locationSamples.length > 0) stintTraceCache.set(traceKey, locationSamples);
+    }
     recordings.push({
       lap: {
         lapNumber: lap.lapNumber,
@@ -2765,7 +2837,17 @@ async function loadActiveStint(sessionId: string): Promise<StintSource | null> {
 /** The shared stint runner -- one pass per (session, completed-lap count). */
 export function getStintRunner(): StintRunner {
   if (stintRunner !== null) return stintRunner;
-  stintRunner = createStintRunner({ loadCompletedLaps: loadActiveStint });
+  stintRunner = createStintRunner({
+    loadCompletedLaps: loadActiveStint,
+    // Ticket P5c-FIX1 E5: the lap event reaches this module before the lap's
+    // telemetry write settles. `awaitLapPersistence()` is the controller's own
+    // completed-lap write queue, so a boundary pass reads a lap only once its
+    // trace is actually on disk.
+    settleLapPersistence: async (sessionId) => {
+      if (sessionId !== mostRecentSessionId) return;
+      await activeController?.awaitLapPersistence();
+    },
+  });
   return stintRunner;
 }
 
@@ -2780,8 +2862,14 @@ export function getStintCoach(): StintCoach {
     runner: getStintRunner(),
     journal: suggestionJournal,
     suggestionsEnabled: () => settingsStore.getSettings().suggestionsEnabled,
+    // P5c-FIX1 E1: the identity of whatever controller is live RIGHT NOW. A
+    // pass that started against another one (a rebuild, a recovered session, a
+    // new outing) presents a context this no longer matches, and applies
+    // nothing.
+    cueContext: () => activeController?.cueContext() ?? null,
     activeCues: () => activeController?.activeCues() ?? [],
-    applyCueUpdates: (updates) => activeController?.applyCueUpdates(updates) ?? [],
+    applyCueUpdates: (updates, request) =>
+      activeController?.applyCueUpdates(updates, request) ?? [],
     onError: (error) => console.warn('[composition] stint coaching', error),
   });
   return stintCoach;
@@ -2819,19 +2907,26 @@ facade.subscribe((state) => {
   const completedLapCount = state.laps.length;
   if (!sessionIsActive(state.sessionState)) {
     lastStintLapCount = 0;
+    stintBoundaries?.reset();
     return;
   }
   if (completedLapCount === 0 || completedLapCount === lastStintLapCount) return;
   lastStintLapCount = completedLapCount;
-  if (stintPassInFlight) return;
+  if (!settingsStore.getSettings().suggestionsEnabled) return;
+  runStintPass(completedLapCount);
+});
+
+/**
+ * Ticket P5c-FIX1 E6: one pass at a time, no dropped boundary. The retention +
+ * coalescing rule itself lives in `stintCoaching.createBoundaryScheduler`
+ * (pure, unit-tested); this is only the binding to the live session.
+ */
+function runStintPass(completedLapCount: number): void {
   const sessionId = mostRecentSessionId;
   if (sessionId === null) return;
-  if (!settingsStore.getSettings().suggestionsEnabled) return;
-  stintPassInFlight = true;
-  void getStintCoach()
-    .onLapCompleted(sessionId, completedLapCount)
-    .catch((error: unknown) => console.warn('[composition] lap-boundary coaching failed', error))
-    .finally(() => {
-      stintPassInFlight = false;
-    });
-});
+  stintBoundaries ??= createBoundaryScheduler({
+    run: (count) => getStintCoach().onLapCompleted(mostRecentSessionId ?? sessionId, count),
+    onError: (error) => console.warn('[composition] lap-boundary coaching failed', error),
+  });
+  stintBoundaries.onBoundary(completedLapCount);
+}

@@ -67,6 +67,12 @@ async function offStateSummary() {
     runner,
     journal,
     suggestionsEnabled: () => DEFAULT_SETTINGS.suggestionsEnabled,
+    cueContext: () => ({
+      sessionId: SESSION_ID,
+      generation: 1,
+      stintIndex: 0,
+      completedLapCount: 4,
+    }),
     activeCues: () => CUES,
     applyCueUpdates: (updates) => {
       cueApplyCalls += 1;
@@ -99,6 +105,7 @@ async function offStateSummary() {
   const doc = buildAnalysisExportDocument(reportState, {
     generatedAtUtc: GENERATED_AT,
     trackday: {
+      enabled: DEFAULT_SETTINGS.suggestionsEnabled,
       cueUpdates: record.cueUpdates,
       pitSuggestions: record.shownPitSuggestions,
     },

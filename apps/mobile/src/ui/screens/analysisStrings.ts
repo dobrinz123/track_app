@@ -28,6 +28,12 @@ export interface AnalysisScreenStrings {
   entryButtonA11y: (session: string) => string;
   /** The standing V1 promise: facts, never instruction. */
   observationsOnly: string;
+  /**
+   * Ticket P5c-FIX1 E9: the header of a report that DOES carry the
+   * suggestions the driver was shown. "Observations only" would be a false
+   * statement in that document, and it sat directly above them.
+   */
+  observationsWithSuggestions: string;
   loading: string;
   loadingHint: string;
   /** Honest dead ends. */
@@ -119,6 +125,8 @@ const EN: AnalysisScreenStrings = {
   entryButton: 'Analysis',
   entryButtonA11y: (session) => `Analyse the session of ${session}`,
   observationsOnly: 'Observations only — this report states what you did, not what to do.',
+  observationsWithSuggestions:
+    'Observations + the suggestions you were shown — every one inside what your own clean laps already did.',
   loading: 'Analysing your laps…',
   loadingHint: 'Everything runs on this phone; nothing is sent anywhere.',
   sessionNotFound: 'That session is no longer stored on this phone.',
@@ -215,6 +223,8 @@ const RO: AnalysisScreenStrings = {
   entryButton: 'Analiză',
   entryButtonA11y: (session) => `Analizează sesiunea din ${session}`,
   observationsOnly: 'Doar observații — raportul spune ce ai făcut, nu ce să faci.',
+  observationsWithSuggestions:
+    'Observații + sugestiile care ți-au fost arătate — toate în limita a ce au făcut deja tururile tale curate.',
   loading: 'Îți analizez tururile…',
   loadingHint: 'Totul rulează pe acest telefon; nu se trimite nimic nicăieri.',
   sessionNotFound: 'Sesiunea nu mai este salvată pe acest telefon.',

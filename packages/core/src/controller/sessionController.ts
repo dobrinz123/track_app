@@ -18,7 +18,15 @@ import type {
 } from '../contracts';
 import { CalibrationEngine, type CalibrationConfig } from '../calibration';
 import { CoachEngine, deriveBrakingZones } from '../coach';
-import { MAX_BRAKE_LATER_M, type ActiveCue, type CueUpdate } from '../coaching/suggestions';
+import {
+  MAX_BRAKE_LATER_M,
+  verifyCueEvidence,
+  type ActiveCue,
+  type CueEvidenceEntry,
+  type CuePoint,
+  type CueUpdate,
+  type CueUpdateEvidence,
+} from '../coaching/suggestions';
 import type { RuntimeProfile } from '../profile';
 import { buildReferenceLap, shouldReplacePb } from '../reference';
 import { SessionPipelineCore, type PipelineCoreConfig } from './pipelineCore';
@@ -88,6 +96,65 @@ export interface AppliedCueUpdate extends CueUpdate {
   /** The session lap number that had just completed when it moved. */
   appliedAfterLapNumber: number;
 }
+
+/**
+ * Ticket P5c-FIX1 E1/E2 — the identity an async analysis pass binds itself to
+ * and must present again at apply time (Codex P5c-REV1 finding 1). A pass that
+ * was computed for a different outing, a rebuilt controller, or an earlier
+ * stint has nothing to say about the cues live now, and is refused.
+ */
+export interface CueUpdateContext {
+  /** The outing the pass read. `null` before any session has started. */
+  sessionId: string | null;
+  /** Minted afresh on every session start / checkpoint restore. */
+  generation: number;
+  /** Advanced at every pit exit — the "per stint" in one change per corner per stint. */
+  stintIndex: number;
+  /** Completed laps at the moment the context was taken. */
+  completedLapCount: number;
+}
+
+/** Why {@link SessionController.applyCueUpdates} refused an update (diagnostics). */
+export type CueUpdateRejection =
+  | 'coaching-disabled'
+  | 'context-mismatch'
+  | 'evidence-unsealed'
+  | 'evidence-context-mismatch'
+  | 'unknown-corner'
+  | 'not-brake-point'
+  | 'already-updated-this-stint'
+  | 'cue-moved-underneath'
+  | 'no-evidence-for-point'
+  | 'evidence-mismatch'
+  | 'not-later'
+  | 'beyond-bound'
+  | 'beyond-demonstrated'
+  | 'not-finite';
+
+/** The demonstrated evidence + the context a batch of updates was computed in. */
+export interface CueUpdateRequest {
+  context: CueUpdateContext;
+  evidence: CueUpdateEvidence;
+}
+
+/**
+ * Ticket P5c-FIX1 E3 (Codex P5c-REV1 finding 3, HIGH). The shipped voice
+ * renders a BRAKE cue of severity 1-4 as the spoken word "Lift."
+ * (`apps/mobile/src/session/voiceCoach.ts`'s `voiceUtteranceIdForCue`), and a
+ * lift always precedes braking. Moving such a cue on the BRAKING envelope
+ * would move a spoken "Lift." later than any lift the driver has demonstrated,
+ * so those corners are validated against the LIFT envelope instead — and
+ * refused outright when the pass carried no lift evidence for them.
+ */
+export const VOICE_LIFT_MAX_SEVERITY = 4;
+
+/**
+ * How far the cue the caller measured may sit from the cue the controller
+ * actually has, metres, before the update counts as stale (E2). Distances are
+ * projected onto a centerline, so an exact float match is not achievable; a
+ * cue that moved by more than this is a different cue.
+ */
+export const CUE_POSITION_TOLERANCE_M = 0.5;
 
 export interface SessionControllerDiagnostics {
   sessionId: string | null;
@@ -209,6 +276,13 @@ export interface SessionControllerDeps {
    * atomically swaps in a new PB (incrementing `coachZoneRefreshes`).
    */
   coaching?: { enabled: boolean; corners: Corner[] };
+  /**
+   * Ticket P5c-FIX1 E2: where a refused cue update is reported. Defaults to
+   * `console.warn` in the app; tests inject their own. A refusal is never
+   * silent -- a suggestion engine that computed one wrongly has to be
+   * observable, not just ineffective.
+   */
+  logger?: (message: string) => void;
   config?: SessionControllerConfig;
 }
 
@@ -312,7 +386,22 @@ export class SessionController {
    * A corner present here has already used its ONE change for this stint.
    */
   private readonly cueOverridesByCorner = new Map<number, number>();
+  /**
+   * Ticket P5c-FIX1 E10: corners that have used their ONE change in the
+   * CURRENT stint. Held apart from `cueOverridesByCorner` (the positions,
+   * which stay where the driver's own evidence put them for the rest of the
+   * outing) so a pit exit re-arms the allowance without rolling a cue back.
+   */
+  private stintChangedCorners = new Set<number>();
+  /** Ticket P5c-FIX1 E1: minted on every session start / checkpoint restore. */
+  private cueGeneration = 0;
+  /** Ticket P5c-FIX1 E10: advanced at every pit exit. */
+  private stintIndex = 0;
+  /** Latched pit state, so leaving the pit lane is observed exactly once. */
+  private inPitLatched = false;
   private appliedCueUpdatesLog: AppliedCueUpdate[] = [];
+  /** Why the LAST `applyCueUpdates` call refused what it refused (E2). */
+  private lastCueRejections: CueUpdateRejection[] = [];
   /**
    * Sync mechanism for MUST DO #5 (lap-number collision after recovery
    * resume). `SessionMachineSnapshot.lapNumber` (the reducer's own counter,
@@ -503,7 +592,13 @@ export class SessionController {
       // outing, so a brand-new session starts from the derived cues again --
       // never carrying another outing's moves into this one.
       this.cueOverridesByCorner.clear();
+      this.stintChangedCorners = new Set();
       this.appliedCueUpdatesLog = [];
+      // P5c-FIX1 E1: a new outing is a new generation, so an analysis pass
+      // still in flight from the previous one can never apply to this one.
+      this.cueGeneration += 1;
+      this.stintIndex = 0;
+      this.inPitLatched = false;
     }
 
     /** Undoes the session identity THIS call minted, so an aborted start leaves nothing for `checkpointNow()`/`endSession()` to persist later. A session id restored from a checkpoint (recovery) is never touched. */
@@ -809,6 +904,15 @@ export class SessionController {
     this.currentCue = null;
     this.coachCueSetAtMono = null;
     this.coachEngine?.reset();
+    // P5c-FIX1 E1/E7: a restore is a new cue generation (an analysis pass from
+    // before it can never apply afterwards) and re-arms the stint allowance --
+    // the recovered outing starts from the cues its own derivation produces.
+    this.cueGeneration += 1;
+    this.stintIndex = 0;
+    this.inPitLatched = false;
+    this.cueOverridesByCorner.clear();
+    this.stintChangedCorners = new Set();
+    this.appliedCueUpdatesLog = [];
 
     for (const lap of laps) this.core.laps.push(lap);
     if (midSession) {
@@ -950,6 +1054,19 @@ export class SessionController {
     // brief quality/matching gap) before clearing.
     if (this.coachEngine !== null) {
       const inPit = this.core.state.state === 'inPit' || (result.match?.onPitLane ?? false);
+      // Ticket P5c-FIX1 E10 (Codex P5c-REV1 finding 10): the STINT boundary.
+      // The detector is the one the pipeline already computes -- the
+      // hysteresis-debounced `inPit` session state, or the per-match
+      // `onPitLane` flag, exactly the pair the cue suppression above trusts --
+      // so no second, weaker speed/time heuristic is introduced. Leaving the
+      // pit lane starts the next stint: the one-change-per-corner allowance
+      // re-arms, while every cue stays where the driver's own evidence put it.
+      if (inPit) {
+        this.inPitLatched = true;
+      } else if (this.inPitLatched) {
+        this.inPitLatched = false;
+        this.beginStint();
+      }
       if (inPit) {
         this.currentCue = null;
         this.coachCueSetAtMono = null;
@@ -1131,38 +1248,206 @@ export class SessionController {
   }
 
   /**
+   * The identity an analysis pass must bind itself to and present again at
+   * apply time (ticket P5c-FIX1 E1). Read before the pass starts and again
+   * when it finishes: any difference means the pass is talking about an outing,
+   * a controller or a stint that is no longer the live one.
+   */
+  cueContext(): CueUpdateContext {
+    return {
+      sessionId: this.sessionId,
+      generation: this.cueGeneration,
+      stintIndex: this.stintIndex,
+      completedLapCount: this.core.laps.length,
+    };
+  }
+
+  /**
+   * Starts the next stint (ticket P5c-FIX1 E10). Called by the pit-exit
+   * detector in `handleSample`; public so a host that knows about a stint the
+   * geometry cannot see (a session paused in the paddock, say) can say so.
+   * Re-arms the one-change-per-corner allowance and does NOT move any cue:
+   * a point the driver's own laps demonstrated stays where it was put.
+   */
+  beginStint(): void {
+    this.stintIndex += 1;
+    this.stintChangedCorners = new Set();
+  }
+
+  /**
+   * Ticket P5c-FIX1 E5 (Codex P5c-REV1 finding 5): resolves once every
+   * completed lap's telemetry/checkpoint write queued so far has settled. The
+   * lap event reaches the app BEFORE its trace is on disk, so an analysis pass
+   * triggered by that event must await this barrier or it reads a lap with no
+   * trace. Rejections are absorbed -- a failed write is not this barrier's to
+   * report (`flush()` still surfaces it); the caller only needs to know the
+   * queue has drained.
+   */
+  async awaitLapPersistence(): Promise<void> {
+    await this.lapPersistenceTail.catch(() => undefined);
+  }
+
+  /** The demonstrated bound this corner's spoken cue must be validated against. */
+  private evidenceFor(
+    evidence: CueUpdateEvidence,
+    cornerId: number,
+    point: CuePoint,
+  ): CueEvidenceEntry | null {
+    return (
+      evidence.entries.find((entry) => entry.cornerId === cornerId && entry.point === point) ?? null
+    );
+  }
+
+  /**
    * Applies bounded cue updates produced by `coaching/suggestions.ts`
-   * (contracts.md R2-3a). This is the LAST line of defence, not a pass-through:
-   * every update is re-checked here against the safety bounds before it can
-   * reach the cue engine, so a caller that computed one wrongly still cannot
-   * move a cue past what the driver demonstrated. An update is refused when
+   * (contracts.md R2-3a). This is the LAST line of defence, not a pass-through,
+   * and after ticket P5c-FIX1 E2 it trusts NOTHING the update says about
+   * itself: the cue it is moving is read from this controller, the bound it may
+   * move to is recomputed from `request.evidence`, and the update's own
+   * `fromM`/`demonstratedM` only have to AGREE with those. An update is refused
+   * when
    *
    *  - coaching is off, or the corner is not in this session's coaching set;
+   *  - `request.context` is not this controller's live session / generation /
+   *    stint (E1: the pass outlived what it was computed for);
+   *  - `request.evidence` does not hash to its own checksum, or was sealed for
+   *    another context;
    *  - it targets anything but the live brake cue point;
    *  - the corner already used its ONE change this stint;
+   *  - the cue has MOVED underneath the pass (`fromM` no longer matches the
+   *    controller's own cue within {@link CUE_POSITION_TOLERANCE_M});
+   *  - the pass carried no evidence for the point this corner is actually
+   *    SPOKEN as -- "Lift." for severity 1-4 (E3) -- or the update's cited
+   *    evidence disagrees with the sealed evidence;
    *  - the step exceeds `MAX_BRAKE_LATER_M`, is not strictly later, or is not
    *    finite;
-   *  - the target is PAST the demonstrated value it cites.
+   *  - the target is PAST the demonstrated value the EVIDENCE proves.
    *
-   * Returns exactly the updates that were applied, in ascending corner order.
+   * Returns exactly the updates that were applied, in ascending corner order,
+   * each carrying the value the controller itself clamped it to.
    */
-  applyCueUpdates(updates: readonly CueUpdate[]): AppliedCueUpdate[] {
-    if (this.coachEngine === null || updates.length === 0) return [];
+  applyCueUpdates(updates: readonly CueUpdate[], request: CueUpdateRequest): AppliedCueUpdate[] {
+    this.lastCueRejections = [];
+    const reject = (reason: CueUpdateRejection): void => {
+      this.lastCueRejections.push(reason);
+      this.deps.logger?.(`[sessionController] cue update refused: ${reason}`);
+    };
+    if (this.coachEngine === null) {
+      if (updates.length > 0) reject('coaching-disabled');
+      return [];
+    }
+    if (updates.length === 0) return [];
+    const live = this.cueContext();
+    const { context, evidence } = request;
+    if (
+      live.sessionId === null ||
+      context.sessionId !== live.sessionId ||
+      context.generation !== live.generation ||
+      context.stintIndex !== live.stintIndex
+    ) {
+      reject('context-mismatch');
+      return [];
+    }
+    if (!verifyCueEvidence(evidence)) {
+      reject('evidence-unsealed');
+      return [];
+    }
+    if (
+      evidence.sessionId !== live.sessionId ||
+      evidence.generation !== live.generation ||
+      evidence.stintIndex !== live.stintIndex
+    ) {
+      reject('evidence-context-mismatch');
+      return [];
+    }
+
+    // The cue set as THIS controller has it right now -- never the caller's.
+    const currentCues = new Map(this.activeCues().map((cue) => [cue.cornerId, cue]));
     const appliedAfterLapNumber = this.snapshotState().lapNumber;
     const appliedAtMono = this.deps.clock.now();
     const applied: AppliedCueUpdate[] = [];
     for (const update of [...updates].sort((left, right) => left.cornerId - right.cornerId)) {
-      if (update.point !== 'brake') continue;
-      if (this.cueOverridesByCorner.has(update.cornerId)) continue;
-      if (!this.coachCorners.some((corner) => corner.id === update.cornerId)) continue;
-      const { fromM, toM, demonstratedM } = update;
-      if (![fromM, toM, demonstratedM].every((value) => Number.isFinite(value))) continue;
-      if (toM <= 0 || toM >= fromM) continue;
-      if (fromM - toM > MAX_BRAKE_LATER_M) continue;
-      // Never past the driver's own evidence -- the whole point of R2-3.
-      if (toM < demonstratedM) continue;
+      if (update.point !== 'brake') {
+        reject('not-brake-point');
+        continue;
+      }
+      if (this.stintChangedCorners.has(update.cornerId)) {
+        reject('already-updated-this-stint');
+        continue;
+      }
+      const corner = this.coachCorners.find((entry) => entry.id === update.cornerId);
+      if (corner === undefined) {
+        reject('unknown-corner');
+        continue;
+      }
+      const currentM = currentCues.get(update.cornerId)?.brakeStartM ?? null;
+      if (currentM === null || !Number.isFinite(currentM)) {
+        reject('cue-moved-underneath');
+        continue;
+      }
+      if (![update.fromM, update.toM, update.demonstratedM].every((v) => Number.isFinite(v))) {
+        reject('not-finite');
+        continue;
+      }
+      if (Math.abs(currentM - update.fromM) > CUE_POSITION_TOLERANCE_M) {
+        reject('cue-moved-underneath');
+        continue;
+      }
+      // E3: what this cue is actually SPOKEN as decides which envelope bounds
+      // it. Severity 1-4 is voiced "Lift.", and a lift precedes braking.
+      const spokenPoint: CuePoint = corner.severity <= VOICE_LIFT_MAX_SEVERITY ? 'lift' : 'brake';
+      const entry = this.evidenceFor(evidence, update.cornerId, spokenPoint);
+      if (entry === null || !Number.isFinite(entry.demonstratedM)) {
+        reject('no-evidence-for-point');
+        continue;
+      }
+      // The update may cite its own numbers, but they have to match the seal.
+      if (spokenPoint === 'brake' && Math.abs(entry.demonstratedM - update.demonstratedM) > 1e-6) {
+        reject('evidence-mismatch');
+        continue;
+      }
+      // Everything below is computed from the CONTROLLER's cue and the SEALED
+      // evidence; `update.toM` is only ever an upper bound on how far it moves.
+      //
+      // Asking for MORE than the step bound is a malformed update -- something
+      // computed it against numbers this controller does not recognise -- and
+      // is refused outright rather than quietly trimmed. Asking for more than
+      // the EVIDENCE supports is clamped back onto the evidence instead: that
+      // is the case E3's lift rule produces (the pass reasoned about braking,
+      // the voice says "Lift."), and the clamped move is fully backed by a
+      // clean lap of this outing.
+      const stepFloorM = currentM - MAX_BRAKE_LATER_M;
+      if (update.toM < stepFloorM - 1e-9) {
+        reject('beyond-bound');
+        continue;
+      }
+      const floorM = Math.max(entry.demonstratedM, stepFloorM);
+      const toM = Math.max(update.toM, floorM);
+      if (toM >= currentM || toM <= 0) {
+        reject('not-later');
+        continue;
+      }
+      if (currentM - toM > MAX_BRAKE_LATER_M) {
+        reject('beyond-bound');
+        continue;
+      }
+      if (toM < entry.demonstratedM) {
+        reject('beyond-demonstrated');
+        continue;
+      }
       this.cueOverridesByCorner.set(update.cornerId, toM);
-      applied.push({ ...update, appliedAtMono, appliedAfterLapNumber });
+      this.stintChangedCorners.add(update.cornerId);
+      applied.push({
+        ...update,
+        fromM: currentM,
+        toM,
+        movedLaterM: currentM - toM,
+        demonstratedM: entry.demonstratedM,
+        evidenceLapNumber: entry.evidenceLapNumber,
+        cleanLapCount: entry.cleanLapCount,
+        appliedAtMono,
+        appliedAfterLapNumber,
+      });
     }
     if (applied.length === 0) return [];
     // `preserveEmitted`: a corner already driven past this lap must not become
@@ -1177,6 +1462,15 @@ export class SessionController {
   /** Every cue move applied this session, oldest first (ticket P5c-B D2/D4). */
   appliedCueUpdates(): AppliedCueUpdate[] {
     return [...this.appliedCueUpdatesLog];
+  }
+
+  /**
+   * Why the last {@link applyCueUpdates} call refused what it refused, in the
+   * order the refusals happened (ticket P5c-FIX1 E2). Empty after a call that
+   * refused nothing.
+   */
+  cueUpdateRejections(): CueUpdateRejection[] {
+    return [...this.lastCueRejections];
   }
 
   private async loadReferenceForSession(): Promise<void> {

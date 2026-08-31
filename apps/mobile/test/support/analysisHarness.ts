@@ -180,3 +180,23 @@ export function driveSession(circuit: BundledCircuit, options: DriveOptions = {}
 
   return { sessionId: `session-${circuit.profile.circuitId}`, circuitId: circuit.profile.circuitId, recordings };
 }
+
+/**
+ * The same bundled circuit, with its geometry marked as FIELD-VALIDATED
+ * (ticket P5c-FIX1 E4).
+ *
+ * The honesty gate the suggestion engine now enforces keys on
+ * `profile.geometryStatus === 'official'`, and TODAY both bundled assets are
+ * `community-derived` — so on the shipped catalog the trackday stage suggests
+ * nothing at all, on either circuit. That is the contract (safety rule 5:
+ * "an unvalidated circuit geometry -> observations without suggestions"), and
+ * it is pinned by its own tests.
+ *
+ * The mechanisms BEHIND that gate — the bounded move, the sealed evidence, the
+ * boundary-only apply — still have to be exercised, so the tests that are about
+ * those use this variant: a circuit whose geometry someone has validated. It
+ * changes one catalog field and nothing else.
+ */
+export function withValidatedGeometry(circuit: BundledCircuit): BundledCircuit {
+  return { ...circuit, profile: { ...circuit.profile, geometryStatus: 'official' } };
+}

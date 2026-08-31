@@ -198,3 +198,41 @@ describe('pit view — RO/EN', () => {
     }
   });
 });
+
+/**
+ * Ticket P5c-FIX1 E8 (Codex P5c-REV1 finding 8): the view reports exactly what
+ * it PUT ON SCREEN, so the journal — and therefore the exported report — can
+ * never mark a suggestion `shown: true` that the driver never saw.
+ */
+describe('pit view — what was actually shown (E8)', () => {
+  it('reports only the focus corners suggestions as shown', async () => {
+    const result = await run(4);
+    const built = input(result, { enabled: true });
+    const state = buildPitViewState(built);
+    if (state.status !== 'ready') throw new Error('expected ready');
+
+    const renderedLines = state.view.corners.flatMap((corner) => corner.suggestions);
+    expect(state.shownSuggestions).toHaveLength(renderedLines.length);
+    const focusCorners = new Set(state.view.corners.map((corner) => corner.cornerId));
+    for (const suggestion of state.shownSuggestions) {
+      expect(focusCorners.has(suggestion.cornerId)).toBe(true);
+    }
+    // The engine generated MORE than the view shows -- that is the whole point.
+    expect(built.suggestions.pitSuggestions.length).toBeGreaterThan(
+      state.shownSuggestions.length,
+    );
+    const generatedOutsideFocus = built.suggestions.pitSuggestions.filter(
+      (suggestion) => !focusCorners.has(suggestion.cornerId),
+    );
+    expect(generatedOutsideFocus.length).toBeGreaterThan(0);
+    for (const suggestion of generatedOutsideFocus) {
+      expect(state.shownSuggestions).not.toContain(suggestion);
+    }
+  });
+
+  it('shows nothing when suggestions are off', async () => {
+    const state = buildPitViewState(input(await run(4), { enabled: false }));
+    if (state.status !== 'ready') throw new Error('expected ready');
+    expect(state.shownSuggestions).toEqual([]);
+  });
+});
