@@ -21,7 +21,7 @@ const OPTIONS = {
 /** Ticket P5d T1(b): lap 1's trace becomes a centreline -- resampled, smoothed, closed. */
 describe('buildLoopCentreline (P5d T1b)', () => {
   it('resamples lap 1 to a ~5 m closed centreline anchored at the start', () => {
-    const samples = rectangleLoopSamples();
+    const samples = rectangleLoopSamples({ laps: 2 });
     const closure = detectLoopClosure(samples);
     expect(closure.closed).toBe(true);
     if (!closure.closed) return;
@@ -50,7 +50,7 @@ describe('buildLoopCentreline (P5d T1b)', () => {
   });
 
   it('smooths noisy fixes: the learned line is shorter and tamer than the raw trace', () => {
-    const samples = rectangleLoopSamples({ noiseSigmaM: 5, seed: 11 });
+    const samples = rectangleLoopSamples({ noiseSigmaM: 5, seed: 11, laps: 2 });
     const closure = detectLoopClosure(samples);
     expect(closure.closed).toBe(true);
     if (!closure.closed) return;
@@ -66,7 +66,7 @@ describe('buildLoopCentreline (P5d T1b)', () => {
 /** Ticket P5d T1(c)+(d): synthetic corners and a RuntimeProfile-compatible ad-hoc profile. */
 describe('buildTestLoopCircuit (P5d T1c, T1d)', () => {
   it('builds an ad-hoc profile that passes the SAME validation bundled circuits do', () => {
-    const result = buildTestLoopCircuit(rectangleLoopSamples(), OPTIONS);
+    const result = buildTestLoopCircuit(rectangleLoopSamples({ laps: 2 }), OPTIONS);
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -74,7 +74,11 @@ describe('buildTestLoopCircuit (P5d T1c, T1d)', () => {
     expect(isLearnedGeometry(result.profile)).toBe(true);
     expect(result.profile.sectorStatus).toBe('app-defined');
     expect(result.profile.circuitId).toBe('learned-test-1');
-    expect(result.profile.corridorWidthM).toBe(DEFAULT_TEST_LOOP_CONFIG.corridorWidthM);
+    // P5d-FIX1 item 8: derived from lap 1, inside the configured bounds.
+    expect(result.profile.corridorWidthM).toBeGreaterThanOrEqual(
+      DEFAULT_TEST_LOOP_CONFIG.minCorridorM,
+    );
+    expect(result.profile.corridorWidthM).toBeLessThanOrEqual(DEFAULT_TEST_LOOP_CONFIG.maxCorridorM);
     expect(result.profile.sectorGates).toEqual([]);
     expect(result.profile.startFinishGate.kind).toBe('startFinish');
     expect(result.profile.centerline.length).toBeGreaterThanOrEqual(50);
@@ -85,7 +89,7 @@ describe('buildTestLoopCircuit (P5d T1c, T1d)', () => {
   });
 
   it('derives the four corners of a rectangle loop, in travel order, each with entry/apex/exit', () => {
-    const result = buildTestLoopCircuit(rectangleLoopSamples(), OPTIONS);
+    const result = buildTestLoopCircuit(rectangleLoopSamples({ laps: 2 }), OPTIONS);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
 
@@ -104,7 +108,7 @@ describe('buildTestLoopCircuit (P5d T1c, T1d)', () => {
   });
 
   it('merges the speed-drop windows into the corner set (and says it did)', () => {
-    const result = buildTestLoopCircuit(rectangleLoopSamples(), OPTIONS);
+    const result = buildTestLoopCircuit(rectangleLoopSamples({ laps: 2 }), OPTIONS);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
 
@@ -120,7 +124,7 @@ describe('buildTestLoopCircuit (P5d T1c, T1d)', () => {
   });
 
   it('recovers a corner the curvature threshold alone missed, from its speed drop', () => {
-    const result = buildTestLoopCircuit(rectangleLoopSamples(), {
+    const result = buildTestLoopCircuit(rectangleLoopSamples({ laps: 2 }), {
       ...OPTIONS,
       // A threshold this high sees no curvature candidate at all on a 25 m
       // radius bend -- only the speed drops are left to find the corners.
@@ -135,7 +139,7 @@ describe('buildTestLoopCircuit (P5d T1c, T1d)', () => {
   });
 
   it('survives noisy GPS: still one closed loop, still four corners', () => {
-    const result = buildTestLoopCircuit(rectangleLoopSamples({ noiseSigmaM: 4, seed: 3 }), OPTIONS);
+    const result = buildTestLoopCircuit(rectangleLoopSamples({ noiseSigmaM: 4, seed: 3, laps: 2 }), OPTIONS);
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -152,7 +156,7 @@ describe('buildTestLoopCircuit (P5d T1c, T1d)', () => {
   });
 
   it('is reproducible: the same trace builds the same geometry twice', () => {
-    const samples = rectangleLoopSamples({ noiseSigmaM: 3, seed: 99 });
+    const samples = rectangleLoopSamples({ noiseSigmaM: 3, seed: 99, laps: 2 });
     const first = buildTestLoopCircuit(samples, OPTIONS);
     const second = buildTestLoopCircuit(samples, OPTIONS);
 
@@ -164,7 +168,7 @@ describe('buildTestLoopCircuit (P5d T1c, T1d)', () => {
   });
 
   it('produces geometry `analyzeCorners` itself can read back (RuntimeProfile compatible)', () => {
-    const result = buildTestLoopCircuit(rectangleLoopSamples(), OPTIONS);
+    const result = buildTestLoopCircuit(rectangleLoopSamples({ laps: 2 }), OPTIONS);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
 

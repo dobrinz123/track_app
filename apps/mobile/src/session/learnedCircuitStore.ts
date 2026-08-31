@@ -4,6 +4,7 @@ import {
   polylineLength,
   type CircuitProfile,
   type Corner,
+  type SqlBindValue,
   type SqlDatabase,
 } from '@circuit/core';
 
@@ -41,7 +42,9 @@ export interface LearnedCircuitEntry extends BundledCircuit {
 export type RemoveLearnedCircuitResult =
   | { ok: true }
   | { ok: false; reason: 'not-found' }
-  | { ok: false; reason: 'has-sessions'; sessionCount: number };
+  | { ok: false; reason: 'has-sessions'; sessionCount: number }
+  /** P5d-FIX1 item 9: the circuit a session is being driven on right now. */
+  | { ok: false; reason: 'active-session' };
 
 interface LearnedCircuitRow {
   circuit_id: string;
@@ -115,28 +118,65 @@ export class SqlLearnedCircuitStore {
     return this.invalidRows;
   }
 
+  /**
+   * P5d-FIX1 item 10 (Codex P5d-REV1 LOW): writes a NEW learned circuit with a
+   * plain INSERT, so an id that is somehow already taken is REPORTED rather
+   * than silently overwriting the circuit that holds it -- and, with it, the
+   * geometry of every session recorded on that circuit. The caller regenerates
+   * the id and tries again.
+   */
+  async insert(input: {
+    profile: CircuitProfile;
+    corners: readonly Corner[];
+    saved: boolean;
+  }): Promise<{ ok: true } | { ok: false; reason: 'id-taken' }> {
+    if (this.cache.has(input.profile.circuitId)) return { ok: false, reason: 'id-taken' };
+    try {
+      await this.db.runAsync(
+        `INSERT INTO learned_circuits
+           (circuit_id, display_name, payload, length_m, corner_count, created_at_utc, saved)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        this.rowValues(input),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/UNIQUE|constraint/i.test(message)) return { ok: false, reason: 'id-taken' };
+      throw error;
+    }
+    await this.refresh();
+    return { ok: true };
+  }
+
   /** Writes a learned circuit whole (insert or replace) and updates the cache. */
   async put(input: {
     profile: CircuitProfile;
     corners: readonly Corner[];
     saved: boolean;
   }): Promise<void> {
-    const payload = encodeLearnedCircuit(input.profile, input.corners);
     await this.db.runAsync(
       `INSERT OR REPLACE INTO learned_circuits
          (circuit_id, display_name, payload, length_m, corner_count, created_at_utc, saved)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
-        input.profile.circuitId,
-        input.profile.displayName,
-        payload,
-        input.profile.totalLengthM,
-        input.corners.length,
-        input.profile.createdAtUtc,
-        input.saved ? 1 : 0,
-      ],
+      this.rowValues(input),
     );
     await this.refresh();
+  }
+
+  /** The one row shape both writers use, so an insert and an update can never disagree. */
+  private rowValues(input: {
+    profile: CircuitProfile;
+    corners: readonly Corner[];
+    saved: boolean;
+  }): SqlBindValue[] {
+    return [
+      input.profile.circuitId,
+      input.profile.displayName,
+      encodeLearnedCircuit(input.profile, input.corners),
+      input.profile.totalLengthM,
+      input.corners.length,
+      input.profile.createdAtUtc,
+      input.saved ? 1 : 0,
+    ];
   }
 
   /**

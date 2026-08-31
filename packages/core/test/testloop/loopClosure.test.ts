@@ -19,7 +19,7 @@ import {
  */
 describe('detectLoopClosure (P5d T1a)', () => {
   it('closes a clean rectangle loop at the return to the start point', () => {
-    const samples = rectangleLoopSamples();
+    const samples = rectangleLoopSamples({ laps: 2 });
     const result = detectLoopClosure(samples);
 
     expect(result.closed).toBe(true);
@@ -89,7 +89,7 @@ describe('detectLoopClosure (P5d T1a)', () => {
 
   it('handles a figure eight as ONE loop (it closes only at the full eight)', () => {
     const path = figureEightPath();
-    const samples = sampleDensePath(path);
+    const samples = sampleDensePath(path, { laps: 2 });
     const result = detectLoopClosure(samples);
 
     expect(result.closed).toBe(true);
@@ -106,14 +106,14 @@ describe('detectLoopClosure (P5d T1a)', () => {
   });
 
   it('still closes when the fixes carry no headingDeg at all (heading read from the track)', () => {
-    const samples = rectangleLoopSamples({ withHeading: false });
+    const samples = rectangleLoopSamples({ withHeading: false, laps: 2 });
     const result = detectLoopClosure(samples);
 
     expect(result.closed).toBe(true);
   });
 
   it('closes on noisy fixes (5 m sigma), and does not close early inside the noise', () => {
-    const samples = rectangleLoopSamples({ noiseSigmaM: 5, seed: 7 });
+    const samples = rectangleLoopSamples({ noiseSigmaM: 5, seed: 7, laps: 2 });
     const result = detectLoopClosure(samples);
 
     expect(result.closed).toBe(true);
@@ -122,7 +122,7 @@ describe('detectLoopClosure (P5d T1a)', () => {
   });
 
   it('honours a caller-raised minimum lap length', () => {
-    const samples = rectangleLoopSamples();
+    const samples = rectangleLoopSamples({ laps: 2 });
     const result = detectLoopClosure(samples, { minLapLengthM: 5_000 });
 
     expect(result.closed).toBe(false);

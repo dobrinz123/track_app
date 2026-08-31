@@ -104,6 +104,10 @@ export function decodeLearnedCircuit(json: string): DecodedLearnedCircuit {
 
   const loaded = loadProfileFromJson(JSON.stringify(parsed.data.profile));
   if (!loaded.ok) return { ok: false, errors: loaded.errors };
+  // P5d-FIX1 H2: a profile read back from storage is frozen before ANY caller
+  // sees it -- the store, the catalog and every screen share this one object,
+  // and geometryStatus is what the honesty gates read off it.
+  Object.freeze(loaded.profile);
   if (!isLearnedGeometry(loaded.profile)) {
     // A stored learned circuit that claims surveyed geometry is refused
     // outright: this is the one field the honesty gates read.

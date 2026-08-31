@@ -255,3 +255,70 @@ export function sampleDensePath(path: DensePath, options: SampleOptions = {}): L
 export function rectangleLoopSamples(options: SampleOptions = {}): LocationSample[] {
   return sampleDensePath(roundedRectanglePath(), options);
 }
+
+/**
+ * A car parked with the engine running: no motion at all, only GNSS drift
+ * around one point. Must never look like departure, distance or a closure.
+ */
+export function parkedDriftSamples(count = 400, sigmaM = 8, seed = 21): LocationSample[] {
+  const random = makeRandom(seed);
+  const projection = createProjection(TEST_ORIGIN);
+  return Array.from({ length: count }, (_, index) => {
+    const { lat, lon } = projection.toLatLon({
+      e: gaussian(random) * sigmaM,
+      n: gaussian(random) * sigmaM,
+    });
+    return {
+      tMono: index * 1000,
+      lat,
+      lon,
+      speedMps: Math.abs(gaussian(random)) * 0.2,
+      accuracyM: 30,
+      source: 'gnss' as const,
+    };
+  });
+}
+
+/** Splices one implausible position jump (an urban-canyon reflection) into a trace. */
+export function withJump(
+  samples: readonly LocationSample[],
+  atIndex: number,
+  eastM: number,
+  northM: number,
+): LocationSample[] {
+  const projection = createProjection(TEST_ORIGIN);
+  return samples.map((sample, index) => {
+    if (index !== atIndex) return sample;
+    const local = projection.toLocal({ lat: sample.lat, lon: sample.lon });
+    const { lat, lon } = projection.toLatLon({ e: local.e + eastM, n: local.n + northM });
+    return { ...sample, lat, lon };
+  });
+}
+
+/** A small rounded rectangle -- under the 300 m minimum on its own. */
+export function smallLoopPath(stepM = 1): DensePath {
+  return roundedRectanglePath(80, 50, 12, stepM);
+}
+
+/**
+ * A loop whose straights are covered in small lateral wiggles: every wiggle is
+ * a curvature candidate, so this is what a naive corner derivation explodes on.
+ */
+export function wigglyLoopPath(stepM = 1): DensePath {
+  const base = roundedRectanglePath(240, 160, 25, stepM);
+  const amplitudeM = 2.5;
+  const wavelengthM = 12;
+  const count = base.points.length;
+  const points = base.points.map((point, index) => {
+    const previous = base.points[(index - 1 + count) % count] ?? point;
+    const next = base.points[(index + 1) % count] ?? point;
+    const tangentE = next.e - previous.e;
+    const tangentN = next.n - previous.n;
+    const length = Math.hypot(tangentE, tangentN) || 1;
+    const normalE = tangentN / length;
+    const normalN = -tangentE / length;
+    const offset = amplitudeM * Math.sin((2 * Math.PI * index) / wavelengthM);
+    return { e: point.e + normalE * offset, n: point.n + normalN * offset };
+  });
+  return { points, speedMps: base.speedMps };
+}

@@ -146,7 +146,7 @@ describe('resolveSelectedCircuit (ticket CN-W3)', () => {
  */
 describe('learned circuits in the catalog (P5d T6)', () => {
   const learned = (): { profile: CircuitProfile; runtime: RuntimeProfile; corners: Corner[] } => {
-    const result = buildTestLoopCircuit(rectangleLoopSamples(), {
+    const result = buildTestLoopCircuit(rectangleLoopSamples({ laps: 2 }), {
       circuitId: 'learned-catalog',
       displayName: 'Bucla mea',
       createdAtUtc: '2026-08-31T09:00:00.000Z',

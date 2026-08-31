@@ -10,7 +10,11 @@ import { GRAVITY_MPS2 } from '../coaching/types';
 import { curvatureProfile, polylineLength, projectOntoPolyline } from '../geometry';
 import type { RuntimeProfile } from '../profile';
 
-import { resolveTestLoopConfig, type TestLoopConfigOverrides } from './config';
+import {
+  MAX_TEST_LOOP_CORNERS,
+  resolveTestLoopConfig,
+  type TestLoopConfigOverrides,
+} from './config';
 
 /**
  * Ticket P5d T1(c) -- synthetic corners for a learned loop.
@@ -61,6 +65,10 @@ export interface TestLoopCornerDerivation {
   confirmedBySpeedDrop: number;
   /** ...and how many corners exist ONLY because the driver braked for them. */
   addedFromSpeedDrop: number;
+  /** P5d-FIX1 item 7: candidates dropped for being too shallow, too short or too gentle. */
+  prunedByShape: number;
+  /** ...and candidates dropped because the corner set hit MAX_TEST_LOOP_CORNERS. */
+  prunedByCap: number;
 }
 
 function modulo(value: number, modulus: number): number {
@@ -499,7 +507,35 @@ export function deriveTestLoopCorners(
     addedFromSpeedDrop += 1;
   }
 
-  const corners: Corner[] = merged
+  // P5d-FIX1 item 7 (binding, Codex P5d-REV1 MEDIUM 7): prune, then cap.
+  //
+  // A phone trace over patched tarmac wiggles, and every wiggle is a curvature
+  // candidate. Unpruned, a wiggly loop produces a corner list nobody can read
+  // -- and, past the storage envelope's own 200-corner limit, a learned
+  // circuit that encodes fine and then vanishes on the next reload. So a
+  // corner has to be a corner (it turns far enough, lasts long enough, and
+  // bends harder than the "is this a bend at all" floor), and the set is
+  // capped DETERMINISTICALLY at the most prominent `MAX_TEST_LOOP_CORNERS`.
+  const curvatureFloor = config.speedDropMinCurvature * config.minCornerProminence;
+  const kept = merged.filter(
+    (corner) =>
+      corner.totalAngleDeg >= config.minCornerAngleDeg &&
+      corner.lengthM >= config.minCornerLengthM &&
+      1 / corner.minRadiusM >= curvatureFloor,
+  );
+  const prunedByShape = merged.length - kept.length;
+  // Prominence = how much the corner actually turns. Ties break on the tighter
+  // radius, then on distance, so the same trace always keeps the same corners.
+  const ranked = [...kept].sort(
+    (a, b) =>
+      b.totalAngleDeg - a.totalAngleDeg ||
+      a.minRadiusM - b.minRadiusM ||
+      a.entryDistanceM - b.entryDistanceM,
+  );
+  const capped = ranked.slice(0, MAX_TEST_LOOP_CORNERS);
+  const prunedByCap = ranked.length - capped.length;
+
+  const corners: Corner[] = capped
     .sort((a, b) => a.entryDistanceM - b.entryDistanceM)
     .map((corner, index) => ({ ...corner, id: index + 1 }));
 
@@ -509,5 +545,7 @@ export function deriveTestLoopCorners(
     curvatureCandidates: candidates.length,
     confirmedBySpeedDrop,
     addedFromSpeedDrop,
+    prunedByShape,
+    prunedByCap,
   };
 }

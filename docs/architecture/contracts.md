@@ -889,6 +889,9 @@ User need: the analysis pipeline must be testable ON THE STREET, without a track
 2. LAP 1 DEFINES THE TRACK: when the driver returns within a closing radius of the start point (with heading roughly matching), lap 1's
    trace becomes the centreline (resampled/smoothed); the S/F line is the start point perpendicular. Corners are DERIVED from the
    centreline curvature + speed-drop windows (reuse the cornerMetrics window logic) into a synthetic catalog (ids C1..Cn, entry/apex/exit).
+   SEAMLESS HANDOVER (P5d-FIX1, binding): the learn phase runs the FULL recording pipeline (GNSS + IMU + OBD) from the moment it starts, and at
+   closure the app persists/selects the learned circuit and rolls straight into a timed session on it WITHOUT stopping any provider or dropping a
+   fix — the learning lap is stored as that session's out-lap and the driving that continues is timed; there is no "start timing" step.
 3. Laps 2+ are timed and classified against that geometry exactly like a circuit session; the Analysis screen and exports work unchanged.
 4. Honesty: the synthetic profile is geometryStatus 'ad-hoc' (never 'official'); the trackday/suggestion stage stays gated; the report
    header names it a Test loop. Data is a normal session in history (circuitId = generated test-loop id, persisted with its geometry).

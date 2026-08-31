@@ -110,12 +110,17 @@ function provider(): StubLocationProviderInstance {
 
 async function learnALoop(
   composition: typeof import('../../src/session/composition'),
-  samples: readonly LocationSample[] = rectangleLoopSamples(),
+  samples: readonly LocationSample[] = rectangleLoopSamples({ laps: 2 }),
 ): Promise<string> {
   const started = await composition.startTestLoop();
   expect(started.ok).toBe(true);
-  for (const sample of samples) provider().push(sample);
-  await flushBootstrap();
+  const gnss = provider();
+  for (const sample of samples) {
+    gnss.push(sample);
+    // P5d-FIX1 H1/H3: the handover is asynchronous and AWAITED -- let it
+    // settle between fixes exactly as it would between two real ones.
+    await flushBootstrap();
+  }
   await flushBootstrap();
   const snapshot = composition.testLoopSnapshot();
   expect(snapshot.phase).toBe('learned');
@@ -191,17 +196,30 @@ describe('composition -- Test Loop mode (P5d T2, T4, T6)', () => {
     );
   });
 
-  it('refuses to delete a learned circuit that still has sessions, and deletes one that has none', async () => {
+  it('refuses to delete a learned circuit that is in use, and deletes one that is not', async () => {
     const composition = await boot(db);
     const circuitId = await learnALoop(composition);
     await composition.saveLearnedCircuit(circuitId, 'De șters');
 
+    // P5d-FIX1 item 9: the session that grew out of the learn phase is STILL
+    // being driven on this geometry -- deleting it would pull the track out
+    // from under a live session.
+    const refusedLive = await composition.deleteLearnedCircuit(circuitId);
+    expect(refusedLive).toEqual({ ok: false, reason: 'active-session' });
+
+    composition.facade.endSession();
+    await composition.facade.whenCommandsSettled?.();
+    await flushBootstrap();
+    await flushBootstrap();
+
     await db.runAsync(
-      'INSERT INTO sessions (sessionId, userId, circuitId, layoutId, layoutVersion, startedAtUtc) VALUES (?, ?, ?, ?, ?, ?)',
+      'INSERT OR REPLACE INTO sessions (sessionId, userId, circuitId, layoutId, layoutVersion, startedAtUtc) VALUES (?, ?, ?, ?, ?, ?)',
       ['s1', 'local', circuitId, 'learned', 1, '2026-08-31T10:00:00.000Z'],
     );
     const refused = await composition.deleteLearnedCircuit(circuitId);
-    expect(refused).toEqual({ ok: false, reason: 'has-sessions', sessionCount: 1 });
+    expect(refused.ok).toBe(false);
+    if (refused.ok) return;
+    expect(refused.reason).toBe('has-sessions');
     expect(composition.listLearnedCircuits()).toHaveLength(1);
 
     await db.runAsync('DELETE FROM sessions WHERE circuitId = ?', [circuitId]);

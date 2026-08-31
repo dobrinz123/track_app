@@ -6,13 +6,28 @@
  * with synthetic ones. See `docs/architecture/contracts.md` "Test Loop mode
  * (Phase 5d)".
  */
-export { DEFAULT_TEST_LOOP_CONFIG, resolveTestLoopConfig } from './config';
+export {
+  DEFAULT_TEST_LOOP_CONFIG,
+  MAX_TEST_LOOP_CORNERS,
+  resolveTestLoopConfig,
+} from './config';
 export type { TestLoopConfig, TestLoopConfigOverrides } from './config';
 
-export { detectLoopClosure, headingDifferenceDeg, toLocalTrack } from './loopClosure';
-export type { LoopClosure, LoopClosureFailureReason, LoopClosureResult } from './loopClosure';
+export {
+  detectLoopClosure,
+  headingDifferenceDeg,
+  qualifyTrack,
+  toLocalTrack,
+} from './loopClosure';
+export type {
+  LoopClosure,
+  LoopClosureFailureReason,
+  LoopClosureResult,
+  QualifiedFix,
+  QualifiedTrack,
+} from './loopClosure';
 
-export { buildLoopCentreline } from './centreline';
+export { buildLoopCentreline, overlapFractionOf } from './centreline';
 export type { LoopCentreline } from './centreline';
 
 export { deriveTestLoopCorners, findSpeedDropWindows } from './syntheticCorners';

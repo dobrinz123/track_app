@@ -5,6 +5,7 @@ import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
 import {
+  retryTestLoopAdoption,
   saveLearnedCircuit,
   settingsStore,
   startTestLoop,
@@ -129,8 +130,43 @@ export function TestLoopScreen({ navigation }: Props): React.JSX.Element {
               {strings.learnedHint}
             </Text>
             <Text style={styles.muted} maxFontSizeMultiplier={1.3}>
+              {strings.timingStarted}
+            </Text>
+            <Text style={styles.muted} maxFontSizeMultiplier={1.3}>
               {strings.adHocNote}
             </Text>
+          </View>
+        ) : null}
+
+        {snapshot.phase === 'adopting' ? (
+          <View style={styles.card}>
+            <View style={styles.rowCentered}>
+              <ActivityIndicator color={colors.accent} />
+              <Text style={styles.cardTitle} maxFontSizeMultiplier={1.3}>
+                {strings.adopting}
+              </Text>
+            </View>
+          </View>
+        ) : null}
+
+        {snapshot.phase === 'error' ? (
+          <View style={styles.failCard}>
+            <Text style={styles.cardTitle} maxFontSizeMultiplier={1.3}>
+              {strings.adoptFailedTitle}
+            </Text>
+            <Text style={styles.body} maxFontSizeMultiplier={1.3}>
+              {strings.adoptFailed(snapshot.adoptError ?? '')}
+            </Text>
+            <Pressable
+              style={[styles.button, styles.primaryButton]}
+              onPress={() => retryTestLoopAdoption()}
+              accessibilityRole="button"
+              accessibilityLabel={strings.retryAdoptA11y}
+            >
+              <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.3}>
+                {strings.retryAdopt}
+              </Text>
+            </Pressable>
           </View>
         ) : null}
 
@@ -166,7 +202,7 @@ export function TestLoopScreen({ navigation }: Props): React.JSX.Element {
               {strings.stop}
             </Text>
           </Pressable>
-        ) : (
+        ) : snapshot.phase === 'idle' || snapshot.phase === 'failed' ? (
           <Pressable
             style={[styles.button, styles.primaryButton, busy && styles.buttonDisabled]}
             onPress={onStart}
@@ -178,18 +214,18 @@ export function TestLoopScreen({ navigation }: Props): React.JSX.Element {
               {snapshot.phase === 'failed' ? strings.tryAgain : strings.start}
             </Text>
           </Pressable>
-        )}
+        ) : null}
 
         {snapshot.phase === 'learned' ? (
           <>
             <Pressable
               style={[styles.button, styles.primaryButton]}
-              onPress={() => navigation.navigate('Preflight')}
+              onPress={() => navigation.navigate('ActiveDashboard')}
               accessibilityRole="button"
-              accessibilityLabel={strings.continueA11y}
+              accessibilityLabel={strings.openDashboardA11y}
             >
               <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.3}>
-                {strings.continueToSession}
+                {strings.openDashboard}
               </Text>
             </Pressable>
 

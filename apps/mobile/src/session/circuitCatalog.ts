@@ -143,6 +143,15 @@ export function setLearnedCircuits(entries: readonly LearnedCatalogEntry[]): voi
       );
       continue;
     }
+    // P5d-FIX1 H2 (binding, Codex P5d-REV1 HIGH 2): a learned profile is
+    // FROZEN before it enters the catalog, exactly like the bundled ones
+    // (M15 above). `geometryStatus` is the single field the live-cue gate
+    // (`testLoopGuards`) and the suggestion gate (`analysisAssembly`) read;
+    // a mutable shared profile is one assignment away from turning ad-hoc
+    // geometry into `official` for every screen at once. `buildTestLoopCircuit`
+    // and the store decoder both freeze too -- this is the last of the three
+    // doors, so no path into the catalog can leave one open.
+    Object.freeze(entry.circuit.profile);
     next.set(entry.circuit.profile.circuitId, entry);
   }
   learnedEntries = next;

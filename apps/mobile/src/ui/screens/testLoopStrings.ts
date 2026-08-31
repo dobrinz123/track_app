@@ -33,6 +33,12 @@ export interface TestLoopStrings {
   learningTitle: string;
   learningHint: string;
   travelled: (metres: string) => string;
+  /** P5d-FIX1 H1/H3: the handover is running -- the track is being kept and timing started. */
+  adopting: string;
+  adoptFailedTitle: string;
+  adoptFailed: (detail: string) => string;
+  retryAdopt: string;
+  retryAdoptA11y: string;
   /** The banner the moment lap 1 closes. */
   learnedBanner: (corners: number, metres: string) => string;
   learnedHint: string;
@@ -61,9 +67,10 @@ export interface TestLoopStrings {
   deleted: string;
   /** The row label in session history. */
   historyLabel: string;
-  /** Session flow after the track is learned. */
-  continueToSession: string;
-  continueA11y: string;
+  /** Session flow after the track is learned (P5d-FIX1 H1: timing is ALREADY running). */
+  timingStarted: string;
+  openDashboard: string;
+  openDashboardA11y: string;
   sessionActive: string;
   notReady: string;
 }
@@ -85,8 +92,13 @@ const EN: TestLoopStrings = {
   learningTitle: 'Learning the track…',
   learningHint: 'Drive the loop and come back to where you started.',
   travelled: (metres) => `${metres} m driven`,
+  adopting: 'Keeping the track and starting timing…',
+  adoptFailedTitle: 'The track could not be kept',
+  adoptFailed: (detail) => `The lap was learned, but storing and selecting it failed: ${detail}`,
+  retryAdopt: 'Try again',
+  retryAdoptA11y: 'Try keeping the learned track again',
   learnedBanner: (corners, metres) => `Track learned — ${corners} corners, ${metres} m`,
-  learnedHint: 'The next laps are timed against this track.',
+  learnedHint: 'Timing is already running — keep driving and this lap is timed against the track.',
   failureTitle: 'No track was learned',
   failure: {
     'not-returned':
@@ -95,7 +107,12 @@ const EN: TestLoopStrings = {
       'That is not a loop — it came back too soon (a lap has to be at least 300 m). An out-and-back or a U-turn cannot be a circuit.',
     'heading-mismatch':
       'You passed the start point going the other way, so this is not a lap of the same loop.',
-    'insufficient-samples': 'Too few GPS fixes to build a track. Check that location is allowed.',
+    'insufficient-samples':
+      'Too few usable GPS fixes to build a track -- the ones that arrived were too inaccurate, or the car was not moving. Check that location is allowed, and drive.',
+    'closure-unconfirmed':
+      'You stopped right at the start point instead of driving through it. Keep going a few car lengths past where you began and the lap will close.',
+    'self-overlapping':
+      'That route runs back over itself -- an out-and-back, or the same short loop lapped more than once. A circuit has to be a single loop of at least 300 m.',
     'profile-invalid':
       'The lap could not be turned into a usable track — its shape is too irregular to time against.',
   },
@@ -119,8 +136,9 @@ const EN: TestLoopStrings = {
     `This circuit still has ${sessions} recorded ${sessions === 1 ? 'session' : 'sessions'}. Delete those first — without the geometry they could no longer be analysed.`,
   deleted: 'Circuit deleted.',
   historyLabel: 'Test loop',
-  continueToSession: 'Start timing',
-  continueA11y: 'Start a timed session on the track just learned',
+  timingStarted: 'Recording and timing continue without interruption — the learning lap is stored as the out lap.',
+  openDashboard: 'Open timing screen',
+  openDashboardA11y: 'Open the timing screen for the session already running',
   sessionActive: 'Finish the running session first.',
   notReady: 'The app is still starting up.',
 };
@@ -142,8 +160,13 @@ const RO: TestLoopStrings = {
   learningTitle: 'Se învață traseul…',
   learningHint: 'Condu bucla și întoarce-te de unde ai plecat.',
   travelled: (metres) => `${metres} m parcurși`,
+  adopting: 'Se păstrează traseul și pornește cronometrarea…',
+  adoptFailedTitle: 'Traseul nu a putut fi păstrat',
+  adoptFailed: (detail) => `Turul a fost învățat, dar salvarea și selectarea lui au eșuat: ${detail}`,
+  retryAdopt: 'Încearcă din nou',
+  retryAdoptA11y: 'Încearcă din nou să păstrezi traseul învățat',
   learnedBanner: (corners, metres) => `Traseu învățat — ${corners} viraje, ${metres} m`,
-  learnedHint: 'Turele următoare sunt cronometrate pe acest traseu.',
+  learnedHint: 'Cronometrarea a pornit deja — continuă să conduci și turul acesta este cronometrat pe traseu.',
   failureTitle: 'Niciun traseu învățat',
   failure: {
     'not-returned':
@@ -153,7 +176,11 @@ const RO: TestLoopStrings = {
     'heading-mismatch':
       'Ai trecut pe la punctul de plecare în sens invers, deci nu este un tur al aceleiași bucle.',
     'insufficient-samples':
-      'Prea puține poziții GPS pentru a construi un traseu. Verifică permisiunea de localizare.',
+      'Prea puține poziții GPS utilizabile pentru a construi un traseu -- cele primite au fost prea imprecise sau mașina nu se mișca. Verifică permisiunea de localizare și condu.',
+    'closure-unconfirmed':
+      'Te-ai oprit chiar în punctul de plecare, fără să treci prin el. Mai mergi câțiva metri dincolo de locul de start și bucla se va închide.',
+    'self-overlapping':
+      'Traseul trece de două ori peste el însuși -- un dus-întors sau aceeași buclă scurtă parcursă de mai multe ori. Un circuit trebuie să fie o singură buclă de cel puțin 300 m.',
     'profile-invalid':
       'Turul nu a putut fi transformat într-un traseu utilizabil — forma lui este prea neregulată pentru cronometrare.',
   },
@@ -177,8 +204,9 @@ const RO: TestLoopStrings = {
     `Circuitul are încă ${sessions} ${sessions === 1 ? 'sesiune înregistrată' : 'sesiuni înregistrate'}. Șterge-le mai întâi — fără geometrie nu ar mai putea fi analizate.`,
   deleted: 'Circuit șters.',
   historyLabel: 'Buclă de test',
-  continueToSession: 'Începe cronometrarea',
-  continueA11y: 'Începe o sesiune cronometrată pe traseul tocmai învățat',
+  timingStarted: 'Înregistrarea și cronometrarea continuă fără întrerupere — turul de învățare este salvat ca tur de ieșire.',
+  openDashboard: 'Deschide ecranul de cronometrare',
+  openDashboardA11y: 'Deschide ecranul de cronometrare al sesiunii deja pornite',
   sessionActive: 'Termină întâi sesiunea în curs.',
   notReady: 'Aplicația încă pornește.',
 };

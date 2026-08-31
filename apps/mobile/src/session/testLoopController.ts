@@ -24,7 +24,15 @@ import {
  * else is one distance calculation per fix.
  */
 
-export type TestLoopPhase = 'idle' | 'learning' | 'learned' | 'failed';
+/**
+ * P5d-FIX1 H3 (Codex P5d-REV1 HIGH 3): `learned` is reached ONLY after the
+ * learned circuit has been persisted, registered and selected. While that is
+ * in flight the phase is `adopting`; if it fails, the phase is `error` (with a
+ * retry), never `learned` -- a driver told the track was learned while the app
+ * quietly kept the previously selected circuit would then be timed, and
+ * coached, on the wrong geometry.
+ */
+export type TestLoopPhase = 'idle' | 'learning' | 'adopting' | 'learned' | 'failed' | 'error';
 
 export interface LearnedTrackSummary {
   circuitId: string;
@@ -48,6 +56,8 @@ export interface TestLoopSnapshot {
   distanceToStartM: number | null;
   learned: LearnedTrackSummary | null;
   failure: TestLoopFailure | null;
+  /** P5d-FIX1 H3: why keeping the just-learned track failed, in the driver's words. */
+  adoptError: string | null;
 }
 
 export interface TestLoopControllerDeps {
@@ -59,10 +69,12 @@ export interface TestLoopControllerDeps {
   makeDisplayName: (createdAtUtc: string) => string;
   /**
    * Called ONCE, the moment lap 1 closes, with the learned circuit. Whatever
-   * it does (persist, register, select, hand over to the session controller)
-   * is the composition layer's business, not this module's.
+   * it does (persist, register, select, roll the session into timing) is the
+   * composition layer's business, not this module's -- but it is AWAITED
+   * (P5d-FIX1 H3): the phase stays `adopting` until it resolves, and a
+   * rejection becomes `error`, never `learned`.
    */
-  onLearned: (circuit: TestLoopCircuit) => void;
+  onLearned: (circuit: TestLoopCircuit) => void | Promise<void>;
   /** Safety valve: a trace longer than this stops learning with an honest failure. */
   maxSamples?: number;
 }
@@ -88,6 +100,11 @@ export class TestLoopController {
   private departed = false;
   private learned: LearnedTrackSummary | null = null;
   private failure: TestLoopFailure | null = null;
+  /** P5d-FIX1 H3: the learned circuit waiting to be kept -- retried, never re-derived. */
+  private pendingCircuit: TestLoopCircuit | null = null;
+  private adoptError: string | null = null;
+  /** Minted once per learn phase, not once per closure ATTEMPT -- the id belongs to this drive. */
+  private circuitId: string | null = null;
   private readonly listeners = new Set<(snapshot: TestLoopSnapshot) => void>();
 
   constructor(private readonly deps: TestLoopControllerDeps) {}
@@ -108,6 +125,7 @@ export class TestLoopController {
       distanceToStartM: this.distanceToStart,
       learned: this.learned,
       failure: this.failure,
+      adoptError: this.adoptError,
     };
   }
 
@@ -119,6 +137,9 @@ export class TestLoopController {
     this.departed = false;
     this.learned = null;
     this.failure = null;
+    this.pendingCircuit = null;
+    this.adoptError = null;
+    this.circuitId = null;
     this.phase = 'learning';
     this.emit();
   }
@@ -173,12 +194,16 @@ export class TestLoopController {
     this.departed = false;
     this.learned = null;
     this.failure = null;
+    this.pendingCircuit = null;
+    this.adoptError = null;
+    this.circuitId = null;
     this.emit();
   }
 
   private tryClose(): void {
+    this.circuitId ??= this.deps.makeCircuitId();
     const result = buildTestLoopCircuit(this.samples, {
-      circuitId: this.deps.makeCircuitId(),
+      circuitId: this.circuitId,
       displayName: this.deps.makeDisplayName(this.deps.nowUtc()),
       createdAtUtc: this.deps.nowUtc(),
     });
@@ -187,15 +212,50 @@ export class TestLoopController {
       // a not-yet into a failure.
       return;
     }
-    this.phase = 'learned';
-    this.learned = {
-      circuitId: result.profile.circuitId,
-      displayName: result.profile.displayName,
-      lengthM: polylineLength(result.runtime.centerline),
-      cornerCount: result.corners.length,
-    };
-    this.deps.onLearned(result);
+    this.adopt(result);
+  }
+
+  /**
+   * P5d-FIX1 H3: the learned track is handed over and only THEN announced.
+   * `adopting` is a real, visible phase -- the driver is not told the track was
+   * learned while the app is still deciding whether it could keep it.
+   */
+  private adopt(circuit: TestLoopCircuit): void {
+    this.pendingCircuit = circuit;
+    this.phase = 'adopting';
+    this.adoptError = null;
     this.emit();
+    void Promise.resolve()
+      .then(() => this.deps.onLearned(circuit))
+      .then(() => {
+        this.phase = 'learned';
+        this.learned = {
+          circuitId: circuit.profile.circuitId,
+          displayName: circuit.profile.displayName,
+          lengthM: polylineLength(circuit.runtime.centerline),
+          cornerCount: circuit.corners.length,
+        };
+        this.adoptError = null;
+        this.emit();
+      })
+      .catch((error: unknown) => {
+        // Never `learned`: the track exists in memory but nothing else knows
+        // about it, so timing it would be timing the wrong circuit.
+        this.phase = 'error';
+        this.learned = null;
+        this.adoptError = error instanceof Error ? error.message : String(error);
+        this.emit();
+      });
+  }
+
+  /**
+   * Retries the handover of a track that WAS learned but could not be kept
+   * (P5d-FIX1 H3). The geometry is not re-derived -- it is the same lap.
+   */
+  retryAdopt(): void {
+    const circuit = this.pendingCircuit;
+    if (this.phase !== 'error' || circuit === null) return;
+    this.adopt(circuit);
   }
 
   private fail(): void {

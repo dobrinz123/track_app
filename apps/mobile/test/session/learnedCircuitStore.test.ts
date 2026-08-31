@@ -20,7 +20,7 @@ import { rectangleLoopSamples } from '../support/testLoopTraces';
  */
 
 function learn(circuitId: string, displayName: string): TestLoopCircuit {
-  const result = buildTestLoopCircuit(rectangleLoopSamples(), {
+  const result = buildTestLoopCircuit(rectangleLoopSamples({ laps: 2 }), {
     circuitId,
     displayName,
     createdAtUtc: '2026-08-31T09:00:00.000Z',
@@ -124,7 +124,7 @@ describe('SqlLearnedCircuitStore (P5d T4, T6)', () => {
     // OUT of the database -- not the in-memory one it went in as.
     const result = runSessionPipeline(entry!.runtime, rectangleLoopSamples({ laps: 4 }), {
       corridorWidthM: entry!.profile.corridorWidthM,
-      calibrateFirst: rectangleLoopSamples(),
+      calibrateFirst: rectangleLoopSamples({ laps: 2 }),
       endSession: true,
     });
 
@@ -155,5 +155,66 @@ describe('SqlLearnedCircuitStore (P5d T4, T6)', () => {
     expect(restarted.invalidRowCount()).toBe(1);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+});
+
+/**
+ * Ticket P5d-FIX1 H2 and item 10 (Codex P5d-REV1 HIGH 2 / LOW 10).
+ */
+describe('SqlLearnedCircuitStore -- hardening (P5d-FIX1 H2, item 10)', () => {
+  let db: SqlDatabase;
+
+  beforeEach(async () => {
+    db = await createSqlJsDatabase();
+    await SqlSessionRepository.create(db);
+    await migrateLearnedCircuitSchema(db);
+  });
+
+  it('hands out FROZEN profiles: geometryStatus cannot be rewritten in place', async () => {
+    const store = new SqlLearnedCircuitStore(db);
+    await store.refresh();
+    const circuit = learn('learned-frozen', 'Bucla');
+    await store.put({ profile: circuit.profile, corners: circuit.corners, saved: true });
+
+    const reloaded = new SqlLearnedCircuitStore(db);
+    await reloaded.refresh();
+    const entry = reloaded.get('learned-frozen');
+    expect(entry).not.toBeNull();
+    expect(Object.isFrozen(entry!.profile)).toBe(true);
+    expect(() => {
+      (entry!.profile as { geometryStatus: string }).geometryStatus = 'official';
+    }).toThrow(TypeError);
+    expect(entry!.profile.geometryStatus).toBe('ad-hoc');
+  });
+
+  it('refuses to insert over an id that is already taken, instead of replacing it', async () => {
+    const store = new SqlLearnedCircuitStore(db);
+    await store.refresh();
+    const first = learn('learned-collision', 'Prima');
+    await store.insert({ profile: first.profile, corners: first.corners, saved: true });
+
+    const second = learn('learned-collision', 'A doua');
+    const result = await store.insert({
+      profile: second.profile,
+      corners: second.corners,
+      saved: false,
+    });
+
+    expect(result).toEqual({ ok: false, reason: 'id-taken' });
+    // The circuit that held the id is untouched -- name, saved flag and all.
+    const kept = store.get('learned-collision');
+    expect(kept!.record.displayName).toBe('Prima');
+    expect(kept!.record.saved).toBe(true);
+  });
+
+  it('inserts a genuinely new id normally', async () => {
+    const store = new SqlLearnedCircuitStore(db);
+    await store.refresh();
+    const circuit = learn('learned-fresh', 'Nouă');
+
+    expect(await store.insert({ profile: circuit.profile, corners: circuit.corners, saved: false })).toEqual(
+      { ok: true },
+    );
+    expect(store.get('learned-fresh')).not.toBeNull();
   });
 });

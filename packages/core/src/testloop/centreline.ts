@@ -1,5 +1,10 @@
 import type { GeoProjection, LatLon, LocalPoint, LocationSample } from '../contracts';
-import { createProjection, polylineCumulative, polylineLength } from '../geometry';
+import {
+  createProjection,
+  polylineCumulative,
+  polylineLength,
+  projectOntoPolyline,
+} from '../geometry';
 
 import { resolveTestLoopConfig, type TestLoopConfigOverrides } from './config';
 import type { LoopClosure } from './loopClosure';
@@ -29,6 +34,20 @@ export interface LoopCentreline {
   direction: 'clockwise' | 'counterclockwise';
   /** Raw fixes lap 1 was built from (after the closure slice), for diagnostics. */
   sampleCount: number;
+  /**
+   * P5d-FIX1 item 6: fraction of centreline vertices that have ANOTHER vertex
+   * within `overlapRadiusM` of them while being far away ALONG the line --
+   * i.e. the same piece of road traversed twice. Near zero for an ordinary
+   * loop; near one for an out-and-back or a loop driven round twice.
+   */
+  overlapFraction: number;
+  /**
+   * P5d-FIX1 item 8: how far lap 1 fixes actually sat from the smoothed line
+   * (90th percentile, metres) -- half of what sizes the corridor.
+   */
+  dispersionM: number;
+  /** Median reported accuracy of the lap 1 fixes, metres (0 when none reported one). */
+  medianAccuracyM: number;
 }
 
 function distance(a: LocalPoint, b: LocalPoint): number {
@@ -167,5 +186,76 @@ export function buildLoopCentreline(
     startHeadingDeg: closure.startHeadingDeg,
     direction: signedArea(local) >= 0 ? 'counterclockwise' : 'clockwise',
     sampleCount: lap.length,
+    overlapFraction: overlapFractionOf(local, config.overlapRadiusM, config.overlapSeparationM),
+    dispersionM: dispersionOf(raw, local),
+    medianAccuracyM: medianAccuracyOf(lap),
   };
+}
+
+/**
+ * P5d-FIX1 item 6 -- how much of this ring lies on top of itself.
+ *
+ * Two vertices that are close in SPACE but far apart ALONG the line are the
+ * same stretch of road driven twice: an out-and-back, a short loop lapped
+ * until the cumulative distance passed the minimum, or a route that doubles
+ * back on itself. Such a "circuit" cannot be timed -- a car on that stretch is
+ * at two lap distances at once -- so the fraction is measured here and the
+ * builder refuses on it, rather than handing the ambiguity to the matcher.
+ *
+ * Adjacency is measured circularly, so the seam (where the ring closes) is
+ * never mistaken for an overlap.
+ */
+export function overlapFractionOf(
+  ring: readonly LocalPoint[],
+  radiusM: number,
+  separationM: number,
+): number {
+  const count = ring.length;
+  if (count < 8) return 0;
+  const cumulative = polylineCumulative(ring as LocalPoint[]);
+  const totalM = polylineLength(ring as LocalPoint[]);
+  let overlapped = 0;
+  for (let index = 0; index < count; index += 1) {
+    const point = ring[index];
+    if (point === undefined) continue;
+    const alongA = cumulative[index] ?? 0;
+    for (let other = 0; other < count; other += 1) {
+      if (other === index) continue;
+      const candidate = ring[other];
+      if (candidate === undefined) continue;
+      const alongB = cumulative[other] ?? 0;
+      const gap = Math.abs(alongA - alongB);
+      const alongSeparationM = Math.min(gap, totalM - gap);
+      if (alongSeparationM < separationM) continue;
+      if (distance(point, candidate) <= radiusM) {
+        overlapped += 1;
+        break;
+      }
+    }
+  }
+  return overlapped / count;
+}
+
+/** 90th-percentile distance of the raw lap 1 fixes from the smoothed ring, metres. */
+function dispersionOf(raw: readonly LocalPoint[], ring: readonly LocalPoint[]): number {
+  if (raw.length === 0 || ring.length < 2) return 0;
+  const cumulative = polylineCumulative(ring as LocalPoint[]);
+  const offsets = raw
+    .map((point) => {
+      const projected = projectOntoPolyline(point, ring as LocalPoint[], cumulative, true);
+      return distance(point, projected.point);
+    })
+    .sort((a, b) => a - b);
+  const index = Math.min(offsets.length - 1, Math.floor(offsets.length * 0.9));
+  return offsets[index] ?? 0;
+}
+
+/** Median reported horizontal accuracy of the lap 1 fixes, metres. */
+function medianAccuracyOf(lap: readonly LocationSample[]): number {
+  const values = lap
+    .map((sample) => sample.accuracyM)
+    .filter((value): value is number => value !== undefined && Number.isFinite(value))
+    .sort((a, b) => a - b);
+  if (values.length === 0) return 0;
+  return values[Math.floor(values.length / 2)] ?? 0;
 }

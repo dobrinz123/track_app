@@ -21,6 +21,7 @@ import {
   SIGNAL_TARGET_CATALOGS,
   type DeleteUserDataResult,
   type SignalTargetCatalog,
+  type TestLoopCircuit,
 } from '@circuit/core';
 // Web detection WITHOUT importing react-native: its Flow-typed source breaks
 // vitest's parser, and `typeof document` distinguishes the three real runtime
@@ -62,6 +63,7 @@ import {
   type RemoveLearnedCircuitResult,
 } from './learnedCircuitStore';
 import { TestLoopController, type TestLoopSnapshot } from './testLoopController';
+import { TestLoopLocationProvider } from './testLoopProvider';
 import { learnedCoachingEnabled } from './testLoopGuards';
 import { createLifecycleLock } from './lifecycleLock';
 import type { DevReplayScenario } from './devReplayScenarios';
@@ -1137,6 +1139,19 @@ function stopTelemetryRecording(): Promise<void> {
 }
 
 /** Starts recording for `sessionId` (no-op if telemetry is disabled or there is no on-device database, e.g. web preview) and starts `telemetryProvider`. Samples are tagged with `telemetryCurrentLapNumber`, updated whenever `facade`'s `lapNumber` changes -- a lap-crossing flush is also queued at that point (Telemetry addendum: "flushed on lap crossing"). */
+/**
+ * P5d-FIX1 H1: writes samples recorded BEFORE the session had an id (the Test
+ * Loop learn phase) into the session that grew out of them, tagged `null` --
+ * the Telemetry addendum's own meaning for "recorded before the first lap".
+ * A no-op when nothing is recording (telemetry disabled, or no database).
+ */
+async function recordPreLapTelemetry(samples: readonly TelemetrySample[]): Promise<void> {
+  const recorder = telemetryRecorder;
+  if (recorder === null || samples.length === 0) return;
+  for (const sample of samples) recorder.record(sample, null);
+  await recorder.flush();
+}
+
 function startTelemetryRecording(sessionId: string): void {
   // P4b amendment: cleared unconditionally, up front -- even on the
   // early-return (disabled/no on-device db) paths below -- so a session that
@@ -1520,7 +1535,12 @@ function createProductionController(): SessionController {
   if (gnssProvider === null) {
     throw new Error('composition: createProductionController() called before gnssProvider is ready');
   }
-  const provider = gnssProvider;
+  // P5d-FIX1 H1: while a Test Loop is learning (or has just closed), the
+  // controller is built on the BUFFERING provider, not the bare GNSS
+  // singleton -- that is what lets lap 1 and everything driven since be
+  // replayed into this controller in order, with no fix lost and no watcher
+  // stopped. Outside Test Loop mode this is exactly the old wiring.
+  const provider: LocationProvider = testLoopProvider ?? gnssProvider;
   const clock = new PerformanceNowClock();
   const restartProvider = async (): Promise<void> => {
     await provider.stop();
@@ -1709,7 +1729,14 @@ async function unlockedRebuildProductionController(): Promise<void> {
   // 'error' terminal-state path, which does not run through `endSession()`.
   // Awaited (F2 fix) so the final flush actually lands before disposal
   // proceeds, instead of racing ahead of it.
-  await stopTelemetryRecording();
+  //
+  // P5d-FIX1 H1: skipped during a Test Loop handover. Nothing is recording
+  // through a `TelemetryRecorder` at that moment (the learn phase BUFFERS,
+  // and the recorder is created a few lines later, for the session this
+  // rebuild is installing), so the only thing this call would do is stop the
+  // OBD provider that is mid-stream -- a blink in the very continuity this
+  // rebuild exists to preserve.
+  if (testLoopProvider === null) await stopTelemetryRecording();
   await staleController.dispose();
   staleFacade?.dispose();
   installProductionController();
@@ -1737,7 +1764,18 @@ async function unlockedRebuildProductionController(): Promise<void> {
   // revoked permission, an OS hiccup) must not fail the selection/recovery/
   // delete-all operation that drove this rebuild.
   try {
-    await gnssProvider?.stop();
+    // P5d-FIX1 H1 (binding, Codex P5d-REV1 HIGH 1): the ONE exception to the
+    // ownership stop. While a Test Loop is being learned or handed over, the
+    // watcher is NOT session-less -- the learn phase owns it, its fixes are
+    // being recorded, and the session about to start on the just-learned
+    // circuit is what this very rebuild exists to install. Stopping it here
+    // would blind the recording for the length of the rebuild, which is
+    // exactly the gap this fix wave removed. Everything the amendment guards
+    // against (a lit indicator with nothing behind it) still holds: the
+    // Test Loop path stops the provider itself when a learn phase ends
+    // without a track (`stopTestLoop`), and the session's own end still runs
+    // the ordinary teardown.
+    if (testLoopProvider === null) await gnssProvider?.stop();
   } catch (error) {
     console.warn('[composition] stopping the GNSS provider after a controller rebuild failed', error);
   }
@@ -1990,27 +2028,51 @@ export function selectCircuit(circuitId: string): Promise<SelectCircuitResult> {
 }
 
 // ---------------------------------------------------------------------------
-// Test Loop mode (ticket P5d, contracts.md "Test Loop mode (Phase 5d)").
+// Test Loop mode (ticket P5d, contracts.md "Test Loop mode (Phase 5d)";
+// hardened by ticket P5d-FIX1 after Codex P5d-REV1).
 //
-// The learn phase is the ONLY part of the app that consumes GNSS fixes without
-// a `SessionController`: there is no circuit to run a session against yet --
-// lap 1 is what creates one. It therefore borrows the provider under
-// `lifecycleLock`, exactly like every other operation that touches the
-// provider or the production controller, and gives it straight back.
+// The learn phase is the ONLY part of the app that consumes GNSS fixes before
+// a `SessionController` exists -- there is no circuit to run a session against
+// yet, because lap 1 is what creates one. Everything else about it is an
+// ORDINARY session, and that is the point of the P5d-FIX1 H1 rework:
 //
-// Everything after the loop closes is deliberately NOT special: the learned
-// circuit is written to the learned-circuit table, registered in the ordinary
-// catalog and SELECTED. From that instant the normal flow (preflight ->
-// calibration -> timing -> history -> analysis) runs against it unchanged --
-// which is the whole point of learning a `CircuitProfile` rather than
-// inventing a parallel "test mode" pipeline.
+//   * the recording pipeline (GNSS + IMU + OBD) runs from the moment learning
+//     starts, not from the moment a circuit exists;
+//   * every fix is kept (`TestLoopLocationProvider`), so the learning lap is
+//     recorded rather than merely watched;
+//   * when lap 1 closes, the learned circuit is persisted, registered and
+//     selected, a controller is built for it, the session starts and is armed,
+//     and the whole backlog is replayed into it IN ORDER -- no provider is
+//     stopped, nothing is dropped, and the driving that continues is timed
+//     against the track just learned. There is no "Start timing" handover any
+//     more, because there is nothing left to hand over.
+//
+// The learning lap becomes the session's OUT-LAP: its trace is stored (as lap
+// 0) and its OBD/IMU samples are recorded, and timing starts at the moment the
+// car crosses the start point it has just defined -- exactly how a session on
+// a bundled circuit behaves after the out-lap.
 // ---------------------------------------------------------------------------
 
 /** The learned circuits on this device -- `null` until bootstrap opens the database (and on web, where there is none). */
 let learnedCircuitStore: SqlLearnedCircuitStore | null = null;
 /** Learned circuits held in memory only (the web dev preview has no database to persist them to). */
 let memoryLearnedCircuits: LearnedCatalogEntry[] = [];
-let testLoopUnsubscribe: (() => void) | null = null;
+/**
+ * P5d-FIX1 H1: the buffering provider that spans the learn phase and the
+ * session that grows out of it. Non-null for exactly that window; every
+ * controller built while it is set is built ON it (see
+ * `createProductionController`), which is what makes the handover seamless.
+ */
+let testLoopProvider: TestLoopLocationProvider | null = null;
+/** OBD/IMU samples recorded during the learn phase, before a session id exists to tag them with. */
+let testLoopTelemetryBuffer: TelemetrySample[] = [];
+let unsubscribeTestLoopTelemetry: (() => void) | null = null;
+let unsubscribeTestLoopGForce: (() => void) | null = null;
+/** Whether the learn phase holds its own G-force reference (released when the session takes its own). */
+let testLoopHoldsGForce = false;
+/** Bound on the learn-phase telemetry backlog -- an hour of 10 Hz channels. */
+const MAX_TEST_LOOP_TELEMETRY_SAMPLES = 360_000;
+let testLoopTelemetryDropped = 0;
 
 /** Republishes the catalog's learned registry from the store (plus any memory-only entries). */
 function publishLearnedCircuits(): void {
@@ -2027,18 +2089,27 @@ function publishLearnedCircuits(): void {
 /**
  * The learn phase's state machine. Created once at module load: it holds no
  * database and no provider, so it is safe to exist before bootstrap.
+ *
+ * `makeCircuitId` is a UUID (P5d-FIX1 item 10) -- learned circuits are keyed
+ * by it in the database, and a timestamp-plus-random id invites exactly the
+ * collision that an `INSERT OR REPLACE` would silently resolve by destroying
+ * somebody's saved circuit.
  */
 const testLoopController = new TestLoopController({
   nowUtc: () => new Date().toISOString(),
-  makeCircuitId: () =>
-    `learned-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+  makeCircuitId: () => `learned-${newLearnedCircuitId()}`,
   makeDisplayName: (createdAtUtc) => `Test loop ${createdAtUtc.slice(0, 10)}`,
-  onLearned: (circuit) => {
-    void adoptLearnedCircuit(circuit).catch((error) => {
-      console.warn('[composition] could not adopt the learned circuit', error);
-    });
-  },
+  onLearned: (circuit) => adoptLearnedCircuit(circuit),
 });
+
+/** RFC-4122 v4 where the runtime offers one, and a random-hex fallback where it does not. */
+function newLearnedCircuitId(): string {
+  const cryptoApi = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (typeof cryptoApi?.randomUUID === 'function') return cryptoApi.randomUUID();
+  const hex = (length: number): string =>
+    Array.from({ length }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+  return `${hex(8)}-${hex(4)}-4${hex(3)}-a${hex(3)}-${hex(12)}`;
+}
 
 /** Live learn-phase state for the Test Loop screen. */
 export function subscribeTestLoop(listener: (snapshot: TestLoopSnapshot) => void): () => void {
@@ -2049,19 +2120,60 @@ export function testLoopSnapshot(): TestLoopSnapshot {
   return testLoopController.snapshot();
 }
 
-/** Stops feeding the learn phase and hands the GNSS provider back (provider-ownership rule). */
-async function releaseTestLoopProvider(): Promise<void> {
-  testLoopUnsubscribe?.();
-  testLoopUnsubscribe = null;
+/**
+ * P5d-FIX1 H1: the OBD and IMU half of the recording pipeline, running from
+ * the START of the learn phase. There is no session id yet to tag samples
+ * with, so they are buffered here and written the instant one exists -- with
+ * `lap_number` NULL, which is exactly what that column means for samples
+ * recorded before the first lap (Telemetry addendum).
+ */
+function startTestLoopRecording(): void {
+  testLoopTelemetryBuffer = [];
+  testLoopTelemetryDropped = 0;
+  if (!settingsStore.getSettings().telemetryEnabled) return;
+
+  const buffer = (sample: TelemetrySample): void => {
+    if (testLoopTelemetryBuffer.length >= MAX_TEST_LOOP_TELEMETRY_SAMPLES) {
+      testLoopTelemetryDropped += 1;
+      return;
+    }
+    testLoopTelemetryBuffer.push(sample);
+  };
+  unsubscribeTestLoopTelemetry = telemetryProvider.onSample(buffer);
+  unsubscribeTestLoopGForce = gForceProvider.onSample(buffer);
   try {
-    await gnssProvider?.stop();
+    telemetryProvider.start();
   } catch (error) {
-    console.warn('[composition] could not stop the GNSS provider after the learn phase', error);
+    console.warn('[composition] telemetryProvider.start() threw synchronously (test loop)', error);
+  }
+  if (!testLoopHoldsGForce) {
+    acquireGForce();
+    testLoopHoldsGForce = true;
+  }
+}
+
+/** Detaches the learn-phase buffers. The providers themselves keep running -- the session owns them now. */
+function detachTestLoopRecording(): void {
+  unsubscribeTestLoopTelemetry?.();
+  unsubscribeTestLoopTelemetry = null;
+  unsubscribeTestLoopGForce?.();
+  unsubscribeTestLoopGForce = null;
+}
+
+/** Releases the learn phase's own G-force hold (the session takes its own in `startTelemetryRecording`). */
+async function releaseTestLoopGForce(): Promise<void> {
+  if (!testLoopHoldsGForce) return;
+  testLoopHoldsGForce = false;
+  try {
+    await releaseGForce();
+  } catch (error) {
+    console.warn('[composition] releasing the test-loop G-force hold failed', error);
   }
 }
 
 /**
- * Begins a learn phase: starts the GNSS provider and feeds every fix to
+ * Begins a learn phase: starts the GNSS provider through the buffering
+ * wrapper, starts the OBD/IMU recording, and feeds every fix to
  * `TestLoopController`. Refuses while a session is live -- learning a track
  * and timing laps are two different uses of the same provider.
  */
@@ -2074,64 +2186,175 @@ export async function startTestLoop(): Promise<
     if (controller !== null && sessionIsActive(currentControllerState(controller))) {
       return { ok: false as const, reason: 'session-active' as const };
     }
-    testLoopUnsubscribe?.();
+    await disposeTestLoopProvider();
+    const provider = new TestLoopLocationProvider(gnssProvider, (sample) =>
+      testLoopController.feed(sample),
+    );
+    testLoopProvider = provider;
     testLoopController.start();
-    await gnssProvider.start();
-    testLoopUnsubscribe = gnssProvider.subscribe((sample) => testLoopController.feed(sample));
+    await provider.start();
+    startTestLoopRecording();
     return { ok: true as const };
   });
 }
 
 /**
- * Ends a learn phase. A loop that closed stays learned; one that did not ends
- * in `failed` carrying the reason the closure test itself gave (T5).
+ * Ends a learn phase that never closed a loop. A loop that WAS learned is
+ * already a running session by the time this can be called, and is ended
+ * through the ordinary `facade.endSession()` instead.
  */
 export async function stopTestLoop(): Promise<TestLoopSnapshot> {
   const snapshot = testLoopController.stop();
-  await releaseTestLoopProvider();
+  if (snapshot.phase !== 'learned' && snapshot.phase !== 'adopting') {
+    await lifecycleLock.run(async () => {
+      detachTestLoopRecording();
+      await releaseTestLoopGForce();
+      await stopTelemetryRecording();
+      await disposeTestLoopProvider();
+    });
+  }
   return snapshot;
 }
 
-/** Leaves Test Loop mode entirely (screen dismissed). */
+/** Leaves Test Loop mode entirely (screen dismissed without a learned track). */
 export async function resetTestLoop(): Promise<void> {
-  await releaseTestLoopProvider();
+  await stopTestLoop();
   testLoopController.reset();
 }
 
-/**
- * The moment lap 1 closes: persist the learned circuit (unsaved -- it exists
- * so THIS session can be timed, analysed and replayed), register it, and make
- * it the selected circuit so the ordinary session flow picks it up.
- */
-async function adoptLearnedCircuit(circuit: {
-  profile: CircuitProfile;
-  runtime: RuntimeProfile;
-  corners: Corner[];
-}): Promise<void> {
-  await releaseTestLoopProvider();
-  if (learnedCircuitStore !== null) {
-    await learnedCircuitStore.put({
-      profile: circuit.profile,
-      corners: circuit.corners,
-      saved: false,
-    });
-  } else {
-    // Web dev preview: no database, so the learned circuit lives for this
-    // process only. It is still a real circuit while it lasts.
-    memoryLearnedCircuits = [
-      ...memoryLearnedCircuits.filter(
-        (entry) => entry.circuit.profile.circuitId !== circuit.profile.circuitId,
-      ),
-      { circuit, listed: false },
-    ];
+/** P5d-FIX1 H3: retries a handover that failed, on the SAME learned geometry. */
+export function retryTestLoopAdoption(): void {
+  testLoopController.retryAdopt();
+}
+
+/** Stops and clears the buffering provider, handing the GNSS watcher back to the plain singleton. */
+async function disposeTestLoopProvider(): Promise<void> {
+  const provider = testLoopProvider;
+  testLoopProvider = null;
+  if (provider === null) return;
+  try {
+    await provider.stop();
+  } catch (error) {
+    console.warn('[composition] stopping the test-loop provider failed', error);
   }
-  publishLearnedCircuits();
-  const selected = await selectCircuit(circuit.profile.circuitId);
-  if (!selected.ok) {
+}
+
+/**
+ * The moment lap 1 closes (P5d-FIX1 H1 + H3). Everything below is ONE
+ * `lifecycleLock` section, and every step is awaited: the driver is only told
+ * the track was learned once it is genuinely persisted, registered, selected
+ * and being timed. A throw anywhere here surfaces as the controller's `error`
+ * phase, with a retry -- never as a session quietly running on the previously
+ * selected circuit.
+ */
+async function adoptLearnedCircuit(circuit: TestLoopCircuit): Promise<void> {
+  const provider = testLoopProvider;
+  // From here on the learner is done, but every fix still arrives and is
+  // still kept -- the controller receives them after it is armed, in order.
+  provider?.beginHandover();
+  const learningSamples = provider?.bufferedSamples() ?? [];
+
+  await lifecycleLock.run(async () => {
+    // 1. Keep it. A learned circuit that cannot be stored cannot be analysed
+    //    after a restart, so this failing is a real failure, not a warning.
+    let profile = circuit.profile;
+    if (learnedCircuitStore !== null) {
+      const stored = await putLearnedCircuitWithFreshId(circuit);
+      profile = stored.profile;
+    } else {
+      // Web dev preview: no database, so the learned circuit lives for this
+      // process only. It is still a real circuit while it lasts.
+      memoryLearnedCircuits = [
+        ...memoryLearnedCircuits.filter(
+          (entry) => entry.circuit.profile.circuitId !== profile.circuitId,
+        ),
+        { circuit: { profile, runtime: circuit.runtime, corners: circuit.corners }, listed: false },
+      ];
+    }
+    publishLearnedCircuits();
+
+    // 2. Select it, and rebuild the production controller for it. Both go
+    //    through the SAME unlocked routine `selectCircuit()` uses -- this
+    //    section already holds the lock, so the public wrapper would deadlock.
+    const entry = circuitCatalog.get(profile.circuitId);
+    if (entry === null) {
+      throw new Error(`the learned circuit ${profile.circuitId} could not be registered`);
+    }
+    await unlockedApplySelection(entry);
+    if (productionControllerCircuitId !== profile.circuitId) {
+      await unlockedRebuildProductionController();
+    }
+    const ctrl = controller;
+    if (ctrl === null) throw new Error('no production controller to run the learned circuit on');
+
+    // 3. Start the session on it and arm it. `start('session')` deliberately
+    //    skips calibration (the same path `resumeRecovery()` uses): the
+    //    geometry came from this driver, on this road, minutes ago -- there is
+    //    nothing a recognition lap could add to it.
+    await ctrl.start('session');
+    ctrl.arm();
+    const sessionId = ctrl.diagnostics().sessionId;
+    if (sessionId === null) throw new Error('the learned-circuit session did not start');
+
+    // 4. The recording pipeline the learn phase was already running now
+    //    belongs to a session: same hooks a normal start goes through.
+    const startedAtUtc = new Date().toISOString();
+    startTelemetryRecording(sessionId);
+    initializeSessionStage(sessionId, startedAtUtc);
+    if (db !== null) {
+      await setActiveSession(db, { sessionId, circuitId: profile.circuitId, startedAtUtc });
+    }
+    detachTestLoopRecording();
+    await flushTestLoopTelemetry();
+    await releaseTestLoopGForce();
+
+    // 5. The learning lap is STORED as the session's out-lap trace (lap 0),
+    //    so the drive that defined the track is not lost.
+    if (learningSamples.length > 0 && repository !== null) {
+      await repository.saveTelemetry(sessionId, 0, learningSamples);
+    }
+
+    // 6. Finally, hand the whole backlog to the controller in order -- the
+    //    learning lap first, then every fix that arrived while this ran. From
+    //    the next fix onwards the session is simply live.
+    provider?.flushBuffered();
+  });
+}
+
+/**
+ * P5d-FIX1 item 10: a plain INSERT, with a fresh id on the (vanishingly
+ * unlikely) collision, instead of an INSERT OR REPLACE that would silently
+ * overwrite an existing learned circuit -- along with the sessions recorded
+ * on it.
+ */
+async function putLearnedCircuitWithFreshId(
+  circuit: TestLoopCircuit,
+): Promise<{ profile: CircuitProfile }> {
+  const store = learnedCircuitStore;
+  if (store === null) throw new Error('no learned-circuit store');
+  let profile = circuit.profile;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const result = await store.insert({ profile, corners: circuit.corners, saved: false });
+    if (result.ok) return { profile };
     console.warn(
-      `[composition] learned circuit "${circuit.profile.circuitId}" could not be selected: ${selected.reason ?? 'unknown reason'}`,
+      `[composition] learned circuit id "${profile.circuitId}" was already taken -- regenerating`,
+    );
+    profile = Object.freeze({ ...profile, circuitId: `learned-${newLearnedCircuitId()}` });
+  }
+  throw new Error('could not find a free id for the learned circuit');
+}
+
+/** Writes the learn phase's buffered OBD/IMU samples into the session's recorder, tagged pre-lap. */
+async function flushTestLoopTelemetry(): Promise<void> {
+  const buffered = testLoopTelemetryBuffer;
+  testLoopTelemetryBuffer = [];
+  if (buffered.length === 0) return;
+  if (testLoopTelemetryDropped > 0) {
+    console.warn(
+      `[composition] ${testLoopTelemetryDropped} learn-phase telemetry samples were dropped (buffer bound)`,
     );
   }
+  await recordPreLapTelemetry(buffered);
 }
 
 /** Every learned circuit on this device, newest first (saved and unsaved alike). */
@@ -2165,25 +2388,48 @@ export async function saveLearnedCircuit(
 }
 
 /**
- * Deletes a learned circuit -- refused while any session still points at it
- * (see `SqlLearnedCircuitStore.remove`'s own doc comment for why deleting the
- * geometry under a recorded session is never the kinder option).
+ * Deletes a learned circuit.
+ *
+ * P5d-FIX1 item 9 (Codex P5d-REV1 MEDIUM 9): serialized with the session
+ * lifecycle and refused for geometry that is IN USE -- the running session's
+ * circuit, or the circuit named by the active-session pointer whose row does
+ * not exist yet. Completed sessions still block it too (see
+ * `SqlLearnedCircuitStore.remove`): a session whose geometry is gone can no
+ * longer be analysed or replayed, so the driver deletes the sessions first.
  */
 export async function deleteLearnedCircuit(
   circuitId: string,
 ): Promise<RemoveLearnedCircuitResult> {
   if (learnedCircuitStore === null) return { ok: false, reason: 'not-found' };
-  const result = await learnedCircuitStore.remove(circuitId);
-  if (result.ok) {
-    publishLearnedCircuits();
-    // The deleted circuit may have been the selected one; fall back to the
-    // catalog's own default rather than leaving a dangling selection.
-    if (settingsStore.getSettings().selectedCircuitId === circuitId) {
-      await selectCircuit(TMR_CIRCUIT_PROFILE.circuitId);
+  const store = learnedCircuitStore;
+  return lifecycleLock.run(async () => {
+    if (
+      activeController !== null &&
+      sessionIsActive(currentControllerState(activeController)) &&
+      productionControllerCircuitId === circuitId
+    ) {
+      return { ok: false as const, reason: 'active-session' as const };
     }
-  }
-  return result;
+    if (db !== null) {
+      const activeCircuitId = await getActiveSessionCircuitId(db);
+      if (activeCircuitId === circuitId) {
+        return { ok: false as const, reason: 'active-session' as const };
+      }
+    }
+    const result = await store.remove(circuitId);
+    if (result.ok) {
+      publishLearnedCircuits();
+      // The deleted circuit may have been the selected one; fall back to the
+      // catalog's own default rather than leaving a dangling selection.
+      if (settingsStore.getSettings().selectedCircuitId === circuitId) {
+        const fallback = circuitCatalog.get(TMR_CIRCUIT_PROFILE.circuitId);
+        if (fallback !== null) await unlockedApplySelection(fallback);
+      }
+    }
+    return result;
+  });
 }
+
 
 /**
  * Runs the full bootstrap sequence: opens the on-device SQLite database,

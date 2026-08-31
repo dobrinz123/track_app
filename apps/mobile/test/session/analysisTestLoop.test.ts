@@ -18,7 +18,7 @@ import { rectangleLoopSamples } from '../support/testLoopTraces';
  */
 
 function learnedCircuit(): BundledCircuit {
-  const result = buildTestLoopCircuit(rectangleLoopSamples(), {
+  const result = buildTestLoopCircuit(rectangleLoopSamples({ laps: 2 }), {
     circuitId: 'learned-analysis',
     displayName: 'Bucla de test',
     createdAtUtc: '2026-08-31T09:00:00.000Z',

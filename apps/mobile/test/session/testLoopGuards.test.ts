@@ -22,7 +22,7 @@ import { rectangleLoopSamples } from '../support/testLoopTraces';
  */
 
 function learn(): TestLoopCircuit {
-  const result = buildTestLoopCircuit(rectangleLoopSamples(), {
+  const result = buildTestLoopCircuit(rectangleLoopSamples({ laps: 2 }), {
     circuitId: 'learned-guards',
     displayName: 'Test loop',
     createdAtUtc: '2026-08-31T09:00:00.000Z',
@@ -54,7 +54,7 @@ describe('Test Loop guards (P5d T5)', () => {
       [
         {
           lap: lap(1),
-          locationSamples: rectangleLoopSamples(),
+          locationSamples: rectangleLoopSamples({ laps: 2 }),
           telemetry: [],
         },
       ],

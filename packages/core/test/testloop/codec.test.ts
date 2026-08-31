@@ -12,7 +12,7 @@ const OPTIONS = {
 };
 
 function learn() {
-  const result = buildTestLoopCircuit(rectangleLoopSamples(), OPTIONS);
+  const result = buildTestLoopCircuit(rectangleLoopSamples({ laps: 2 }), OPTIONS);
   if (!result.ok) throw new Error(`fixture did not learn a loop: ${result.reason}`);
   return result;
 }
