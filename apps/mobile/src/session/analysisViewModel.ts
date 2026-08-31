@@ -1,5 +1,8 @@
 import {
   buildReport,
+  // Ticket P5d T3: the one predicate that says "this circuit's geometry was
+  // learned from a lap, not surveyed".
+  isLearnedGeometry,
   type CoachReport,
   type CornerInsight,
   type CornerLapRow,
@@ -526,6 +529,14 @@ export interface AnalysisView {
   header: string;
   disclaimer: string;
   observationsOnly: string;
+  /**
+   * Ticket P5d T3: set only when this session was driven on a LEARNED (test
+   * loop) circuit -- the badge that names it, and the note that says the
+   * geometry is ad-hoc. `null` on every surveyed circuit, so the screen is
+   * literally unchanged for them.
+   */
+  testLoopBadge: string | null;
+  testLoopNote: string | null;
   /** Compact one-liners about the session itself (laps, clean laps, best lap). */
   summaryChips: string[];
   /** One short chip per distinct engine limitation code -- the prose is in the export. */
@@ -987,6 +998,10 @@ export function buildAnalysisScreenState(
     ),
     disclaimer: report.disclaimer,
     observationsOnly: strings.observationsOnly,
+    testLoopBadge: isLearnedGeometry(result.source.circuit.profile) ? strings.testLoopBadge : null,
+    testLoopNote: isLearnedGeometry(result.source.circuit.profile)
+      ? strings.testLoopGeometryNote
+      : null,
     summaryChips: summaryChips(result.insights, language, strings),
     limitationChips: limitationChips(result.insights, strings),
     overview: sectionLines(report, 'overview'),

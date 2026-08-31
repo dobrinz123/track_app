@@ -83,3 +83,5 @@ export * from './fixtures';
 export * from './replay';
 export * from './controller';
 export * from './telemetry';
+// Phase 5d Test Loop mode: learning an ad-hoc circuit from lap 1.
+export * from './testloop';

@@ -46,7 +46,23 @@ import { InMemorySettingsStore, chooseInitialActiveVehicleProfileId } from './se
 import { RealSessionFacade, type RealSessionFacadeCallbacks } from './realFacade';
 import { ReplayTimeSource, ReplayTimestampedLocationProvider, ScaledReplayClock } from './liveTimestampedProvider';
 import { TMR_CIRCUIT_PROFILE, TMR_CORNERS, TMR_RUNTIME_PROFILE } from './tmrProfile';
-import { circuitCatalog, resolveSelectedCircuit, type BundledCircuit } from './circuitCatalog';
+import {
+  circuitCatalog,
+  resolveSelectedCircuit,
+  setLearnedCircuits,
+  type BundledCircuit,
+  type LearnedCatalogEntry,
+} from './circuitCatalog';
+// Ticket P5d (Test Loop mode): learning an ad-hoc circuit from lap 1, keeping
+// it, and the two guards a learned circuit carries for the rest of its life.
+import { migrateLearnedCircuitSchema } from '../persistence/learnedCircuitSchema';
+import {
+  SqlLearnedCircuitStore,
+  type LearnedCircuitRecord,
+  type RemoveLearnedCircuitResult,
+} from './learnedCircuitStore';
+import { TestLoopController, type TestLoopSnapshot } from './testLoopController';
+import { learnedCoachingEnabled } from './testLoopGuards';
 import { createLifecycleLock } from './lifecycleLock';
 import type { DevReplayScenario } from './devReplayScenarios';
 import { startVoiceCoach } from './voiceCoach';
@@ -1475,8 +1491,18 @@ function currentControllerState(ctrl: SessionController): SessionState {
  * coaching config is fixed for its own lifetime -- see
  * `SessionControllerDeps.coaching`'s own doc comment in `@circuit/core`).
  */
-function coachingConfig(corners: Corner[]): { enabled: boolean; corners: Corner[] } {
-  return { enabled: settingsStore.getSettings().coachingEnabled, corners };
+function coachingConfig(
+  corners: Corner[],
+  profile: Pick<CircuitProfile, 'geometryStatus'>,
+): { enabled: boolean; corners: Corner[] } {
+  // Ticket P5d T5 (binding): a LEARNED circuit's geometry was never validated
+  // on track, so it may be timed and analysed but never coached on -- the
+  // driver's own `coachingEnabled` toggle cannot re-enable it. Voice follows
+  // for free: it speaks nothing but cues (`testLoopGuards.ts`).
+  return {
+    enabled: learnedCoachingEnabled(settingsStore.getSettings().coachingEnabled, profile),
+    corners,
+  };
 }
 
 /**
@@ -1517,7 +1543,7 @@ function createProductionController(): SessionController {
     appVersion: appVersion(),
     algorithmVersion: ALGORITHM_VERSION,
     restartProvider,
-    coaching: coachingConfig(selected.corners),
+    coaching: coachingConfig(selected.corners, selected.profile),
   });
 }
 
@@ -1963,6 +1989,202 @@ export function selectCircuit(circuitId: string): Promise<SelectCircuitResult> {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Test Loop mode (ticket P5d, contracts.md "Test Loop mode (Phase 5d)").
+//
+// The learn phase is the ONLY part of the app that consumes GNSS fixes without
+// a `SessionController`: there is no circuit to run a session against yet --
+// lap 1 is what creates one. It therefore borrows the provider under
+// `lifecycleLock`, exactly like every other operation that touches the
+// provider or the production controller, and gives it straight back.
+//
+// Everything after the loop closes is deliberately NOT special: the learned
+// circuit is written to the learned-circuit table, registered in the ordinary
+// catalog and SELECTED. From that instant the normal flow (preflight ->
+// calibration -> timing -> history -> analysis) runs against it unchanged --
+// which is the whole point of learning a `CircuitProfile` rather than
+// inventing a parallel "test mode" pipeline.
+// ---------------------------------------------------------------------------
+
+/** The learned circuits on this device -- `null` until bootstrap opens the database (and on web, where there is none). */
+let learnedCircuitStore: SqlLearnedCircuitStore | null = null;
+/** Learned circuits held in memory only (the web dev preview has no database to persist them to). */
+let memoryLearnedCircuits: LearnedCatalogEntry[] = [];
+let testLoopUnsubscribe: (() => void) | null = null;
+
+/** Republishes the catalog's learned registry from the store (plus any memory-only entries). */
+function publishLearnedCircuits(): void {
+  const stored: LearnedCatalogEntry[] =
+    learnedCircuitStore === null
+      ? []
+      : learnedCircuitStore.entries().map((entry) => ({
+          circuit: { profile: entry.profile, runtime: entry.runtime, corners: entry.corners },
+          listed: entry.record.saved,
+        }));
+  setLearnedCircuits([...stored, ...memoryLearnedCircuits]);
+}
+
+/**
+ * The learn phase's state machine. Created once at module load: it holds no
+ * database and no provider, so it is safe to exist before bootstrap.
+ */
+const testLoopController = new TestLoopController({
+  nowUtc: () => new Date().toISOString(),
+  makeCircuitId: () =>
+    `learned-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+  makeDisplayName: (createdAtUtc) => `Test loop ${createdAtUtc.slice(0, 10)}`,
+  onLearned: (circuit) => {
+    void adoptLearnedCircuit(circuit).catch((error) => {
+      console.warn('[composition] could not adopt the learned circuit', error);
+    });
+  },
+});
+
+/** Live learn-phase state for the Test Loop screen. */
+export function subscribeTestLoop(listener: (snapshot: TestLoopSnapshot) => void): () => void {
+  return testLoopController.subscribe(listener);
+}
+
+export function testLoopSnapshot(): TestLoopSnapshot {
+  return testLoopController.snapshot();
+}
+
+/** Stops feeding the learn phase and hands the GNSS provider back (provider-ownership rule). */
+async function releaseTestLoopProvider(): Promise<void> {
+  testLoopUnsubscribe?.();
+  testLoopUnsubscribe = null;
+  try {
+    await gnssProvider?.stop();
+  } catch (error) {
+    console.warn('[composition] could not stop the GNSS provider after the learn phase', error);
+  }
+}
+
+/**
+ * Begins a learn phase: starts the GNSS provider and feeds every fix to
+ * `TestLoopController`. Refuses while a session is live -- learning a track
+ * and timing laps are two different uses of the same provider.
+ */
+export async function startTestLoop(): Promise<
+  { ok: true } | { ok: false; reason: 'not-ready' | 'session-active' }
+> {
+  await ready();
+  return lifecycleLock.run(async () => {
+    if (gnssProvider === null) return { ok: false as const, reason: 'not-ready' as const };
+    if (controller !== null && sessionIsActive(currentControllerState(controller))) {
+      return { ok: false as const, reason: 'session-active' as const };
+    }
+    testLoopUnsubscribe?.();
+    testLoopController.start();
+    await gnssProvider.start();
+    testLoopUnsubscribe = gnssProvider.subscribe((sample) => testLoopController.feed(sample));
+    return { ok: true as const };
+  });
+}
+
+/**
+ * Ends a learn phase. A loop that closed stays learned; one that did not ends
+ * in `failed` carrying the reason the closure test itself gave (T5).
+ */
+export async function stopTestLoop(): Promise<TestLoopSnapshot> {
+  const snapshot = testLoopController.stop();
+  await releaseTestLoopProvider();
+  return snapshot;
+}
+
+/** Leaves Test Loop mode entirely (screen dismissed). */
+export async function resetTestLoop(): Promise<void> {
+  await releaseTestLoopProvider();
+  testLoopController.reset();
+}
+
+/**
+ * The moment lap 1 closes: persist the learned circuit (unsaved -- it exists
+ * so THIS session can be timed, analysed and replayed), register it, and make
+ * it the selected circuit so the ordinary session flow picks it up.
+ */
+async function adoptLearnedCircuit(circuit: {
+  profile: CircuitProfile;
+  runtime: RuntimeProfile;
+  corners: Corner[];
+}): Promise<void> {
+  await releaseTestLoopProvider();
+  if (learnedCircuitStore !== null) {
+    await learnedCircuitStore.put({
+      profile: circuit.profile,
+      corners: circuit.corners,
+      saved: false,
+    });
+  } else {
+    // Web dev preview: no database, so the learned circuit lives for this
+    // process only. It is still a real circuit while it lasts.
+    memoryLearnedCircuits = [
+      ...memoryLearnedCircuits.filter(
+        (entry) => entry.circuit.profile.circuitId !== circuit.profile.circuitId,
+      ),
+      { circuit, listed: false },
+    ];
+  }
+  publishLearnedCircuits();
+  const selected = await selectCircuit(circuit.profile.circuitId);
+  if (!selected.ok) {
+    console.warn(
+      `[composition] learned circuit "${circuit.profile.circuitId}" could not be selected: ${selected.reason ?? 'unknown reason'}`,
+    );
+  }
+}
+
+/** Every learned circuit on this device, newest first (saved and unsaved alike). */
+export function listLearnedCircuits(): LearnedCircuitRecord[] {
+  if (learnedCircuitStore !== null) return learnedCircuitStore.entries().map((e) => e.record);
+  return memoryLearnedCircuits.map((entry) => ({
+    circuitId: entry.circuit.profile.circuitId,
+    displayName: entry.circuit.profile.displayName,
+    lengthM: entry.circuit.profile.totalLengthM,
+    cornerCount: entry.circuit.corners.length,
+    createdAtUtc: entry.circuit.profile.createdAtUtc,
+    saved: entry.listed,
+  }));
+}
+
+/**
+ * Ticket T6's "Save circuit": names a learned loop and promotes it to a
+ * first-class entry in the circuit list. Never available without a database --
+ * a circuit that cannot outlive the process was never saved.
+ */
+export async function saveLearnedCircuit(
+  circuitId: string,
+  displayName: string,
+): Promise<{ ok: true } | { ok: false; reason: 'not-ready' | 'unknown-circuit' | 'empty-name' }> {
+  if (displayName.trim().length === 0) return { ok: false, reason: 'empty-name' };
+  if (learnedCircuitStore === null) return { ok: false, reason: 'not-ready' };
+  const saved = await learnedCircuitStore.markSaved(circuitId, displayName);
+  if (!saved) return { ok: false, reason: 'unknown-circuit' };
+  publishLearnedCircuits();
+  return { ok: true };
+}
+
+/**
+ * Deletes a learned circuit -- refused while any session still points at it
+ * (see `SqlLearnedCircuitStore.remove`'s own doc comment for why deleting the
+ * geometry under a recorded session is never the kinder option).
+ */
+export async function deleteLearnedCircuit(
+  circuitId: string,
+): Promise<RemoveLearnedCircuitResult> {
+  if (learnedCircuitStore === null) return { ok: false, reason: 'not-found' };
+  const result = await learnedCircuitStore.remove(circuitId);
+  if (result.ok) {
+    publishLearnedCircuits();
+    // The deleted circuit may have been the selected one; fall back to the
+    // catalog's own default rather than leaving a dangling selection.
+    if (settingsStore.getSettings().selectedCircuitId === circuitId) {
+      await selectCircuit(TMR_CIRCUIT_PROFILE.circuitId);
+    }
+  }
+  return result;
+}
+
 /**
  * Runs the full bootstrap sequence: opens the on-device SQLite database,
  * builds the real `SessionController` + `GnssLocationProvider`, checks for a
@@ -1983,6 +2205,9 @@ async function runBootstrap(): Promise<void> {
     gnssProvider = null;
     historyStore = null;
     activeController = null;
+    // Ticket P5d: a retry re-reads the learned circuits from the database it
+    // is about to reopen -- never from a half-built previous attempt.
+    learnedCircuitStore = null;
 
     if (IS_WEB_RUNTIME) {
       // Web preview is a development surface only: expo-sqlite's wasm backend
@@ -2031,6 +2256,25 @@ async function runBootstrap(): Promise<void> {
       // profile; re-read now that the ACTIVE one is known.
       await refreshVehicleProfileBindingsCache();
     }
+
+    // Ticket P5d T6 (binding): learned circuits are registered in the catalog
+    // BEFORE the production controller and the history store are built, so a
+    // persisted `selectedCircuitId` naming a learned circuit resolves to its
+    // real geometry instead of falling back to the default. A failure here is
+    // warned about and survived: one unreadable learned circuit must never
+    // stop the app from starting.
+    if (db !== null) {
+      try {
+        await migrateLearnedCircuitSchema(db);
+        const learned = new SqlLearnedCircuitStore(db);
+        await learned.refresh();
+        learnedCircuitStore = learned;
+      } catch (error) {
+        learnedCircuitStore = null;
+        console.warn('[composition] learned circuits unavailable this launch', error);
+      }
+    }
+    publishLearnedCircuits();
 
     // F3 fix: build the production controller/facade now (so `controller`
     // exists for the preflight gate registered just below), but do NOT
@@ -2757,7 +3001,7 @@ async function unlockedStartDevReplaySession(
         await replayProvider.stop();
         await replayProvider.start();
       },
-      coaching: coachingConfig(replayEntry?.corners ?? TMR_CORNERS),
+      coaching: coachingConfig(replayEntry?.corners ?? TMR_CORNERS, replayEntry?.profile ?? TMR_CIRCUIT_PROFILE),
     });
 
     replayController = devController;

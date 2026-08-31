@@ -1,9 +1,12 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { buildTestLoopCircuit, type CircuitProfile, type Corner, type RuntimeProfile } from '@circuit/core';
+import { rectangleLoopSamples } from '../support/testLoopTraces';
 import {
   circuitCatalog,
   MOTORPARK_CIRCUIT_PROFILE,
   MOTORPARK_RUNTIME_PROFILE,
   resolveSelectedCircuit,
+  setLearnedCircuits,
 } from '../../src/session/circuitCatalog';
 import { TMR_CIRCUIT_PROFILE, TMR_CORNERS, TMR_RUNTIME_PROFILE } from '../../src/session/tmrProfile';
 
@@ -18,6 +21,9 @@ function summaryFor(profile: typeof TMR_CIRCUIT_PROFILE) {
     layoutVersion: profile.layoutVersion,
     geometryStatus: profile.geometryStatus,
     sectorStatus: profile.sectorStatus,
+    // Ticket P5d T6: every summary now says where the circuit came from; the
+    // bundled assets are, and stay, `'bundled'`.
+    origin: 'bundled',
   };
 }
 
@@ -130,6 +136,67 @@ describe('resolveSelectedCircuit (ticket CN-W3)', () => {
     expect(resolved.corners).toBe(TMR_CORNERS);
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy.mock.calls[0]![0]).toContain('does-not-exist');
+    warnSpy.mockRestore();
+  });
+});
+
+/**
+ * Ticket P5d T6 -- learned circuits share the catalog with the bundled ones,
+ * without ever becoming indistinguishable from them.
+ */
+describe('learned circuits in the catalog (P5d T6)', () => {
+  const learned = (): { profile: CircuitProfile; runtime: RuntimeProfile; corners: Corner[] } => {
+    const result = buildTestLoopCircuit(rectangleLoopSamples(), {
+      circuitId: 'learned-catalog',
+      displayName: 'Bucla mea',
+      createdAtUtc: '2026-08-31T09:00:00.000Z',
+    });
+    if (!result.ok) throw new Error(`fixture did not learn a loop: ${result.reason}`);
+    return { profile: result.profile, runtime: result.runtime, corners: result.corners };
+  };
+
+  afterEach(() => {
+    setLearnedCircuits([]);
+  });
+
+  it('lists a SAVED learned circuit beside the bundled ones, labelled as learned', () => {
+    setLearnedCircuits([{ circuit: learned(), listed: true }]);
+    const list = circuitCatalog.list();
+
+    expect(list).toHaveLength(3);
+    const row = list.find((entry) => entry.circuitId === 'learned-catalog');
+    expect(row?.origin).toBe('learned');
+    expect(row?.geometryStatus).toBe('ad-hoc');
+    // The bundled two are untouched, and still say so.
+    expect(list.filter((entry) => entry.origin === 'bundled')).toHaveLength(2);
+  });
+
+  it('resolves an UNLISTED learned circuit (a one-off test loop) without listing it', () => {
+    setLearnedCircuits([{ circuit: learned(), listed: false }]);
+
+    expect(circuitCatalog.list()).toHaveLength(2);
+    expect(circuitCatalog.get('learned-catalog')).not.toBeNull();
+    expect(resolveSelectedCircuit({ selectedCircuitId: 'learned-catalog' }).profile.circuitId).toBe(
+      'learned-catalog',
+    );
+  });
+
+  it('never lets a learned circuit shadow a bundled id', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const impostor = learned();
+    setLearnedCircuits([
+      {
+        circuit: {
+          ...impostor,
+          profile: { ...impostor.profile, circuitId: TMR_CIRCUIT_PROFILE.circuitId },
+        },
+        listed: true,
+      },
+    ]);
+
+    expect(circuitCatalog.get(TMR_CIRCUIT_PROFILE.circuitId)!.profile).toBe(TMR_CIRCUIT_PROFILE);
+    expect(circuitCatalog.list()).toHaveLength(2);
+    expect(warnSpy).toHaveBeenCalled();
     warnSpy.mockRestore();
   });
 });

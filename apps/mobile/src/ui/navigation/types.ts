@@ -17,6 +17,13 @@ export type RootStackParamList = {
    * session, and says so when there is none.
    */
   PitView: undefined;
+  /**
+   * Ticket P5d T2 (binding, user decision): Test Loop mode is a FIRST-CLASS
+   * product route, reached from the circuit selection screen -- learning a
+   * track is how an unregistered circuit becomes usable, so there is no
+   * developer gate anywhere in this flow.
+   */
+  TestLoop: undefined;
   PersonalBest: undefined;
   Settings: undefined;
   Telemetry: undefined;

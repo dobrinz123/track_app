@@ -26,6 +26,10 @@ import { PitViewScreen } from '../screens/PitViewScreen';
 import { resolvePitScreenStrings } from '../screens/trackdayStrings';
 import { useSettings } from '../hooks/useSettings';
 import { settingsStore } from '../../session/composition';
+// Ticket P5d T2: Test Loop mode is an ordinary product screen, registered in
+// every build, entered from the circuit selection screen.
+import { TestLoopScreen } from '../screens/TestLoopScreen';
+import { resolveTestLoopStrings } from '../screens/testLoopStrings';
 import { PersonalBestScreen } from '../screens/PersonalBestScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
 import { TelemetryScreen } from '../screens/TelemetryScreen';
@@ -57,6 +61,7 @@ export function RootNavigator(): React.JSX.Element {
   const settings = useSettings(settingsStore);
   const analysisStrings = resolveAnalysisScreenStrings(settings.language);
   const pitStrings = resolvePitScreenStrings(settings.language);
+  const testLoopStrings = resolveTestLoopStrings(settings.language);
   return (
     <Stack.Navigator
       initialRouteName="CircuitSelection"
@@ -106,6 +111,11 @@ export function RootNavigator(): React.JSX.Element {
         name="PitView"
         component={PitViewScreen}
         options={{ title: pitStrings.screenTitle }}
+      />
+      <Stack.Screen
+        name="TestLoop"
+        component={TestLoopScreen}
+        options={{ title: testLoopStrings.screenTitle }}
       />
       <Stack.Screen name="PersonalBest" component={PersonalBestScreen} options={{ title: 'Personal Best' }} />
       <Stack.Screen name="Settings" component={SettingsScreen} options={{ title: 'Settings' }} />

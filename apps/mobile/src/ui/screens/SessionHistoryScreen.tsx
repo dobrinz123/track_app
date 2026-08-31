@@ -11,6 +11,9 @@ import { resolveSelectedCircuit } from '../../session/circuitCatalog';
 import { layoutLabel } from '../data/circuit';
 import { useSettings } from '../hooks/useSettings';
 import { resolveAnalysisScreenStrings } from './analysisStrings';
+// Ticket P5d T4: a learned circuit's sessions are labelled as test loops, so
+// this list never presents ad-hoc geometry as a surveyed circuit.
+import { resolveTestLoopStrings } from './testLoopStrings';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'SessionHistory'>;
 
@@ -23,6 +26,8 @@ export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
   // Ticket P5b B1 (binding): every stored session -- of EITHER circuit -- can be
   // analysed from here. Ordinary product surface, no developer gate.
   const analysisStrings = resolveAnalysisScreenStrings(settings.language);
+  const testLoopStrings = resolveTestLoopStrings(settings.language);
+  const learnedCircuit = selected.profile.geometryStatus === 'ad-hoc';
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -33,7 +38,8 @@ export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
         <Text style={styles.circuit} maxFontSizeMultiplier={1.3}>
           {/* ticket CN-FIX3b: friendly layout label; the id itself still keys
               this store's own per-circuit history/PB lookups. */}
-          {selected.profile.displayName} · {layoutLabel(selected.profile.layoutId)}
+          {selected.profile.displayName} ·{' '}
+          {learnedCircuit ? testLoopStrings.learnedLabel : layoutLabel(selected.profile.layoutId)}
         </Text>
 
         {pb ? (
@@ -65,6 +71,7 @@ export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
                     {formatDateUtc(session.displayDateUtc)}
                   </Text>
                   <Text style={styles.sessionMeta} maxFontSizeMultiplier={1.3}>
+                    {learnedCircuit ? `${testLoopStrings.historyLabel} · ` : ''}
                     {session.laps.length} laps · best <TimeDisplayInline ms={bestMs} />
                   </Text>
                 </View>

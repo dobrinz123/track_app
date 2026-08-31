@@ -152,8 +152,13 @@ export function AnalysisScreen({ route }: Props): React.JSX.Element {
           {view.title}
         </Text>
         <Text style={styles.header} maxFontSizeMultiplier={1.3}>
-          {view.header}
+          {view.testLoopBadge === null ? view.header : `${view.testLoopBadge} · ${view.header}`}
         </Text>
+        {view.testLoopNote === null ? null : (
+          <Text style={styles.header} maxFontSizeMultiplier={1.3}>
+            {view.testLoopNote}
+          </Text>
+        )}
         <View style={styles.chipRow}>
           {view.summaryChips.map((chip) => (
             <Chip key={chip} label={chip} />

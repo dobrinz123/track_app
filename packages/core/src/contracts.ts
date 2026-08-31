@@ -47,7 +47,14 @@ export interface CircuitProfile {
   country: string; locality: string;
   layoutId: string; layoutVersion: number;
   source: { name: string; url?: string; license?: string; retrievedAt?: string };
-  geometryStatus: 'official' | 'community-derived' | 'dev-only';
+  /**
+   * How the geometry got here. `'ad-hoc'` (Phase 5d Test Loop mode) is
+   * geometry LEARNED on device from one lap of driving -- never surveyed,
+   * never validated on track. It is the value every honesty gate reads to
+   * decide a circuit may be timed and analysed but never advised on
+   * (`analysisAssembly`'s `geometryValidated`, which admits `'official'` only).
+   */
+  geometryStatus: 'official' | 'community-derived' | 'dev-only' | 'ad-hoc';
   sectorStatus: 'official' | 'app-defined';
   direction: 'clockwise' | 'counterclockwise';
   centerline: LatLon[];               // closed loop implied (last != first; wrap implicit)

@@ -30,6 +30,14 @@ export interface CircuitSummary {
   layoutVersion: number;
   geometryStatus: string;
   sectorStatus: string;
+  /**
+   * Ticket P5d T6: where this circuit came from. `'bundled'` is a reviewed
+   * asset that ships with the app; `'learned'` is geometry this device learned
+   * from one lap of driving (`geometryStatus: 'ad-hoc'`). The selection list
+   * labels the two differently -- a learned circuit must never look like a
+   * surveyed one.
+   */
+  origin: 'bundled' | 'learned';
 }
 
 /** A bundled circuit's full data -- profile, runtime companion, and its coaching corner set (ticket CN-W3, contracts.md's Multi-circuit selection addendum). */
@@ -97,13 +105,67 @@ const ENTRIES: ReadonlyMap<string, BundledCircuit> = new Map([
  * wrapped in the multi-circuit-ready interface. NOT yet backed by
  * `@circuit/core`'s `createCircuitCatalog` (still landing on a concurrent
  * branch); this in-app implementation is deliberately swappable in place.
+ * Since ticket P5d T6 it serves BUNDLED entries plus the learned registry
+ * immediately below.
  */
+
+/**
+ * Ticket P5d T6 -- circuits this device LEARNED (Test Loop mode), registered
+ * at bootstrap by `composition.ts` from `SqlLearnedCircuitStore`.
+ *
+ * Two visibilities, because a learned loop means two different things:
+ *  - `listed: true`  -- the driver saved and named it, so it belongs in the
+ *    selection list beside the bundled circuits (labelled as learned);
+ *  - `listed: false` -- a one-off test loop, kept ONLY so its own session can
+ *    still be resolved (history, analysis, replay) after a restart.
+ * `get()` resolves BOTH; `list()` shows only the first kind.
+ *
+ * This registry is module state deliberately: the catalog is the single
+ * lookup every screen, controller and analysis pass already goes through, so
+ * a learned circuit becomes a first-class circuit by appearing here rather
+ * than by every call site learning about a second source.
+ */
+export interface LearnedCatalogEntry {
+  circuit: BundledCircuit;
+  listed: boolean;
+}
+
+let learnedEntries: ReadonlyMap<string, LearnedCatalogEntry> = new Map();
+
+/** Replaces the learned-circuit registry wholesale (bootstrap, and after every save/delete). */
+export function setLearnedCircuits(entries: readonly LearnedCatalogEntry[]): void {
+  const next = new Map<string, LearnedCatalogEntry>();
+  for (const entry of entries) {
+    // A bundled circuit id can never be shadowed by a learned one.
+    if (ENTRIES.has(entry.circuit.profile.circuitId)) {
+      console.warn(
+        `[circuitCatalog] ignoring learned circuit "${entry.circuit.profile.circuitId}": that id is a bundled circuit`,
+      );
+      continue;
+    }
+    next.set(entry.circuit.profile.circuitId, entry);
+  }
+  learnedEntries = next;
+}
+
+/** True when `circuitId` is a learned (ad-hoc) circuit rather than a bundled one. */
+export function isLearnedCircuitId(circuitId: string): boolean {
+  return learnedEntries.has(circuitId);
+}
+
 export const circuitCatalog: AppCircuitCatalog = {
   list(): CircuitSummary[] {
-    return Array.from(ENTRIES.values(), (entry) => summarize(entry.profile));
+    const bundled = Array.from(ENTRIES.values(), (entry) => ({
+      ...summarize(entry.profile),
+      origin: 'bundled' as const,
+    }));
+    const learned = Array.from(learnedEntries.values())
+      .filter((entry) => entry.listed)
+      .map((entry) => ({ ...summarize(entry.circuit.profile), origin: 'learned' as const }));
+    return [...bundled, ...learned];
   },
   get(circuitId: string) {
-    return ENTRIES.get(circuitId) ?? null;
+    return ENTRIES.get(circuitId) ?? learnedEntries.get(circuitId)?.circuit ?? null;
   },
 };
 
@@ -115,8 +177,13 @@ export const circuitCatalog: AppCircuitCatalog = {
  * `console.warn`, never a crash and never a fetch.
  */
 export function resolveSelectedCircuit(settings: Pick<AppSettings, 'selectedCircuitId'>): BundledCircuit {
-  const entry = ENTRIES.get(settings.selectedCircuitId);
-  if (entry !== undefined) return entry;
+  // Ticket P5d T6: bundled OR learned -- a saved learned circuit is selectable
+  // exactly like a bundled one, so this must resolve through the catalog
+  // rather than the bundled map alone. (Without this the session controller
+  // and history store for a learned circuit would silently be built for the
+  // default circuit instead.)
+  const entry = circuitCatalog.get(settings.selectedCircuitId);
+  if (entry !== null) return entry;
   console.warn(
     `[circuitCatalog] resolveSelectedCircuit: unknown selectedCircuitId "${settings.selectedCircuitId}" -- falling back to ${TMR_CIRCUIT_PROFILE.circuitId}`,
   );

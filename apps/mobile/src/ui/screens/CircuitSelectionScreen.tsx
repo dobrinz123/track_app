@@ -7,8 +7,10 @@ import { colors, fontFamily, radii, spacing, typography } from '../theme';
 import { TraceLogo } from '../components/TraceLogo';
 import { TraceWordmark } from '../components/TraceWordmark';
 import { circuitCatalog, type CircuitSummary } from '../../session/circuitCatalog';
-import { selectCircuit } from '../../session/composition';
+import { selectCircuit, settingsStore } from '../../session/composition';
 import { layoutLabel } from '../data/circuit';
+import { useSettings } from '../hooks/useSettings';
+import { resolveTestLoopStrings, type TestLoopStrings } from './testLoopStrings';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'CircuitSelection'>;
 
@@ -19,6 +21,8 @@ type Props = NativeStackScreenProps<RootStackParamList, 'CircuitSelection'>;
  * disclaimer live on S2 (Circuit Detail) and Settings > About now, not here.
  */
 export function CircuitSelectionScreen({ navigation }: Props): React.JSX.Element {
+  const settings = useSettings(settingsStore);
+  const testLoopStrings = resolveTestLoopStrings(settings.language);
   const circuits = circuitCatalog.list();
   // H1 fix (ticket CN-FIX2, binding): `selectCircuit()` now awaits bootstrap
   // internally, so a tap during a slow cold-launch can take a moment to
@@ -75,14 +79,39 @@ export function CircuitSelectionScreen({ navigation }: Props): React.JSX.Element
               bordered={index > 0}
               disabled={selectingId !== null}
               busy={selectingId === circuit.circuitId}
+              learnedLabel={testLoopStrings.learnedLabel}
               onPress={() => handlePress(circuit.circuitId)}
             />
           ))}
-          <View style={[styles.moreRow, circuits.length > 0 && styles.rowBorder]}>
-            <Text style={styles.moreText} maxFontSizeMultiplier={1.3}>
-              More circuits coming
+          {
+            // Ticket P5d T2/T6 (binding, user decision): learning a track is a
+            // first-class way to get a circuit, so its entry point sits HERE,
+            // under the circuits, with no developer gate of any kind.
+          }
+          <Pressable
+            style={[styles.row, styles.rowBorder, selectingId !== null && styles.rowDisabled]}
+            onPress={() => navigation.navigate('TestLoop')}
+            disabled={selectingId !== null}
+            accessibilityRole="button"
+            accessibilityLabel={testLoopStrings.entryA11y}
+          >
+            <View style={styles.rowMain}>
+              <Text style={styles.rowTitle} maxFontSizeMultiplier={1.3}>
+                {testLoopStrings.entryTitle}
+              </Text>
+              <Text style={styles.rowSubtitle} maxFontSizeMultiplier={1.3}>
+                {testLoopStrings.entrySubtitle}
+              </Text>
+            </View>
+            <Text
+              style={styles.chevron}
+              maxFontSizeMultiplier={1.3}
+              accessibilityElementsHidden
+              importantForAccessibility="no"
+            >
+              ›
             </Text>
-          </View>
+          </Pressable>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -94,15 +123,19 @@ function CircuitRow({
   bordered,
   disabled,
   busy,
+  learnedLabel,
   onPress,
 }: {
   circuit: CircuitSummary;
   bordered: boolean;
   disabled: boolean;
   busy: boolean;
+  /** Ticket P5d T6: the label a LEARNED circuit carries, in the app's language. */
+  learnedLabel: TestLoopStrings['learnedLabel'];
   onPress: () => void;
 }): React.JSX.Element {
   const lengthKm = (circuit.lengthM / 1000).toFixed(3);
+  const learned = circuit.origin === 'learned';
   // ticket CN-FIX3b: the chip and the spoken label both read the friendly
   // layout label; `circuit.layoutId` itself (the catalog/storage key) is
   // untouched.
@@ -114,14 +147,14 @@ function CircuitRow({
       disabled={disabled}
       accessibilityRole="button"
       accessibilityState={{ disabled, busy }}
-      accessibilityLabel={`${circuit.displayName}, ${circuit.locality}, ${circuit.country}, ${lengthKm} kilometers, ${layout}. View circuit details.`}
+      accessibilityLabel={`${circuit.displayName}, ${learned ? learnedLabel : `${circuit.locality}, ${circuit.country}`}, ${lengthKm} kilometers, ${layout}. View circuit details.`}
     >
       <View style={styles.rowMain}>
         <Text style={styles.rowTitle} maxFontSizeMultiplier={1.3}>
           {circuit.displayName}
         </Text>
         <Text style={styles.rowSubtitle} maxFontSizeMultiplier={1.3}>
-          {circuit.locality} · {circuit.country}
+          {learned ? learnedLabel : `${circuit.locality} · ${circuit.country}`}
         </Text>
         <View style={styles.rowMetaRow}>
           <Text style={styles.rowMeta} maxFontSizeMultiplier={1.3}>

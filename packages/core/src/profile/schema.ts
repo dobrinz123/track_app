@@ -40,7 +40,10 @@ export const circuitProfileSchema: z.ZodType<CircuitProfile> = z
         retrievedAt: z.string().optional(),
       })
       .strict(),
-    geometryStatus: z.enum(['official', 'community-derived', 'dev-only']),
+    // 'ad-hoc' (Phase 5d): geometry learned on device from lap 1. Accepted here
+    // so a learned circuit is stored and reloaded through the SAME validation
+    // path a bundled asset uses -- see src/testloop/codec.ts.
+    geometryStatus: z.enum(['official', 'community-derived', 'dev-only', 'ad-hoc']),
     sectorStatus: z.enum(['official', 'app-defined']),
     direction: z.enum(['clockwise', 'counterclockwise']),
     centerline: z.array(latLonSchema).max(5000),
