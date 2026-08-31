@@ -134,6 +134,46 @@ export interface AssembledAnalysis {
 }
 
 /**
+ * How many samples carried each decoded channel, over some set of samples.
+ * Kept separate from the fractions so the SESSION's coverage can be summed out
+ * of the per-lap counts instead of re-walking every sample of every lap
+ * (ticket P5-FIX2 W2: the final pass is chunked lap by lap).
+ */
+interface ChannelCounts {
+  total: number;
+  counts: Map<CoachingChannelId, number>;
+}
+
+function countChannels(samples: readonly CornerLapSample[]): ChannelCounts {
+  const counts = new Map<CoachingChannelId, number>();
+  for (const sample of samples) {
+    const channels = sample.channels;
+    if (channels === undefined) continue;
+    for (const channel of ANALYSIS_CHANNELS) {
+      if (Number.isFinite(channels[channel])) {
+        counts.set(channel, (counts.get(channel) ?? 0) + 1);
+      }
+    }
+  }
+  return { total: samples.length, counts };
+}
+
+/** Only channels that actually appear, in `ANALYSIS_CHANNELS` order (byte-stable). */
+function coverageFromCounts(counted: ChannelCounts): AnalysisChannelCoverage[] {
+  const out: AnalysisChannelCoverage[] = [];
+  for (const channel of ANALYSIS_CHANNELS) {
+    const sampleCount = counted.counts.get(channel) ?? 0;
+    if (sampleCount === 0) continue;
+    out.push({
+      channel,
+      fraction: counted.total > 0 ? sampleCount / counted.total : 0,
+      sampleCount,
+    });
+  }
+  return out;
+}
+
+/**
  * Per-channel coverage over already-projected samples: the fraction of samples
  * carrying a finite value for it. Only channels that actually appear are
  * returned, in `ANALYSIS_CHANNELS` order, so the result is byte-stable.
@@ -145,24 +185,7 @@ export interface AssembledAnalysis {
 export function channelCoverage(
   samples: readonly CornerLapSample[],
 ): AnalysisChannelCoverage[] {
-  const counts = new Map<CoachingChannelId, number>();
-  for (const sample of samples) {
-    const channels = sample.channels;
-    if (channels === undefined) continue;
-    for (const channel of ANALYSIS_CHANNELS) {
-      if (Number.isFinite(channels[channel])) {
-        counts.set(channel, (counts.get(channel) ?? 0) + 1);
-      }
-    }
-  }
-  const total = samples.length;
-  const out: AnalysisChannelCoverage[] = [];
-  for (const channel of ANALYSIS_CHANNELS) {
-    const sampleCount = counts.get(channel) ?? 0;
-    if (sampleCount === 0) continue;
-    out.push({ channel, fraction: total > 0 ? sampleCount / total : 0, sampleCount });
-  }
-  return out;
+  return coverageFromCounts(countChannels(samples));
 }
 
 /** Removes the named channels from every sample (never mutates the input). */
@@ -245,85 +268,173 @@ function projectRecording(
 }
 
 /**
- * The session half: the per-lap coverage gate (C2), the engine input, and the
- * context. Pure, and shared by the synchronous and the chunked entry points so
- * the two can never drift apart.
+ * Which part of the pass a yield falls in (ticket P5-FIX2 W2, Codex P5-REV
+ * finding 14). `project` is the per-lap projection half; `coverage` and `strip`
+ * are the per-lap steps of the FINAL assembly, which used to be one synchronous
+ * block; `analyze` brackets the engine call.
  */
+export type AnalysisPassPhase = 'project' | 'coverage' | 'strip' | 'analyze';
+
+/** Hands the JS thread back at a named chunk boundary of the pass. */
+export type AnalysisPassYield = (phase: AnalysisPassPhase) => Promise<void>;
+
+/**
+ * The session half of the assembly, broken into the steps that GROW with the
+ * session: one per lap to count its channels, one per lap to apply the coverage
+ * gate (C2), one per lap to strip what the gate excluded, and a cheap tail.
+ *
+ * Written once, driven twice -- straight through by
+ * {@link assembleSessionAnalysis} and with a yield between the steps by
+ * {@link assembleSessionAnalysisChunked} -- so the synchronous and chunked
+ * paths cannot drift apart (they are asserted equal in the tests).
+ */
+function createAssemblyPass(
+  circuit: BundledCircuit,
+  joined: readonly JoinedLap[],
+  skippedLaps: SkippedLap[],
+  options: AssembleOptions,
+) {
+  const minCoverage = options.minChannelCoverage ?? ANALYSIS_MIN_CHANNEL_COVERAGE;
+  const lapCounts: ChannelCounts[] = [];
+  const session: ChannelCounts = { total: 0, counts: new Map<CoachingChannelId, number>() };
+  let coverage: AnalysisChannelCoverage[] = [];
+  const perLapCoverage: AnalysisLapChannelCoverage[] = [];
+  const excludedOn = new Map<CoachingChannelId, number[]>();
+  const perLapDrops: ReadonlySet<CoachingChannelId>[] = [];
+  const laps: SessionLapInput[] = [];
+
+  return {
+    lapCount: joined.length,
+
+    /** Step 1, per lap: what this lap carried, summed into the session's totals. */
+    countLap(index: number): void {
+      const entry = joined[index];
+      if (entry === undefined) return;
+      const counted = countChannels(entry.samples);
+      lapCounts[index] = counted;
+      session.total += counted.total;
+      for (const [channel, count] of counted.counts) {
+        session.counts.set(channel, (session.counts.get(channel) ?? 0) + count);
+      }
+    },
+
+    /** Between the halves: the session-wide coverage the gate compares against. */
+    sealCoverage(): void {
+      coverage = coverageFromCounts(session);
+    },
+
+    /**
+     * Step 2, per lap: the gate. A channel enters a lap's inputs only if it
+     * covered THAT lap; `excludedOn` then names, per channel, the laps that
+     * lacked it -- which is exactly what the report has to state.
+     */
+    gateLap(index: number): void {
+      const entry = joined[index];
+      if (entry === undefined) return;
+      const lapCoverage = coverageFromCounts(
+        lapCounts[index] ?? { total: 0, counts: new Map<CoachingChannelId, number>() },
+      );
+      const excluded: CoachingChannelId[] = [];
+      for (const row of coverage) {
+        // A channel the session carried but this lap did not is coverage 0 here.
+        const lapFraction = lapCoverage.find((it) => it.channel === row.channel)?.fraction ?? 0;
+        if (lapFraction > minCoverage) continue;
+        excluded.push(row.channel);
+        const excludedLaps = excludedOn.get(row.channel) ?? [];
+        excludedLaps.push(entry.lap.lapNumber);
+        excludedOn.set(row.channel, excludedLaps);
+      }
+      perLapDrops[index] = new Set(excluded);
+      perLapCoverage.push({ lapNumber: entry.lap.lapNumber, coverage: lapCoverage, excluded });
+    },
+
+    /** Step 3, per lap: the engine input, with this lap's excluded channels removed. */
+    stripLap(index: number): void {
+      const entry = joined[index];
+      if (entry === undefined) return;
+      laps.push({
+        lap: entry.lap,
+        samples: stripChannels(entry.samples, perLapDrops[index] ?? new Set()),
+        ...(entry.sectorTimes === undefined ? {} : { sectorTimes: entry.sectorTimes }),
+      });
+    },
+
+    /** The tail: session-wide facts, all of them O(channels). */
+    finish(): AssembledAnalysis {
+      const lowCoverageChannels: AnalysisExcludedChannel[] = coverage
+        .filter((entry) => (excludedOn.get(entry.channel)?.length ?? 0) > 0)
+        .map((entry) => ({
+          ...entry,
+          excludedLapNumbers: [...(excludedOn.get(entry.channel) ?? [])].sort((a, b) => a - b),
+          analysedLapCount: joined.length,
+        }));
+      const usedChannels = coverage
+        .filter((entry) => (excludedOn.get(entry.channel)?.length ?? 0) < joined.length)
+        .map((entry) => entry.channel);
+
+      const context: SessionAnalysisContext = {
+        totalLengthM: polylineLength(circuit.runtime.centerline),
+        circuitId: circuit.profile.circuitId,
+        circuitName: circuit.profile.displayName,
+        layoutId: circuit.profile.layoutId,
+        // A recording proves what this session carried, never what the car can
+        // produce -- so nothing is ever declared unsupported here.
+        unsupportedChannels: [],
+        // Data, not a per-circuit constant: `geometryStatus` is the catalog's own
+        // statement about whether the geometry has been validated on track.
+        geometryValidated: circuit.profile.geometryStatus === 'official',
+      };
+
+      return {
+        laps,
+        corners: circuit.corners,
+        context,
+        coverage,
+        perLapCoverage,
+        lowCoverageChannels,
+        usedChannels,
+        skippedLaps,
+        sampleCount: session.total,
+      };
+    },
+  };
+}
+
+/** The final pass, straight through. */
 function finishAssembly(
   circuit: BundledCircuit,
   joined: readonly JoinedLap[],
   skippedLaps: SkippedLap[],
   options: AssembleOptions,
 ): AssembledAnalysis {
-  const totalLengthM = polylineLength(circuit.runtime.centerline);
-  const minCoverage = options.minChannelCoverage ?? ANALYSIS_MIN_CHANNEL_COVERAGE;
+  const pass = createAssemblyPass(circuit, joined, skippedLaps, options);
+  for (let index = 0; index < pass.lapCount; index += 1) pass.countLap(index);
+  pass.sealCoverage();
+  for (let index = 0; index < pass.lapCount; index += 1) pass.gateLap(index);
+  for (let index = 0; index < pass.lapCount; index += 1) pass.stripLap(index);
+  return pass.finish();
+}
 
-  const allSamples = joined.flatMap((entry) => entry.samples);
-  const coverage = channelCoverage(allSamples);
-
-  // The gate, lap by lap: a channel enters a lap's inputs only if it covered
-  // THAT lap. `excludedOn` then names, per channel, the laps that lacked it --
-  // which is exactly what the report has to state.
-  const perLapCoverage: AnalysisLapChannelCoverage[] = [];
-  const excludedOn = new Map<CoachingChannelId, number[]>();
-  const perLapDrops: ReadonlySet<CoachingChannelId>[] = [];
-  for (const entry of joined) {
-    const lapCoverage = channelCoverage(entry.samples);
-    const excluded: CoachingChannelId[] = [];
-    for (const row of coverage) {
-      // A channel the session carried but this lap did not is coverage 0 here.
-      const lapFraction = lapCoverage.find((it) => it.channel === row.channel)?.fraction ?? 0;
-      if (lapFraction > minCoverage) continue;
-      excluded.push(row.channel);
-      const laps = excludedOn.get(row.channel) ?? [];
-      laps.push(entry.lap.lapNumber);
-      excludedOn.set(row.channel, laps);
-    }
-    perLapDrops.push(new Set(excluded));
-    perLapCoverage.push({ lapNumber: entry.lap.lapNumber, coverage: lapCoverage, excluded });
+/** The SAME final pass, handing the thread back between laps (P5-FIX2 W2). */
+async function finishAssemblyChunked(
+  circuit: BundledCircuit,
+  joined: readonly JoinedLap[],
+  skippedLaps: SkippedLap[],
+  options: AssembleOptions,
+  yieldToUi: AnalysisPassYield,
+): Promise<AssembledAnalysis> {
+  const pass = createAssemblyPass(circuit, joined, skippedLaps, options);
+  for (let index = 0; index < pass.lapCount; index += 1) {
+    await yieldToUi('coverage');
+    pass.countLap(index);
   }
-
-  const lowCoverageChannels: AnalysisExcludedChannel[] = coverage
-    .filter((entry) => (excludedOn.get(entry.channel)?.length ?? 0) > 0)
-    .map((entry) => ({
-      ...entry,
-      excludedLapNumbers: [...(excludedOn.get(entry.channel) ?? [])].sort((a, b) => a - b),
-      analysedLapCount: joined.length,
-    }));
-  const usedChannels = coverage
-    .filter((entry) => (excludedOn.get(entry.channel)?.length ?? 0) < joined.length)
-    .map((entry) => entry.channel);
-
-  const laps: SessionLapInput[] = joined.map((entry, index) => ({
-    lap: entry.lap,
-    samples: stripChannels(entry.samples, perLapDrops[index] ?? new Set()),
-    ...(entry.sectorTimes === undefined ? {} : { sectorTimes: entry.sectorTimes }),
-  }));
-
-  const context: SessionAnalysisContext = {
-    totalLengthM,
-    circuitId: circuit.profile.circuitId,
-    circuitName: circuit.profile.displayName,
-    layoutId: circuit.profile.layoutId,
-    // A recording proves what this session carried, never what the car can
-    // produce -- so nothing is ever declared unsupported here.
-    unsupportedChannels: [],
-    // Data, not a per-circuit constant: `geometryStatus` is the catalog's own
-    // statement about whether the geometry has been validated on track.
-    geometryValidated: circuit.profile.geometryStatus === 'official',
-  };
-
-  return {
-    laps,
-    corners: circuit.corners,
-    context,
-    coverage,
-    perLapCoverage,
-    lowCoverageChannels,
-    usedChannels,
-    skippedLaps,
-    sampleCount: allSamples.length,
-  };
+  pass.sealCoverage();
+  for (let index = 0; index < pass.lapCount; index += 1) pass.gateLap(index);
+  for (let index = 0; index < pass.lapCount; index += 1) {
+    await yieldToUi('strip');
+    pass.stripLap(index);
+  }
+  return pass.finish();
 }
 
 /**
@@ -349,26 +460,28 @@ export function assembleSessionAnalysis(
  * The SAME assembly, one lap at a time, handing the JS thread back between
  * laps (ticket P5b-FIX1 C5, Codex P5b-REV1 finding 5): a single yield before
  * the pass only paints the spinner -- a twenty-lap projection then still froze
- * the UI for the whole run. The engine's own `analyzeSession` stays
- * synchronous; this splits the part that is per-lap, which is the part that
- * grows with the session.
+ * the UI for the whole run.
+ *
+ * Ticket P5-FIX2 W2 (Codex P5-REV finding 14) extends that through the FINAL
+ * pass: the per-lap coverage gate and the per-lap channel stripping yield per
+ * lap too, so a long session no longer freezes the screen after the projection
+ * half is done.
  */
 export async function assembleSessionAnalysisChunked(
   circuit: BundledCircuit,
   recordings: readonly AnalysisLapRecording[],
   options: AssembleOptions = {},
-  yieldToUi: () => Promise<void> = async () => undefined,
+  yieldToUi: AnalysisPassYield = async () => undefined,
 ): Promise<AssembledAnalysis> {
   const skippedLaps: SkippedLap[] = [];
   const joined: JoinedLap[] = [];
   for (const recording of ordered(recordings)) {
-    await yieldToUi();
+    await yieldToUi('project');
     const result = projectRecording(circuit, recording, options);
     if ('skipped' in result) skippedLaps.push(result.skipped);
     else joined.push(result.joined);
   }
-  await yieldToUi();
-  return finishAssembly(circuit, joined, skippedLaps, options);
+  return finishAssemblyChunked(circuit, joined, skippedLaps, options, yieldToUi);
 }
 
 /** Stored laps in lap order -- the order every downstream list is reported in. */
@@ -379,4 +492,28 @@ function ordered(recordings: readonly AnalysisLapRecording[]): AnalysisLapRecord
 /** Runs the deterministic engine over an assembled session. Pure. */
 export function runSessionAnalysis(assembled: AssembledAnalysis): SessionInsights {
   return analyzeSession(assembled.laps, assembled.corners, assembled.context);
+}
+
+/**
+ * The engine call at the end of the chunked pass, with a yield on either side
+ * of it (ticket P5-FIX2 W2): the last frame of the spinner is painted before
+ * the engine runs, and the thread is handed back the moment it returns rather
+ * than at the end of whatever the caller does next.
+ *
+ * `analyzeSession` itself stays ONE synchronous unit, deliberately. Its
+ * rankings are session-global -- the ranked consistency basis is chosen across
+ * ALL corners (`sessionInsights.ts`) and decides each corner's `comparable`
+ * flag -- so splitting the call by corner slices and merging the pieces would
+ * produce different findings, and splitting it by lap would break the reference
+ * lap and the demonstrated envelope. Chunking INSIDE the engine is a change to
+ * `packages/core`, not to its call site.
+ */
+export async function runSessionAnalysisChunked(
+  assembled: AssembledAnalysis,
+  yieldToUi: AnalysisPassYield = async () => undefined,
+): Promise<SessionInsights> {
+  await yieldToUi('analyze');
+  const insights = runSessionAnalysis(assembled);
+  await yieldToUi('analyze');
+  return insights;
 }

@@ -74,6 +74,23 @@ export interface AnalysisScreenStrings {
   expandCornerA11y: (corner: string) => string;
   collapseCornerA11y: (corner: string) => string;
   cleanLapMark: string;
+  /**
+   * Ticket P5-FIX2 W4 (contracts.md R2-2): the chrome of the compact VISUAL in
+   * the expanded corner — a mark row per lap along the approach to the corner.
+   * Labels only: the marks themselves are positions the view model computed
+   * from the engine's own measurements, and the engine's sentences are not
+   * rendered in the app at all any more (they stay in the export).
+   */
+  markBrake: string;
+  markLift: string;
+  /** The right-hand end of the axis: the corner entry itself. */
+  markAxisEntry: string;
+  /** The left-hand end: how far before the entry the axis starts ("180 m before"). */
+  markAxisStart: (distance: string) => string;
+  /** Says the unit once, so each lap's figures can stay bare numbers. */
+  markSpeedCaption: string;
+  /** One spoken line per lap's mark row. */
+  markRowA11y: (lapNumber: number, detail: string) => string;
   /** What a metric the engine could not measure prints as. */
   noValue: string;
   /** The demonstrated envelope, assembled from the engine's own measurements. */
@@ -149,6 +166,12 @@ const EN: AnalysisScreenStrings = {
   expandCornerA11y: (corner) => `Show the per-lap values of ${corner}`,
   collapseCornerA11y: (corner) => `Hide the per-lap values of ${corner}`,
   cleanLapMark: 'clean',
+  markBrake: 'brake',
+  markLift: 'lift',
+  markAxisEntry: 'entry',
+  markAxisStart: (distance) => `${distance} before`,
+  markSpeedCaption: 'min speed → exit (km/h)',
+  markRowA11y: (lapNumber, detail) => `Lap ${lapNumber}: ${detail}`,
   noValue: '—',
   envelopeFromCleanLaps: (parts, laps) => `From your own clean laps (${laps}): ${parts}.`,
   envelopeLatestBrake: (distance, lapNumber) =>
@@ -239,6 +262,12 @@ const RO: AnalysisScreenStrings = {
   expandCornerA11y: (corner) => `Arată valorile pe tururi pentru ${corner}`,
   collapseCornerA11y: (corner) => `Ascunde valorile pe tururi pentru ${corner}`,
   cleanLapMark: 'curat',
+  markBrake: 'frână',
+  markLift: 'ridicat',
+  markAxisEntry: 'intrare',
+  markAxisStart: (distance) => `${distance} înainte`,
+  markSpeedCaption: 'viteză minimă → ieșire (km/h)',
+  markRowA11y: (lapNumber, detail) => `Turul ${lapNumber}: ${detail}`,
   noValue: '—',
   envelopeFromCleanLaps: (parts, laps) => `Din tururile tale curate (${laps}): ${parts}.`,
   envelopeLatestBrake: (distance, lapNumber) =>

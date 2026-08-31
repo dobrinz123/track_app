@@ -51,19 +51,48 @@ import type { AnalysisScreenState, AnalysisUiLanguage } from './analysisViewMode
  * expo-file-system v57 class API (`File`/`Paths`, `write()` is SYNCHRONOUS),
  * the same single `expo-sharing` call, and the same never-throws contract.
  *
+ * Schema 3 added the trackday block (P5c-B D4). Schema 4 (ticket P5-FIX2 W3,
+ * Codex P5-REV finding 15) adds the STRUCTURED half of the P5c facts that until
+ * now existed only inside localized sentences: each lap's R2-1 labels with the
+ * measured values they stand on, and the coverage gate's per-lap verdict. The
+ * prose stays exactly as it was — this is alongside it, not instead of it.
+ *
  * Nothing in the summary is written by this module about the DRIVING -- every
  * observation line comes from the engine's own localised report, carried here
  * through the screen's view model. What this module owns is the frame: table
  * headers, section captions and the one-page budget.
  */
 
-export const ANALYSIS_EXPORT_SCHEMA_VERSION = 3;
+/**
+ * The R2-1 lap labels, taken from the engine's own lap record rather than
+ * re-declared here (`@circuit/core` does not re-export the union itself, and a
+ * copy of it in this file would be a second source of truth for what a label
+ * can be).
+ */
+type LapLabel = LapInsight['labels'][number];
+
+export const ANALYSIS_EXPORT_SCHEMA_VERSION = 4;
 export const ANALYSIS_EXPORT_KIND = 'trace-analysis-report';
 
 export interface AnalysisExportChannelCoverage {
   channel: CoachingChannelId;
   percent: number;
   sampleCount: number;
+}
+
+/**
+ * Ticket P5-FIX2 W3 (Codex P5-REV finding 15): ONE analysed lap's own decoded
+ * coverage, and what that lap therefore lost. Schema 3 stated this only inside
+ * a localized sentence ("brake was not recorded on laps 2 and 3"), which a tool
+ * cannot read back; the structured form is per lap, per channel, with the
+ * percentage the gate actually saw.
+ */
+export interface AnalysisExportLapCoverage {
+  lapNumber: number;
+  /** Every decoded channel this lap carried, in `ANALYSIS_CHANNELS` order. */
+  coverage: AnalysisExportChannelCoverage[];
+  /** Channels stripped from THIS lap's inputs by the coverage gate. */
+  excluded: CoachingChannelId[];
 }
 
 /** One (lap, corner) measurement. Measurements only -- no advisory speed. */
@@ -163,6 +192,20 @@ export interface AnalysisExportLap {
   detail: string;
   unavailableChecks: LapCheckId[];
   coverageFraction: number;
+  /**
+   * Ticket P5-FIX2 W3: the R2-1 labels this lap carries — HEAVY_BRAKING,
+   * ABS_SUSPECTED, SLIDE_ROTATION. Informative signatures of normal circuit
+   * driving, NEVER a reason to exclude a lap: `status` and `reasons` above stay
+   * untouched by them, which is exactly what a reader of this file has to be
+   * able to check for itself.
+   */
+  labels: LapLabel[];
+  /** Peak |longitudinal g| over the lap — the value HEAVY_BRAKING stands on. */
+  peakDecelG: number | null;
+  /** Worst yaw-rate excess over the track-implied yaw, deg/s — SLIDE_ROTATION's. */
+  yawExcessDps: number | null;
+  /** Whether a brake-release-reapply oscillation was seen — ABS_SUSPECTED's. */
+  absOscillationDetected: boolean;
 }
 
 export interface AnalysisExportSectorLoss {
@@ -286,6 +329,8 @@ export interface AnalysisExportDocument {
     usedChannels: CoachingChannelId[];
     coverage: AnalysisExportChannelCoverage[];
     tooSparseChannels: AnalysisExportChannelCoverage[];
+    /** Ticket P5-FIX2 W3: the coverage gate's own verdict, analysed lap by lap. */
+    perLapCoverage: AnalysisExportLapCoverage[];
     lapsWithoutTrace: { lapNumber: number; reason: string }[];
     notes: string[];
   };
@@ -588,6 +633,10 @@ function mapLap(lap: LapInsight): AnalysisExportLap {
     detail: lap.detail,
     unavailableChecks: [...lap.unavailableChecks],
     coverageFraction: lap.coverageFraction,
+    labels: [...lap.labels],
+    peakDecelG: lap.peakDecelG,
+    yawExcessDps: lap.yawExcessDps,
+    absOscillationDetected: lap.absOscillationDetected,
   };
 }
 
@@ -683,6 +732,15 @@ export function buildAnalysisExportDocument(
         channel: entry.channel,
         percent: percent(entry.fraction),
         sampleCount: entry.sampleCount,
+      })),
+      perLapCoverage: assembled.perLapCoverage.map((entry) => ({
+        lapNumber: entry.lapNumber,
+        coverage: entry.coverage.map((row) => ({
+          channel: row.channel,
+          percent: percent(row.fraction),
+          sampleCount: row.sampleCount,
+        })),
+        excluded: [...entry.excluded],
       })),
       lapsWithoutTrace: assembled.skippedLaps.map((entry) => ({
         lapNumber: entry.lapNumber,

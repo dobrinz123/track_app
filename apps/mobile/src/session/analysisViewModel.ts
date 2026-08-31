@@ -10,8 +10,9 @@ import {
 
 import {
   assembleSessionAnalysisChunked,
-  runSessionAnalysis,
+  runSessionAnalysisChunked,
   type AnalysisLapRecording,
+  type AnalysisPassYield,
   type AssembledAnalysis,
 } from './analysisAssembly';
 import type { BundledCircuit } from './circuitCatalog';
@@ -98,7 +99,15 @@ export type AnalysisRunResult =
       insights: SessionInsights;
     }
   | { status: 'unavailable'; reason: AnalysisUnavailableReason }
-  | { status: 'error'; error: string };
+  | { status: 'error'; error: string }
+  /**
+   * Ticket P5-FIX2 W1 (Codex P5-REV finding 12): the run was INVALIDATED by a
+   * session-state change while it was under way. It carries no verdict about
+   * the session at all -- it is work that was thrown away -- so it is never
+   * published as an answer and never memoised; the screen shows the spinner of
+   * the fresh run that replaced it (see {@link buildAnalysisScreenState}).
+   */
+  | { status: 'superseded' };
 
 /**
  * What a loader may answer: the session, `null` when it is not stored at all,
@@ -121,10 +130,12 @@ export interface AnalysisRunnerDeps {
   /** True while a session is running: no analysis happens during one (B1). */
   isSessionActive: () => boolean;
   /**
-   * Hands the JS thread back between laps of the pass, so the screen keeps
-   * painting and responding. Defaults to a macrotask.
+   * Hands the JS thread back between the chunks of the pass -- per lap while
+   * projecting, per lap again through the final assembly, and around the engine
+   * call (P5-FIX2 W2). Defaults to a macrotask. The phase is passed so a test
+   * can tell the projection half from the final pass.
    */
-  yieldToUi?: () => Promise<void>;
+  yieldToUi?: AnalysisPassYield;
 }
 
 export interface AnalysisRunner {
@@ -132,6 +143,15 @@ export interface AnalysisRunner {
   run: (sessionId: string) => Promise<AnalysisRunResult>;
   /** The cached result for `sessionId`, or `null`. Never starts work. */
   peek: (sessionId: string) => AnalysisRunResult | null;
+  /**
+   * Ticket P5-FIX2 W1: invalidates every run currently in flight. Superseded
+   * work is dropped from the join table (so no later caller can rejoin it),
+   * stops at its next chunk boundary, and can neither publish nor cache its
+   * result. The cache of FINISHED analyses is untouched -- those are facts
+   * about a recording, not about the session lifecycle. Called by the
+   * controller on every session-state change, in both directions.
+   */
+  invalidate: () => void;
   /** Drops the cache (a new session was recorded, laps changed, ...). */
   clear: () => void;
 }
@@ -141,6 +161,19 @@ function defaultYield(): Promise<void> {
 }
 
 const SESSION_ACTIVE: AnalysisRunResult = { status: 'unavailable', reason: 'session-active' };
+const SUPERSEDED: AnalysisRunResult = { status: 'superseded' };
+
+/**
+ * Thrown at a chunk boundary to stop a pass that may no longer publish -- the
+ * lifecycle epoch moved, or a session started. Carries the result the run must
+ * resolve to, so the abort never reads as an analysis failure.
+ */
+class AnalysisPassAborted extends Error {
+  constructor(readonly result: AnalysisRunResult) {
+    super('analysis pass aborted');
+    this.name = 'AnalysisPassAborted';
+  }
+}
 
 /**
  * A memoised analysis runner. The cache holds the LANGUAGE-INDEPENDENT result
@@ -151,20 +184,45 @@ export function createAnalysisRunner(deps: AnalysisRunnerDeps): AnalysisRunner {
   const cache = new Map<string, AnalysisRunResult>();
   const inFlight = new Map<string, Promise<AnalysisRunResult>>();
   const yieldToUi = deps.yieldToUi ?? defaultYield;
+  /**
+   * P5-FIX2 W1: the lifecycle epoch. Every run remembers the epoch it started
+   * in; {@link AnalysisRunner.invalidate} bumps it and empties `inFlight`, so a
+   * superseded run is unreachable to new callers and stops itself at its next
+   * chunk boundary.
+   */
+  let generation = 0;
 
-  async function compute(sessionId: string): Promise<AnalysisRunResult> {
-    // P5b-FIX1 C1: checked BEFORE the load, again after it, and again after the
-    // pass -- a session that starts at any point during the run invalidates the
-    // whole result, because analysing over a live session is exactly what the
-    // safety rule forbids.
-    if (deps.isSessionActive()) return SESSION_ACTIVE;
+  async function compute(sessionId: string, mine: number): Promise<AnalysisRunResult> {
+    /** The one reason a pass may not continue, or `null` when it may. */
+    const stopReason = (): AnalysisRunResult | null => {
+      if (mine !== generation) return SUPERSEDED;
+      // P5b-FIX1 C1: analysing over a live session is what the safety rule
+      // forbids, so a session that starts at ANY point voids the whole run.
+      if (deps.isSessionActive()) return SESSION_ACTIVE;
+      return null;
+    };
+    /**
+     * The yield the whole pass hands the UI back through -- and, per Codex
+     * P5-REV finding 1, the place the epoch is rechecked. A state change during
+     * a twenty-lap projection now stops the pass at the very next chunk instead
+     * of after the last lap.
+     */
+    const guardedYield: AnalysisPassYield = async (phase) => {
+      await yieldToUi(phase);
+      const stop = stopReason();
+      if (stop !== null) throw new AnalysisPassAborted(stop);
+    };
+
+    const beforeLoad = stopReason();
+    if (beforeLoad !== null) return beforeLoad;
     let loaded: AnalysisSourceResult;
     try {
       loaded = await deps.loadSession(sessionId);
     } catch (error) {
       return { status: 'error', error: error instanceof Error ? error.message : String(error) };
     }
-    if (deps.isSessionActive()) return SESSION_ACTIVE;
+    const afterLoad = stopReason();
+    if (afterLoad !== null) return afterLoad;
     if (loaded === null) return { status: 'unavailable', reason: 'session-not-found' };
     if ('unavailable' in loaded) return { status: 'unavailable', reason: loaded.unavailable };
     const source: AnalysisSessionSource = loaded;
@@ -175,14 +233,17 @@ export function createAnalysisRunner(deps: AnalysisRunnerDeps): AnalysisRunner {
         source.circuit,
         source.recordings,
         {},
-        yieldToUi,
+        guardedYield,
       );
-      if (deps.isSessionActive()) return SESSION_ACTIVE;
+      const afterAssembly = stopReason();
+      if (afterAssembly !== null) return afterAssembly;
       if (assembled.laps.length === 0) return { status: 'unavailable', reason: 'no-trace' };
-      const insights = runSessionAnalysis(assembled);
-      if (deps.isSessionActive()) return SESSION_ACTIVE;
+      const insights = await runSessionAnalysisChunked(assembled, guardedYield);
+      const afterEngine = stopReason();
+      if (afterEngine !== null) return afterEngine;
       return { status: 'ready', source, assembled, insights };
     } catch (error) {
+      if (error instanceof AnalysisPassAborted) return error.result;
       return { status: 'error', error: error instanceof Error ? error.message : String(error) };
     }
   }
@@ -191,10 +252,16 @@ export function createAnalysisRunner(deps: AnalysisRunnerDeps): AnalysisRunner {
     run(sessionId) {
       const cached = cache.get(sessionId);
       if (cached !== undefined) return Promise.resolve(cached);
+      // Only runs of the CURRENT epoch are ever in this map (invalidate empties
+      // it), so joining one can never rejoin superseded work (W1).
       const running = inFlight.get(sessionId);
       if (running !== undefined) return running;
-      const promise = compute(sessionId).then((result) => {
-        inFlight.delete(sessionId);
+      const mine = generation;
+      const promise: Promise<AnalysisRunResult> = compute(sessionId, mine).then((result) => {
+        if (inFlight.get(sessionId) === promise) inFlight.delete(sessionId);
+        // Superseded work is thrown away here too: a run that finished after
+        // its epoch closed says nothing about the session it was asked about.
+        if (mine !== generation) return SUPERSEDED;
         // Only a FINISHED analysis is memoised. A transient failure is not ("try
         // again" has to mean it), and neither is any unavailable reason: every
         // one of them -- a live session above all (C1) -- can stop being true
@@ -208,8 +275,14 @@ export function createAnalysisRunner(deps: AnalysisRunnerDeps): AnalysisRunner {
     peek(sessionId) {
       return cache.get(sessionId) ?? null;
     },
+    invalidate() {
+      generation += 1;
+      inFlight.clear();
+    },
     clear() {
       cache.clear();
+      // A run started against the dropped cache must not repopulate it.
+      generation += 1;
       inFlight.clear();
     },
   };
@@ -269,6 +342,13 @@ export function createAnalysisController(deps: AnalysisControllerDeps): Analysis
     publish(deps.runner.peek(deps.sessionId));
     void deps.runner.run(deps.sessionId).then((result) => {
       if (disposed || mine !== generation || sessionActive) return;
+      // Someone else's state change invalidated our run (the runner is shared).
+      // A superseded run is not an answer, so this screen starts a fresh one
+      // rather than showing work that was thrown away (W1).
+      if (result.status === 'superseded') {
+        start();
+        return;
+      }
       publish(result);
     });
   }
@@ -277,9 +357,13 @@ export function createAnalysisController(deps: AnalysisControllerDeps): Analysis
     const active = sessionIsActive(state);
     if (active === sessionActive) return;
     sessionActive = active;
+    // P5-FIX2 W1: EVERY crossing invalidates the shared runner's in-flight
+    // work, in both directions. A run that spanned a session -- start and end
+    // alike -- is work about a phone that was doing something else; the next
+    // eligible view must start fresh rather than rejoin it.
+    generation += 1;
+    deps.runner.invalidate();
     if (active) {
-      // Whatever is running belongs to a session that is no longer finished.
-      generation += 1;
       publish(SESSION_ACTIVE);
       return;
     }
@@ -328,6 +412,60 @@ export interface AnalysisCornerLapRow {
   latG: string;
 }
 
+/**
+ * One mark on a lap's approach line (ticket P5-FIX2 W4, contracts.md R2-2).
+ * The engine measures a braking or lift point as METRES BEFORE the corner
+ * entry; this is that measurement placed on a 0..1 axis so the screen can draw
+ * it without doing any arithmetic of its own.
+ */
+export interface AnalysisCornerMark {
+  kind: 'brake' | 'lift';
+  /** 0 = the earliest point any lap of this corner produced, 1 = the corner entry. */
+  position: number;
+  /** The measurement itself, in the language's own format ("120 m"). */
+  label: string;
+  /**
+   * Half-width of the brake-onset uncertainty on the SAME axis, or `null`. A
+   * held channel can only place the onset at one of its own samples, and the
+   * card says so instead of drawing a precision that was never measured.
+   */
+  uncertainty: number | null;
+}
+
+/** One lap's line in the compact visual: where it braked and lifted, and its speeds. */
+export interface AnalysisCornerMarkRow {
+  lapNumber: number;
+  clean: boolean;
+  marks: AnalysisCornerMark[];
+  /** Minimum speed as a bare figure ("82,4"); the caption carries the unit. */
+  minSpeed: string | null;
+  exit: string | null;
+  /** 0..1 within this corner's own measured range, for a compact bar. `null` unmeasured. */
+  minSpeedBar: number | null;
+  exitBar: number | null;
+  /** The whole row as one spoken line, for a screen reader. */
+  a11yLabel: string;
+}
+
+/**
+ * The corner's compact visual: an approach axis running from the earliest point
+ * any lap produced (left) to the corner entry (right), one marked line per lap.
+ * `null` when no lap of the session measured a braking point, a lift point or a
+ * speed here -- there is nothing to draw and the card says so in words instead.
+ */
+export interface AnalysisCornerVisual {
+  /** How far before the corner entry the axis starts, metres. */
+  axisStartM: number;
+  /** The two ends of the axis, localised ("180 m before" ... "entry"). */
+  axisStartLabel: string;
+  axisEntryLabel: string;
+  brakeLabel: string;
+  liftLabel: string;
+  /** Says the speed unit once for the whole block. */
+  speedCaption: string;
+  rows: AnalysisCornerMarkRow[];
+}
+
 export interface AnalysisCornerDetail {
   cornerId: number;
   heading: string;
@@ -342,9 +480,18 @@ export interface AnalysisCornerDetail {
     latG: string;
   };
   perLap: AnalysisCornerLapRow[];
+  /**
+   * Ticket P5-FIX2 W4: the same per-lap facts as a compact VISUAL. `null` when
+   * nothing about this corner was measured.
+   */
+  visual: AnalysisCornerVisual | null;
   /** What the driver has DEMONSTRATED on their own clean laps, or `null`. */
   envelopeLine: string | null;
-  /** The engine's own observation sentences for this corner. */
+  /**
+   * The engine's own observation sentences for this corner. Carried for the
+   * EXPORT and for tests; the app itself no longer renders them (R2-2 asks the
+   * card to be visual, and the full sentences live in the shared report).
+   */
   observations: string[];
 }
 
@@ -584,6 +731,118 @@ function envelopeLine(
   );
 }
 
+/** Keeps a computed axis position inside the drawn line. */
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return value < 0 ? 0 : value > 1 ? 1 : value;
+}
+
+/** Finite numbers only -- `null` and NaN are "not measured", never zero. */
+function measuredNumbers(values: readonly (number | null)[]): number[] {
+  return values.filter((value): value is number => value !== null && Number.isFinite(value));
+}
+
+/**
+ * Where a measurement sits on the approach axis. The engine reports braking and
+ * lift points as METRES BEFORE the corner entry, so a bigger number is further
+ * from the corner: position 0 is the axis start, position 1 is the entry.
+ */
+function axisPosition(metresBeforeEntry: number, axisStartM: number): number {
+  if (axisStartM <= 0) return 1;
+  return clamp01(1 - metresBeforeEntry / axisStartM);
+}
+
+/** 0..1 within the corner's own measured range; a single measured value fills the bar. */
+function bar(value: number | null, values: readonly number[]): number | null {
+  if (value === null || !Number.isFinite(value) || values.length === 0) return null;
+  const low = Math.min(...values);
+  const high = Math.max(...values);
+  return high > low ? clamp01((value - low) / (high - low)) : 1;
+}
+
+/**
+ * Ticket P5-FIX2 W4 (Codex P5-REV finding 16, contracts.md R2-2): the corner's
+ * per-lap facts as MARKS rather than sentences.
+ *
+ * Every number here is the engine's own measurement, re-expressed as a position
+ * on one axis so the card can be read at a glance: the axis spans from the
+ * earliest braking/lift point any lap of this corner produced to the corner
+ * entry itself, and each lap gets one line with its brake mark, its lift mark
+ * and its two speed figures. Nothing is inferred, nothing is suggested, and a
+ * lap that measured nothing simply has no marks.
+ */
+function cornerVisual(
+  corner: CornerInsight,
+  language: AnalysisUiLanguage,
+  strings: AnalysisScreenStrings,
+): AnalysisCornerVisual | null {
+  const distances = measuredNumbers(
+    corner.perLap.flatMap((row) => [row.brakeStartM, row.liftPointM]),
+  );
+  const minSpeeds = measuredNumbers(corner.perLap.map((row) => row.minSpeedKph));
+  const exits = measuredNumbers(corner.perLap.map((row) => row.exitSpeedKph));
+  if (distances.length === 0 && minSpeeds.length === 0 && exits.length === 0) return null;
+
+  // A tidy axis end just past the furthest measurement, so the earliest mark is
+  // not glued to the edge. Never zero: a corner braked at the entry itself
+  // still needs an axis to sit on.
+  const furthestM = distances.length === 0 ? 0 : Math.max(...distances);
+  const axisStartM = Math.max(10, Math.ceil((furthestM * 1.1) / 10) * 10);
+
+  const rows: AnalysisCornerMarkRow[] = corner.perLap.map((row) => {
+    const marks: AnalysisCornerMark[] = [];
+    if (row.liftPointM !== null && Number.isFinite(row.liftPointM)) {
+      marks.push({
+        kind: 'lift',
+        position: axisPosition(row.liftPointM, axisStartM),
+        label: metres(row.liftPointM, language),
+        uncertainty: null,
+      });
+    }
+    if (row.brakeStartM !== null && Number.isFinite(row.brakeStartM)) {
+      marks.push({
+        kind: 'brake',
+        position: axisPosition(row.brakeStartM, axisStartM),
+        label: metres(row.brakeStartM, language),
+        uncertainty:
+          row.brakeOnsetUncertaintyM === null || axisStartM <= 0
+            ? null
+            : clamp01(row.brakeOnsetUncertaintyM / axisStartM),
+      });
+    }
+    const minSpeed = row.minSpeedKph === null ? null : decimal(row.minSpeedKph, 1, language);
+    const exit = row.exitSpeedKph === null ? null : decimal(row.exitSpeedKph, 1, language);
+    const spoken = [
+      ...marks.map(
+        (mark) =>
+          `${mark.kind === 'brake' ? strings.markBrake : strings.markLift} ${mark.label}`,
+      ),
+      ...(minSpeed === null ? [] : [`${strings.detailColumns.minSpeed} ${kph(row.minSpeedKph!, language)}`]),
+      ...(exit === null ? [] : [`${strings.detailColumns.exit} ${kph(row.exitSpeedKph!, language)}`]),
+    ].join(', ');
+    return {
+      lapNumber: row.lapNumber,
+      clean: row.clean,
+      marks,
+      minSpeed,
+      exit,
+      minSpeedBar: bar(row.minSpeedKph, minSpeeds),
+      exitBar: bar(row.exitSpeedKph, exits),
+      a11yLabel: strings.markRowA11y(row.lapNumber, spoken === '' ? strings.noValue : spoken),
+    };
+  });
+
+  return {
+    axisStartM,
+    axisStartLabel: strings.markAxisStart(metres(axisStartM, language)),
+    axisEntryLabel: strings.markAxisEntry,
+    brakeLabel: strings.markBrake,
+    liftLabel: strings.markLift,
+    speedCaption: strings.markSpeedCaption,
+    rows,
+  };
+}
+
 function cornerDetail(
   corner: CornerInsight,
   heading: string,
@@ -612,6 +871,7 @@ function cornerDetail(
     heading,
     columns: strings.detailColumns,
     perLap,
+    visual: cornerVisual(corner, language, strings),
     envelopeLine: envelopeLine(corner, language, strings),
     observations,
   };
@@ -699,6 +959,10 @@ export function buildAnalysisScreenState(
   language: AnalysisUiLanguage,
 ): AnalysisScreenState {
   const strings = resolveAnalysisScreenStrings(language);
+  // P5-FIX2 W1: a run the session lifecycle invalidated carries no verdict. The
+  // screen waits for the fresh pass that replaced it -- never a stale report,
+  // never an error the driver did not cause.
+  if (result.status === 'superseded') return { status: 'loading' };
   if (result.status === 'error') return { status: 'error', message: strings.failed };
   if (result.status === 'unavailable') {
     return {
