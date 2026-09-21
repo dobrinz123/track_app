@@ -146,8 +146,10 @@ export interface AnalysisRunnerDeps {
    * {@link AssembleOptions.smoothGForceChannels}; absent or `false` -- the
    * default -- passes `{}` to the assembly exactly as before.
    *
-   * The memo is keyed by the flag as well (see `cacheKey`), so turning it on
-   * and off never serves a smoothed result as an unsmoothed one.
+   * P6a-FIX1 H2: read EXACTLY ONCE per pass, in `run()`, and threaded into
+   * both the cache key and the assembly options -- never re-read across an
+   * await. The memo is keyed by that captured value (see `cacheKeyFor`), so
+   * turning it on and off never serves a smoothed result as an unsmoothed one.
    */
   analysisSmoothingEnabled?: () => boolean;
 }
@@ -212,10 +214,26 @@ export function createAnalysisRunner(deps: AnalysisRunnerDeps): AnalysisRunner {
    * Ticket P6a: the memo/in-flight key. IDENTICAL to the session id whenever
    * smoothing is off, so the pre-P6a keying is untouched; a smoothed pass gets
    * its own key rather than overwriting (or being served) the unsmoothed one.
+   *
+   * Ticket P6a-FIX1 H2 (HIGH, Codex, reproduced with the real runner): the
+   * flag is a PARAMETER here, never re-read. The first version called
+   * `smoothingOn()` separately in `run()` (to pick the key) and again inside
+   * `compute()` (to pick the assembly options), with an `await` on the session
+   * load in between. Flipping the setting during that await made the two reads
+   * disagree, and a SMOOTHED result was then memoised under the UNSUFFIXED,
+   * flags-off key -- after which every later flags-off read of that session
+   * returned smoothed data, for the life of the cache. One read per pass, in
+   * `run()`, threaded into both places, is the whole fix.
    */
-  const cacheKey = (sessionId: string): string => (smoothingOn() ? `${sessionId}|sg` : sessionId);
+  const cacheKeyFor = (sessionId: string, smoothing: boolean): string =>
+    smoothing ? `${sessionId}|sg` : sessionId;
 
-  async function compute(sessionId: string, mine: number): Promise<AnalysisRunResult> {
+  async function compute(
+    sessionId: string,
+    mine: number,
+    /** P6a-FIX1 H2: the flag value captured by `run()` for THIS pass. Never re-read here. */
+    smoothing: boolean,
+  ): Promise<AnalysisRunResult> {
     /** The one reason a pass may not continue, or `null` when it may. */
     const stopReason = (): AnalysisRunResult | null => {
       if (mine !== generation) return SUPERSEDED;
@@ -256,8 +274,9 @@ export function createAnalysisRunner(deps: AnalysisRunnerDeps): AnalysisRunner {
         source.circuit,
         source.recordings,
         // Ticket P6a: `{}` -- byte-for-byte the pre-P6a call -- unless the
-        // opt-in smoothing flag is on for this pass.
-        smoothingOn() ? { smoothGForceChannels: true } : {},
+        // opt-in smoothing flag is on for this pass. P6a-FIX1 H2: the value
+        // `run()` captured, NOT a fresh read of the setting.
+        smoothing ? { smoothGForceChannels: true } : {},
         guardedYield,
       );
       const afterAssembly = stopReason();
@@ -275,8 +294,12 @@ export function createAnalysisRunner(deps: AnalysisRunnerDeps): AnalysisRunner {
 
   return {
     run(sessionId) {
-      // Ticket P6a: `key === sessionId` whenever smoothing is off.
-      const key = cacheKey(sessionId);
+      // Ticket P6a-FIX1 H2: the ONE read of the flag for this whole pass.
+      // Everything below -- the key it is looked up and stored under, and the
+      // assembly options it runs with -- uses THIS value, so no await can
+      // separate them. Ticket P6a: `key === sessionId` whenever smoothing is off.
+      const smoothing = smoothingOn();
+      const key = cacheKeyFor(sessionId, smoothing);
       const cached = cache.get(key);
       if (cached !== undefined) return Promise.resolve(cached);
       // Only runs of the CURRENT epoch are ever in this map (invalidate empties
@@ -284,7 +307,7 @@ export function createAnalysisRunner(deps: AnalysisRunnerDeps): AnalysisRunner {
       const running = inFlight.get(key);
       if (running !== undefined) return running;
       const mine = generation;
-      const promise: Promise<AnalysisRunResult> = compute(sessionId, mine).then((result) => {
+      const promise: Promise<AnalysisRunResult> = compute(sessionId, mine, smoothing).then((result) => {
         if (inFlight.get(key) === promise) inFlight.delete(key);
         // Superseded work is thrown away here too: a run that finished after
         // its epoch closed says nothing about the session it was asked about.
@@ -300,7 +323,9 @@ export function createAnalysisRunner(deps: AnalysisRunnerDeps): AnalysisRunner {
       return promise;
     },
     peek(sessionId) {
-      return cache.get(cacheKey(sessionId)) ?? null;
+      // Synchronous: read and lookup cannot be separated by an await, so
+      // there is no TOCTOU window here (unlike `run()`, see H2 above).
+      return cache.get(cacheKeyFor(sessionId, smoothingOn())) ?? null;
     },
     invalidate() {
       generation += 1;

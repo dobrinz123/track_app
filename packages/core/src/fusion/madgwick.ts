@@ -198,6 +198,16 @@ export class MadgwickAhrs {
    * accelerometer should measure it. Subtracting `gravity * g` from a raw
    * accelerometer sample leaves the vehicle's own linear acceleration -- the
    * longitudinal and lateral g the coaching engine cares about.
+   *
+   * MIND THE DIRECTION: despite the name, this vector points UP, not down.
+   * The filter drives it towards the normalised accelerometer reading, and an
+   * accelerometer at rest measures SPECIFIC FORCE -- the normal force holding
+   * it up, +1 g skywards -- not the gravitational field pulling it down. That
+   * is precisely why the subtraction above is unnegated. It also makes this
+   * vector the estimated VERTICAL in sensor coordinates, which is what lets a
+   * caller derive a mount-independent yaw axis by projecting the gyroscope
+   * onto it (see `apps/mobile/src/session/gforceProvider.ts`); a caller who
+   * assumes it points down gets the sign of that projection backwards.
    */
   gravity(): Vector3 {
     const { w, x, y, z } = this.quaternion;

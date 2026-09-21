@@ -250,6 +250,86 @@ describe('P6a -- the runner reads the flag fresh and keys its memo by it', () =>
     expect(loads).toBe(2);
   });
 
+  it('H2: flipping the flag DURING the load never files a smoothed result under the flags-off key', async () => {
+    // Ticket P6a-FIX1 H2 (HIGH, Codex, reproduced with the real runner). The
+    // interleaving: start a pass with smoothing OFF, turn it ON while the
+    // session is still loading, let the pass finish, turn it OFF again. Before
+    // the fix, `run()` picked the UNSUFFIXED key from the first read and
+    // `compute()` picked SMOOTHED options from the second, so the flags-off
+    // cache entry held smoothed data from then on.
+    const source = sourceFor();
+    let smoothing = false;
+    let releaseLoad: () => void = () => undefined;
+    const loadGate = new Promise<void>((resolve) => {
+      releaseLoad = resolve;
+    });
+
+    const runner = createAnalysisRunner({
+      loadSession: async () => {
+        await loadGate; // the await the flag flip slips through
+        return source;
+      },
+      isSessionActive: () => false,
+      analysisSmoothingEnabled: () => smoothing,
+      yieldToUi: async () => undefined,
+    });
+
+    const inFlight = runner.run('p6a-session'); // captured with smoothing FALSE
+    smoothing = true; // flipped mid-load
+    releaseLoad();
+    const result = await inFlight;
+    smoothing = false; // and back off again
+
+    expect(result.status).toBe('ready');
+    if (result.status !== 'ready') throw new Error('unreachable');
+
+    // The pass was started as a flags-off pass, so it must BE a flags-off pass.
+    const unsmoothed = assembleSessionAnalysis(source.circuit, source.recordings);
+    expect(result.assembled).toEqual(unsmoothed);
+
+    // ... and the flags-off cache entry it left behind is the unsmoothed one.
+    const afterwards = runner.peek('p6a-session');
+    expect(afterwards?.status).toBe('ready');
+    if (afterwards?.status !== 'ready') throw new Error('unreachable');
+    expect(afterwards.assembled).toEqual(unsmoothed);
+    expect(await runner.run('p6a-session')).toBe(result);
+
+    // The smoothed variant is genuinely different, so the assertions above are
+    // not passing by coincidence.
+    expect(
+      assembleSessionAnalysis(source.circuit, source.recordings, { smoothGForceChannels: true }),
+    ).not.toEqual(unsmoothed);
+  });
+
+  it('H2 mirror: flipping OFF during the load never files an unsmoothed result under the smoothed key', async () => {
+    const source = sourceFor();
+    let smoothing = true;
+    let releaseLoad: () => void = () => undefined;
+    const loadGate = new Promise<void>((resolve) => {
+      releaseLoad = resolve;
+    });
+    const runner = createAnalysisRunner({
+      loadSession: async () => {
+        await loadGate;
+        return source;
+      },
+      isSessionActive: () => false,
+      analysisSmoothingEnabled: () => smoothing,
+      yieldToUi: async () => undefined,
+    });
+
+    const inFlight = runner.run('p6a-session'); // captured with smoothing TRUE
+    smoothing = false;
+    releaseLoad();
+    const result = await inFlight;
+    smoothing = true;
+
+    if (result.status !== 'ready') throw new Error('unreachable');
+    expect(result.assembled).toEqual(
+      assembleSessionAnalysis(source.circuit, source.recordings, { smoothGForceChannels: true }),
+    );
+  });
+
   it('with no analysisSmoothingEnabled dep wired at all, the runner behaves exactly as before', async () => {
     const source = sourceFor();
     const runner = createAnalysisRunner({

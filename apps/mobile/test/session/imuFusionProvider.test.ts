@@ -123,7 +123,15 @@ describe('P6a -- imuFusionEnabled OFF (the default): the provider is byte-for-by
     await provider.stop();
   });
 
-  it('reproduces the low-pass values EXACTLY -- hand-driven `computeLinearAcceleration` over the same stream', async () => {
+  it('reproduces the low-pass values EXACTLY over 100 probe samples -- hand-driven `computeLinearAcceleration` over the same stream', async () => {
+    // Ticket P6a-FIX1: 100 samples, matching the probe count the independent
+    // review used when it confirmed the flags-off path against the previous
+    // commit. Deterministic LCG, so the stream is the same on every run.
+    let state = 20_260_921;
+    const nextNoise = (): number => {
+      state = (state * 1_103_515_245 + 12_345) % 2_147_483_648;
+      return state / 2_147_483_648 - 0.5;
+    };
     const stream: AccelerometerReading[] = [
       { x: 0.02, y: -0.01, z: 0.99 },
       { x: 0.31, y: -0.42, z: 1.02 },
@@ -131,6 +139,13 @@ describe('P6a -- imuFusionEnabled OFF (the default): the provider is byte-for-by
       { x: 0.08, y: 0.63, z: 1.05 },
       { x: -0.12, y: -0.22, z: 0.98 },
     ];
+    while (stream.length < 100) {
+      stream.push({
+        x: nextNoise() * 2.4,
+        y: nextNoise() * 2.4,
+        z: 1 + nextNoise() * 0.6,
+      });
+    }
     // The reference: the exported pure function, chained the way the provider
     // chains it. If the flag-off branch ever stops being the same code, these
     // numbers separate.
@@ -162,34 +177,140 @@ describe('P6a -- imuFusionEnabled ON: Madgwick gravity + the gyroscope channel',
     await rig.provider.stop();
   });
 
-  it('emits yawRateDps off the device Z axis, in deg/s and in the COMPASS sense (a right turn is positive)', async () => {
-    const rig = await startRig(true);
-    // Right-handed about +z (up) means a LEFT turn is positive rad/s, so a
-    // RIGHT turn -- what a positive course-over-ground rate means -- is
-    // negative on the gyroscope.
-    const rightTurnRadPerSec = -0.5;
-    rig.clock.advance(40);
-    rig.gyro.emit({ x: 0, y: 0, z: rightTurnRadPerSec });
-
-    const yaw = rig.samples.filter((s) => s.channel === 'yawRateDps');
-    expect(yaw).toHaveLength(1);
-    expect(yaw[0]!.value).toBeCloseTo((0.5 * 180) / Math.PI, 9);
-    expect(yaw[0]!.value).toBeGreaterThan(0);
-
-    // ... and the mirror case, so the sign is pinned in both directions.
-    rig.clock.advance(40);
-    rig.gyro.emit({ x: 0, y: 0, z: 0.5 });
-    expect(rig.samples.filter((s) => s.channel === 'yawRateDps')[1]!.value).toBeLessThan(0);
-    await rig.provider.stop();
-  });
-
   it('yawRateDps is stamped with the injected monotonic clock, never Date.now()', async () => {
     const rig = await startRig(true);
+    rig.clock.advance(40);
+    rig.accel.emit({ x: 0, y: 0, z: 1 }); // seeds the filter (P6a-FIX1 M1)
     rig.clock.advance(40);
     const expectedStamp = rig.clock.now();
     rig.gyro.emit({ x: 0.01, y: -0.02, z: 0.3 });
     const yaw = rig.samples.filter((s) => s.channel === 'yawRateDps');
     expect(yaw[0]!.tMonoMs).toBe(expectedStamp);
+    await rig.provider.stop();
+  });
+});
+
+/**
+ * Ticket P6a-FIX1 H1 (HIGH). The yaw axis must not be a chosen device axis,
+ * because which device axis is vertical is a fact about the physical mount
+ * that nobody has measured. The rate is projected onto the vertical the
+ * filter itself estimates, so the SAME code gives the right answer for a
+ * phone lying flat and for a phone standing upright.
+ *
+ * Every case below encodes a REAL RIGHT TURN and requires a POSITIVE
+ * `yawRateDps`, because `cleanLap.ts` compares the integral of this channel
+ * against GNSS course over ground, which grows clockwise.
+ */
+describe('P6a-FIX1 H1 -- the yaw axis is mount-independent', () => {
+  const NINETY_DPS_RAD = Math.PI / 2;
+
+  /** Settles the filter on `atRest` so `gravity()` really is this mount's vertical. */
+  async function mountedRig(atRest: AccelerometerReading): Promise<Rig> {
+    const rig = await startRig(true);
+    for (let i = 0; i < 80; i += 1) {
+      rig.clock.advance(40);
+      rig.gyro.emit({ x: 0, y: 0, z: 0 });
+      rig.accel.emit(atRest);
+    }
+    rig.samples.length = 0;
+    return rig;
+  }
+
+  const yawOf = (rig: Rig): number => {
+    const yaw = rig.samples.filter((s) => s.channel === 'yawRateDps');
+    expect(yaw).toHaveLength(1);
+    return yaw[0]!.value;
+  };
+
+  /**
+   * Two decimal places, deliberately. The projection is onto the filter's
+   * ESTIMATE of vertical, and a fixed-gain gradient filter does not converge
+   * to a point -- it limit-cycles within about `beta * dt` = 0.1 * 0.04 =
+   * 0.004 rad (0.23 deg) of the true attitude. The projection error is second
+   * order in that angle, so 90 deg/s comes back within ~1e-3 deg/s. Asserting
+   * 90.00 +/- 0.005 pins the axis, the scale AND the sign without pretending
+   * an estimator is exact.
+   */
+  const YAW_DIGITS = 2;
+
+  it('FLAT mount (up = device +z): a right turn reads +90 deg/s', async () => {
+    const rig = await mountedRig({ x: 0, y: 0, z: 1 });
+    rig.clock.advance(40);
+    // Right-handed about UP is counterclockwise = a LEFT turn, so a RIGHT
+    // turn is the negative rate about the up axis.
+    rig.gyro.emit({ x: 0, y: 0, z: -NINETY_DPS_RAD });
+    expect(yawOf(rig)).toBeCloseTo(90, YAW_DIGITS);
+    await rig.provider.stop();
+  });
+
+  it('UPRIGHT PORTRAIT mount (up = device +y): the SAME right turn still reads +90 deg/s', async () => {
+    // This is the reviewer's counter-example: with the phone upright, the
+    // fixed-device-z version recorded 0 deg/s for a 90 deg/s right turn.
+    const rig = await mountedRig({ x: 0, y: 1, z: 0 });
+    rig.clock.advance(40);
+    rig.gyro.emit({ x: 0, y: -NINETY_DPS_RAD, z: 0 });
+    expect(yawOf(rig)).toBeCloseTo(90, YAW_DIGITS);
+    await rig.provider.stop();
+  });
+
+  it('INVERTED PORTRAIT mount (up = device -y): still +90 deg/s for a right turn', async () => {
+    const rig = await mountedRig({ x: 0, y: -1, z: 0 });
+    rig.clock.advance(40);
+    rig.gyro.emit({ x: 0, y: NINETY_DPS_RAD, z: 0 });
+    expect(yawOf(rig)).toBeCloseTo(90, YAW_DIGITS);
+    await rig.provider.stop();
+  });
+
+  it('a TILTED mount (no device axis is vertical) still resolves the right turn correctly', async () => {
+    // 45 degrees between y and z: neither axis alone carries the yaw.
+    const s = Math.SQRT1_2;
+    const rig = await mountedRig({ x: 0, y: s, z: s });
+    rig.clock.advance(40);
+    rig.gyro.emit({ x: 0, y: -NINETY_DPS_RAD * s, z: -NINETY_DPS_RAD * s });
+    expect(yawOf(rig)).toBeCloseTo(90, YAW_DIGITS);
+    await rig.provider.stop();
+  });
+
+  it('a LEFT turn is negative in every mount (the sign is pinned in both directions)', async () => {
+    for (const atRest of [
+      { x: 0, y: 0, z: 1 },
+      { x: 0, y: 1, z: 0 },
+    ]) {
+      const rig = await mountedRig(atRest);
+      rig.clock.advance(40);
+      rig.gyro.emit({
+        x: 0,
+        y: atRest.y * NINETY_DPS_RAD,
+        z: atRest.z * NINETY_DPS_RAD,
+      });
+      expect(yawOf(rig)).toBeCloseTo(-90, YAW_DIGITS);
+      await rig.provider.stop();
+    }
+  });
+
+  it('a rotation PERPENDICULAR to the estimated vertical contributes no yaw at all', async () => {
+    const rig = await mountedRig({ x: 0, y: 0, z: 1 });
+    rig.clock.advance(40);
+    rig.gyro.emit({ x: NINETY_DPS_RAD, y: 0, z: 0 }); // pure roll/pitch
+    expect(yawOf(rig)).toBeCloseTo(0, YAW_DIGITS);
+    await rig.provider.stop();
+  });
+
+  it('emits NO yawRateDps before the filter has an attitude estimate', async () => {
+    const rig = await startRig(true);
+    rig.clock.advance(40);
+    rig.gyro.emit({ x: 0, y: 0, z: -1 });
+    rig.clock.advance(40);
+    rig.gyro.emit({ x: 0, y: 0, z: -1 });
+    // No accelerometer sample has arrived, so there is no vertical to project
+    // onto -- a guessed one is exactly what H1 forbids.
+    expect(rig.samples).toHaveLength(0);
+
+    rig.clock.advance(40);
+    rig.accel.emit({ x: 0, y: 0, z: 1 }); // seeds
+    rig.clock.advance(40);
+    rig.gyro.emit({ x: 0, y: 0, z: -1 });
+    expect(rig.samples.filter((s) => s.channel === 'yawRateDps')).toHaveLength(1);
     await rig.provider.stop();
   });
 

@@ -27,10 +27,50 @@
  */
 export type SavitzkyGolayEdgeMode = 'interpolate' | 'nearest';
 
+/**
+ * Largest `polyOrder` this implementation will accept (ticket P6a-FIX1 M4,
+ * after an independent review measured a silent loss of accuracy at extreme
+ * orders: smoothing 25 constant samples with `{windowLength: 25, polyOrder: 20}`
+ * returned 0.9737744 at both endpoints instead of 1).
+ *
+ * The cause is intrinsic to the method as written: the design matrix is the
+ * RAW Vandermonde of the centred window (`A[j][k] = (j - halfWindow)^k`) and
+ * the fit is solved through the NORMAL equations `(A^T A)^-1 A^T`, which
+ * squares an already badly scaled matrix. Partial pivoting does not rescue a
+ * badly SCALED system -- it only reorders it -- so past some order the
+ * returned coefficients stop reproducing the very polynomials the fit is
+ * defined to be exact on, quietly and without any error.
+ *
+ * The bound is MEASURED, not guessed. For every odd `windowLength` from 3 to
+ * 101 and every `polyOrder` up to it, the worst absolute error in reproducing
+ * each monomial of degree <= `polyOrder` (plus the worst deviation of the
+ * coefficient sum from 1, at every edge offset) is:
+ *
+ *   order 0  2.2e-15    order 4  5.0e-13    order  8  9.0e-9
+ *   order 1  3.1e-15    order 5  4.2e-12    order  9  2.5e-8
+ *   order 2  1.4e-14    order 6  3.5e-11    order 10  1.4e-6
+ *   order 3  2.8e-14    order 7  7.1e-10    order 11  4.7e-6
+ *
+ * The tolerance this library holds itself to is 1e-9 absolute -- six orders of
+ * magnitude below the resolution of any sensor whose trace it filters. Order 7
+ * is the last order that stays inside it; order 8 is already nine times past
+ * it. So 7 is the ceiling, and anything above it is REFUSED rather than
+ * silently approximated.
+ *
+ * Nothing this repo uses comes near the bound: the shipped configuration is
+ * `{windowLength: 9, polyOrder: 2}` (`analysisAssembly.ts`), whose measured
+ * error is 1.4e-14, and no test exceeds order 5. Rejecting is therefore
+ * preferred here over re-deriving the fit in a scaled or orthogonal basis:
+ * that would change -- however slightly -- every number a currently-valid
+ * configuration produces, and those numbers are read by a shipped, field-
+ * confirmed analysis. A validation gate changes none of them.
+ */
+export const MAX_SAVITZKY_GOLAY_POLY_ORDER = 7;
+
 export interface SavitzkyGolayOptions {
   /** Samples per window. Must be odd and >= 3 so the window has a centre. */
   windowLength: number;
-  /** Degree of the fitted polynomial. Must be < windowLength. */
+  /** Degree of the fitted polynomial. Must be < windowLength, and at most {@link MAX_SAVITZKY_GOLAY_POLY_ORDER}. */
   polyOrder: number;
   /** Derivative to return: 0 smooths, 1 is the first derivative. Default 0. */
   derivative?: number;
@@ -78,6 +118,16 @@ function resolveOptions(options: SavitzkyGolayOptions): ResolvedOptions {
   }
   if (polyOrder >= windowLength) {
     throw new RangeError('polyOrder must be smaller than windowLength');
+  }
+  // Ticket P6a-FIX1 M4: refuse what this solver cannot compute accurately,
+  // rather than returning a plausible-looking wrong number. See
+  // MAX_SAVITZKY_GOLAY_POLY_ORDER for the measurements behind the bound.
+  if (polyOrder > MAX_SAVITZKY_GOLAY_POLY_ORDER) {
+    throw new RangeError(
+      `polyOrder must be at most ${MAX_SAVITZKY_GOLAY_POLY_ORDER}: beyond that the normal equations ` +
+        'of the unscaled Vandermonde basis are too ill-conditioned for this solver to reproduce ' +
+        'the fitted polynomial to 1e-9',
+    );
   }
   if (!Number.isInteger(derivative) || derivative < 0) {
     throw new RangeError('derivative must be a non-negative integer');

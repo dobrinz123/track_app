@@ -1,4 +1,4 @@
-import { MadgwickAhrs, type TelemetrySample } from '@circuit/core';
+import { MadgwickAhrs, type Quaternion, type TelemetrySample } from '@circuit/core';
 
 /**
  * G-force telemetry provider (Telemetry addendum — channel revision,
@@ -49,8 +49,13 @@ import { MadgwickAhrs, type TelemetrySample } from '@circuit/core';
  * `yawRateDps` row is ever produced, and the accelerometer path runs the exact
  * code it always did (`handleReading` branches around the fusion path rather
  * than replacing it). The setting is read ONCE per `start()` and frozen for
- * that run. See `handleFusedReading` for the gyro/accelerometer pairing and
- * `dt` decisions, and `handleGyroReading` for the `yawRateDps` axis and sign.
+ * that run. See `handleFusedReading` for the gyro/accelerometer pairing, the
+ * seeding of the initial attitude, and the freshness/gap policies; and
+ * `handleGyroReading` for why `yawRateDps` is projected onto the ESTIMATED
+ * vertical rather than read off a chosen device axis (ticket P6a-FIX1 H1 --
+ * the mount is a physical fact nobody has measured, so the channel is built
+ * not to depend on it). The latG/longG axis mapping is deliberately NOT
+ * touched by that: it is the pre-existing, separately-owned question.
  *
  * MUST NOT interact with lap timing in any way (same binding as the OBD
  * telemetry provider): this module never touches `SessionFacade`/
@@ -67,6 +72,40 @@ const UPDATE_INTERVAL_MS = 40; // ~25 Hz per the addendum.
 const GRAVITY_LOW_PASS_ALPHA = 0.8;
 /** Radians per second -> degrees per second, for the `yawRateDps` channel. */
 const RAD_TO_DEG = 180 / Math.PI;
+
+/**
+ * Ticket P6a-FIX1 M2: how old the held gyroscope reading may be and still be
+ * integrated. Three nominal intervals (3 x 40 ms) -- the original ticket's
+ * own reasoning was that a hold of at most one interval is harmless, and this
+ * makes that bound REAL while leaving room for ordinary iOS delivery jitter.
+ * Past it the rotation rate is treated as ZERO (the filter then levels on the
+ * accelerometer alone) rather than assumed to have continued: a sensor that
+ * stopped reporting is not a sensor reporting the same thing forever.
+ */
+const GYRO_MAX_AGE_MS = 3 * UPDATE_INTERVAL_MS;
+
+/**
+ * Ticket P6a-FIX1 M3: the accelerometer gap beyond which the filter is
+ * RESEEDED from the current reading instead of integrating across the gap.
+ * 500 ms is 12.5 nominal intervals: far outside any plausible scheduling
+ * jitter at a requested 40 ms, so a gap this long means the stream actually
+ * broke (app backgrounded, sensor suspended, session paused). Integrating a
+ * held rotation rate across such a gap fabricates attitude -- an independent
+ * review measured -0.68966 g on longG from a level, stationary sample after a
+ * five-second gap. Reseeding also re-levels the filter, which is exactly what
+ * is wanted after a pause.
+ */
+const MAX_FUSION_GAP_MS = 500;
+
+/**
+ * Ticket P6a-FIX1 M1: an accelerometer reading may seed the filter's attitude
+ * only if its magnitude is plausibly gravity. A reading taken mid-bump or
+ * mid-braking carries the vehicle's own acceleration, and seeding from it
+ * would tilt the whole estimate. Generous on purpose (0.5 g .. 1.5 g): this
+ * rejects a clearly unusable sample, it is not a calibration.
+ */
+const SEED_MIN_G = 0.5;
+const SEED_MAX_G = 1.5;
 
 export interface AccelerometerReading {
   x: number;
@@ -157,6 +196,63 @@ function isFiniteReading(reading: AccelerometerReading): boolean {
 }
 
 /**
+ * Ticket P6a-FIX1 M1: the quaternion whose {@link MadgwickAhrs.gravity} equals
+ * the given measured up-direction, i.e. the attitude the phone is actually
+ * mounted at -- returned so the filter can START there instead of at identity.
+ *
+ * WHY THIS IS NEEDED. `MadgwickAhrs` starts at the identity quaternion, whose
+ * `gravity()` is `(0, 0, 1)`: "the phone is lying flat, screen up". For any
+ * other mount that is simply wrong, and the filter has to walk the error off
+ * at the `beta` gain (0.1 rad/s) while every sample in between is emitted as
+ * a fictitious linear acceleration. An independent review measured the cost:
+ * a perfectly still phone reading `{x: 0, y: -1, z: 0}` produced -0.80245 g on
+ * longG a full second in, at 25 Hz. Seeding removes the transient entirely --
+ * a still phone reads ~0 from its very first fused sample.
+ *
+ * THE GEOMETRY. `gravity()` is the third row of the rotation matrix of `q`,
+ * i.e. the earth-frame up axis expressed in the SENSOR frame. So the seed is
+ * the shortest-arc rotation carrying the measured direction `up` onto the
+ * earth's `+z`, and the standard shortest-arc construction for unit vectors
+ * `a -> b` is `q = normalise(( 1 + a.b , a x b ))`, here with `b = (0,0,1)`:
+ *
+ *   w = 1 + up.z,   (x, y, z) = up x (0,0,1) = (up.y, -up.x, 0)
+ *
+ * ANTIPARALLEL CASE (explicitly handled, per the ticket). When `up` is exactly
+ * `(0, 0, -1)` -- the phone mounted upside down relative to the assumed
+ * reference -- the cross product vanishes and `w` is 0, so the formula above
+ * degenerates to the zero quaternion and the rotation AXIS is undefined: every
+ * axis perpendicular to `up` is an equally valid 180 degree turn. The
+ * magnitude of the unnormalised quaternion is `sqrt(2 * (1 + up.z))`, so
+ * `1 + up.z` is exactly the quantity that collapses; below
+ * {@link ANTIPARALLEL_EPSILON} we pick one such axis explicitly (the x axis,
+ * `q = (0, 1, 0, 0)`) rather than let `reset()` throw on a zero-magnitude
+ * quaternion. That quaternion's `gravity()` is `(0, 0, -1)` -- the answer we
+ * want -- and any perpendicular axis would do equally well, because the yaw
+ * it leaves undetermined is exactly the yaw a 6-axis filter cannot observe.
+ *
+ * `null` means "this reading cannot seed anything" (not finite, or not
+ * plausibly gravity) and the caller must keep waiting.
+ */
+const ANTIPARALLEL_EPSILON = 1e-9;
+
+export function seedOrientationFromGravity(
+  measured: AccelerometerReading,
+): Quaternion | null {
+  if (!isFiniteReading(measured)) return null;
+  const magnitude = Math.sqrt(
+    measured.x * measured.x + measured.y * measured.y + measured.z * measured.z,
+  );
+  if (!(magnitude >= SEED_MIN_G) || !(magnitude <= SEED_MAX_G)) return null;
+  const up = { x: measured.x / magnitude, y: measured.y / magnitude, z: measured.z / magnitude };
+  const w = 1 + up.z;
+  if (w <= ANTIPARALLEL_EPSILON) {
+    // Exactly (or numerically) upside down: axis undefined, pick one.
+    return { w: 0, x: 1, y: 0, z: 0 };
+  }
+  return { w, x: up.y, y: -up.x, z: 0 }; // `reset()` normalises.
+}
+
+/**
  * Pure gravity low-pass filter + linear-acceleration isolation (exported so
  * its exact numeric behavior can be pinned by hand-computed test vectors,
  * independent of the accelerometer plumbing around it). Standard
@@ -203,10 +299,25 @@ export function createGForceProvider(deps: GForceProviderDeps): GForceProvider {
   let ahrs: MadgwickAhrs | null = null;
   /** The gyroscope's own subscription -- separate from the accelerometer's, and only ever installed while `fusionActive`. */
   let gyroSubscription: AccelerometerSubscription | null = null;
-  /** Most recent gyroscope reading (rad/s), or `null` before the first one arrives. See the PAIRING note on {@link handleFusedReading}. */
-  let latestGyro: GyroscopeReading | null = null;
+  /**
+   * Most recent gyroscope reading (rad/s) WITH the monotonic time it arrived,
+   * or `null` before the first one. Ticket P6a-FIX1 M2: the timestamp is the
+   * fix -- an untimed "latest" reading is reused forever, so a gyroscope that
+   * simply stops delivering gets its last rate integrated indefinitely (an
+   * independent review measured a level, stationary phone reading -0.98971 g
+   * on longG two seconds after one 1 rad/s sample).
+   */
+  let latestGyro: { reading: GyroscopeReading; atMs: number } | null = null;
   /** `monotonicNow()` at the previous fused update, for `dt`. Never `Date.now()`. */
   let lastFusionMs: number | null = null;
+  /**
+   * Ticket P6a-FIX1 M1: has the filter been given a real starting attitude
+   * yet? Until it has, NOTHING fused is emitted -- no latG/longG and no
+   * yawRateDps -- because both are derived from an attitude estimate that does
+   * not exist. Seeding is done by {@link seedOrientation} from the first
+   * plausible accelerometer reading, and redone after a stream break (M3).
+   */
+  let seeded = false;
 
   function emit(channel: 'latG' | 'longG' | 'yawRateDps', value: number): void {
     const sample: TelemetrySample = { channel, value, tMonoMs: monotonicNow() };
@@ -255,16 +366,61 @@ export function createGForceProvider(deps: GForceProviderDeps): GForceProvider {
     const filter = ahrs;
     if (filter === null || !isFiniteReading(raw)) return;
     const now = monotonicNow();
+
+    // --- M1/M3: decide whether this sample advances the filter, seeds it, or
+    // does neither. ---------------------------------------------------------
     const elapsedMs = lastFusionMs === null ? null : now - lastFusionMs;
+    // M3: a gap this long is a broken stream, not jitter -- reseed rather than
+    // integrate across it (and drop the held gyro, which is far past its own
+    // freshness limit by then anyway).
+    const streamBroke = elapsedMs !== null && elapsedMs > MAX_FUSION_GAP_MS;
+    if (streamBroke) {
+      seeded = false;
+      latestGyro = null;
+    }
+    if (!seeded) {
+      // M1: seed from a plausible gravity reading, and emit NOTHING until one
+      // arrives -- a fused value without an attitude estimate is a guess.
+      const seed = seedOrientationFromGravity(raw);
+      if (seed === null) return;
+      filter.reset(seed);
+      seeded = true;
+      lastFusionMs = now;
+      // The seeded attitude explains THIS reading exactly, so the linear
+      // acceleration it implies is the honest one for this sample -- no
+      // integration has happened and none is needed.
+      const seededGravity = filter.gravity();
+      emit('latG', raw.x - seededGravity.x);
+      emit('longG', raw.y - seededGravity.y);
+      return;
+    }
+
+    // M3: a duplicate or backward timestamp means NO time passed. Substituting
+    // a nominal 40 ms (what the first version did) invents integration time --
+    // 25 callbacks sharing one timestamp fabricated a whole second of rotation.
+    // The accelerometer sample is still real, so it is still reported, using
+    // the attitude estimate unchanged.
+    if (elapsedMs === null || !Number.isFinite(elapsedMs) || elapsedMs <= 0) {
+      const held = filter.gravity();
+      emit('latG', raw.x - held.x);
+      emit('longG', raw.y - held.y);
+      return;
+    }
     lastFusionMs = now;
-    const dtSeconds =
-      elapsedMs !== null && Number.isFinite(elapsedMs) && elapsedMs > 0
-        ? elapsedMs / 1_000
-        : UPDATE_INTERVAL_MS / 1_000;
+
+    // M2: the held gyro rate is only integrated while it is FRESH. Past
+    // `GYRO_MAX_AGE_MS` the rotation rate is taken as zero and the filter
+    // levels on the accelerometer alone.
+    const gyroHold = latestGyro;
+    const gyro =
+      gyroHold !== null && now - gyroHold.atMs <= GYRO_MAX_AGE_MS
+        ? gyroHold.reading
+        : { x: 0, y: 0, z: 0 };
+
     try {
-      filter.update(latestGyro ?? { x: 0, y: 0, z: 0 }, raw, dtSeconds);
+      filter.update(gyro, raw, elapsedMs / 1_000);
     } catch {
-      // `update()` validates its own inputs with `RangeError`. Both are
+      // `update()` validates its own inputs with `RangeError`. All of them are
       // pre-checked above, so this is defense in depth only: a sensor sample
       // must never escape into the native event emitter as a throw.
       return;
@@ -280,16 +436,56 @@ export function createGForceProvider(deps: GForceProviderDeps): GForceProvider {
    * measured channel and `coaching/cleanLap.ts` integrates it against its own
    * `tMonoMs` stamps, so inventing intermediate values would only blur it.
    *
-   * Device Z axis under the same mount assumption latG/longG make (x lateral,
-   * y longitudinal, z vertical), NEGATED: a gyroscope is right-handed about
-   * +z, so a LEFT turn reads positive, whereas the GNSS course over ground
-   * `cleanLap` falls back to grows CLOCKWISE. The two signals are compared
-   * directly there, so they must share one sense.
+   * TICKET P6a-FIX1 H1 (HIGH) -- MOUNT-INDEPENDENT YAW AXIS. The first version
+   * read the yaw rate off a FIXED device axis (z), reasoning from the
+   * pre-existing latG=x / longG=y mapping that the mount must be flat. An
+   * independent reviewer argued just as consistently for y, reasoning from the
+   * word "portrait" (upright, where the device z axis points out through the
+   * screen and y is vertical). Both readings of the evidence are sound and
+   * NEITHER is decidable from the source, because the answer is a physical
+   * fact about how the phone is clamped in the car that nobody has measured.
+   * So no axis is chosen at all.
+   *
+   * Instead the rate is PROJECTED onto the vertical direction the filter has
+   * already estimated. Yaw is rotation about the vertical, whatever the mount
+   * happens to make "vertical" in sensor coordinates, and a dot product with
+   * a unit vector extracts exactly that component. A flat mount then recovers
+   * the old z reading and an upright mount recovers y, from the same line of
+   * code, with no assumption in it. The reviewer's own counter-example --
+   * `{x: 0, y: -PI/2, z: 0}` with the phone upright, a 90 deg/s RIGHT turn,
+   * which the fixed-z version recorded as 0 -- now reads +90 deg/s.
+   *
+   * WHICH VECTOR, AND THE SIGN. `MadgwickAhrs.gravity()` is named for the
+   * quantity it references but it points UP: the filter drives it towards the
+   * NORMALISED ACCELEROMETER READING, and an accelerometer at rest measures
+   * the specific force holding the device up (+1 g on the axis pointing at the
+   * sky), not the downward acceleration of gravity. That is also why the same
+   * vector is subtracted, unnegated, to isolate linear acceleration. So this
+   * projects onto +`gravity()`, the UP direction -- and then NEGATES.
+   *
+   * The negation is the compass convention. A gyroscope is right-handed, so a
+   * positive rate about the UP axis is counterclockwise seen from above, which
+   * is a LEFT turn. `cleanLap.ts` compares the integral of this channel
+   * against GNSS course over ground, which grows CLOCKWISE (a RIGHT turn is
+   * positive). One of the two has to be flipped to share a sense, and it is
+   * this one. Pinned by a test that encodes an actual right turn, in both a
+   * flat and an upright mount.
+   *
+   * P6a-FIX1 M1: nothing is emitted before the filter is seeded -- an
+   * unseeded estimate would project onto a GUESSED vertical, which is the very
+   * thing this fix exists to avoid.
    */
   function handleGyroReading(reading: GyroscopeReading): void {
     if (!isFiniteReading(reading)) return;
-    latestGyro = reading;
-    emit('yawRateDps', -reading.z * RAD_TO_DEG);
+    const now = monotonicNow();
+    // Timestamped (M2) even when nothing is emitted: the fused update needs
+    // its age, and freshness is judged from when it ARRIVED.
+    latestGyro = { reading, atMs: now };
+    const filter = ahrs;
+    if (filter === null || !seeded) return;
+    const up = filter.gravity();
+    const aboutUp = reading.x * up.x + reading.y * up.y + reading.z * up.z;
+    emit('yawRateDps', -aboutUp * RAD_TO_DEG);
   }
 
   function handleReading(raw: AccelerometerReading): void {
@@ -350,6 +546,8 @@ export function createGForceProvider(deps: GForceProviderDeps): GForceProvider {
       ahrs = fusionActive ? new MadgwickAhrs() : null;
       latestGyro = null;
       lastFusionMs = null;
+      // P6a-FIX1 M1: every run re-seeds from its own first plausible reading.
+      seeded = false;
       const myGeneration = ++generation;
       if (fusionActive) void startGyroscope(myGeneration);
       void (async () => {
@@ -390,6 +588,7 @@ export function createGForceProvider(deps: GForceProviderDeps): GForceProvider {
       ahrs = null;
       latestGyro = null;
       lastFusionMs = null;
+      seeded = false;
     },
 
     onSample(cb) {
