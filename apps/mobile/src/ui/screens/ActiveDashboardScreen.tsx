@@ -17,6 +17,7 @@ import { facade, settingsStore } from '../../session/composition';
 import { useFacadeState } from '../hooks/useFacadeState';
 import { useSettings } from '../hooks/useSettings';
 import { resolvePitScreenStrings } from './trackdayStrings';
+import { dashboardCalibrationChip } from '../calibrationNotice';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'ActiveDashboard'>;
 
@@ -83,7 +84,17 @@ export function ActiveDashboardScreen({ navigation }: Props): React.JSX.Element 
   // more urgent, momentary signal and must never be masked or crowded by a
   // standing fact about the whole session, so the two never share a slot and
   // this marker's visibility never depends on `offTrack`/`banner` state.
-  const matchingUnvalidated = state.matchingUnvalidated;
+  //
+  // Ticket P10B H6-B: TWO markers, because there are two facts and neither
+  // of them is "calibrated". `matchingUnvalidated` is `calibrationStatus ===
+  // 'unvalidated'` and nothing else, so a session whose provenance could not
+  // be read back -- `'unknown'`, which is what a recovery resume without a
+  // readable session record produces -- rendered NOTHING at all while timing
+  // continued. The reviewer reproduced exactly that. UNCAL means the
+  // calibration was REJECTED and the driver went out anyway; CAL? means this
+  // device cannot say whether it was ever validated. They are different
+  // facts and are labelled differently.
+  const calibrationChip = dashboardCalibrationChip(state.calibrationStatus);
 
   // C7 fix: a failed async command (e.g. endSession()'s persistence
   // rejecting) takes priority over the other, more routine banner states --
@@ -130,13 +141,13 @@ export function ActiveDashboardScreen({ navigation }: Props): React.JSX.Element 
               quality, recording count), never in `bannerSlot` where it could
               compete with or delay the OFF TRACK banner. One short marker,
               not a sentence -- the detail lives in history/the export. */}
-          {matchingUnvalidated ? (
+          {calibrationChip !== null ? (
             <View
-              style={styles.uncalChip}
-              accessibilityLabel="Calibration not validated for this session. Lap and sector times may be wrong or missing."
+              style={[styles.uncalChip, calibrationChip.kind === 'unknown' && styles.unknownCalChip]}
+              accessibilityLabel={calibrationChip.accessibilityLabel}
             >
               <Text style={styles.uncalChipText} maxFontSizeMultiplier={1.2}>
-                UNCAL
+                {calibrationChip.label}
               </Text>
             </View>
           ) : null}
@@ -280,6 +291,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.xs,
     backgroundColor: colors.warning,
   },
+  // P10B H6-B: the UNKNOWN marker is the same shape and the same weight --
+  // it is equally a statement that this session is not calibrated -- but a
+  // different colour, so a driver who has seen both can tell "I chose to go
+  // out past a rejected calibration" from "the device cannot say".
+  unknownCalChip: { backgroundColor: colors.textSecondary },
   uncalChipText: {
     ...typography.label,
     color: colors.background,

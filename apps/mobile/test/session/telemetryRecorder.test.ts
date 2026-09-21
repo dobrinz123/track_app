@@ -216,11 +216,13 @@ describe('TelemetryRecorder never opens its own transaction (F1 fix)', () => {
         return { changes: 1 };
       },
       getAllAsync: async () => [],
-      withTransactionAsync: async (fn: () => Promise<void>): Promise<void> => {
+      // P10B H5-B: hands the callback the transaction-scoped handle, as
+      // every real adapter now does.
+      withTransactionAsync: async (fn: (tx: SqlDatabase) => Promise<void>): Promise<void> => {
         log.push('BEGIN');
         openTransactionDepth += 1;
         try {
-          await fn();
+          await fn(fakeInner);
         } finally {
           openTransactionDepth -= 1;
           log.push('COMMIT');
@@ -228,24 +230,25 @@ describe('TelemetryRecorder never opens its own transaction (F1 fix)', () => {
       },
     };
     // Production wiring (`expoSqlDatabase.ts`'s `openAppDatabase()`): ONE
-    // shared gate -- repository transactions hold it for their whole span,
-    // the recorder holds it per batch INSERT.
+    // shared gate held by the gated database around EVERY unit of work --
+    // a repository transaction for its whole span, this recorder's batch
+    // INSERT for its own (P10B H5-B; the recorder no longer holds it).
     const gate = createSqlWriteGate();
     const db = gateSqlTransactions(fakeInner, gate);
 
     // Simulates the controller's own lap-persistence transaction, held open
     // for a tick, WHILE a telemetry flush is queued concurrently -- exactly
     // the race the binding "a telemetry write can never interleave with an
-    // open controller transaction" guards against. The callback ALSO issues
-    // an inner statement through the gated db -- the exact shape that
-    // self-deadlocked under the removed every-call FIFO design (N1).
-    const controllerTx = db.withTransactionAsync(async () => {
+    // open controller transaction" guards against. The callback issues its
+    // inner statement through the transaction-scoped `tx` handle (P10B
+    // H5-B), which is what keeps full serialization deadlock-free.
+    const controllerTx = db.withTransactionAsync(async (tx) => {
       await new Promise<void>((resolve) => setTimeout(resolve, 5));
-      await db.runAsync('UPDATE sessions SET x = 1', []);
+      await tx.runAsync('UPDATE sessions SET x = 1', []);
       log.push('controller-write');
     });
 
-    const recorder = new TelemetryRecorder(db, 'sess-tx-race', undefined, gate);
+    const recorder = new TelemetryRecorder(db, 'sess-tx-race');
     recorder.record(sample('rpm', 1, 1), null);
     recorder.flushOnLapCrossing();
 
@@ -265,10 +268,10 @@ describe('TelemetryRecorder never opens its own transaction (F1 fix)', () => {
         return { changes: 1 };
       },
       getAllAsync: async () => [],
-      withTransactionAsync: async (fn: () => Promise<void>): Promise<void> => {
+      withTransactionAsync: async (fn: (tx: SqlDatabase) => Promise<void>): Promise<void> => {
         log.push('BEGIN');
         try {
-          await fn();
+          await fn(inner);
         } finally {
           log.push('COMMIT');
         }
@@ -281,19 +284,21 @@ describe('TelemetryRecorder never opens its own transaction (F1 fix)', () => {
     const txHeldOpen = new Promise<void>((resolve) => {
       releaseTx = resolve;
     });
-    const tx = db.withTransactionAsync(async () => {
+    const tx = db.withTransactionAsync(async (scoped) => {
       // Two awaited inner statements while the transaction holds the gate --
       // under the N1-buggy design each of these enqueued behind the
-      // transaction itself and never ran (this test then times out).
-      await db.runAsync('r1', []);
+      // transaction itself and never ran (this test then times out). They go
+      // through the transaction-scoped handle (P10B H5-B); routing them
+      // through the outer `db` is what would deadlock now.
+      await scoped.runAsync('r1', []);
       await txHeldOpen;
-      await db.runAsync('r2', []);
+      await scoped.runAsync('r2', []);
     });
 
     // Telemetry flush queued while the transaction is still open: must wait.
-    const flush = gate.exclusive(() =>
-      db.runAsync('INSERT INTO telemetry_samples (x) VALUES (1)', []),
-    );
+    // P10B H5-B: gated by the database itself, with no `exclusive()` of the
+    // caller's own -- that is the whole point of the fix.
+    const flush = db.runAsync('INSERT INTO telemetry_samples (x) VALUES (1)', []);
     await Promise.resolve();
     expect(log).toContain('run:r1');
     expect(log).not.toContain('telemetry-insert');

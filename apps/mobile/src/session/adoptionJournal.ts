@@ -181,20 +181,24 @@ export const ACTIVE_SESSION_SETTINGS_KEYS = [
 ] as const;
 
 export async function deleteOrphanSession(db: SqlDatabase, sessionId: string): Promise<void> {
-  await db.withTransactionAsync(async () => {
-    await db.runAsync('DELETE FROM telemetry WHERE sessionId = ?', [sessionId]);
-    await db.runAsync('DELETE FROM laps WHERE sessionId = ?', [sessionId]);
-    await db.runAsync('DELETE FROM checkpoints WHERE sessionId = ?', [sessionId]);
-    await db.runAsync('DELETE FROM sessions WHERE sessionId = ?', [sessionId]);
-    await db.runAsync('DELETE FROM telemetry_samples WHERE session_id = ?', [sessionId]);
+  // Ticket P10B H5-B: every statement goes through the transaction-scoped
+  // `tx` handle. The outer `db` may be gated (`gateSqlTransactions`), and a
+  // statement sent through it from in here would queue behind this very
+  // transaction.
+  await db.withTransactionAsync(async (tx) => {
+    await tx.runAsync('DELETE FROM telemetry WHERE sessionId = ?', [sessionId]);
+    await tx.runAsync('DELETE FROM laps WHERE sessionId = ?', [sessionId]);
+    await tx.runAsync('DELETE FROM checkpoints WHERE sessionId = ?', [sessionId]);
+    await tx.runAsync('DELETE FROM sessions WHERE sessionId = ?', [sessionId]);
+    await tx.runAsync('DELETE FROM telemetry_samples WHERE session_id = ?', [sessionId]);
 
-    const pointer = await db.getAllAsync<{ value: string }>(
+    const pointer = await tx.getAllAsync<{ value: string }>(
       'SELECT value FROM settings WHERE key = ? LIMIT 1',
       [ACTIVE_SESSION_SETTINGS_KEYS[0]],
     );
     if (pointer[0]?.value === sessionId) {
       for (const key of ACTIVE_SESSION_SETTINGS_KEYS) {
-        await db.runAsync('DELETE FROM settings WHERE key = ?', [key]);
+        await tx.runAsync('DELETE FROM settings WHERE key = ?', [key]);
       }
     }
   });

@@ -109,7 +109,7 @@ describe('P7R E2 -- the unvalidated-matching log', () => {
       getAllAsync: async () => {
         throw new Error('disk is gone');
       },
-      withTransactionAsync: async (fn: () => Promise<void>) => fn(),
+      withTransactionAsync: async (fn: (tx: SqlDatabase) => Promise<void>) => fn(broken),
     };
     await expect(readUnvalidatedMatchingSessionIds(broken)).resolves.toEqual([]);
     await expect(markSessionMatchingUnvalidated(broken, 'session-a')).resolves.toBe(false);

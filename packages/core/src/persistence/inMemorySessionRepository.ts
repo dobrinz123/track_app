@@ -99,6 +99,29 @@ export class InMemorySessionRepository implements LocalSessionRepository {
     for (const entry of staged) this.telemetry.set(entry.key, entry.samples);
   }
 
+  /**
+   * Ticket P10B H4-B: the lap rows, the reclaim and the recovery checkpoint
+   * in one indivisible step. Same technique as `saveTelemetryBatch` above --
+   * validate and deep-copy everything first, then apply the copies in one
+   * synchronous loop with no `await` in it, so no interleaving observer can
+   * ever see the lap rows without the checkpoint that names them.
+   */
+  async saveLapCommit(
+    sessionId: string,
+    entries: readonly { lapNumber: number; samples: LocationSample[] }[],
+    checkpoint: { snapshot: SessionMachineSnapshot; laps: LapRecord[] },
+  ): Promise<void> {
+    assertJsonSerializable(checkpoint.snapshot, `checkpoint(${sessionId}).snapshot`);
+    assertJsonSerializable(checkpoint.laps, `checkpoint(${sessionId}).laps`);
+    const staged = entries.map((entry) => ({
+      key: telemetryKey(sessionId, entry.lapNumber),
+      samples: structuredClone(entry.samples),
+    }));
+    const stagedCheckpoint = structuredClone({ snapshot: checkpoint.snapshot, laps: checkpoint.laps });
+    for (const entry of staged) this.telemetry.set(entry.key, entry.samples);
+    this.checkpoints.set(sessionId, stagedCheckpoint);
+  }
+
   async loadTelemetry(sessionId: string, lapNumber: number): Promise<LocationSample[]> {
     const entry = this.telemetry.get(telemetryKey(sessionId, lapNumber));
     return entry ? structuredClone(entry) : [];

@@ -1,5 +1,4 @@
 import type { SqlBindValue, SqlDatabase, TelemetryChannelId, TelemetrySample } from '@circuit/core';
-import { PASSTHROUGH_WRITE_GATE, type SqlWriteGate } from './sqlWriteGate';
 
 const BATCH_SIZE = 25;
 const BATCH_INTERVAL_MS = 1_000;
@@ -40,15 +39,17 @@ interface BufferedRow {
  * a transaction" and breaking lap/PB persistence. Each flush is now exactly
  * ONE parameterized multi-row `INSERT` statement (`writeBatch` below) --
  * already atomic in SQLite without an explicit transaction wrapper, so this
- * recorder issues zero `BEGIN`s ever. The "never interleaves with an open
- * controller transaction" guarantee (N1 fix, LEAD takeover) comes from the
- * shared `SqlWriteGate`: `openAppDatabase()` gates every repository
- * transaction for its whole BEGIN..COMMIT span, and `writeBatch` acquires
- * the SAME gate around its single INSERT -- so the INSERT can never execute
- * inside a controller transaction's open window, and (unlike the removed
- * every-call `serializeSqlDatabase` FIFO, which self-deadlocked every
- * transaction) the transaction callback's own inner statements pass through
- * freely. See sqlWriteGate.ts's module doc comment.
+ * recorder issues zero `BEGIN`s ever.
+ *
+ * The "never interleaves with an open controller transaction" guarantee (N1
+ * fix, LEAD takeover) comes from the shared `SqlWriteGate`. Ticket P10B
+ * H5-B moved where that is applied: the gated `SqlDatabase`
+ * (`openAppDatabase()`) now acquires the gate around EVERY call made through
+ * it, this INSERT included, so the recorder no longer holds the gate itself
+ * -- doing both would re-enter the gate and deadlock. The guarantee is
+ * unchanged and now covers every other standalone write on the connection
+ * too, which is the defect H5-B reported: an ungated pass-through write
+ * could join, and be rolled back by, an unrelated transaction.
  *
  * Telemetry NEVER gates lap timing (binding): every method here is either
  * synchronous/fire-and-forget (`record`, `flushOnLapCrossing`) or awaited
@@ -72,8 +73,6 @@ export class TelemetryRecorder {
     private readonly sessionId: string,
     /** Row cap override -- test-only seam; production callers always use the binding default (`TELEMETRY_ROW_CAP`, 200,000/session). */
     private readonly rowCap: number = TELEMETRY_ROW_CAP,
-    /** Shared write gate (N1 fix): production passes `openAppDatabase()`'s gate so batch INSERTs mutually exclude with repository transactions. */
-    private readonly writeGate: SqlWriteGate = PASSTHROUGH_WRITE_GATE,
   ) {}
 
   /** Buffers one sample tagged with the caller's currently-known lap number (`null` before the first lap starts). No-op once disposed or once the 200k row cap has been reached. */
@@ -166,11 +165,12 @@ export class TelemetryRecorder {
     for (const row of toWrite) {
       params.push(this.sessionId, row.lapNumber, row.tMonoMs, row.channel, row.value);
     }
-    await this.writeGate.exclusive(() =>
-      this.db.runAsync(
-        `INSERT INTO telemetry_samples (session_id, lap_number, t_mono_ms, channel, value) VALUES ${placeholders}`,
-        params,
-      ),
+    // P10B H5-B: NOT wrapped in `writeGate.exclusive` any more -- the gated
+    // database acquires the gate for this statement itself, and holding it
+    // here as well would queue this INSERT behind its own gate acquisition.
+    await this.db.runAsync(
+      `INSERT INTO telemetry_samples (session_id, lap_number, t_mono_ms, channel, value) VALUES ${placeholders}`,
+      params,
     );
     this.rowsWritten += toWrite.length;
     if (this.rowsWritten >= this.rowCap) this.capReached = true;

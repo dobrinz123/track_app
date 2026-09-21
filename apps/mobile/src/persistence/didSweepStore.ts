@@ -555,18 +555,21 @@ export function createSqlDidSweepStore(db: SqlDatabase): DidSweepStore {
     // preserving both "no-op if runId doesn't exist" and the five-run
     // retention promise.
     async flushRunProgress(runId, responders, patch, nowUtc): Promise<void> {
-      await db.withTransactionAsync(async () => {
-        const existing = await db.getAllAsync<{ run_id: string }>('SELECT run_id FROM did_sweep_runs WHERE run_id = ? LIMIT 1', [runId]);
+      // Ticket P10B H5-B: every statement of a transaction goes through the
+      // transaction-scoped `tx` handle -- the outer `db` is serialized, and
+      // reaching for it in here would queue behind this transaction.
+      await db.withTransactionAsync(async (tx) => {
+        const existing = await tx.getAllAsync<{ run_id: string }>('SELECT run_id FROM did_sweep_runs WHERE run_id = ? LIMIT 1', [runId]);
         if (existing.length === 0) return; // the run is gone -- writing responders now would orphan them.
-        if (responders.length > 0) await upsertRespondersSql(db, runId, responders, nowUtc);
+        if (responders.length > 0) await upsertRespondersSql(tx, runId, responders, nowUtc);
         const { sets, params } = buildProgressPatchSql(patch, nowUtc);
         if (responders.length > 0) {
-          const responderCount = await countRespondersSql(db, runId);
+          const responderCount = await countRespondersSql(tx, runId);
           sets.push('responder_count = ?');
           params.push(responderCount);
         }
         params.push(runId);
-        await db.runAsync(`UPDATE did_sweep_runs SET ${sets.join(', ')} WHERE run_id = ?`, params);
+        await tx.runAsync(`UPDATE did_sweep_runs SET ${sets.join(', ')} WHERE run_id = ?`, params);
       });
     },
 
@@ -607,16 +610,16 @@ export function createSqlDidSweepStore(db: SqlDatabase): DidSweepStore {
     // it must then be a complete no-op, never an orphan row.
     async appendObservationSamples(runId, observationId, samples): Promise<void> {
       if (samples.length === 0) return;
-      await db.withTransactionAsync(async () => {
-        const existing = await db.getAllAsync<{ run_id: string }>('SELECT run_id FROM did_sweep_runs WHERE run_id = ? LIMIT 1', [runId]);
+      await db.withTransactionAsync(async (tx) => {
+        const existing = await tx.getAllAsync<{ run_id: string }>('SELECT run_id FROM did_sweep_runs WHERE run_id = ? LIMIT 1', [runId]);
         if (existing.length === 0) return;
-        const seqRows = await db.getAllAsync<{ n: number }>(
+        const seqRows = await tx.getAllAsync<{ n: number }>(
           'SELECT COUNT(*) AS n FROM did_sweep_observation_samples WHERE run_id = ? AND observation_id = ?',
           [runId, observationId],
         );
         let seq = seqRows[0]?.n ?? 0;
         for (const sample of samples) {
-          await db.runAsync(
+          await tx.runAsync(
             `INSERT OR REPLACE INTO did_sweep_observation_samples (run_id, observation_id, seq, did, phase, t_ms, raw_hex, batch_index)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
             [runId, observationId, seq, sample.did, sample.phase, sample.tMs, bytesToHex(sample.raw), sample.batchIndex ?? null],
@@ -644,10 +647,10 @@ export function createSqlDidSweepStore(db: SqlDatabase): DidSweepStore {
     },
 
     async saveObservationSummary(runId, observationId, summaryJson, nowUtc): Promise<void> {
-      await db.withTransactionAsync(async () => {
-        const existing = await db.getAllAsync<{ run_id: string }>('SELECT run_id FROM did_sweep_runs WHERE run_id = ? LIMIT 1', [runId]);
+      await db.withTransactionAsync(async (tx) => {
+        const existing = await tx.getAllAsync<{ run_id: string }>('SELECT run_id FROM did_sweep_runs WHERE run_id = ? LIMIT 1', [runId]);
         if (existing.length === 0) return;
-        await db.runAsync(
+        await tx.runAsync(
           `INSERT INTO did_sweep_observation_summaries (run_id, observation_id, created_at_utc, summary_json)
            VALUES (?, ?, ?, ?)
            ON CONFLICT(run_id, observation_id) DO UPDATE SET created_at_utc = excluded.created_at_utc, summary_json = excluded.summary_json`,

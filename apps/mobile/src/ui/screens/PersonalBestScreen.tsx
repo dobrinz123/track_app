@@ -7,18 +7,40 @@ import { colors, radii, spacing, typography } from '../theme';
 import { TimeDisplay } from '../components/TimeDisplay';
 import { QualityPill } from '../components/QualityPill';
 import { formatDateUtc } from '../format';
-import { sessionHistoryStore, settingsStore } from '../../session/composition';
+import { resolveSessionCalibrationStatus, sessionHistoryStore, settingsStore } from '../../session/composition';
 import { resolveSelectedCircuit } from '../../session/circuitCatalog';
 import { layoutLabel } from '../data/circuit';
 import { useSettings } from '../hooks/useSettings';
+import { pbCalibrationNotice, pbCalibrationProvenanceValue } from '../calibrationNotice';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'PersonalBest'>;
+
+/**
+ * Ticket P10B H7-B -- A PB IS A CLAIM ABOUT A TIME, AND IT CARRIES ITS
+ * CALIBRATION WITH IT.
+ *
+ * The reviewer rejected calibration with ten stationary fixes, proceeded,
+ * drove two TMR laps, and this screen presented the resulting 92.662 s as a
+ * personal best with a quality pill and nothing else: no hint anywhere that
+ * the session it came from was never vouched for. A lap time from
+ * unvalidated matching may be wrong or may not even be a real lap -- and a
+ * PB is the one number the driver will chase all day.
+ *
+ * The words live in `../calibrationNotice` (pure, and therefore actually
+ * tested); this screen resolves the status from `pb.sessionId` -- the
+ * session that SET the time is the one whose calibration qualifies it -- and
+ * renders them.
+ */
 
 /** S11 — personal best details with provenance (date, session), quality flags. Header names the SELECTED circuit (ticket CN-W3), not a hardcoded constant. */
 export function PersonalBestScreen({ navigation }: Props): React.JSX.Element {
   const pb = sessionHistoryStore.getPersonalBest();
   const settings = useSettings(settingsStore);
   const selected = resolveSelectedCircuit(settings);
+  // Ticket P10B H7-B: resolved from the PB's OWN session id -- the session
+  // that set the time is the one whose calibration qualifies it.
+  const pbCalibrationStatus = pb === null ? null : resolveSessionCalibrationStatus(pb.sessionId);
+  const calibrationNotice = pbCalibrationStatus === null ? null : pbCalibrationNotice(pbCalibrationStatus);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -44,6 +66,25 @@ export function PersonalBestScreen({ navigation }: Props): React.JSX.Element {
             <View style={styles.timeCard}>
               <TimeDisplay ms={pb.lap.durationMs} size="display" color={colors.success} />
               <QualityPill quality={pb.lap.quality} />
+              {/* Ticket P10B H7-B: beside the time itself, not buried in the
+                  provenance card below -- the qualification has to be read
+                  by anyone who reads the number. */}
+              {calibrationNotice !== null ? (
+                <View style={styles.calibrationBlock} accessibilityLabel={calibrationNotice.hint}>
+                  <Text
+                    style={[
+                      styles.calibrationBadge,
+                      calibrationNotice.kind === 'unknown' && styles.calibrationBadgeUnknown,
+                    ]}
+                    maxFontSizeMultiplier={1.3}
+                  >
+                    {calibrationNotice.badge}
+                  </Text>
+                  <Text style={styles.calibrationHint} maxFontSizeMultiplier={1.3}>
+                    {calibrationNotice.hint}
+                  </Text>
+                </View>
+              ) : null}
             </View>
 
             <View style={styles.provenanceCard}>
@@ -56,6 +97,20 @@ export function PersonalBestScreen({ navigation }: Props): React.JSX.Element {
                 </Text>
                 <Text style={styles.provenanceValue} maxFontSizeMultiplier={1.3}>
                   {formatDateUtc(pb.recordedAtUtc)}
+                </Text>
+              </View>
+              <View style={styles.provenanceRow}>
+                <Text style={styles.provenanceKey} maxFontSizeMultiplier={1.3}>
+                  Calibration
+                </Text>
+                <Text
+                  style={[
+                    styles.provenanceValue,
+                    pbCalibrationStatus !== 'validated' && styles.provenanceValueFlagged,
+                  ]}
+                  maxFontSizeMultiplier={1.3}
+                >
+                  {pbCalibrationProvenanceValue(pbCalibrationStatus ?? 'unknown')}
                 </Text>
               </View>
               <View style={styles.provenanceRow}>
@@ -101,4 +156,11 @@ const styles = StyleSheet.create({
   provenanceKey: { ...typography.body, color: colors.textSecondary },
   provenanceValue: { ...typography.body, color: colors.textPrimary },
   provenanceValueLink: { ...typography.body, color: colors.accent, textDecorationLine: 'underline' },
+  // P10B H7-B: same visual language the results and history screens already
+  // use for this fact, so a driver recognises it wherever it appears.
+  calibrationBlock: { gap: spacing.xs, marginTop: spacing.xs },
+  calibrationBadge: { ...typography.label, color: colors.warning, letterSpacing: 1 },
+  calibrationBadgeUnknown: { color: colors.textSecondary },
+  calibrationHint: { ...typography.body, color: colors.textSecondary },
+  provenanceValueFlagged: { color: colors.warning },
 });

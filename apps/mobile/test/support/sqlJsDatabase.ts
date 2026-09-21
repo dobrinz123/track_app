@@ -28,7 +28,7 @@ export function wrapSqlJsDatabase(db: Database): SqlDatabase {
   // within a transaction". Gating here makes the double faithful to
   // production rather than papering over the collision.
   let transactionTail: Promise<unknown> = Promise.resolve();
-  return {
+  const handle: SqlDatabase = {
     async execAsync(sql: string): Promise<void> {
       db.exec(sql);
     },
@@ -52,11 +52,16 @@ export function wrapSqlJsDatabase(db: Database): SqlDatabase {
       }
     },
 
-    withTransactionAsync(fn: () => Promise<void>): Promise<void> {
+    // Ticket P10B H5-B: hands the callback the transaction-scoped handle --
+    // this same adapter, which is the ungated connection. In production the
+    // gate sits ABOVE this wrapper (`gateSqlTransactions`), so a callback
+    // that used the outer handle instead would queue behind its own
+    // transaction.
+    withTransactionAsync(fn: (tx: SqlDatabase) => Promise<void>): Promise<void> {
       const run = transactionTail.then(async () => {
         db.run('BEGIN');
         try {
-          await fn();
+          await fn(handle);
           db.run('COMMIT');
         } catch (err) {
           db.run('ROLLBACK');
@@ -70,6 +75,7 @@ export function wrapSqlJsDatabase(db: Database): SqlDatabase {
       return run;
     },
   };
+  return handle;
 }
 
 /** Creates a brand-new in-memory sql.js-backed `SqlDatabase` for a test. */

@@ -281,6 +281,19 @@ export interface SessionControllerDiagnostics {
   rawTraceRetainedSampleCount: number;
   /** Ticket P10A H3: everything captured but not on disk right now -- `rawTracePendingCount + rawTraceRetainedSampleCount`. */
   rawTraceUnwrittenCount: number;
+  /**
+   * Ticket P10B H3-B: the `tMono` of every captured fix that is NOT on disk
+   * -- the unflushed tail plus every retained batch, including the residue a
+   * failed LAP commit handed back.
+   *
+   * The count alone could not answer the question the reviewer's
+   * reproduction asks ("which nine fixes went missing?"), and a completeness
+   * figure that cannot be reconciled against the drive is the kind of number
+   * this ticket exists to stop shipping.
+   */
+  rawTraceUnwrittenTMonos: number[];
+  /** Ticket P10B H3-B: lap commits whose transaction did not land and are still being retried. */
+  failedLapCommitCount: number;
   /** Ticket P10A H6: this session's durable calibration provenance, as the controller will write it. */
   calibrationStatus: SessionCalibrationStatus;
   /** Number of times braking zones have been regenerated from a NEW personal-best reference lap landing mid-session (Phase 3 coaching addendum) -- 0 when coaching is disabled or no PB has been replaced yet this controller's lifetime. */
@@ -681,6 +694,33 @@ export class SessionController {
     readyAtMono: number;
   }> = [];
   /**
+   * Ticket P10B H3-B: lap commits whose transaction did NOT commit, kept so
+   * they can be tried again.
+   *
+   * The lap row is the only place a completed lap's fixes are keyed BY LAP;
+   * until its transaction commits, the lap's own samples that had not yet
+   * reached a chunk row exist nowhere on disk. The first cut removed them
+   * from `pendingTrace` synchronously at lap completion and then let a
+   * failing transaction drop them: the P10B reviewer rejected both
+   * `saveTelemetryBatch` calls of a two-lap session and nine fixes
+   * (`293100`, `385100`..`385800`) disappeared from every buffer, with
+   * `unwrittenSampleCount` still reporting `0`.
+   *
+   * Now the residue is handed to the ordinary retained-batch machinery
+   * (`retainTraceBatch`, so it is counted as unwritten and retried as a
+   * chunk), and the lap commit ITSELF is retried from here on the same
+   * cadence. Whichever lands first, the other is reconciled: a committed lap
+   * row releases the retained batch (`releaseRetainedRange`), and a written
+   * chunk is reclaimed by the lap commit that follows it.
+   */
+  private failedLapCommits: Array<{
+    lap: LapRecord;
+    telemetry: LocationSample[];
+    checkpoint: { snapshot: SessionMachineSnapshot; laps: LapRecord[] };
+    attempts: number;
+    readyAtMono: number;
+  }> = [];
+  /**
    * Ticket P10A H2: serializes the DURABLE SESSION RECORD writes (the
    * `saveSession` row this controller writes at recording start and again
    * whenever the calibration provenance changes) so two of them can never
@@ -927,6 +967,8 @@ export class SessionController {
       rawTraceRetainedBatchCount: this.failedTraceWrites.length,
       rawTraceRetainedSampleCount: this.retainedTraceSampleCount(),
       rawTraceUnwrittenCount: this.unwrittenTraceSampleCount(),
+      rawTraceUnwrittenTMonos: this.unwrittenTraceTMonos(),
+      failedLapCommitCount: this.failedLapCommits.length,
       calibrationStatus: this.calibrationStatus,
       coachZoneRefreshes: this.coachZoneRefreshes,
     };
@@ -1378,7 +1420,24 @@ export class SessionController {
     sessionId: string,
     snapshot: SessionMachineSnapshot,
     laps: LapRecord[],
-    options?: { calibrationStatus?: SessionCalibrationStatus },
+    options?: {
+      calibrationStatus?: SessionCalibrationStatus;
+      /**
+       * Ticket P10B H4-B: lap numbers this session ALREADY has telemetry
+       * rows for on disk, as the host can enumerate them (mobile:
+       * `readStoredGnssLapNumbers`). Folded into the lap-number offset below
+       * alongside the checkpoint's own laps.
+       *
+       * The checkpoint is no longer allowed to lag a committed lap (see
+       * `writeLapCommit`), but a database interrupted BEFORE that fix
+       * already can: the reviewer's reopened database held lap 1's 93 fixes
+       * with a checkpoint that named no laps at all, and the resumed run
+       * reused lap number 1 and replaced the row. Reading the identities
+       * that storage actually holds is what stops a pre-existing database in
+       * that state from losing those fixes on the very next lap.
+       */
+      storedLapNumbers?: readonly number[];
+    },
   ): void {
     // Ticket P10A H5: the restored run's provenance, before `this.sessionId`
     // is overwritten. Explicit wins (the host read it back from the durable
@@ -1402,6 +1461,12 @@ export class SessionController {
     // start. `0` when there's no restored history (matches a fresh session).
     const restoredLapNumbers = laps.map((lap) => lap.lapNumber);
     if (midSession) restoredLapNumbers.push(snapshot.lapNumber);
+    // Ticket P10B H4-B: a lap number that STORAGE has already committed a
+    // telemetry row for is taken, whatever the checkpoint says -- reusing it
+    // would replace that row and destroy every fix in it.
+    for (const stored of options?.storedLapNumbers ?? []) {
+      if (Number.isFinite(stored) && stored > 0) restoredLapNumbers.push(stored);
+    }
     this.lapNumberOffset = restoredLapNumbers.length === 0 ? 0 : Math.max(...restoredLapNumbers);
 
     this.core = new SessionPipelineCore(this.deps.runtimeProfile, {
@@ -1675,6 +1740,20 @@ export class SessionController {
       );
       this.failedTraceWrites = [];
     }
+    // Ticket P10B H3-B: same for lap commits that never landed. No FIX is
+    // lost with them -- a lap commit that did not commit left every one of
+    // its samples in the chunk rows (or in a retained batch, reported above);
+    // what is abandoned here is the per-lap ROW, which is derived data. It is
+    // still said out loud rather than dropped in silence.
+    if (this.failedLapCommits.length > 0) {
+      this.noteTraceFailure(
+        'abandon',
+        new Error(
+          `${this.failedLapCommits.length} lap telemetry commit(s) never succeeded before a new recording run began`,
+        ),
+      );
+      this.failedLapCommits = [];
+    }
     this.traceRunBase = Math.max(Date.now() - TRACE_KEY_EPOCH_MS, this.traceRunBase + 1);
   }
 
@@ -1688,6 +1767,15 @@ export class SessionController {
   /** Ticket P10A H3: everything captured that is NOT on disk -- the unflushed tail plus every retained batch. */
   private unwrittenTraceSampleCount(): number {
     return this.pendingTrace.length + this.retainedTraceSampleCount();
+  }
+
+  /** Ticket P10B H3-B: the same set, named fix by fix -- see {@link SessionControllerDiagnostics.rawTraceUnwrittenTMonos}. */
+  private unwrittenTraceTMonos(): number[] {
+    const out = this.pendingTrace.map((sample) => sample.tMono);
+    for (const entry of this.failedTraceWrites) {
+      for (const sample of entry.samples) out.push(sample.tMono);
+    }
+    return out;
   }
 
   /**
@@ -1818,14 +1906,20 @@ export class SessionController {
       // instant `endSession()` is called can be reading a state that is
       // about to change. Chaining puts the decision after every write that
       // is already in flight, which is the only place it is knowable.
-      if (!final && this.failedTraceWrites.length === 0) return this.tracePersistenceTail;
+      if (!final && this.failedTraceWrites.length === 0 && this.failedLapCommits.length === 0) {
+        return this.tracePersistenceTail;
+      }
       // Nothing new to write, but batches are waiting: drive the retry pass
       // on its own rather than letting it wait for the next captured fix --
       // a session that has stopped receiving fixes is exactly when a
       // retained batch most needs to land.
-      const drain = this.tracePersistenceTail.then(() =>
-        this.drainFailedTraceWrites(sessionId, final),
-      );
+      const drain = this.tracePersistenceTail.then(async () => {
+        // Ticket P10B H3-B: lap commits first -- a committed lap releases the
+        // retained batch holding its own residue, so the chunk write below is
+        // then not needed at all.
+        await this.drainFailedLapCommits(sessionId, final);
+        await this.drainFailedTraceWrites(sessionId, final);
+      });
       this.tracePersistenceTail = drain;
       return drain;
     }
@@ -1871,6 +1965,7 @@ export class SessionController {
           readyAtMono: this.deps.clock.now() + TRACE_RETRY_BASE_DELAY_MS,
         });
       }
+      await this.drainFailedLapCommits(sessionId, final);
       await this.drainFailedTraceWrites(sessionId, final);
     });
     this.tracePersistenceTail = write;
@@ -1920,16 +2015,56 @@ export class SessionController {
    * retained batch must never write those fixes back afterwards -- that would
    * re-create exactly the double ownership H4 is about, from the other side.
    */
-  private releaseRetainedRange(tStart: number, tEnd: number): void {
-    if (this.failedTraceWrites.length === 0) return;
+  /**
+   * Ticket P10B H3-B: returns HOW MANY samples it released. Those samples
+   * were unwritten a moment ago and are on disk now -- inside the lap row
+   * that just committed -- so the caller counts them as persisted. Without
+   * that, a lap rescuing a retained batch made the samples vanish from the
+   * unwritten figure without ever appearing in the persisted one.
+   */
+  private releaseRetainedRange(tStart: number, tEnd: number): number {
+    if (this.failedTraceWrites.length === 0) return 0;
     const remaining: typeof this.failedTraceWrites = [];
+    let released = 0;
     for (const entry of this.failedTraceWrites) {
-      entry.samples = entry.samples.filter(
-        (sample) => sample.tMono < tStart || sample.tMono > tEnd,
-      );
+      const kept = entry.samples.filter((sample) => sample.tMono < tStart || sample.tMono > tEnd);
+      released += entry.samples.length - kept.length;
+      entry.samples = kept;
       if (entry.samples.length > 0) remaining.push(entry);
     }
     this.failedTraceWrites = remaining;
+    return released;
+  }
+
+  /**
+   * Ticket P10B H3-B: takes ownership of samples that have nowhere else to
+   * live, as an ordinary retained batch -- its own chunk key, its own chunk
+   * metadata (so a later lap commit can reclaim the row once it exists),
+   * counted as unwritten until a retry actually stores it.
+   *
+   * Used when a lap commit fails: the lap's un-chunked fixes have already
+   * left `pendingTrace` by then, and this is what keeps them in the system
+   * instead of dropping them.
+   */
+  private retainTraceBatch(samples: readonly LocationSample[]): void {
+    if (samples.length === 0) return;
+    const batch = [...samples];
+    this.traceSequence += 1;
+    const key = -(this.traceRunBase * TRACE_CHUNK_KEY_STRIDE + this.traceSequence);
+    let tMin = batch[0]!.tMono;
+    let tMax = tMin;
+    for (const sample of batch) {
+      if (sample.tMono < tMin) tMin = sample.tMono;
+      if (sample.tMono > tMax) tMax = sample.tMono;
+    }
+    this.traceChunks.push({ key, tMin, tMax, count: batch.length });
+    this.traceSampleCount += batch.length;
+    this.failedTraceWrites.push({
+      key,
+      samples: batch,
+      attempts: 1,
+      readyAtMono: this.deps.clock.now() + TRACE_RETRY_BASE_DELAY_MS,
+    });
   }
 
   /**
@@ -1975,62 +2110,186 @@ export class SessionController {
     sessionId: string,
     lap: LapRecord,
     telemetry: LocationSample[],
-    firstStoredByLapRow: number,
+    pendingOwned: LocationSample[],
+    checkpoint: { snapshot: SessionMachineSnapshot; laps: LapRecord[] },
   ): Promise<void> {
     const work = this.tracePersistenceTail.then(async () => {
-      const entries: { lapNumber: number; samples: LocationSample[] }[] = [
-        { lapNumber: lap.lapNumber, samples: telemetry },
-      ];
-      const claimed: { chunk: { key: number; tMin: number; tMax: number; count: number }; kept: LocationSample[] }[] = [];
-      const affected = this.traceChunks.filter(
-        (chunk) => chunk.count > 0 && chunk.tMax >= lap.tStart && chunk.tMin <= lap.tEnd,
-      );
-      for (const chunk of affected) {
-        if (chunk.tMin >= lap.tStart && chunk.tMax <= lap.tEnd) {
-          // Wholly inside the lap: the lap row now owns every sample in it.
-          // Emptied rather than deleted -- the repository contract has no
-          // telemetry delete, and an empty payload reads back as `[]`, which
-          // is what "no unclaimed samples here" means to every reader.
-          entries.push({ lapNumber: chunk.key, samples: [] });
-          claimed.push({ chunk, kept: [] });
-          continue;
-        }
-        const stored = await this.deps.repository.loadTelemetry(sessionId, chunk.key);
-        const kept = stored.filter((sample) => sample.tMono < lap.tStart || sample.tMono > lap.tEnd);
-        if (kept.length === stored.length) continue;
-        entries.push({ lapNumber: chunk.key, samples: kept });
-        claimed.push({ chunk, kept });
+      const outcome = await this.attemptLapCommit(sessionId, {
+        lap,
+        telemetry,
+        checkpoint,
+        firstStoredByLapRow: pendingOwned.length,
+      });
+      if (!outcome.ok) {
+        // Ticket P10B H3-B: the lap's own un-chunked fixes left `pendingTrace`
+        // when the lap completed and this transaction was to be their first
+        // and only home. Hand them to the retained-batch machinery BEFORE
+        // rejecting, so they are counted as unwritten and retried, then keep
+        // the lap commit itself for retry too.
+        this.retainTraceBatch(pendingOwned);
+        this.failedLapCommits.push({
+          lap,
+          telemetry,
+          checkpoint,
+          attempts: 1,
+          readyAtMono: this.deps.clock.now() + TRACE_RETRY_BASE_DELAY_MS,
+        });
+        // Rethrown -- the ORIGINAL failure, so the caller sees the cause --
+        // so the lap's own persistence chain, and therefore
+        // `flush()`/`endSession()`, still learns the lap row did not land.
+        throw outcome.error;
       }
-
-      try {
-        await this.deps.repository.saveTelemetryBatch(sessionId, entries);
-      } catch (error) {
-        // Surfaced on the driving screen through `recording.failedWriteCount`
-        // (the trace is what did not move), and rethrown so the lap's own
-        // persistence chain -- and therefore `flush()`/`endSession()` -- still
-        // learns the lap row did not land.
-        this.noteTraceFailure('reclaim', error);
-        throw error;
-      }
-
-      this.persistedSampleCount += firstStoredByLapRow;
-      for (const { chunk, kept } of claimed) {
-        this.traceSampleCount -= chunk.count - kept.length;
-        chunk.count = kept.length;
-        if (kept.length > 0) {
-          chunk.tMin = kept.reduce((min, s) => (s.tMono < min ? s.tMono : min), kept[0]!.tMono);
-          chunk.tMax = kept.reduce((max, s) => (s.tMono > max ? s.tMono : max), kept[0]!.tMono);
-        }
-      }
-      this.traceChunks = this.traceChunks.filter((chunk) => chunk.count > 0);
-      // Ticket P10A H3: a batch still awaiting retry must not write these
-      // fixes back after the lap row has claimed them.
-      this.releaseRetainedRange(lap.tStart, lap.tEnd);
     });
     // The trace chain itself must never stay rejected (every later append
     // chains off it); the rejection reaches the caller through `work`.
     this.tracePersistenceTail = work.catch(() => undefined);
     return work;
+  }
+
+  /**
+   * ONE attempt at a lap commit. Reports failure by returning
+   * `{ ok: false, error }` (it never throws) -- the caller decides whether
+   * that is a first failure to retain or a retry to reschedule, and the
+   * original error is carried out so the first failure can rethrow it.
+   *
+   * Runs inside the `tracePersistenceTail` chain, like every other trace
+   * write, so the chunk reads below cannot race an append or a reclaim.
+   * `firstStoredByLapRow` is the count of samples this row stores for the
+   * FIRST time (a retry passes 0: its residue is retained separately and is
+   * counted when the retained batch is released).
+   */
+  private async attemptLapCommit(
+    sessionId: string,
+    entry: {
+      lap: LapRecord;
+      telemetry: LocationSample[];
+      checkpoint: { snapshot: SessionMachineSnapshot; laps: LapRecord[] };
+      firstStoredByLapRow: number;
+    },
+  ): Promise<{ ok: true } | { ok: false; error: unknown }> {
+    const { lap, telemetry, checkpoint } = entry;
+    const entries: { lapNumber: number; samples: LocationSample[] }[] = [
+      { lapNumber: lap.lapNumber, samples: telemetry },
+    ];
+    const claimed: { chunk: { key: number; tMin: number; tMax: number; count: number }; kept: LocationSample[] }[] = [];
+    const affected = this.traceChunks.filter(
+      (chunk) => chunk.count > 0 && chunk.tMax >= lap.tStart && chunk.tMin <= lap.tEnd,
+    );
+    for (const chunk of affected) {
+      if (chunk.tMin >= lap.tStart && chunk.tMax <= lap.tEnd) {
+        // Wholly inside the lap: the lap row now owns every sample in it.
+        // Emptied rather than deleted -- the repository contract has no
+        // telemetry delete, and an empty payload reads back as `[]`, which
+        // is what "no unclaimed samples here" means to every reader.
+        entries.push({ lapNumber: chunk.key, samples: [] });
+        claimed.push({ chunk, kept: [] });
+        continue;
+      }
+      let stored: LocationSample[];
+      try {
+        stored = await this.deps.repository.loadTelemetry(sessionId, chunk.key);
+      } catch (error) {
+        // A chunk that cannot be READ cannot be safely reclaimed: emptying it
+        // unseen would be the data loss this whole path exists to prevent.
+        this.noteTraceFailure('reclaim', error);
+        return { ok: false, error };
+      }
+      const kept = stored.filter((sample) => sample.tMono < lap.tStart || sample.tMono > lap.tEnd);
+      if (kept.length === stored.length) continue;
+      entries.push({ lapNumber: chunk.key, samples: kept });
+      claimed.push({ chunk, kept });
+    }
+
+    try {
+      await this.writeLapCommit(sessionId, entries, checkpoint);
+    } catch (error) {
+      // Surfaced on the driving screen through `recording.failedWriteCount`
+      // (the trace is what did not move).
+      this.noteTraceFailure('reclaim', error);
+      return { ok: false, error };
+    }
+
+    this.persistedSampleCount += entry.firstStoredByLapRow;
+    for (const { chunk, kept } of claimed) {
+      this.traceSampleCount -= chunk.count - kept.length;
+      chunk.count = kept.length;
+      if (kept.length > 0) {
+        chunk.tMin = kept.reduce((min, s) => (s.tMono < min ? s.tMono : min), kept[0]!.tMono);
+        chunk.tMax = kept.reduce((max, s) => (s.tMono > max ? s.tMono : max), kept[0]!.tMono);
+      }
+    }
+    this.traceChunks = this.traceChunks.filter((chunk) => chunk.count > 0);
+    // Ticket P10A H3: a batch still awaiting retry must not write these
+    // fixes back after the lap row has claimed them. Ticket P10B H3-B: what
+    // it releases is now ON DISK, inside the row this commit just wrote, so
+    // it counts as persisted rather than silently leaving both figures.
+    this.persistedSampleCount += this.releaseRetainedRange(lap.tStart, lap.tEnd);
+    return { ok: true };
+  }
+
+  /**
+   * Ticket P10B H4-B -- THE CHECKPOINT COMMITS WITH THE LAP, OR AFTER
+   * NOTHING AT ALL.
+   *
+   * The reviewer interrupted a session between the (committed) lap batch and
+   * the checkpoint that followed it: storage then held lap 1's 93 fixes with
+   * the chunk copies already reclaimed, while the checkpoint still said the
+   * session had no laps. The resumed run allocated lap number 1 again and
+   * replaced the row -- 93 fixes gone, no copy anywhere.
+   *
+   * A repository offering `saveLapCommit` commits both in ONE transaction,
+   * which makes that state unreachable. One that does not is driven in the
+   * SAFE order instead: checkpoint first, telemetry second. An interruption
+   * then leaves a checkpoint naming a lap whose row never landed -- the lap
+   * NUMBER is reserved, so the next run cannot reuse it, and every fix is
+   * still sitting in the unclaimed chunk rows that were never reclaimed.
+   * Nothing is lost either way; only the (recomputable) per-lap row is.
+   */
+  private async writeLapCommit(
+    sessionId: string,
+    entries: readonly { lapNumber: number; samples: LocationSample[] }[],
+    checkpoint: { snapshot: SessionMachineSnapshot; laps: LapRecord[] },
+  ): Promise<void> {
+    const repository = this.deps.repository;
+    if (repository.saveLapCommit !== undefined) {
+      await repository.saveLapCommit(sessionId, entries, checkpoint);
+      return;
+    }
+    await repository.saveCheckpoint(sessionId, checkpoint.snapshot, checkpoint.laps);
+    await repository.saveTelemetryBatch(sessionId, entries);
+  }
+
+  /**
+   * Ticket P10B H3-B: one pass over the lap commits that did not land.
+   * Ordered BEFORE the retained chunk batches by both callers -- a lap commit
+   * that succeeds releases its residue batch, so retrying it first saves the
+   * chunk write entirely. Never throws.
+   */
+  private async drainFailedLapCommits(sessionId: string, force: boolean): Promise<void> {
+    if (this.failedLapCommits.length === 0) return;
+    const remaining: typeof this.failedLapCommits = [];
+    for (const entry of this.failedLapCommits) {
+      const waiting = this.deps.clock.now() < entry.readyAtMono;
+      const exhausted = entry.attempts >= TRACE_RETRY_MAX_ATTEMPTS;
+      if (!force && (waiting || exhausted)) {
+        remaining.push(entry);
+        continue;
+      }
+      const outcome = await this.attemptLapCommit(sessionId, {
+        lap: entry.lap,
+        telemetry: entry.telemetry,
+        checkpoint: entry.checkpoint,
+        // Zero: this lap's un-chunked residue was handed to
+        // `failedTraceWrites` at the first failure, so it is counted either
+        // by the retained batch's own write or by `releaseRetainedRange`.
+        firstStoredByLapRow: 0,
+      });
+      if (outcome.ok) continue;
+      entry.attempts += 1;
+      entry.readyAtMono = this.deps.clock.now() + this.traceRetryDelayMs(entry.attempts);
+      remaining.push(entry);
+    }
+    this.failedLapCommits = remaining;
   }
 
   private onLapCompleted(lap: LapRecord): Promise<void> {
@@ -2055,8 +2314,13 @@ export class SessionController {
     );
     // Ticket P7M M6: these are the lap's samples that no chunk write had
     // reached yet, so the lap row below is the FIRST time they are stored --
-    // the only part of that row the persisted counter has not already counted.
-    const firstStoredByLapRow = this.pendingTrace.length - keptPending.length;
+    // the only part of that row the persisted counter has not already
+    // counted. Ticket P10B H3-B: kept as the SAMPLES, not just their count,
+    // because a failed commit has to be able to hand them back to the
+    // retained-batch machinery rather than lose them.
+    const pendingOwnedByLapRow = this.pendingTrace.filter(
+      (sample) => sample.tMono >= lap.tStart && sample.tMono <= lap.tEnd,
+    );
     this.pendingTrace = keptPending;
     // Build while this lap's matches are guaranteed to still be present in
     // SessionPipelineCore's bounded rolling buffer. Deferring construction
@@ -2071,13 +2335,13 @@ export class SessionController {
     const persistence = this.lapPersistenceTail.then(async () => {
       // Ticket P7M M1 + P10A H4: the lap row and the reclaim of the same
       // fixes out of the unclaimed chunks are ONE transaction -- there is no
-      // longer an instant at which both rows own them.
-      await this.commitLapTelemetry(sessionId, lap, telemetry, firstStoredByLapRow);
-      await this.deps.repository.saveCheckpoint(
-        sessionId,
-        checkpointSnapshot,
-        checkpointLaps,
-      );
+      // longer an instant at which both rows own them. Ticket P10B H4-B: the
+      // recovery checkpoint is part of that same unit (or, on a repository
+      // that cannot do it, written first) -- see `writeLapCommit`.
+      await this.commitLapTelemetry(sessionId, lap, telemetry, pendingOwnedByLapRow, {
+        snapshot: checkpointSnapshot,
+        laps: checkpointLaps,
+      });
       await this.maybeReplacePb(lap, pbCandidate);
       this.emit();
     });

@@ -20,18 +20,24 @@ runRepositoryContractTests('SqlSessionRepository(sql.js)', async () => SqlSessio
  */
 function withInjectedRunFailure(db: SqlDatabase, shouldFail: (sql: string) => boolean, message: string): SqlDatabase {
   let armed = true;
-  return {
-    execAsync: (sql) => db.execAsync(sql),
+  // P10B H5-B: a transaction's statements now run through the
+  // transaction-scoped handle the callback is given, so the injection has to
+  // decorate THAT handle too -- otherwise a mid-transaction failure can no
+  // longer be simulated at all. Both decorations share `armed`, so it is
+  // still exactly ONE injected failure.
+  const decorate = (inner: SqlDatabase): SqlDatabase => ({
+    execAsync: (sql) => inner.execAsync(sql),
     runAsync: async (sql: string, params?: readonly SqlBindValue[]) => {
       if (armed && shouldFail(sql)) {
         armed = false;
         throw new Error(message);
       }
-      return db.runAsync(sql, params);
+      return inner.runAsync(sql, params);
     },
-    getAllAsync: (sql, params) => db.getAllAsync(sql, params),
-    withTransactionAsync: (fn) => db.withTransactionAsync(fn),
-  };
+    getAllAsync: (sql, params) => inner.getAllAsync(sql, params),
+    withTransactionAsync: (fn) => inner.withTransactionAsync((tx) => fn(decorate(tx))),
+  });
+  return decorate(db);
 }
 
 describe('SqlSessionRepository - SQL-specific guarantees', () => {

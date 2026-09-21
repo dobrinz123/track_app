@@ -107,7 +107,6 @@ import {
   type GForceProvider,
 } from './gforceProvider';
 import { TelemetryRecorder } from '../persistence/telemetryRecorder';
-import { PASSTHROUGH_WRITE_GATE, type SqlWriteGate } from '../persistence/sqlWriteGate';
 import { createAnalysisRunner, sessionIsActive, type AnalysisRunner } from './analysisViewModel';
 import { createAnalysisSessionLoader } from './analysisSessionLoader';
 import { loadSessionTelemetryByLap } from '../persistence/telemetryRead';
@@ -1245,7 +1244,9 @@ function startTelemetryRecording(sessionId: string): void {
   if (db === null) return;
   if (!settingsStore.getSettings().telemetryEnabled) return;
 
-  const recorder = new TelemetryRecorder(db, sessionId, undefined, dbWriteGate ?? undefined);
+  // P10B H5-B: no gate argument -- `db` is the gated handle and serializes
+  // this recorder's INSERTs against every transaction itself.
+  const recorder = new TelemetryRecorder(db, sessionId);
   telemetryRecorder = recorder;
   telemetryCurrentLapNumber = null;
 
@@ -1421,8 +1422,6 @@ export function subscribeRecoveryNotice(cb: (n: string | null) => void): () => v
 // ---------------------------------------------------------------------------
 
 let db: SqlDatabase | null = null;
-/** Shared transaction/telemetry write gate from `openAppDatabase()` (N1 fix) -- null on the in-memory/web path, where there is no shared connection to protect. */
-let dbWriteGate: SqlWriteGate | null = null;
 let repository: LocalSessionRepository | null = null;
 let controller: SessionController | null = null;
 /** The `RealSessionFacade` currently wrapping the production `controller` -- kept alive (not recreated) across DevReplay swaps so `restoreProductionFacade()` (C6 fix) can just re-point `facadeWrapper` back to it instead of leaking a fresh subscription every time. Recreated together with `controller` by `installProductionController()` (C1 fix). */
@@ -1540,22 +1539,24 @@ async function setActiveSession(
   database: SqlDatabase,
   session: { sessionId: string; circuitId: string; startedAtUtc?: string } | null,
 ): Promise<void> {
-  await database.withTransactionAsync(async () => {
+  // Ticket P10B H5-B: statements go through the transaction-scoped `tx`
+  // handle, never through the (gated) outer `database` handle.
+  await database.withTransactionAsync(async (tx) => {
     if (session === null) {
-      await database.runAsync('DELETE FROM settings WHERE key = ?', [ACTIVE_SESSION_SETTINGS_KEY]);
-      await database.runAsync('DELETE FROM settings WHERE key = ?', [ACTIVE_SESSION_CIRCUIT_SETTINGS_KEY]);
-      await database.runAsync('DELETE FROM settings WHERE key = ?', [ACTIVE_SESSION_STARTED_SETTINGS_KEY]);
+      await tx.runAsync('DELETE FROM settings WHERE key = ?', [ACTIVE_SESSION_SETTINGS_KEY]);
+      await tx.runAsync('DELETE FROM settings WHERE key = ?', [ACTIVE_SESSION_CIRCUIT_SETTINGS_KEY]);
+      await tx.runAsync('DELETE FROM settings WHERE key = ?', [ACTIVE_SESSION_STARTED_SETTINGS_KEY]);
     } else {
-      await database.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      await tx.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
         ACTIVE_SESSION_SETTINGS_KEY,
         session.sessionId,
       ]);
-      await database.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      await tx.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
         ACTIVE_SESSION_CIRCUIT_SETTINGS_KEY,
         session.circuitId,
       ]);
       if (session.startedAtUtc !== undefined) {
-        await database.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+        await tx.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
           ACTIVE_SESSION_STARTED_SETTINGS_KEY,
           session.startedAtUtc,
         ]);
@@ -2818,7 +2819,10 @@ async function runBootstrap(): Promise<void> {
     } else {
       const opened = await openAppDatabase(DB_NAME);
       db = opened.db;
-      dbWriteGate = opened.writeGate;
+      // P10B H5-B: the gate itself is no longer wired anywhere by hand --
+      // `opened.db` acquires it around every call made through it, which is
+      // what stops a standalone write from executing inside (and being
+      // rolled back by) an unrelated transaction.
       repository = opened.repository;
     }
 
@@ -3208,8 +3212,25 @@ export async function resumeRecovery(): Promise<boolean> {
       // one thing it must never come back as is "calibrated". Without this,
       // `start('session')` reset the live label to false and the dashboard
       // showed a never-calibrated resumed session as an ordinary one.
+      // Ticket P10B H4-B (binding): the lap numbers storage has ALREADY
+      // committed telemetry rows for. A checkpoint can lag a committed lap
+      // on any database written before the lap commit and its checkpoint
+      // became one transaction -- the reviewer's reopened database held lap
+      // 1's 93 fixes while the checkpoint named no laps, and the resumed run
+      // allocated lap 1 again and replaced the row. Reading the identities
+      // off disk is what stops that from happening to a database already in
+      // that state. Never fatal: an unreadable index resumes as before.
+      let storedLapNumbers: readonly number[] = [];
+      if (database !== null) {
+        try {
+          storedLapNumbers = await readStoredGnssLapNumbers(database, info.sessionId);
+        } catch (error) {
+          console.warn('[composition] resumeRecovery: could not read stored lap numbers', error);
+        }
+      }
       ctrl.restoreFromCheckpoint(info.sessionId, checkpoint.snapshot, checkpoint.laps, {
         calibrationStatus: resolveSessionCalibrationStatus(info.sessionId),
+        storedLapNumbers,
       });
       await ctrl.start('session');
       // F6 fix (WPT3, binding): normal session start reaches
@@ -3413,13 +3434,20 @@ async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDa
     await stopTelemetryRecording();
     const database = db;
     try {
-      telemetryOk = await (dbWriteGate ?? PASSTHROUGH_WRITE_GATE).exclusive(async () => {
-        await database.runAsync('DELETE FROM telemetry_samples');
-        const remaining = await database.getAllAsync<{ count: number }>(
+      // P10B H5-B: expressed as a TRANSACTION rather than as a gate hold.
+      // The gated database now acquires the gate around every call made
+      // through it, so holding it here as well would deadlock -- and the
+      // DELETE + verify pair needs to be indivisible anyway, which is what
+      // `withTransactionAsync` (and only it) actually provides.
+      let remainingRows = 1;
+      await database.withTransactionAsync(async (tx) => {
+        await tx.runAsync('DELETE FROM telemetry_samples');
+        const remaining = await tx.getAllAsync<{ count: number }>(
           'SELECT COUNT(*) AS count FROM telemetry_samples',
         );
-        return (remaining[0]?.count ?? 0) === 0;
+        remainingRows = remaining[0]?.count ?? 0;
       });
+      telemetryOk = remainingRows === 0;
     } catch (error) {
       // N4 (binding): symmetric with the per-circuit try/catch above -- a
       // rejected telemetry delete/verify is reported as `ok: false` plus the

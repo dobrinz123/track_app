@@ -12,7 +12,7 @@ function loadSqlJs(): ReturnType<typeof initSqlJs> {
 
 /** Wraps a live sql.js `Database` handle as a `SqlDatabase`. */
 export function wrapSqlJsDatabase(db: Database): SqlDatabase {
-  return {
+  const handle: SqlDatabase = {
     async execAsync(sql: string): Promise<void> {
       db.exec(sql);
     },
@@ -36,10 +36,13 @@ export function wrapSqlJsDatabase(db: Database): SqlDatabase {
       }
     },
 
-    async withTransactionAsync(fn: () => Promise<void>): Promise<void> {
+    // Ticket P10B H5-B: the callback gets the transaction-scoped handle the
+    // contract promises -- here the same ungated adapter, since this double
+    // has one connection and no gate above it.
+    async withTransactionAsync(fn: (tx: SqlDatabase) => Promise<void>): Promise<void> {
       db.run('BEGIN');
       try {
-        await fn();
+        await fn(handle);
         db.run('COMMIT');
       } catch (err) {
         db.run('ROLLBACK');
@@ -47,6 +50,7 @@ export function wrapSqlJsDatabase(db: Database): SqlDatabase {
       }
     },
   };
+  return handle;
 }
 
 /** Creates a brand-new in-memory sql.js-backed `SqlDatabase` for a test. */

@@ -172,7 +172,12 @@ export interface RawSessionExportDocument {
      * order. More than one entry means this session was resumed after a
      * process death — and that its `tMono` values restart at each boundary.
      */
-    runs: { runBase: number; chunkCount: number; sampleCount: number }[];
+    /**
+     * Ticket P10B M8: counted AFTER reconciliation, from the samples this
+     * document actually contains. `startIndex` is where this run's block
+     * begins in `unclaimed`, so a reader slices rather than accumulates.
+     */
+    runs: { runBase: number; chunkCount: number; sampleCount: number; startIndex: number }[];
     /**
      * Ticket P10A H4: fixes that were stored in BOTH a lap row and a chunk
      * row (a lap write that committed while its reclaim did not) and were
@@ -252,8 +257,8 @@ function sampleIdentity(sample: LocationSample): string {
 function reconcileUnclaimed(
   lapTraces: readonly RawSessionLapTrace[],
   laps: readonly LapRecord[],
-  unclaimed: readonly LocationSample[],
-): { kept: LocationSample[]; removed: number } {
+  unclaimed: readonly TaggedSample[],
+): { kept: TaggedSample[]; removed: number } {
   const available = new Map<string, number>();
   for (const trace of lapTraces) {
     for (const sample of trace.samples) {
@@ -282,9 +287,10 @@ function reconcileUnclaimed(
   }
   if (claimedRanges.length === 0) return { kept: [...unclaimed], removed: 0 };
 
-  const kept: LocationSample[] = [];
+  const kept: TaggedSample[] = [];
   let removed = 0;
-  for (const sample of unclaimed) {
+  for (const tagged of unclaimed) {
+    const sample = tagged.sample;
     const inClaimedRange = claimedRanges.some(
       (range) => sample.tMono >= range.from && sample.tMono <= range.to,
     );
@@ -297,9 +303,20 @@ function reconcileUnclaimed(
         continue;
       }
     }
-    kept.push(sample);
+    kept.push(tagged);
   }
   return { kept, removed };
+}
+
+/**
+ * Ticket P10B M8: one unclaimed fix WITH the run and chunk row it came out
+ * of, carried through reconciliation so the exported run counts can be
+ * computed from what actually shipped.
+ */
+interface TaggedSample {
+  sample: LocationSample;
+  runBase: number;
+  key: number;
 }
 
 /**
@@ -328,22 +345,51 @@ export function buildRawSessionExportDocument(
   const orderedChunks = [...input.unclaimedChunks].sort(
     (a, b) => a.runBase - b.runBase || a.sequence - b.sequence || a.key - b.key,
   );
-  const rawUnclaimed: LocationSample[] = [];
-  const runTotals = new Map<number, { chunkCount: number; sampleCount: number }>();
+  const rawUnclaimed: TaggedSample[] = [];
   for (const chunk of orderedChunks) {
-    rawUnclaimed.push(...chunk.samples);
-    const totals = runTotals.get(chunk.runBase) ?? { chunkCount: 0, sampleCount: 0 };
-    totals.chunkCount += 1;
-    totals.sampleCount += chunk.samples.length;
-    runTotals.set(chunk.runBase, totals);
+    for (const sample of chunk.samples) {
+      rawUnclaimed.push({ sample, runBase: chunk.runBase, key: chunk.key });
+    }
   }
-  const runs = [...runTotals.entries()]
-    .map(([runBase, totals]) => ({ runBase, ...totals }))
-    .sort((a, b) => a.runBase - b.runBase);
 
   // Ticket P10A H4: one fix, exported once.
   const reconciled = reconcileUnclaimed(laps, input.session.laps, rawUnclaimed);
-  const unclaimed = reconciled.kept;
+  const unclaimed = reconciled.kept.map((tagged) => tagged.sample);
+
+  // Ticket P10B M8 -- THE RUN COUNTS DESCRIBE WHAT SHIPPED, NOT WHAT WAS
+  // READ. They were computed from the chunk rows BEFORE reconciliation while
+  // `unclaimed` held the samples AFTER it, so a run whose only fix was a
+  // duplicate of a lap-row sample still claimed one sample in the export --
+  // and a consumer walking `runs` in order (their only purpose: `tMono` is
+  // not comparable across runs, so the boundaries are how you split the
+  // array) then attributed the NEXT run's fix to the previous run. The
+  // reviewer reproduced exactly that with one fix in each of two runs.
+  //
+  // Counted from the reconciled array instead, with each sample's run
+  // identity intact, plus the index it starts at so the boundary is stated
+  // rather than inferred. A run that contributed nothing to `unclaimed` is
+  // not listed: it shipped no samples to be bounded.
+  const runTotals = new Map<number, { chunkCount: number; sampleCount: number; startIndex: number; keys: Set<number> }>();
+  reconciled.kept.forEach((tagged, index) => {
+    const totals = runTotals.get(tagged.runBase) ?? {
+      chunkCount: 0,
+      sampleCount: 0,
+      startIndex: index,
+      keys: new Set<number>(),
+    };
+    totals.sampleCount += 1;
+    totals.keys.add(tagged.key);
+    totals.chunkCount = totals.keys.size;
+    runTotals.set(tagged.runBase, totals);
+  });
+  const runs = [...runTotals.entries()]
+    .map(([runBase, totals]) => ({
+      runBase,
+      chunkCount: totals.chunkCount,
+      sampleCount: totals.sampleCount,
+      startIndex: totals.startIndex,
+    }))
+    .sort((a, b) => a.runBase - b.runBase);
 
   // Ticket P10A (MEDIUM, ordering): sensor rows arrive in storage (rowid)
   // order, which IS capture order across launches. Re-sorting them on

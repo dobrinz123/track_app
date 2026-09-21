@@ -119,6 +119,49 @@ export class SqlSessionRepository implements LocalSessionRepository {
     ]);
   }
 
+  /**
+   * Ticket P10B H4-B -- LAP TELEMETRY, RECLAIM AND THE RECOVERY CHECKPOINT
+   * COMMIT TOGETHER.
+   *
+   * `saveTelemetryBatch` (P10A H4) already made the lap row and the reclaim
+   * of the chunks it claims atomic. The checkpoint stayed OUTSIDE that
+   * transaction, and the P10B reviewer reproduced what that costs: interrupt
+   * after the batch commits but before the checkpoint lands, and storage
+   * holds lap 1's 93 fixes with the chunk copies already reclaimed while the
+   * checkpoint still says "no laps". The resumed run then allocates lap
+   * number 1 again and REPLACES that row -- 93 fixes gone, with no copy left
+   * anywhere.
+   *
+   * Committing the checkpoint in the same transaction makes that state
+   * unreachable: either the lap exists in both places, or in neither (in
+   * which case the fixes are still in their chunk rows, untouched).
+   */
+  async saveLapCommit(
+    sessionId: string,
+    entries: readonly { lapNumber: number; samples: LocationSample[] }[],
+    checkpoint: { snapshot: SessionMachineSnapshot; laps: LapRecord[] },
+  ): Promise<void> {
+    for (const entry of entries) {
+      assertJsonSerializable(entry.samples, `telemetry(${sessionId}, lap ${entry.lapNumber})`);
+    }
+    // Serialized (and validated) BEFORE the transaction opens, exactly like
+    // `saveCheckpoint`: a non-serializable snapshot must not be able to abort
+    // a transaction half-way, it must never open one.
+    const payload = CheckpointCodec.serialize({ snapshot: checkpoint.snapshot, laps: checkpoint.laps });
+    await this.db.withTransactionAsync(async (tx) => {
+      for (const entry of entries) {
+        await tx.runAsync(
+          'INSERT OR REPLACE INTO telemetry (sessionId, lapNumber, payload) VALUES (?, ?, ?)',
+          [sessionId, entry.lapNumber, JSON.stringify(entry.samples)],
+        );
+      }
+      await tx.runAsync('INSERT OR REPLACE INTO checkpoints (sessionId, payload) VALUES (?, ?)', [
+        sessionId,
+        payload,
+      ]);
+    });
+  }
+
   async loadCheckpoint(sessionId: string): Promise<{ snapshot: SessionMachineSnapshot; laps: LapRecord[] } | null> {
     const rows = await this.db.getAllAsync<PayloadRow>('SELECT payload FROM checkpoints WHERE sessionId = ?', [
       sessionId,
@@ -133,8 +176,8 @@ export class SqlSessionRepository implements LocalSessionRepository {
 
   async saveSession(s: SessionSummary): Promise<void> {
     assertJsonSerializable(s.laps, `session(${s.sessionId}).laps`);
-    await this.db.withTransactionAsync(async () => {
-      await this.db.runAsync(
+    await this.db.withTransactionAsync(async (tx) => {
+      await tx.runAsync(
         `INSERT OR REPLACE INTO sessions
            (sessionId, userId, circuitId, layoutId, layoutVersion, startedAtUtc,
             calibrationStatus, traceUnwritten, traceFailedWrites)
@@ -156,9 +199,9 @@ export class SqlSessionRepository implements LocalSessionRepository {
       );
       // Full replace of this session's laps: matches saveSession's
       // "last write wins for this sessionId" semantics.
-      await this.db.runAsync('DELETE FROM laps WHERE sessionId = ?', [s.sessionId]);
+      await tx.runAsync('DELETE FROM laps WHERE sessionId = ?', [s.sessionId]);
       for (const lap of s.laps) {
-        await this.db.runAsync('INSERT INTO laps (sessionId, lapNumber, payload) VALUES (?, ?, ?)', [
+        await tx.runAsync('INSERT INTO laps (sessionId, lapNumber, payload) VALUES (?, ?, ?)', [
           s.sessionId,
           lap.lapNumber,
           JSON.stringify(lap),
@@ -229,9 +272,9 @@ export class SqlSessionRepository implements LocalSessionRepository {
       assertJsonSerializable(entry.samples, `telemetry(${sessionId}, lap ${entry.lapNumber})`);
     }
     if (entries.length === 0) return;
-    await this.db.withTransactionAsync(async () => {
+    await this.db.withTransactionAsync(async (tx) => {
       for (const entry of entries) {
-        await this.db.runAsync(
+        await tx.runAsync(
           'INSERT OR REPLACE INTO telemetry (sessionId, lapNumber, payload) VALUES (?, ?, ?)',
           [sessionId, entry.lapNumber, JSON.stringify(entry.samples)],
         );
@@ -276,12 +319,12 @@ export class SqlSessionRepository implements LocalSessionRepository {
     // so the atomicity is real and testable -- if the INSERT half fails for
     // any reason, the whole transaction rolls back and the prior row (if any)
     // is restored by SQLite, never left half-deleted.
-    await this.db.withTransactionAsync(async () => {
-      await this.db.runAsync(
+    await this.db.withTransactionAsync(async (tx) => {
+      await tx.runAsync(
         'DELETE FROM reference_laps WHERE userId = ? AND circuitId = ? AND layoutId = ? AND layoutVersion = ?',
         [ref.userId, ref.circuitId, ref.layoutId, ref.layoutVersion],
       );
-      await this.db.runAsync(
+      await tx.runAsync(
         'INSERT INTO reference_laps (userId, circuitId, layoutId, layoutVersion, payload) VALUES (?, ?, ?, ?, ?)',
         [ref.userId, ref.circuitId, ref.layoutId, ref.layoutVersion, payload],
       );
@@ -296,29 +339,29 @@ export class SqlSessionRepository implements LocalSessionRepository {
     // The prefix sweep at the end is what covers that case.
     const sessionIdPrefix = `${userId}--`;
 
-    await this.db.withTransactionAsync(async () => {
-      await this.db.runAsync('DELETE FROM laps WHERE sessionId IN (SELECT sessionId FROM sessions WHERE userId = ?)', [
+    await this.db.withTransactionAsync(async (tx) => {
+      await tx.runAsync('DELETE FROM laps WHERE sessionId IN (SELECT sessionId FROM sessions WHERE userId = ?)', [
         userId,
       ]);
-      await this.db.runAsync(
+      await tx.runAsync(
         'DELETE FROM checkpoints WHERE sessionId IN (SELECT sessionId FROM sessions WHERE userId = ?)',
         [userId],
       );
-      await this.db.runAsync(
+      await tx.runAsync(
         'DELETE FROM telemetry WHERE sessionId IN (SELECT sessionId FROM sessions WHERE userId = ?)',
         [userId],
       );
-      await this.db.runAsync('DELETE FROM sessions WHERE userId = ?', [userId]);
-      await this.db.runAsync('DELETE FROM reference_laps WHERE userId = ?', [userId]);
+      await tx.runAsync('DELETE FROM sessions WHERE userId = ?', [userId]);
+      await tx.runAsync('DELETE FROM reference_laps WHERE userId = ?', [userId]);
 
       // Orphan sweep by sessionId prefix (see comment above). `substr(x, 1, N)
       // = prefix` with N = length(prefix) is a plain-equality prefix match
       // that needs no LIKE-wildcard escaping of userId.
-      await this.db.runAsync('DELETE FROM checkpoints WHERE substr(sessionId, 1, length(?)) = ?', [
+      await tx.runAsync('DELETE FROM checkpoints WHERE substr(sessionId, 1, length(?)) = ?', [
         sessionIdPrefix,
         sessionIdPrefix,
       ]);
-      await this.db.runAsync('DELETE FROM telemetry WHERE substr(sessionId, 1, length(?)) = ?', [
+      await tx.runAsync('DELETE FROM telemetry WHERE substr(sessionId, 1, length(?)) = ?', [
         sessionIdPrefix,
         sessionIdPrefix,
       ]);

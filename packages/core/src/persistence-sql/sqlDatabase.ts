@@ -30,5 +30,22 @@ export interface SqlDatabase {
   execAsync(sql: string): Promise<void>;
   runAsync(sql: string, params?: readonly SqlBindValue[]): Promise<SqlRunResult>;
   getAllAsync<T>(sql: string, params?: readonly SqlBindValue[]): Promise<T[]>;
-  withTransactionAsync(fn: () => Promise<void>): Promise<void>;
+  /**
+   * Ticket P10B H5-B -- TRANSACTION-SCOPED ACCESS.
+   *
+   * The callback is handed a `tx` handle and MUST issue every statement of
+   * the transaction through it, never through the outer `SqlDatabase` it
+   * closed over. On a shared single connection the outer handle may be
+   * serialized (see apps/mobile/src/persistence/sqlWriteGate.ts): a statement
+   * sent through it from inside an open transaction would queue behind the
+   * transaction that is waiting for it (deadlock), while a statement sent
+   * through it from OUTSIDE would silently enrol in whatever transaction
+   * happens to be open and be rolled back with it -- the P10B reviewer
+   * reproduced exactly that, losing ten flushed fixes to an unrelated
+   * `saveSession` rollback.
+   *
+   * `tx` is the ungated connection; the gate is held for the whole
+   * BEGIN..COMMIT span by the wrapper, so no other unit can interleave.
+   */
+  withTransactionAsync(fn: (tx: SqlDatabase) => Promise<void>): Promise<void>;
 }

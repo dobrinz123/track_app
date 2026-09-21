@@ -233,9 +233,11 @@ describe('P10A MEDIUM -- cross-launch ordering uses run identity, never tMono', 
     );
 
     expect(doc.gnss.unclaimed.map((s) => s.tMono)).toEqual([100_000, 1_000]);
+    // P10B M8: `startIndex` states where each run's block begins in
+    // `unclaimed`, and the counts are those of the EXPORTED samples.
     expect(doc.gnss.runs).toEqual([
-      { runBase: 500, chunkCount: 1, sampleCount: 1 },
-      { runBase: 700, chunkCount: 1, sampleCount: 1 },
+      { runBase: 500, chunkCount: 1, sampleCount: 1, startIndex: 0 },
+      { runBase: 700, chunkCount: 1, sampleCount: 1, startIndex: 1 },
     ]);
     expect(doc.notes.some((note) => note.includes('2 app runs'))).toBe(true);
   });

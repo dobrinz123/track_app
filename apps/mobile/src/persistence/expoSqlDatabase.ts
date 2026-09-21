@@ -16,12 +16,20 @@ import { createSqlWriteGate, gateSqlTransactions, type SqlWriteGate } from './sq
 //   - getAllAsync<T>(sql, params)       -> db.getAllAsync<T>(sql, params)
 //   - withTransactionAsync(fn)          -> db.withTransactionAsync(fn)
 export function wrapExpoSqliteDatabase(db: SQLiteDatabase): SqlDatabase {
-  return {
+  const handle: SqlDatabase = {
     execAsync: (sql: string) => db.execAsync(sql),
     runAsync: (sql: string, params: readonly SqlBindValue[] = []) => db.runAsync(sql, params as SqlBindValue[]),
     getAllAsync: <T>(sql: string, params: readonly SqlBindValue[] = []) => db.getAllAsync<T>(sql, params as SqlBindValue[]),
-    withTransactionAsync: (fn: () => Promise<void>) => db.withTransactionAsync(fn),
+    // Ticket P10B H5-B: expo-sqlite's own `withTransactionAsync` takes a
+    // zero-argument task, so the transaction-scoped handle this contract
+    // promises is supplied here -- and it is THIS object, the ungated
+    // connection. A caller inside the callback therefore reaches the
+    // connection directly instead of re-entering whatever wrapper
+    // (`gateSqlTransactions`) sits above it.
+    withTransactionAsync: (fn: (tx: SqlDatabase) => Promise<void>) =>
+      db.withTransactionAsync(() => fn(handle)),
   };
+  return handle;
 }
 
 // F1/N1: transaction-vs-telemetry mutual exclusion lives in ./sqlWriteGate.ts
@@ -64,12 +72,14 @@ export async function openAppDatabase(
   dbName: string,
 ): Promise<{ db: SqlDatabase; repository: SqlSessionRepository; writeGate: SqlWriteGate }> {
   const raw = await openDatabaseAsync(dbName);
-  // F1/N1 fix: the repository's transactions acquire `writeGate` for their
-  // whole BEGIN..COMMIT span (`gateSqlTransactions`); `TelemetryRecorder`
-  // acquires the SAME gate around each batch INSERT (composition.ts passes
-  // `writeGate` to its constructor). Statements inside a transaction callback
-  // pass through ungated -- they are the holder's own critical section
-  // (wrapping them too is the self-deadlock this replaces, N1).
+  // F1/N1 fix, extended by P10B H5-B: EVERY unit of work on this connection
+  // acquires `writeGate` -- a whole repository transaction for its entire
+  // BEGIN..COMMIT span, and each standalone statement (a `TelemetryRecorder`
+  // batch INSERT, a trace chunk write, a settings row) for its own duration.
+  // Statements issued inside a transaction callback go through the `tx`
+  // handle that callback is given, straight to the connection, which is what
+  // keeps full serialization deadlock-free (the self-deadlock N1 hit, and the
+  // reason no caller may wrap a gated statement in `exclusive()` itself).
   const writeGate = createSqlWriteGate();
   const db = gateSqlTransactions(wrapExpoSqliteDatabase(raw), writeGate);
   const repository = await SqlSessionRepository.create(db);
