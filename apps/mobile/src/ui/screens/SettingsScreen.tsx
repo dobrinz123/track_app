@@ -36,6 +36,10 @@ import { getNetworkInfo } from '../../session/networkInfo';
 import { enetAdapterReservation } from '../../session/enetAdapterReservation';
 import Constants from 'expo-constants';
 import { SUGGESTION_SETTING_STRINGS } from './trackdayStrings';
+import {
+  ANALYSIS_SMOOTHING_SETTING_STRINGS,
+  IMU_FUSION_SETTING_STRINGS,
+} from './imuSettingsStrings';
 
 /** Session states that mean "there is an active session in progress" -- the delete-my-data control is hidden/disabled during all of these so it can never race a live write (M3 fix). */
 const ACTIVE_SESSION_STATES = new Set([
@@ -148,6 +152,9 @@ function DiagnosticsRow({ label, value }: { label: string; value: string }): Rea
 export function SettingsScreen({ navigation }: Props): React.JSX.Element {
   const settings = useSettings(settingsStore);
   const suggestionStrings = SUGGESTION_SETTING_STRINGS[settings.language];
+  // Ticket P6a: the two experimental signal-processing rows, in the app language.
+  const imuFusionStrings = IMU_FUSION_SETTING_STRINGS[settings.language];
+  const analysisSmoothingStrings = ANALYSIS_SMOOTHING_SETTING_STRINGS[settings.language];
   const facadeState = useFacadeState(facade);
   // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
   const isDev = typeof __DEV__ !== 'undefined' ? __DEV__ : false;
@@ -622,6 +629,63 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
               accessibilityRole="switch"
               accessibilityLabel={suggestionStrings.a11y}
               accessibilityState={{ checked: settings.suggestionsEnabled }}
+            />
+          </View>
+        </View>
+
+        {
+          // Ticket P6a (binding): the two experimental signal-processing
+          // opt-ins. Both default OFF; with both off the live G channels and
+          // the analysis read path run exactly the code that produced every
+          // field-confirmed recording so far. Their own section, because
+          // neither is coaching and neither is OBD.
+        }
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
+            MOTION SENSORS (EXPERIMENTAL)
+          </Text>
+          <View style={styles.toggleRow}>
+            <View style={styles.toggleTextGroup}>
+              <Text style={styles.toggleTitle} maxFontSizeMultiplier={1.3}>
+                {imuFusionStrings.title}
+              </Text>
+              <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                {imuFusionStrings.help}
+              </Text>
+              <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                {imuFusionStrings.helpBounds}
+              </Text>
+            </View>
+            <Switch
+              value={settings.imuFusionEnabled}
+              onValueChange={(value) => settingsStore.update({ imuFusionEnabled: value })}
+              trackColor={{ false: colors.border, true: colors.accentDim }}
+              thumbColor={settings.imuFusionEnabled ? colors.accent : colors.textMuted}
+              accessibilityRole="switch"
+              accessibilityLabel={imuFusionStrings.a11y}
+              accessibilityState={{ checked: settings.imuFusionEnabled }}
+            />
+          </View>
+          <View style={styles.toggleRow}>
+            <View style={styles.toggleTextGroup}>
+              <Text style={styles.toggleTitle} maxFontSizeMultiplier={1.3}>
+                {analysisSmoothingStrings.title}
+              </Text>
+              <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                {analysisSmoothingStrings.help}
+              </Text>
+              <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                {analysisSmoothingStrings.helpBounds}
+              </Text>
+            </View>
+            <Switch
+              value={settings.analysisSmoothingEnabled}
+              onValueChange={(value) => settingsStore.update({ analysisSmoothingEnabled: value })}
+              trackColor={{ false: colors.border, true: colors.accentDim }}
+              thumbColor={settings.analysisSmoothingEnabled ? colors.accent : colors.textMuted}
+              accessibilityRole="switch"
+              accessibilityLabel={analysisSmoothingStrings.a11y}
+              accessibilityState={{ checked: settings.analysisSmoothingEnabled }}
             />
           </View>
         </View>

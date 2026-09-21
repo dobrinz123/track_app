@@ -149,6 +149,18 @@ export class SqlSettingsStore implements SettingsStore {
     if (typeof initial.lastSeenVin !== 'string' && initial.lastSeenVin !== null) {
       initial = { ...initial, lastSeenVin: null };
     }
+    // Ticket P6a (binding): both new flags are opt-in and both change how a
+    // field-confirmed signal path behaves, so a present-but-malformed
+    // persisted value must never be read as truthy and silently switch one on
+    // -- repaired back to `false` exactly like `suggestionsEnabled` above. An
+    // install from before these settings existed carries no key at all and
+    // takes `DEFAULT_SETTINGS`' `false`.
+    if (typeof initial.imuFusionEnabled !== 'boolean') {
+      initial = { ...initial, imuFusionEnabled: false };
+    }
+    if (typeof initial.analysisSmoothingEnabled !== 'boolean') {
+      initial = { ...initial, analysisSmoothingEnabled: false };
+    }
     return new SqlSettingsStore(db, initial, rowHasActiveVehicleProfileId);
   }
 

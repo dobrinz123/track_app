@@ -4,6 +4,7 @@ import {
   joinTelemetryChannels,
   polylineLength,
   projectLapSamples,
+  savitzkyGolay,
   type ClassifiableLap,
   type CoachingChannelId,
   type Corner,
@@ -12,6 +13,7 @@ import {
   type SessionAnalysisContext,
   type SessionInsights,
   type SessionLapInput,
+  type TelemetryChannelId,
   type TelemetrySample,
 } from '@circuit/core';
 
@@ -239,6 +241,92 @@ export interface AssembleOptions {
    * everything, exactly as before.
    */
   projectionCache?: LapProjectionCache;
+  /**
+   * Ticket P6a (binding), the `analysisSmoothingEnabled` setting: smooth the
+   * recorded `latG`/`longG` series of each lap with
+   * {@link smoothGForceTelemetry} before they are joined onto the GNSS
+   * samples. Omitted or `false` (the default) reads the rows exactly as
+   * recorded, which is what every analysis has done until now.
+   *
+   * THIS OPTION MAY ONLY EVER BE SET ON THE POST-SESSION ANALYSIS PATH.
+   * Savitzky-Golay is non-causal: the {@link G_SMOOTHING_WINDOW}-sample window
+   * reads {@link G_SMOOTHING_WINDOW} / 2 samples INTO THE FUTURE of each
+   * output sample, ~160 ms at the provider's 25 Hz. That is fine over a
+   * finished recording and a lie in anything live, so `stintCoaching.ts` (the
+   * between-stint cue path, which runs while the driver is still out) never
+   * passes it.
+   */
+  smoothGForceChannels?: boolean;
+}
+
+/**
+ * Ticket P6a: the Savitzky-Golay window used on the G channels -- 9 samples,
+ * quadratic. At the G provider's ~25 Hz that is a 360 ms window (160 ms of it
+ * in the future of each output sample, see
+ * {@link AssembleOptions.smoothGForceChannels}), short enough that a braking
+ * spike or an apex minimum keeps its height and width, which is exactly why
+ * this is a polynomial fit and not a moving average.
+ */
+const G_SMOOTHING_WINDOW = 9;
+const G_SMOOTHING_POLY_ORDER = 2;
+
+/** The channels {@link smoothGForceTelemetry} touches. Nothing else is ever altered. */
+const SMOOTHED_CHANNELS: readonly TelemetryChannelId[] = ['latG', 'longG'];
+
+/**
+ * Ticket P6a: returns `telemetry` with each of {@link SMOOTHED_CHANNELS}
+ * replaced by its Savitzky-Golay-smoothed series, every other row passed
+ * through untouched, and the original order and `tMonoMs` stamps preserved
+ * (only `value` changes). Pure -- the input array and its samples are never
+ * mutated.
+ *
+ * Conservative by construction, because a failed smooth must degrade to the
+ * raw recording rather than to a failed analysis:
+ *  - a channel with fewer than {@link G_SMOOTHING_WINDOW} samples is left
+ *    alone (`savitzkyGolay` rejects a series shorter than one window, and
+ *    rightly so -- it will not invent samples);
+ *  - a channel carrying any non-finite value is left alone (same reason:
+ *    `savitzkyGolay` throws on one, and a NaN row is a recording fault the
+ *    analysis should still see);
+ *  - `savitzkyGolay` is a least-squares fit over finite inputs, but it is
+ *    called inside a `try` anyway and any throw falls back to the raw series.
+ *
+ * Exported so the transform itself is testable without assembling a session.
+ */
+export function smoothGForceTelemetry(
+  telemetry: readonly TelemetrySample[],
+): readonly TelemetrySample[] {
+  const smoothedByChannel = new Map<TelemetryChannelId, number[]>();
+  for (const channel of SMOOTHED_CHANNELS) {
+    const values: number[] = [];
+    for (const sample of telemetry) {
+      if (sample.channel === channel) values.push(sample.value);
+    }
+    if (values.length < G_SMOOTHING_WINDOW) continue;
+    if (!values.every((value) => Number.isFinite(value))) continue;
+    try {
+      smoothedByChannel.set(
+        channel,
+        savitzkyGolay(values, {
+          windowLength: G_SMOOTHING_WINDOW,
+          polyOrder: G_SMOOTHING_POLY_ORDER,
+        }),
+      );
+    } catch {
+      // Degrade to the raw series for this channel; never fail the analysis.
+    }
+  }
+  if (smoothedByChannel.size === 0) return telemetry;
+
+  const cursors = new Map<TelemetryChannelId, number>();
+  return telemetry.map((sample) => {
+    const smoothed = smoothedByChannel.get(sample.channel);
+    if (smoothed === undefined) return sample;
+    const index = cursors.get(sample.channel) ?? 0;
+    cursors.set(sample.channel, index + 1);
+    const value = smoothed[index];
+    return value === undefined ? sample : { ...sample, value };
+  });
 }
 
 interface JoinedLap {
@@ -278,6 +366,20 @@ function recordingFingerprint(recording: AnalysisLapRecording): string {
   ].join(':');
 }
 
+/**
+ * Ticket P6a: {@link recordingFingerprint} plus the smoothing decision, so a
+ * cache filled while `analysisSmoothingEnabled` was off is never served to a
+ * pass that asked for smoothing (or the reverse). Appended ONLY when smoothing
+ * is on, so every fingerprint the pre-P6a code produced is unchanged.
+ */
+function projectionFingerprint(
+  recording: AnalysisLapRecording,
+  options: AssembleOptions,
+): string {
+  const base = recordingFingerprint(recording);
+  return options.smoothGForceChannels === true ? `${base}:sg` : base;
+}
+
 /** {@link projectRecording}, served from `options.projectionCache` when it can be. */
 function projectRecordingCached(
   circuit: BundledCircuit,
@@ -286,7 +388,7 @@ function projectRecordingCached(
 ): ProjectedLap {
   const cache = options.projectionCache;
   if (cache === undefined) return projectRecording(circuit, recording, options);
-  const fingerprint = recordingFingerprint(recording);
+  const fingerprint = projectionFingerprint(recording, options);
   const hit = cache.entries.get(recording.lap.lapNumber);
   if (hit !== undefined && hit.fingerprint === fingerprint) return hit.projected;
   const projected = projectRecording(circuit, recording, options);
@@ -308,10 +410,18 @@ function projectRecording(
   if (projected.samples.length === 0) {
     return { skipped: { lapNumber: recording.lap.lapNumber, reason: 'unprojectable' } };
   }
+  // Ticket P6a: the ONE place the recorded G series may be smoothed -- on the
+  // read side, over a finished lap, before the join. With
+  // `smoothGForceChannels` unset (the default) `recording.telemetry` is passed
+  // through by reference and the join below is the identical call it was.
+  const telemetry =
+    options.smoothGForceChannels === true
+      ? smoothGForceTelemetry(recording.telemetry)
+      : recording.telemetry;
   const withChannels =
-    recording.telemetry.length === 0
+    telemetry.length === 0
       ? projected.samples
-      : joinTelemetryChannels(projected.samples, recording.telemetry, {
+      : joinTelemetryChannels(projected.samples, telemetry, {
           maxStalenessMs: options.maxChannelStalenessMs ?? 1_000,
         });
   return {

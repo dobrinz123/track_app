@@ -516,3 +516,57 @@ Codex P5d-REV6: 0 HIGH → final verifications complete (gates 2794, Codex REV1.
 BUILD 11 DELIVERED (22:52): run 33432079961 on b549ffc (variant release) → builds/ipa/TRACE-v11-learned-circuits-release-2026-08-31.ipa (14,333,378 bytes, md5 c9f131237071c611316b05f3c9c7fe7e). Forensics: bundle id app.circuittimer.tmr; markers Test loop ×2, learned_circuits ×7, qualifyStep, testLoopAdoption, self-overlapping, closure-unconfirmed, activeVehicleProfileId, vinPatterns, Signal Finder ×9, vehicle_profile_bindings ×8, Session analysis (diacritic/em-dash strings UTF-16 → not greppable, expected). Verification chain: gates (2794) → Codex P5d-REV1..REV6 (final: 0 HIGH / 0 MEDIUM new; documented residual: staging read-then-INSERT-OR-REPLACE TOCTOU within one process — queue a one-line conditional-insert fix for build 12) → E2E smoke (selection card + Test loop intro). Protocol: builds/ipa/TEST-11-PROTOCOL.md. Contains vs build 10: P5d Test Loop / learned circuits (+5 fix waves), P4q VIN (+FIX; inert until a real VIN fills Supra's pattern).
 USER FEEDBACK (test 11, first minutes): tapping 'New circuit' lands on a page titled 'Test loop' with the legal/low-speed intro — WRONG FRAMING: the production purpose is LEARNING REAL CIRCUITS not in the catalog; the street test is our internal/secondary use. FIX6-copy wave sent: screen title 'New circuit', racetrack-first intro, the legal note scoped to public-road use, history rows named by the learned circuit (fallback 'Learned circuit'), 'Test loop' wording removed from user-facing strings.
 P5d-FIX6 copy DONE (Opus, 4 min): screen retitled 'Circuit nou / New circuit', racetrack-first intro, street use as a scoped secondary note, history/badge/default name 'Circuit învățat / Learned circuit' (localized provisional names), no user-facing 'test loop' string left (pinned by scan). Gates: 0/0/0/0 (1471 + 1324 = 2795) → COMMIT + push. Goes into build 12 with the rest of the user's test-11 findings.
+
+---
+# RUN P6 — IMU fusion + SG filter wiring, Codex review, CI security gates (2026-09-21)
+
+BASELINE: 3ef8dcd | M packages/core/src/index.ts, M hardware/kicad/trace-dongle/*.kicad_pr[lo]; untracked: packages/core/src/{signal,fusion}/, packages/core/test/{signal,fusion}/, .foreman/scratch/* | 2026-09-21
+
+LEAD SEAT CHANGE: Fable 5 → Opus 5 (1M context). Frontier → frontier; routing table unchanged.
+MODE: Codex-boosted Full (Agent ✓, real shell ✓, Codex CLI 0.153.4 ✓ — consent: user's message "a si b si apoi c foloeste foremen" explicitly orders the Codex review as wave B).
+
+PRE-RUN STATE (LEAD work, already gated): native Madgwick AHRS (packages/core/src/fusion/) + Savitzky-Golay (packages/core/src/signal/) implemented after an accreditation gate rejected the npm candidates (ahrs: LICENSE says Apache-2.0, package.json says APSL-2.0; kalman-filter + ml-savitzky-golay: dormant, Scorecard 2.1-2.9). Gates green: typecheck 0, lint 0 errors, tests 2823 (1499 core + 1324 mobile). NOTHING CONSUMES THEM YET — zero behaviour change so far.
+
+## Plan
+- P6a-SCOUT  (read-only) map telemetry pipeline, feature-flag mechanism, IMU availability, replayable test sessions
+- P6a         wire MadgwickAhrs + savitzkyGolay into telemetry behind a flag, DEFAULT OFF, compared on existing sessions
+- P6a-VERIFY  blind verifier on the P6a diff
+- P6b         Codex review of fusion/signal + the P6a wiring — 0 HIGH required (user's standing rule)
+- P6c         CI: gitleaks + osv-scanner + @onebeyond/license-checker (the 3 repos that passed accreditation)
+
+## Routing
+- P6a-SCOUT → haiku (FAST): read-only recon, bounded
+- P6a → sonnet (WORKHORSE) or opus if the scout shows IMU capture is absent (then it is new-subsystem work, not wiring)
+- P6a-VERIFY → foreman-verifier (blind, fresh context)
+- P6b → Codex (cross-family reviewer; Claude wrote the code under review)
+- P6c → sonnet (WORKHORSE): config work, well-specified
+
+## Tasks
+P6a-SCOUT | PENDING | read-only | -
+P6a       | PENDING | TBD by scout | -
+P6a-VERIFY| PENDING | read-only | -
+P6b       | PENDING | read-only | -
+P6c       | PENDING | .github/workflows/**, root package.json (devDeps+scripts) | -
+
+## Decisions
+- Sequencing A -> B -> C per the user's explicit "a si b si apoi c", even though P6c's write set (.github/, root manifest) is disjoint from P6a's and could have run in parallel.
+- Flag DEFAULT OFF is non-negotiable: Madgwick/SG touch the timing path, and lap times are the product. Field-confirmed behaviour must not move without an explicit opt-in and a same-session comparison.
+
+## Attempts
+P6a-SCOUT | 1 | haiku FAST | rev1 | DONE | read-only, no checks | 4 findings, see below | 2026-09-21
+  -> ACCEPTED. Findings that reshaped the wave:
+     (1) NO GYROSCOPE anywhere (grep Gyroscope across apps/mobile/src + packages/core/src = 0 hits); only expo-sensors Accelerometer is imported (gforceProvider.ts:95).
+     (2) cleanLap.ts:339 ALREADY consumes `yawRateDps` and falls back to GNSS heading -- a consumer with no producer. `yawRateDps` is NOT a declared TelemetryChannelId (telemetry/contracts.ts:28 has only latG|longG).
+     (3) Gravity separation today = first-order complementary low-pass (gforceProvider.ts:113 computeLinearAcceleration) with a HARDCODED PORTRAIT mount (latG=device X, longG=device Y).
+     (4) Flag pattern to copy = coachingEnabled (settingsStore.ts:76-83 -> sqlSettingsStore.ts:108-112 user_settings -> SettingsScreen.tsx).
+     (5) Replay harness with end-to-end lap-time assertions exists: test/replay/replay-harness.integration.test.ts:76 over fixtures/scenarios.ts.
+
+LEAD DESIGN DECISIONS (not delegated):
+  - Madgwick without a gyroscope degenerates to a slower accelerometer leveler with no advantage over the existing low-pass. Therefore gyro capture is IN SCOPE for P6a; it also fills the yawRateDps channel cleanLap already wants.
+  - Savitzky-Golay is NON-CAUSAL: at 25 Hz a 9-sample window costs 360 ms of lag. LIVE PATH FORBIDDEN. SG goes in the post-session analysis read path; Madgwick (causal) goes in the live provider.
+  - Two flags, not one: imuFusionEnabled (live) and analysisSmoothingEnabled (analysis) -- different code paths, different risk, both default FALSE.
+  - Seat raised WORKHORSE -> FRONTIER (opus): axis/frame/unit semantics plus a byte-identical-when-off guarantee is where a subtle error ships silently to a field-confirmed product.
+
+CODEX CHANNEL VERIFIED: `codex login status` = "Logged in using ChatGPT" (subscription billing); echo check via `codex exec --sandbox read-only` returned "ok" (2,850 tokens). Account default model used (no -m pin). Wave B unblocked.
+
+P6a | 1 | opus FRONTIER | rev1 (.foreman/scratch/p6a-ticket.md, 58 lines) | DISPATCHED | - | - | 2026-09-21

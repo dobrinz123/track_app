@@ -139,6 +139,17 @@ export interface AnalysisRunnerDeps {
    * can tell the projection half from the final pass.
    */
   yieldToUi?: AnalysisPassYield;
+  /**
+   * Ticket P6a (binding): the `analysisSmoothingEnabled` setting, read fresh
+   * at the start of every pass (a setting is not a fact about a recording, so
+   * it is never captured once at construction). `true` runs the pass with
+   * {@link AssembleOptions.smoothGForceChannels}; absent or `false` -- the
+   * default -- passes `{}` to the assembly exactly as before.
+   *
+   * The memo is keyed by the flag as well (see `cacheKey`), so turning it on
+   * and off never serves a smoothed result as an unsmoothed one.
+   */
+  analysisSmoothingEnabled?: () => boolean;
 }
 
 export interface AnalysisRunner {
@@ -195,6 +206,15 @@ export function createAnalysisRunner(deps: AnalysisRunnerDeps): AnalysisRunner {
    */
   let generation = 0;
 
+  /** Ticket P6a: `analysisSmoothingEnabled`, or `false` when nothing wired it. */
+  const smoothingOn = (): boolean => deps.analysisSmoothingEnabled?.() ?? false;
+  /**
+   * Ticket P6a: the memo/in-flight key. IDENTICAL to the session id whenever
+   * smoothing is off, so the pre-P6a keying is untouched; a smoothed pass gets
+   * its own key rather than overwriting (or being served) the unsmoothed one.
+   */
+  const cacheKey = (sessionId: string): string => (smoothingOn() ? `${sessionId}|sg` : sessionId);
+
   async function compute(sessionId: string, mine: number): Promise<AnalysisRunResult> {
     /** The one reason a pass may not continue, or `null` when it may. */
     const stopReason = (): AnalysisRunResult | null => {
@@ -235,7 +255,9 @@ export function createAnalysisRunner(deps: AnalysisRunnerDeps): AnalysisRunner {
       const assembled = await assembleSessionAnalysisChunked(
         source.circuit,
         source.recordings,
-        {},
+        // Ticket P6a: `{}` -- byte-for-byte the pre-P6a call -- unless the
+        // opt-in smoothing flag is on for this pass.
+        smoothingOn() ? { smoothGForceChannels: true } : {},
         guardedYield,
       );
       const afterAssembly = stopReason();
@@ -253,15 +275,17 @@ export function createAnalysisRunner(deps: AnalysisRunnerDeps): AnalysisRunner {
 
   return {
     run(sessionId) {
-      const cached = cache.get(sessionId);
+      // Ticket P6a: `key === sessionId` whenever smoothing is off.
+      const key = cacheKey(sessionId);
+      const cached = cache.get(key);
       if (cached !== undefined) return Promise.resolve(cached);
       // Only runs of the CURRENT epoch are ever in this map (invalidate empties
       // it), so joining one can never rejoin superseded work (W1).
-      const running = inFlight.get(sessionId);
+      const running = inFlight.get(key);
       if (running !== undefined) return running;
       const mine = generation;
       const promise: Promise<AnalysisRunResult> = compute(sessionId, mine).then((result) => {
-        if (inFlight.get(sessionId) === promise) inFlight.delete(sessionId);
+        if (inFlight.get(key) === promise) inFlight.delete(key);
         // Superseded work is thrown away here too: a run that finished after
         // its epoch closed says nothing about the session it was asked about.
         if (mine !== generation) return SUPERSEDED;
@@ -269,14 +293,14 @@ export function createAnalysisRunner(deps: AnalysisRunnerDeps): AnalysisRunner {
         // again" has to mean it), and neither is any unavailable reason: every
         // one of them -- a live session above all (C1) -- can stop being true
         // while the screen is open.
-        if (result.status === 'ready') cache.set(sessionId, result);
+        if (result.status === 'ready') cache.set(key, result);
         return result;
       });
-      inFlight.set(sessionId, promise);
+      inFlight.set(key, promise);
       return promise;
     },
     peek(sessionId) {
-      return cache.get(sessionId) ?? null;
+      return cache.get(cacheKey(sessionId)) ?? null;
     },
     invalidate() {
       generation += 1;

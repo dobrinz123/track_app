@@ -984,6 +984,13 @@ export const telemetryProvider: TelemetryProvider = {
 // ---------------------------------------------------------------------------
 export const gForceProvider: GForceProvider = createGForceProvider({
   monotonicNow: () => telemetryClock.now(),
+  // Ticket P6a (binding): the opt-in IMU-fusion path. Read through the live
+  // settings store rather than captured, but consumed by the provider ONCE per
+  // `start()` and frozen for that run (see its own doc comment) -- so the
+  // estimator never changes underneath a lap being recorded. `false` (the
+  // default) leaves this provider exactly as it has always been: accelerometer
+  // only, low-pass gravity, no `yawRateDps`.
+  imuFusionEnabled: () => settingsStore.getSettings().imuFusionEnabled,
 });
 
 /**
@@ -3791,6 +3798,12 @@ let analysisRunner: AnalysisRunner | null = null;
 export function getAnalysisRunner(): AnalysisRunner {
   if (analysisRunner !== null) return analysisRunner;
   analysisRunner = createAnalysisRunner({
+    // Ticket P6a (binding): the opt-in Savitzky-Golay smoothing of the
+    // recorded latG/longG series. Wired ONLY here -- the post-session analysis
+    // read path -- and deliberately NOT into `stintCoaching.ts`'s
+    // between-stint pass, which runs while the driver is still out and must
+    // never read a non-causal filter (see `AssembleOptions.smoothGForceChannels`).
+    analysisSmoothingEnabled: () => settingsStore.getSettings().analysisSmoothingEnabled,
     // The live session state, snapshotted per call: `subscribe()` always calls
     // back synchronously with the current state (the `SessionFacade` contract).
     isSessionActive: () => {

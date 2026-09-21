@@ -25,9 +25,27 @@ export type TelemetryChannelId =
                    // (`vehicle_profile_bindings` channel `brakePressure`), scaled from the
                    // finder's own observed min..max. A real analog: it always wins over a
                    // bare switch when the profile carries both.
-  | 'latG' | 'longG'; // device accelerometer, NOT OBD; gravity isolated by low-pass,
+  | 'latG' | 'longG'  // device accelerometer, NOT OBD; gravity isolated by low-pass,
                       // linear acceleration projected off gravity; portrait mount;
                       // unit g, recorded through the same TelemetrySample path
+  | 'yawRateDps';    // device GYROSCOPE (expo-sensors `Gyroscope`), NOT OBD. Ticket P6a
+                     // (binding): the rate the CAR rotates about its vertical axis,
+                     // degrees per second, in the SAME sense as GNSS course over ground
+                     // (compass convention -- a RIGHT turn is positive), so
+                     // `coaching/cleanLap.ts`'s yaw check can compare it against the
+                     // centreline heading it already falls back to. Read off the device
+                     // Z axis under the same portrait/flat mount assumption `latG`/`longG`
+                     // make (x lateral, y longitudinal, z vertical) and sign-flipped,
+                     // because a gyroscope is right-handed about +z (counterclockwise
+                     // positive) while a compass heading grows clockwise.
+                     //
+                     // Emitted ONLY while the `imuFusionEnabled` setting is on
+                     // (`apps/mobile/src/session/gforceProvider.ts`): with the flag off the
+                     // gyroscope is never subscribed to and no row of this channel is ever
+                     // recorded, so every pre-P6a recording and every default install
+                     // behaves exactly as before. `coaching/types.ts`'s `CoachingChannelId`
+                     // already named it as a tier-2 channel "no shipped provider emits yet";
+                     // this is that move, and the union alias simply collapses.
 
 export interface TelemetrySample {
   channel: TelemetryChannelId;

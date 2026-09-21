@@ -55,6 +55,11 @@ const TELEMETRY_CHART_DISPLAY: Readonly<Record<TelemetryChannelId, { label: stri
     // yet in `TELEMETRY_CHART_CHANNELS` (out of this ticket's scope), same
     // exhaustiveness-only placeholder treatment as the row above.
     accelPedalPct: { label: 'Accelerator pedal', unit: '%', color: colors.textMuted },
+    // Ticket P6a: the device gyroscope's yaw-rate channel, recorded only while
+    // the `imuFusionEnabled` setting is on. Not in `TELEMETRY_CHART_CHANNELS`
+    // (charting it is out of that ticket's scope) -- the same
+    // exhaustiveness-only placeholder treatment as the two rows above.
+    yawRateDps: { label: 'Yaw rate', unit: '°/s', color: colors.textMuted },
   };
 
 /** Thin-bar sparkline for one channel's bucketed lap telemetry. Pure View/Text -- no svg, no new deps (ticket constraint). */

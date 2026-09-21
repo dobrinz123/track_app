@@ -25,6 +25,8 @@ export const CORE_PACKAGE_ID = '@circuit/core' as const;
 // ---------------------------------------------------------------------------
 
 export * from './geometry';
+export * from './signal';
+export * from './fusion';
 export * from './profile';
 export * from './catalog';
 export * from './corners';

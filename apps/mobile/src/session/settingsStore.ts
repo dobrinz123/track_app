@@ -266,6 +266,35 @@ export interface AppSettings {
    * usable) -- never a fabricated placeholder.
    */
   lastSeenVin: string | null;
+  /**
+   * Ticket P6a (binding): switches the LIVE G-force provider
+   * (`session/gforceProvider.ts`) from the first-order low-pass gravity
+   * estimate to a `MadgwickAhrs` (gyroscope + accelerometer) one, AND starts
+   * capturing the gyroscope as the new `yawRateDps` telemetry channel.
+   *
+   * Defaults to `false`, and OFF means OFF completely: the gyroscope is never
+   * subscribed to, not one `yawRateDps` row is recorded, and the accelerometer
+   * path runs the SAME code that produced every field-confirmed recording so
+   * far. Read once per `start()` and frozen for that run, so flipping it never
+   * swaps the estimator underneath a lap already being recorded. It can never
+   * affect lap timing either way -- the G provider never touches
+   * `SessionFacade`/`SessionController` (see its own module doc comment).
+   */
+  imuFusionEnabled: boolean;
+  /**
+   * Ticket P6a (binding): applies a Savitzky-Golay smoother
+   * (`@circuit/core`'s `savitzkyGolay`, 9-sample window, quadratic) to the
+   * recorded `latG`/`longG` series in the POST-SESSION analysis read path
+   * (`session/analysisAssembly.ts`, reached through `analysisViewModel.ts`'s
+   * runner).
+   *
+   * ANALYSIS ONLY, never live and never the between-stint trackday stage: the
+   * filter is non-causal -- a 9-sample window at 25 Hz needs 160 ms of FUTURE
+   * samples -- so it may only ever run over a finished recording, never over a
+   * signal something is being cued from. Defaults to `false`; with it off the
+   * analysis reads exactly the rows it always did.
+   */
+  analysisSmoothingEnabled: boolean;
 }
 
 /**
@@ -392,6 +421,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   activeVehicleProfileId: GENERIC_VEHICLE_PROFILE_ID,
   activeVehicleProfileSource: 'default',
   lastSeenVin: null,
+  // Ticket P6a (binding): both experimental paths are OPT-IN. These two
+  // `false`s are the guarantee that this ticket changed nothing in the field.
+  imuFusionEnabled: false,
+  analysisSmoothingEnabled: false,
 };
 
 /**
