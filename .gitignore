@@ -17,3 +17,6 @@ builds/
 
 # E2E screenshots written by the agent-browser daemon into its cwd (never commit)
 /[0-9][0-9]-*.png
+
+# @onebeyond/license-checker drops a report file on every failing scan
+license-error-*.md
