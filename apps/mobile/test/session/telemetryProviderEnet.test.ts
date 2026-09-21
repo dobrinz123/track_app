@@ -274,33 +274,46 @@ describe('telemetryProvider: ENET reconnect policy (real-adapter path, mocked En
     vi.useRealTimers();
   });
 
-  it("reaches 'failed', retries exactly ONCE after 3s, then stays failed (no further retries) -- SAME policy as ELM327", async () => {
-    const store = new InMemorySettingsStore();
-    store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet', enetAutoDiscover: false });
+  /** Ticket P7M M3 -- SUPERSEDES the pre-P7M "exactly ONE retry" policy, and still the SAME policy as ELM327. */
+  it("reaches 'failed' and keeps reconnecting indefinitely on the capped backoff -- SAME policy as ELM327 (P7M M3)", async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const store = new InMemorySettingsStore();
+      store.update({ telemetryEnabled: true, telemetrySimulate: false, adapterType: 'enet', enetAutoDiscover: false });
 
-    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
-    const states: string[] = [];
-    provider.onStateChange((s) => states.push(s));
+      const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter(), isDev: true });
+      const states: string[] = [];
+      provider.onStateChange((s) => states.push(s));
 
-    provider.start();
-    await flushMicrotasks();
-    expect(tracker.connectCalls).toBe(1);
-    expect(states.at(-1)).toBe('failed');
+      provider.start();
+      await flushMicrotasks();
+      expect(tracker.connectCalls).toBe(1);
+      expect(states.at(-1)).toBe('failed');
 
-    await vi.advanceTimersByTimeAsync(2_000);
-    await flushMicrotasks();
-    expect(tracker.connectCalls).toBe(1);
+      let expectedConnects = 1;
+      for (const delayMs of [3_000, 6_000, 12_000, 24_000, 30_000, 30_000]) {
+        await vi.advanceTimersByTimeAsync(delayMs - 1);
+        await flushMicrotasks();
+        expect(tracker.connectCalls).toBe(expectedConnects);
+        await vi.advanceTimersByTimeAsync(1);
+        await flushMicrotasks();
+        expectedConnects += 1;
+        expect(tracker.connectCalls).toBe(expectedConnects);
+        expect(states.at(-1)).toBe('failed');
+      }
 
-    await vi.advanceTimersByTimeAsync(1_000);
-    await flushMicrotasks();
-    expect(tracker.connectCalls).toBe(2);
-    expect(states.at(-1)).toBe('failed');
+      await vi.advanceTimersByTimeAsync(300_000);
+      await flushMicrotasks();
+      expect(tracker.connectCalls).toBe(expectedConnects + 10);
 
-    await vi.advanceTimersByTimeAsync(60_000);
-    await flushMicrotasks();
-    expect(tracker.connectCalls).toBe(2);
-
-    await provider.stop();
+      await provider.stop();
+      const afterStop = tracker.connectCalls;
+      await vi.advanceTimersByTimeAsync(300_000);
+      await flushMicrotasks();
+      expect(tracker.connectCalls).toBe(afterStop);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
 

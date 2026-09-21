@@ -32,17 +32,44 @@ export const IMU_FUSION_SETTING_STRINGS: Readonly<
 > = {
   en: {
     title: 'IMU sensor fusion (experimental)',
-    help: 'Estimate gravity by fusing the phone’s gyroscope with its accelerometer instead of a simple low-pass filter, and record the yaw rate as its own channel. Steadier lateral and longitudinal g while braking and cornering.',
+    help: 'Estimate gravity by fusing the phone’s gyroscope with its accelerometer instead of a simple low-pass filter. Steadier lateral and longitudinal g while braking and cornering. This changes how those two are measured — recording the yaw rate is the separate switch above.',
     helpBounds:
       'Never used for lap timing. A phone without a usable gyroscope simply records nothing extra. Takes effect at your next session. Off by default.',
     a11y: 'IMU sensor fusion',
   },
   ro: {
     title: 'Fuziune senzori IMU (experimental)',
-    help: 'Estimează gravitația combinând giroscopul telefonului cu accelerometrul, în loc de un filtru trece-jos simplu, și înregistrează viteza de girație pe canalul ei. Accelerații laterale și longitudinale mai stabile la frânare și în viraje.',
+    help: 'Estimează gravitația combinând giroscopul telefonului cu accelerometrul, în loc de un filtru trece-jos simplu. Accelerații laterale și longitudinale mai stabile la frânare și în viraje. Aceasta schimbă modul în care sunt măsurate cele două — înregistrarea vitezei de girație este comutatorul separat de mai sus.',
     helpBounds:
       'Nu este folosită niciodată pentru cronometrare. Un telefon fără giroscop utilizabil pur și simplu nu înregistrează nimic în plus. Se aplică de la următoarea ta sesiune. Oprit implicit.',
     a11y: 'Fuziune senzori IMU',
+  },
+};
+
+/**
+ * The `imuGyroCaptureEnabled` row (ticket P7R E3).
+ *
+ * The copy has to make ONE distinction clear to someone standing in a
+ * paddock: this row records a new measurement, the fusion row above changes
+ * how an existing one is computed. That is the whole reason they are two
+ * rows, and it is why this one is on by default while that one is not.
+ */
+export const IMU_GYRO_CAPTURE_SETTING_STRINGS: Readonly<
+  Record<AnalysisUiLanguage, ImuSettingStrings>
+> = {
+  en: {
+    title: 'Record yaw rate (gyroscope)',
+    help: 'Record how fast the car is rotating, from the phone’s gyroscope, as its own channel alongside the g-force channels. Used by the post-session analysis to tell a real slide from a corner you simply drove quickly.',
+    helpBounds:
+      'Never used for lap timing, and it does not change your lateral or longitudinal g — those keep being measured exactly as before. A phone without a usable gyroscope simply records nothing extra. Takes effect at your next session. On by default.',
+    a11y: 'Record yaw rate from the gyroscope',
+  },
+  ro: {
+    title: 'Înregistrează viteza de girație (giroscop)',
+    help: 'Înregistrează cât de repede se rotește mașina, de la giroscopul telefonului, pe un canal propriu, alături de canalele de accelerație. Este folosită în analiza de după sesiune ca să deosebească o derapare reală de un viraj pe care pur și simplu l-ai luat repede.',
+    helpBounds:
+      'Nu este folosită niciodată pentru cronometrare și nu îți schimbă accelerațiile laterale sau longitudinale — acelea sunt măsurate exact ca până acum. Un telefon fără giroscop utilizabil pur și simplu nu înregistrează nimic în plus. Se aplică de la următoarea ta sesiune. Pornit implicit.',
+    a11y: 'Înregistrează viteza de girație de la giroscop',
   },
 };
 

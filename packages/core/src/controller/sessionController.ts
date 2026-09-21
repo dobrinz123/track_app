@@ -15,6 +15,7 @@ import type {
   SessionMachineSnapshot,
   SessionState,
   SessionSummary,
+  TrackMatch,
 } from '../contracts';
 import { CalibrationEngine, type CalibrationConfig } from '../calibration';
 import { CoachEngine, deriveBrakingZones } from '../coach';
@@ -87,7 +88,75 @@ export interface FacadeStateCore {
    * and the exported report both read.
    */
   coachCueUpdates: AppliedCueUpdate[];
+  /**
+   * Ticket P7M M2: whether the app currently believes the car is on the
+   * mapped circuit at all.
+   *
+   * `gnssQuality` above is a GNSS metric and nothing more -- it answers "is
+   * the fix any good", not "does the fix belong to this track". A car driving
+   * 100 m off a centerline traced from aerial imagery, under a clear sky,
+   * reads `good` while every lap it drives goes uncounted, and until this
+   * field existed there was no live state on the driving screen that could
+   * say so. That matters most on the first visit to a circuit whose geometry
+   * has never been validated on site, which is exactly when the driver needs
+   * to tell "working" from "silently broken" without stopping.
+   */
+  trackMatch: {
+    state: TrackMatchState;
+    /** Absolute distance from the centerline of the last matched fix, metres; `null` when the last fix produced no match at all. */
+    lateralM: number | null;
+    /** The matcher's own confidence in that fix, `[0,1]`; `null` when there was no match. */
+    confidence: number | null;
+  };
+  /**
+   * Ticket P7M M6: proof, from the car, that the drive is being kept.
+   *
+   * The owner has already lost a track day to M1's defect -- drove, came
+   * home, found nothing. M1 makes the trace survive; this makes the survival
+   * VISIBLE while there is still time to act on it, because discovering it at
+   * home is the failure that already happened once.
+   *
+   * `persistedSampleCount` counts GNSS samples whose `saveTelemetry` call has
+   * RESOLVED -- never samples that merely passed through memory -- so it is
+   * the write path itself reporting, not an optimistic tally beside it. It is
+   * monotonic within a session: a lap claiming samples out of the unclaimed
+   * chunks re-keys rows, it does not un-store anything.
+   */
+  recording: {
+    /** GNSS samples durably written this session, confirmed write by confirmed write. */
+    persistedSampleCount: number;
+    /** Writes that failed this session. Non-zero means the count above has stopped telling the truth. */
+    failedWriteCount: number;
+  };
+  /**
+   * Ticket P7R E2: is this session running on matching the calibration gate
+   * REFUSED to vouch for?
+   *
+   * `false` for every session that reached `armed` the ordinary way -- an
+   * accepted calibration, or a recovery resume of one. `true` only after
+   * {@link SessionController.proceedWithoutValidatedCalibration} concluded a
+   * calibration the engine then REJECTED, i.e. the driver chose to go out and
+   * collect data rather than lose the day to a gate that could not be
+   * satisfied. It stays `false` when that same method force-finishes a lap
+   * the engine turns out to ACCEPT -- that is an ordinary calibration and is
+   * never labelled as anything else.
+   *
+   * It exists because the alternative to the escape hatch is a day with no
+   * data at all -- that has already happened once -- but a session run on
+   * geometry the gate rejected must never be indistinguishable from a
+   * normal one. The thresholds are untouched; this is the honest label on
+   * the outcome of overriding them.
+   */
+  matchingUnvalidated: boolean;
 }
+
+/**
+ * Ticket P7M M2. `'unknown'` until the first live sample of a session (and
+ * again after it ends); `'offTrack'` only once the car has failed to match the
+ * circuit CONTINUOUSLY for {@link OFF_TRACK_HOLD_MS} -- one rejected fix is
+ * ordinary and must never flash a warning at a driver mid-corner.
+ */
+export type TrackMatchState = 'unknown' | 'matched' | 'offTrack';
 
 /** One {@link CueUpdate} the controller actually applied, with when it happened. */
 export interface AppliedCueUpdate extends CueUpdate {
@@ -166,6 +235,22 @@ export interface SessionControllerDiagnostics {
   appliedInvalidReasons: string[];
   /** Current size of the in-flight raw-sample buffer (M2 fix) -- trimmed to the current lap on every lap completion, not the whole session's sample count. */
   rawSampleBufferSize: number;
+  /**
+   * Ticket P7M M1: how many continuous raw-trace chunk rows this run has
+   * written that still hold samples no completed lap has claimed (out-lap,
+   * learn-lap, in-pit and -- the case this exists for -- an entire session in
+   * which no crossing was ever detected). `0` before the first flush and
+   * after every sample so far has been claimed by a lap row.
+   */
+  rawTraceChunkCount: number;
+  /** Ticket P7M M1: samples currently held in those chunk rows. */
+  rawTraceSampleCount: number;
+  /** Ticket P7M M1: samples captured but not yet flushed to storage (at most one flush interval's worth). */
+  rawTracePendingCount: number;
+  /** Ticket P7M M1: raw-trace writes that failed this run. Never thrown (the trace must not be able to abort the session summary), so this is how a failing disk becomes visible. */
+  rawTraceWriteFailures: number;
+  /** Ticket P7M M6: GNSS samples this session has durably written, counted only as each write resolves. */
+  persistedSampleCount: number;
   /** Number of times braking zones have been regenerated from a NEW personal-best reference lap landing mid-session (Phase 3 coaching addendum) -- 0 when coaching is disabled or no PB has been replaced yet this controller's lifetime. */
   coachZoneRefreshes: number;
 }
@@ -208,6 +293,94 @@ const DEFAULT_WATCHDOG_POLL_MS = 1_000;
  * never regresses.
  */
 const CALIBRATION_COMPLETE_COVERAGE_FRACTION = 0.98;
+
+/**
+ * Ticket P7M M1 -- continuous raw-GNSS-trace persistence.
+ *
+ * Before this, `saveTelemetry` was called from exactly ONE place
+ * (`onLapCompleted`), filtered to `lap.tStart..lap.tEnd`. A session in which
+ * no start/finish crossing was ever detected -- the realistic outcome of a
+ * first visit to a circuit whose gate geometry has never been validated on
+ * site -- therefore persisted NOTHING of the drive, and a force-quit between
+ * stints lost the in-flight lap the same way. The trace is the raw material
+ * the circuit geometry itself can be rebuilt from, so it must reach storage
+ * whether or not the timing logic ever agrees that a lap happened.
+ *
+ * The OBD recorder (`apps/mobile/src/persistence/telemetryRecorder.ts`) already
+ * solves this with 25-sample/1-second batches tagged `lap_number = NULL` until
+ * a lap exists, and these constants mirror its cadence. The GNSS telemetry
+ * table cannot copy its ROW SHAPE, though: `telemetry` is keyed
+ * `(sessionId, lapNumber)` with the whole lap's samples in ONE JSON payload
+ * column (`persistence-sql/schema.ts`), so there is no per-row `lap_number` to
+ * re-tag in place, and appending to a single growing "untagged" row would
+ * re-serialize the entire session's trace every second (quadratic, on a phone,
+ * while driving).
+ *
+ * So the untagged trace is chunked across its own reserved key space instead:
+ * one row per flush, at a NEGATIVE `lapNumber` (real laps are >= 1 and the
+ * learned-circuit out-lap trace already owns 0 -- see
+ * `apps/mobile/src/session/composition.ts`'s adoption flow). Nothing in the app
+ * reads telemetry except by a specific known lap number, so these rows are
+ * invisible to every existing reader, and `deleteUserData`'s sweeps are
+ * lapNumber-agnostic so they are cleaned up with the rest of a session.
+ *
+ * Double-writing is avoided by RECLAIM rather than by not writing: when a lap
+ * does complete, its row is written from the in-memory buffer exactly as
+ * before (byte-for-byte the same content as pre-P7M), and the chunks are then
+ * rewritten with the samples in `tStart..tEnd` removed -- the closest this
+ * schema allows to "tag the rows that were already written". Samples OUTSIDE
+ * every completed lap (out-lap, cool-down, pit) deliberately stay in the
+ * chunks: they belong to no lap row, and losing them is exactly the failure
+ * this change exists to prevent.
+ */
+const TRACE_FLUSH_SAMPLE_COUNT = 25;
+/**
+ * Longest a captured sample may sit in memory before it is written (ms).
+ * Bounds what a force-quit can cost.
+ *
+ * Cost of choosing durability over row count: the shipped GNSS provider runs
+ * at roughly 1 Hz (`BestForNavigation`, `gnssLocationProvider.ts`), so the
+ * sample-count threshold is never the one that fires -- this interval is, and
+ * each flush becomes its own small row. A 30-minute stint is therefore ~1800
+ * one-sample rows, and each completed lap's reclaim rewrites the ~90 of them
+ * it covers. Both are small, serialized off the sample path, and the price of
+ * never losing more than a second of trace; if row churn ever shows up in the
+ * field, the fix is to keep the newest chunk OPEN and rewrite it in place
+ * until it reaches `TRACE_FLUSH_SAMPLE_COUNT`, which cuts both figures ~25x
+ * without changing durability.
+ */
+const TRACE_FLUSH_INTERVAL_MS = 1_000;
+/**
+ * Chunk keys are `-(runBase * STRIDE + sequence)`, where `runBase` is the
+ * millisecond at which the run began, counted from {@link TRACE_KEY_EPOCH_MS}.
+ *
+ * A session id can legally be driven TWICE -- ADR-0003 §3 recovery resumes the
+ * SAME id in a new process -- and a plain `-1, -2, -3...` sequence would then
+ * overwrite the pre-crash trace, the very data the resume exists to protect.
+ * Banding by start instant makes two runs' keys disjoint with no read-back
+ * probe, which the repository API could not answer anyway: `loadTelemetry`
+ * returns `[]` for both "no row" and "row emptied by reclaim", so a free key
+ * is not findable through the contract. Millisecond resolution (rather than
+ * whole seconds) so an immediate crash-and-relaunch still lands in its own
+ * band.
+ *
+ * Sizing: the epoch keeps `runBase` near 2.1e11, so `runBase * 10_000` stays
+ * an order of magnitude inside `Number.MAX_SAFE_INTEGER` (9.0e15) for decades,
+ * and the stride allows 10k chunks per run -- over an hour even at the fastest
+ * flush cadence this writer can reach.
+ */
+const TRACE_CHUNK_KEY_STRIDE = 10_000;
+/** 2020-01-01T00:00:00Z. Only the ORIGIN of the key band; nothing reads a date back out of a key. */
+const TRACE_KEY_EPOCH_MS = Date.UTC(2020, 0, 1);
+
+/**
+ * Ticket P7M M2: how long the car must fail to match the circuit before the
+ * driving screen is allowed to call it off-track. Three seconds is ~125 m at
+ * 150 km/h -- far beyond a dropped fix or a moment's jitter, and short enough
+ * that a driver who has just discovered the gate geometry is wrong learns it
+ * on the out-lap rather than at the end of the day.
+ */
+const OFF_TRACK_HOLD_MS = 3_000;
 
 const PAUSABLE_STATES = new Set<SessionState>(['calibrating', 'armed', 'outLap', 'timing', 'inPit']);
 const MID_SESSION_STATES = new Set<SessionState>(['outLap', 'timing', 'inPit']);
@@ -356,6 +529,12 @@ export class SessionController {
   private latestDelta: DeltaUpdate | null = null;
   private latestSpeedKph: number | null = null;
   private latestGnssQuality: QualityLevel = 'good';
+  /** Ticket P7M M2 -- see {@link FacadeStateCore.trackMatch}. */
+  private trackMatchState: TrackMatchState = 'unknown';
+  private latestLateralM: number | null = null;
+  private latestMatchConfidence: number | null = null;
+  /** `deps.clock.now()` of the first sample in the current unbroken run of unmatched fixes; `null` while matched. */
+  private offTrackSinceMono: number | null = null;
   private calibrationSnapshot: {
     coverageFraction: number;
     onTrack: boolean;
@@ -367,10 +546,40 @@ export class SessionController {
     distanceM?: number;
   } | null = null;
   private calibrationResult: CalibrationResult | null = null;
+  /** Ticket P7R E2: see {@link FacadeStateCore.matchingUnvalidated}. Set ONLY by `proceedWithoutValidatedCalibration()`, and only on its rejected branch; cleared by every path that starts or restores a run. */
+  private matchingUnvalidated = false;
   private lastLapMs: number | null = null;
   private pbMs: number | null = null;
   private currentReference: ReferenceLap | null = null;
   private rawSamples: LocationSample[] = [];
+  /** Ticket P7M M1: samples captured since the last flush. Never more than one flush interval's worth. */
+  private pendingTrace: LocationSample[] = [];
+  /** Metadata for the chunk rows this run has written -- enough to decide which of them a completed lap has claimed, WITHOUT holding the trace itself in memory. */
+  private traceChunks: Array<{ key: number; tMin: number; tMax: number; count: number }> = [];
+  /** Whole-second wall clock at which the current run began; the high half of every chunk key (see {@link TRACE_CHUNK_KEY_STRIDE}). */
+  private traceRunBase = 0;
+  private traceSequence = 0;
+  private traceSampleCount = 0;
+  private lastTraceFlushMono: number | null = null;
+  /**
+   * Serializes ALL raw-trace storage work -- appends and reclaims alike -- in
+   * issue order. Reclaim reads a chunk back before rewriting it, so it must
+   * never interleave with the write that created it, and a chunk appended
+   * while a reclaim is mid-flight must land after it.
+   */
+  private tracePersistenceTail: Promise<void> = Promise.resolve();
+  /** Raw-trace writes that failed this run. Counted, logged, never thrown -- see `noteTraceFailure`. */
+  private traceWriteFailures = 0;
+  /**
+   * Ticket P7M M6 -- see {@link FacadeStateCore.recording}. Advanced ONLY
+   * from a resolved `saveTelemetry`, and only by samples that write actually
+   * put on disk for the first time: a chunk flush counts its batch, and a lap
+   * row counts only the samples that were still unflushed when the lap
+   * completed (everything else in the lap's range was already counted when
+   * its chunk was written, and reclaim re-keys those rows rather than
+   * re-storing them).
+   */
+  private persistedSampleCount = 0;
   /** Phase 3 coaching addendum. `null` whenever coaching is disabled (`deps.coaching` unset/`enabled: false`) or the supplied corner set is empty -- every coaching code path below is a no-op in that case. */
   private readonly coachEngine: CoachEngine | null;
   private readonly coachCorners: Corner[];
@@ -482,6 +691,13 @@ export class SessionController {
     // Persistence failures must reach the caller; silently settling them made
     // a completed flush indistinguishable from lost telemetry/PB writes.
     await Promise.all(pending);
+    // Ticket P7M M1: the raw-trace chain is awaited here so a caller that has
+    // flushed knows the trace is on disk too. It is deliberately NOT part of
+    // `pendingWork`: its writes are already serialized on their own chain, so
+    // awaiting the tail covers every earlier one, and a per-flush entry in
+    // `pendingWork` would grow an array once a second for the whole session.
+    // It also never rejects -- see `noteTraceFailure`.
+    await this.tracePersistenceTail;
   }
 
   // -------------------------------------------------------------------
@@ -523,7 +739,51 @@ export class SessionController {
       speedKph: this.latestSpeedKph,
       coachCue: this.currentCue,
       coachCueUpdates: [...this.appliedCueUpdatesLog],
+      trackMatch: {
+        state: this.trackMatchState,
+        lateralM: this.latestLateralM,
+        confidence: this.latestMatchConfidence,
+      },
+      recording: {
+        persistedSampleCount: this.persistedSampleCount,
+        failedWriteCount: this.traceWriteFailures,
+      },
+      matchingUnvalidated: this.matchingUnvalidated,
     };
+  }
+
+  /**
+   * Ticket P7M M2. "On the circuit" is deliberately NOT just
+   * `match !== null`: `TrackMatcher` still returns a match for a fix well
+   * outside the corridor (it only raises its own internal `lost` flag after
+   * `offCorridorLimit` of them), carrying a large `lateralM` and a confidence
+   * driven to zero -- which is precisely the misplaced-centerline case this
+   * state exists to make visible. A pit-lane match is on-track by definition:
+   * the pit lane is part of the mapped circuit and its offset from the racing
+   * centerline is expected.
+   */
+  private updateTrackMatch(match: TrackMatch | null): void {
+    const now = this.deps.clock.now();
+    this.latestLateralM = match === null ? null : Math.abs(match.lateralM);
+    this.latestMatchConfidence = match?.confidence ?? null;
+    const onTrack =
+      match !== null &&
+      (match.onPitLane || Math.abs(match.lateralM) <= this.deps.circuitProfile.corridorWidthM);
+    if (onTrack) {
+      this.offTrackSinceMono = null;
+      this.trackMatchState = 'matched';
+      return;
+    }
+    this.offTrackSinceMono ??= now;
+    if (now - this.offTrackSinceMono >= OFF_TRACK_HOLD_MS) this.trackMatchState = 'offTrack';
+  }
+
+  /** Back to "nothing known" -- a session that is not running makes no claim about where the car is. */
+  private resetTrackMatch(): void {
+    this.trackMatchState = 'unknown';
+    this.latestLateralM = null;
+    this.latestMatchConfidence = null;
+    this.offTrackSinceMono = null;
   }
 
   diagnostics(): SessionControllerDiagnostics {
@@ -536,8 +796,26 @@ export class SessionController {
       reverseTravelDetected: this.core.reverseTravelDetected,
       appliedInvalidReasons: [...this.core.appliedInvalidReasons],
       rawSampleBufferSize: this.rawSamples.length,
+      rawTraceChunkCount: this.traceChunks.length,
+      rawTraceSampleCount: this.traceSampleCount,
+      rawTracePendingCount: this.pendingTrace.length,
+      rawTraceWriteFailures: this.traceWriteFailures,
+      persistedSampleCount: this.persistedSampleCount,
       coachZoneRefreshes: this.coachZoneRefreshes,
     };
+  }
+
+  /**
+   * Ticket P7M M1: the `lapNumber` keys this run's unclaimed raw-trace chunks
+   * are stored under, oldest first -- read them back with
+   * `repository.loadTelemetry(sessionId, key)` and concatenate to recover the
+   * drive that no lap row claimed. In-process only (the keys are not
+   * persisted); a trace left behind by a previous launch is recovered by
+   * reading every negative `lapNumber` the `telemetry` table holds for that
+   * session id.
+   */
+  rawTraceChunkKeys(): number[] {
+    return this.traceChunks.map((chunk) => chunk.key);
   }
 
   // -------------------------------------------------------------------
@@ -600,6 +878,13 @@ export class SessionController {
       this.stintIndex = 0;
       this.inPitLatched = false;
     }
+    // Ticket P7M M1: a fresh run of the raw-trace writer. Called for the
+    // recovery path too (`phase === 'session'`, same session id as a previous
+    // launch), where the run band is what keeps this run's chunks from
+    // overwriting the pre-crash ones.
+    this.beginTraceRun();
+    // Ticket P7M M2: a starting session knows nothing yet about where the car is.
+    this.resetTrackMatch();
 
     /** Undoes the session identity THIS call minted, so an aborted start leaves nothing for `checkpointNow()`/`endSession()` to persist later. A session id restored from a checkpoint (recovery) is never touched. */
     const abortStart = (): void => {
@@ -680,6 +965,8 @@ export class SessionController {
         ...this.deps.config?.calibration,
       });
       this.calibrationResult = null;
+      // Ticket P7R E2: a fresh Learn lap is a fresh claim about the matching.
+      this.matchingUnvalidated = false;
       this.calibrationSnapshot = { coverageFraction: 0, onTrack: true };
       this.core.dispatch({ type: 'CALIBRATION_STARTED' });
       this.mode = 'calibrating';
@@ -688,6 +975,7 @@ export class SessionController {
       this.core.dispatch({ type: 'CALIBRATION_FINISHED', result: recoverySkippedCalibrationResult() });
       this.core.dispatch({ type: 'CALIBRATION_ACCEPTED' });
       this.calibrationResult = null;
+      this.matchingUnvalidated = false;
       this.mode = 'idle';
     }
 
@@ -711,6 +999,66 @@ export class SessionController {
     this.calibrationEngine = null;
     this.trackAsync(this.loadReferenceForSession().then(() => this.emit()));
     this.emit();
+  }
+
+  /**
+   * Ticket P7R E2 (binding) -- THE CALIBRATION GATE IS NOT A DEAD END.
+   *
+   * The owner has already lost a whole track day here: at Transilvania Motor
+   * Ring coverage parked at ~0.83, retry, ~0.83 again, no session ever
+   * started, nothing recorded. A quality gate may refuse to VOUCH for data.
+   * It must never refuse to let the data be COLLECTED, and any threshold can
+   * fail on geometry nobody has validated on site.
+   *
+   * THE WALL IS NOT WHERE IT LOOKS. A Learn lap only reaches
+   * `calibrationReview` once coverage passes
+   * {@link CALIBRATION_COMPLETE_COVERAGE_FRACTION} (0.98) -- so a lap stuck
+   * below the 0.85 ACCEPTANCE bar never produces a result at all. It does not
+   * fail; it simply never finishes, and the only control the driver has left
+   * is Cancel. That is the failure that cost the day, and it is why this
+   * method covers BOTH states rather than only the review screen:
+   *
+   *  - `calibrating`: the Learn lap is force-finished HERE AND NOW, through
+   *    the engine's own `finish()`. The verdict is the engine's, computed
+   *    from what was actually driven -- no threshold is lowered, skipped or
+   *    second-guessed.
+   *  - `calibrationReview`: the verdict already exists; it is used as it
+   *    stands.
+   *
+   * Then, honestly, one of two things happens:
+   *
+   *  - the engine ACCEPTED what it was given (possible when a driver
+   *    force-finishes a lap that was in fact good enough) -- this is an
+   *    ordinary accepted calibration and is NOT labelled as anything else;
+   *  - the engine rejected it -- the session is still armed, and
+   *    {@link FacadeStateCore.matchingUnvalidated} goes `true` and stays true
+   *    for the rest of the run, so the host can say so on screen and record
+   *    it against the stored session.
+   *
+   * `'refused'` -- and nothing mutated at all -- when there is no calibration
+   * to conclude: not in either state, or in `calibrating` with no engine.
+   */
+  proceedWithoutValidatedCalibration(): 'armed-accepted' | 'armed-unvalidated' | 'refused' {
+    if (this.core.state.state === 'calibrating') {
+      if (this.calibrationEngine === null) return 'refused';
+      // The engine's own verdict on the partial lap -- the same call the
+      // 0.98 completion trigger makes, at a moment the driver chose.
+      this.finishCalibrationNow();
+    }
+    if (this.core.state.state !== 'calibrationReview') return 'refused';
+    const result = this.calibrationResult;
+    if (result === null) return 'refused';
+    if (result.accepted) {
+      this.acceptCalibration();
+      return 'armed-accepted';
+    }
+    this.matchingUnvalidated = true;
+    this.core.dispatch({ type: 'CALIBRATION_ACCEPTED' });
+    this.calibrationSnapshot = null;
+    this.calibrationEngine = null;
+    this.trackAsync(this.loadReferenceForSession().then(() => this.emit()));
+    this.emit();
+    return 'armed-unvalidated';
   }
 
   rejectCalibration(): void {
@@ -743,6 +1091,7 @@ export class SessionController {
     this.calibrationEngine = null;
     this.calibrationSnapshot = null;
     this.calibrationResult = null;
+    this.matchingUnvalidated = false;
     this.mode = 'idle';
     this.emit();
   }
@@ -791,6 +1140,10 @@ export class SessionController {
       this.providerRunning = false;
     }
     this.core.dispatch({ type: 'END_SESSION' });
+    // Ticket P7M M1: unconditional, and BEFORE the flush barrier -- a session
+    // that completed no lap at all still leaves its whole drive on disk, and
+    // a session that did completes with nothing of the cool-down lap pending.
+    await this.flushRawTrace();
     await this.flush();
     const sessionId = this.sessionId;
     if (sessionId !== null) {
@@ -812,6 +1165,8 @@ export class SessionController {
     this.latestDelta = null;
     this.currentCue = null;
     this.coachCueSetAtMono = null;
+    // Ticket P7M M2: an ended session makes no claim about the car's position.
+    this.resetTrackMatch();
     this.emit();
   }
 
@@ -896,7 +1251,16 @@ export class SessionController {
     this.calibrationEngine = null;
     this.calibrationSnapshot = null;
     this.calibrationResult = null;
+    // Ticket P7R E2: a restored run makes no claim about the calibration of
+    // the run before it -- the host owns the DURABLE record of which stored
+    // sessions were run on unvalidated matching.
+    this.matchingUnvalidated = false;
     this.paused = false;
+    this.resetTrackMatch();
+    // Ticket P7M M1: a restore is a new run of the trace writer. Its own
+    // key band keeps whatever the previous launch wrote for this SAME session
+    // id intact (see `TRACE_CHUNK_KEY_STRIDE`).
+    this.beginTraceRun();
     // A restored checkpoint carries no live coaching state to resume (the
     // engine's per-lap rearm bookkeeping is meaningless across a process
     // restart) -- clear the displayed cue and rearm the engine itself so a
@@ -991,6 +1355,15 @@ export class SessionController {
     this.lastSampleAtMono = this.deps.clock.now();
     if (this.paused) return;
 
+    // Ticket P7M M1: capture happens HERE -- above the mode branches -- not
+    // inside the `live` branch with `rawSamples`. A Learn lap that never
+    // reaches its coverage threshold (the first symptom of geometry that is
+    // wrong on site) leaves `mode === 'calibrating'` forever and used to
+    // discard every fix it was fed; that trace is precisely what the geometry
+    // would be rebuilt from. Paused is still excluded: the car is stationary
+    // and the driver has said so.
+    this.recordRawTrace(sample);
+
     if (this.mode === 'calibrating' && this.calibrationEngine !== null) {
       this.calibrationEngine.feed(sample);
       const progress = this.calibrationEngine.progress();
@@ -1015,6 +1388,7 @@ export class SessionController {
     this.rawSamples.push(sample);
     const result = this.core.ingest(sample);
     this.latestGnssQuality = result.assessment.level;
+    this.updateTrackMatch(result.match);
     if (sample.speedMps !== undefined) this.latestSpeedKph = sample.speedMps * 3.6;
     if (result.completingStartFinish) {
       // SessionPipelineCore resets its delta engine at this boundary. Clear
@@ -1114,6 +1488,138 @@ export class SessionController {
     this.emit();
   }
 
+  // -------------------------------------------------------------------
+  // Raw-trace persistence (ticket P7M M1)
+  // -------------------------------------------------------------------
+
+  /** Starts a fresh run of the chunk writer -- see {@link TRACE_CHUNK_KEY_STRIDE} for why the band is taken from the wall clock, and `Math.max` for why two runs inside the same millisecond still get their own bands (in-process; across processes the millisecond itself separates them). */
+  private beginTraceRun(): void {
+    this.pendingTrace = [];
+    this.traceChunks = [];
+    this.traceSequence = 0;
+    this.traceSampleCount = 0;
+    this.traceWriteFailures = 0;
+    this.persistedSampleCount = 0;
+    this.lastTraceFlushMono = null;
+    this.traceRunBase = Math.max(Date.now() - TRACE_KEY_EPOCH_MS, this.traceRunBase + 1);
+  }
+
+  private recordRawTrace(sample: LocationSample): void {
+    if (this.sessionId === null) return;
+    this.pendingTrace.push(sample);
+    const now = this.deps.clock.now();
+    if (this.lastTraceFlushMono === null) this.lastTraceFlushMono = now;
+    if (
+      this.pendingTrace.length >= TRACE_FLUSH_SAMPLE_COUNT ||
+      now - this.lastTraceFlushMono >= TRACE_FLUSH_INTERVAL_MS
+    ) {
+      // Never rejects (see `noteTraceFailure`) and is awaited via
+      // `tracePersistenceTail` in `flush()`, so there is nothing to track and
+      // no unhandled rejection to leak out of the sample callback.
+      void this.flushRawTrace();
+    }
+  }
+
+  /**
+   * Writes everything captured since the last flush as one chunk row.
+   * Public so a host can force it at a moment the controller cannot see --
+   * the app's OS-background transition, above all (`checkpointNow()` calls it
+   * for exactly that reason). A no-op with nothing pending.
+   */
+  flushRawTrace(): Promise<void> {
+    const sessionId = this.sessionId;
+    if (sessionId === null || this.pendingTrace.length === 0) return this.tracePersistenceTail;
+    const batch = this.pendingTrace;
+    this.pendingTrace = [];
+    this.lastTraceFlushMono = this.deps.clock.now();
+    this.traceSequence += 1;
+    const key = -(this.traceRunBase * TRACE_CHUNK_KEY_STRIDE + this.traceSequence);
+    let tMin = batch[0]!.tMono;
+    let tMax = tMin;
+    for (const sample of batch) {
+      if (sample.tMono < tMin) tMin = sample.tMono;
+      if (sample.tMono > tMax) tMax = sample.tMono;
+    }
+    // Metadata is recorded SYNCHRONOUSLY (before the write resolves) so a lap
+    // completing in the same tick already knows this chunk exists and can
+    // reclaim from it.
+    this.traceChunks.push({ key, tMin, tMax, count: batch.length });
+    this.traceSampleCount += batch.length;
+    const write = this.tracePersistenceTail
+      .then(async () => {
+        await this.deps.repository.saveTelemetry(sessionId, key, batch);
+        // P7M M6: counted HERE, after the write resolved -- a failing write
+        // must freeze the driver's indicator, never advance it.
+        //
+        // Deliberately does NOT `emit()`. The counter is read from
+        // `snapshotState()`, so it is already current in the next emission
+        // the ordinary sample path makes -- at the ~1 Hz the fixes
+        // themselves arrive, which is the cadence the number is counting.
+        // Emitting per write instead would add a second, unrelated stream of
+        // state notifications to every subscriber for a value that changes
+        // nothing else on screen.
+        this.persistedSampleCount += batch.length;
+      })
+      .catch((error: unknown) => this.noteTraceFailure('flush', error));
+    this.tracePersistenceTail = write;
+    return write;
+  }
+
+  /**
+   * A failed trace write is counted and reported, never thrown. The trace is
+   * best-effort insurance against losing the day; making it able to reject
+   * `endSession()` would let it take down the session summary and PB write it
+   * exists to back up, which is precisely the wrong trade.
+   */
+  private noteTraceFailure(stage: 'flush' | 'reclaim', error: unknown): void {
+    this.traceWriteFailures += 1;
+    const detail = error instanceof Error ? error.message : String(error);
+    const message = `[sessionController] raw-trace ${stage} failed: ${detail}`;
+    if (this.deps.logger === undefined) console.warn(message);
+    else this.deps.logger(message);
+  }
+
+  /**
+   * Removes `tStart..tEnd` from the unclaimed chunks after the lap row for
+   * that range has been written -- the "tag the rows that already exist"
+   * half of M1, as close as a one-payload-per-lap schema gets to it. Ordered
+   * strictly AFTER the lap row's own write by its caller, so there is never
+   * an instant at which those samples are in neither place.
+   */
+  private reclaimTraceRange(sessionId: string, tStart: number, tEnd: number): Promise<void> {
+    const work = this.tracePersistenceTail.then(async () => {
+      const affected = this.traceChunks.filter(
+        (chunk) => chunk.count > 0 && chunk.tMax >= tStart && chunk.tMin <= tEnd,
+      );
+      for (const chunk of affected) {
+        if (chunk.tMin >= tStart && chunk.tMax <= tEnd) {
+          // Wholly inside the lap: the lap row now owns every sample in it.
+          // Emptied rather than deleted -- the repository contract has no
+          // telemetry delete, and an empty payload reads back as `[]`, which
+          // is what "no unclaimed samples here" means to every reader.
+          await this.deps.repository.saveTelemetry(sessionId, chunk.key, []);
+          this.traceSampleCount -= chunk.count;
+          chunk.count = 0;
+          continue;
+        }
+        const stored = await this.deps.repository.loadTelemetry(sessionId, chunk.key);
+        const kept = stored.filter((sample) => sample.tMono < tStart || sample.tMono > tEnd);
+        if (kept.length === stored.length) continue;
+        await this.deps.repository.saveTelemetry(sessionId, chunk.key, kept);
+        this.traceSampleCount -= chunk.count - kept.length;
+        chunk.count = kept.length;
+        if (kept.length > 0) {
+          chunk.tMin = kept.reduce((min, s) => (s.tMono < min ? s.tMono : min), kept[0]!.tMono);
+          chunk.tMax = kept.reduce((max, s) => (s.tMono > max ? s.tMono : max), kept[0]!.tMono);
+        }
+      }
+      this.traceChunks = this.traceChunks.filter((chunk) => chunk.count > 0);
+    })
+      .catch((error: unknown) => this.noteTraceFailure('reclaim', error));
+    this.tracePersistenceTail = work;
+    return work;
+  }
+
   private onLapCompleted(lap: LapRecord): Promise<void> {
     this.lastLapMs = lap.durationMs;
     const sessionId = this.sessionId;
@@ -1126,6 +1632,19 @@ export class SessionController {
     // M2 fix. Every sample up to and including this lap's end has now either
     // been persisted above or belonged to an earlier, already-saved lap.
     this.rawSamples = this.rawSamples.filter((sample) => sample.tMono > lap.tEnd);
+    // Ticket P7M M1: the same samples must not ALSO stay queued for the
+    // unclaimed trace. Done synchronously, here, so nothing still in memory
+    // can be flushed into a chunk after `reclaimTraceRange` below has already
+    // swept the rows. Samples OUTSIDE the lap stay pending on purpose -- they
+    // are in no lap row.
+    const keptPending = this.pendingTrace.filter(
+      (sample) => sample.tMono < lap.tStart || sample.tMono > lap.tEnd,
+    );
+    // Ticket P7M M6: these are the lap's samples that no chunk write had
+    // reached yet, so the lap row below is the FIRST time they are stored --
+    // the only part of that row the persisted counter has not already counted.
+    const firstStoredByLapRow = this.pendingTrace.length - keptPending.length;
+    this.pendingTrace = keptPending;
     // Build while this lap's matches are guaranteed to still be present in
     // SessionPipelineCore's bounded rolling buffer. Deferring construction
     // into the SQL queue can let a burst of later laps evict this telemetry
@@ -1138,6 +1657,10 @@ export class SessionController {
     const checkpointLaps = [...this.core.laps];
     const persistence = this.lapPersistenceTail.then(async () => {
       await this.deps.repository.saveTelemetry(sessionId, lap.lapNumber, telemetry);
+      this.persistedSampleCount += firstStoredByLapRow;
+      // Ticket P7M M1: only now that the lap row is durable are the same
+      // samples dropped from the unclaimed chunks.
+      await this.reclaimTraceRange(sessionId, lap.tStart, lap.tEnd);
       await this.deps.repository.saveCheckpoint(
         sessionId,
         checkpointSnapshot,
@@ -1514,6 +2037,11 @@ export class SessionController {
   async checkpointNow(): Promise<void> {
     const sessionId = this.sessionId;
     if (sessionId === null) return;
+    // Ticket P7M M1: the app-background transition is the best warning a
+    // force-quit ever gives, so the trace captured since the last interval
+    // flush goes out with the checkpoint rather than waiting for a tick that
+    // may never come.
+    await this.flushRawTrace();
     await this.deps.repository.saveCheckpoint(sessionId, this.core.state, this.core.laps);
   }
 

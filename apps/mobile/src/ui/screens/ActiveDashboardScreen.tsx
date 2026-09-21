@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useKeepAwake } from 'expo-keep-awake';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
-import { colors, spacing, typography } from '../theme';
+import { colors, fontFamily, spacing, typography } from '../theme';
 import { DeltaDisplay } from '../components/DeltaDisplay';
 import { TimeDisplay } from '../components/TimeDisplay';
 import { QualityPill } from '../components/QualityPill';
@@ -55,6 +55,24 @@ export function ActiveDashboardScreen({ navigation }: Props): React.JSX.Element 
     }
   }, [navigation, state.sessionState]);
 
+  // Ticket P7M M2 -- the ONE state the quality pill can never express. The
+  // pill reports GNSS quality; a car driving 100 m off a centerline traced
+  // from aerial imagery, under a clear sky, reads "good" on it while nothing
+  // it drives is counted. This is read in a helmet at speed, so it is not a
+  // number and not a diagnostic row: it is a solid red bar, in place of
+  // whatever else the banner slot would have shown, that says the timing is
+  // not working. Suppressed while `paused` (the state froze when the driver
+  // stopped feeding samples, so it is no longer a claim about now) and behind
+  // `lastError` (a command that actually failed is more urgent still).
+  const offTrack =
+    state.lastError === null &&
+    state.trackMatch.state === 'offTrack' &&
+    state.sessionState !== 'paused';
+
+  // Ticket P7M M6: storage has refused at least one write this session, so
+  // the counter beside this dot has stopped being the truth.
+  const recordingFailed = state.recording.failedWriteCount > 0;
+
   // C7 fix: a failed async command (e.g. endSession()'s persistence
   // rejecting) takes priority over the other, more routine banner states --
   // it's the one case that means the app did NOT do what the driver asked.
@@ -74,12 +92,48 @@ export function ActiveDashboardScreen({ navigation }: Props): React.JSX.Element 
       <View style={styles.container}>
         <View style={styles.topRow}>
           <QualityPill quality={state.gnssQuality} compact />
+          {/* Ticket P7M M6 -- the recording counter. The owner has already
+              come home from a track day with nothing; this is the number
+              that would have told them, from the car, while there was still
+              time. It counts samples whose WRITE RESOLVED, so it freezes
+              rather than lying if storage stops accepting them, and the dot
+              goes solid red the moment a write has actually failed. No
+              label: a number that climbs is the whole message. */}
+          <View style={styles.recChip}>
+            <View style={[styles.recDot, recordingFailed && styles.recDotFailed]} />
+            <Text
+              style={[styles.recCount, recordingFailed && styles.recCountFailed]}
+              maxFontSizeMultiplier={1.2}
+              accessibilityLabel={
+                recordingFailed
+                  ? `Recording error. ${state.recording.persistedSampleCount} samples saved, ${state.recording.failedWriteCount} writes failed.`
+                  : `${state.recording.persistedSampleCount} samples saved`
+              }
+            >
+              {state.recording.persistedSampleCount}
+            </Text>
+          </View>
           <Text style={styles.lapCounter} maxFontSizeMultiplier={1.2} accessibilityLabel={`Lap ${state.lapNumber}`}>
             LAP {state.lapNumber}
           </Text>
         </View>
 
-        <View style={styles.bannerSlot}>{banner ? <StatusBanner variant={banner.variant} message={banner.message} /> : null}</View>
+        <View style={styles.bannerSlot}>
+          {offTrack ? (
+            <View
+              style={styles.offTrackBanner}
+              accessibilityRole="alert"
+              accessibilityLiveRegion="assertive"
+              accessibilityLabel="Off track. The car is not matched to the circuit and laps are not being timed."
+            >
+              <Text style={styles.offTrackText} maxFontSizeMultiplier={1.2}>
+                OFF TRACK — NOT TIMING
+              </Text>
+            </View>
+          ) : banner ? (
+            <StatusBanner variant={banner.variant} message={banner.message} />
+          ) : null}
+        </View>
 
         {/* Fixed-height slot (Phase 3 coaching addendum, S7): reserved ONLY while
             coaching is on, so the strip's own cue appearing/disappearing never
@@ -185,7 +239,29 @@ const styles = StyleSheet.create({
   container: { flex: 1, padding: spacing.md, gap: spacing.sm },
   topRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   lapCounter: { ...typography.subtitle, color: colors.textSecondary, letterSpacing: 1 },
+  recChip: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
+  recDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: colors.success },
+  recDotFailed: { backgroundColor: colors.danger },
+  recCount: { ...typography.subtitle, color: colors.textSecondary, letterSpacing: 0.5 },
+  recCountFailed: { color: colors.danger },
   bannerSlot: { minHeight: 0 },
+  // P7M M2: deliberately louder than `StatusBanner` -- filled, not outlined,
+  // and display-weight rather than body text, because this is the one banner
+  // that has to survive a glance through a visor in direct sunlight.
+  offTrackBanner: {
+    backgroundColor: colors.danger,
+    borderRadius: 12,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    alignItems: 'center',
+  },
+  offTrackText: {
+    ...typography.subtitle,
+    color: colors.background,
+    fontFamily: fontFamily.displayBold,
+    letterSpacing: 1.5,
+    textAlign: 'center',
+  },
   coachSlot: { height: COACH_STRIP_HEIGHT },
   deltaZone: { flexGrow: 3, alignItems: 'center', justifyContent: 'center' },
   lapTimeZone: { alignItems: 'center', justifyContent: 'center' },

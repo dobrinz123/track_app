@@ -6,7 +6,13 @@ import type { LapRecord } from '@circuit/core';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
 import { TimeDisplay } from '../components/TimeDisplay';
-import { facade, getMostRecentSessionId, settingsStore } from '../../session/composition';
+import {
+  buildRawSessionExport,
+  facade,
+  getMostRecentSessionId,
+  settingsStore,
+} from '../../session/composition';
+import { shareRawSessionExport } from '../../session/rawSessionShare';
 import { useFacadeState } from '../hooks/useFacadeState';
 import { useSettings } from '../hooks/useSettings';
 import { resolveAnalysisScreenStrings } from './analysisStrings';
@@ -37,6 +43,29 @@ function sectorBests(laps: readonly LapRecord[]): (number | null)[] {
   return bests;
 }
 
+/**
+ * Ticket P7R E1 — the copy for the raw export, on the screen the driver is
+ * standing on the moment a session ends.
+ *
+ * This is the paddock path. The analysis button below is offered only when
+ * the session has laps; this one is offered ALWAYS, because the session with
+ * no laps is precisely the one whose data is otherwise stuck on the phone.
+ */
+const RAW_EXPORT_COPY = {
+  button: 'Export raw data',
+  buttonA11y: 'Export the raw recorded data of this session',
+  busy: 'Exporting…',
+  done: 'Raw data shared.',
+  written: 'Raw data written to the app cache (no share sheet on this platform).',
+  failed: 'Could not export the raw data.',
+  missing: 'This session is no longer on the device.',
+  unavailable: 'Storage is not ready yet — try again in a moment.',
+  noSession: 'No session from this launch to export.',
+  /** Said out loud on the screen a zero-lap session lands on, so the driver knows the drive was NOT lost. */
+  zeroLapHint:
+    'No laps were timed, but the full GPS trace and sensor data were still recorded. Export the raw data to keep them.',
+} as const;
+
 /** S8 — post-session results: lap list, sector bests, PB badge. */
 export function SessionResultsScreen({ navigation }: Props): React.JSX.Element {
   const state = useFacadeState(facade);
@@ -51,6 +80,36 @@ export function SessionResultsScreen({ navigation }: Props): React.JSX.Element {
   const settings = useSettings(settingsStore);
   const analysisStrings = resolveAnalysisScreenStrings(settings.language);
   const analysableSessionId = laps.length > 0 ? getMostRecentSessionId() : null;
+  // Ticket P7R E1: the raw export needs NO laps -- only a session id.
+  const [exporting, setExporting] = React.useState(false);
+  const [exportNote, setExportNote] = React.useState<string | null>(null);
+
+  const exportRaw = React.useCallback(async (): Promise<void> => {
+    if (exporting) return;
+    const sessionId = getMostRecentSessionId();
+    if (sessionId === null) {
+      setExportNote(RAW_EXPORT_COPY.noSession);
+      return;
+    }
+    setExporting(true);
+    setExportNote(null);
+    const doc = await buildRawSessionExport(sessionId);
+    if (doc === 'session-not-found') {
+      setExportNote(RAW_EXPORT_COPY.missing);
+    } else if (doc === 'storage-unavailable') {
+      setExportNote(RAW_EXPORT_COPY.unavailable);
+    } else {
+      const outcome = await shareRawSessionExport(doc);
+      setExportNote(
+        !outcome.ok
+          ? RAW_EXPORT_COPY.failed
+          : outcome.shared
+            ? RAW_EXPORT_COPY.done
+            : RAW_EXPORT_COPY.written,
+      );
+    }
+    setExporting(false);
+  }, [exporting]);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -87,9 +146,18 @@ export function SessionResultsScreen({ navigation }: Props): React.JSX.Element {
           LAPS
         </Text>
         {laps.length === 0 ? (
-          <Text style={styles.emptyText} maxFontSizeMultiplier={1.3}>
-            No laps recorded.
-          </Text>
+          <>
+            <Text style={styles.emptyText} maxFontSizeMultiplier={1.3}>
+              No laps recorded.
+            </Text>
+            {/* Ticket P7R E1: the one thing a driver must not conclude from
+                "no laps" is that the drive was lost. It was not -- P7M M1
+                persists the trace independently of lap detection -- and the
+                button below is how it leaves the phone. */}
+            <Text style={styles.emptyText} maxFontSizeMultiplier={1.3}>
+              {RAW_EXPORT_COPY.zeroLapHint}
+            </Text>
+          </>
         ) : (
           laps.map((lap) => {
             const isBest = lap.valid && lap.durationMs === bestLapMs;
@@ -133,6 +201,26 @@ export function SessionResultsScreen({ navigation }: Props): React.JSX.Element {
               {analysisStrings.entryButton}
             </Text>
           </Pressable>
+        )}
+        {/* Ticket P7R E1: unconditional -- no analysis, no laps required. */}
+        <Pressable
+          style={[styles.button, styles.secondaryButton, exporting && styles.buttonBusy]}
+          onPress={() => {
+            void exportRaw();
+          }}
+          disabled={exporting}
+          accessibilityRole="button"
+          accessibilityState={{ disabled: exporting }}
+          accessibilityLabel={RAW_EXPORT_COPY.buttonA11y}
+        >
+          <Text style={styles.secondaryButtonText} maxFontSizeMultiplier={1.3}>
+            {exporting ? RAW_EXPORT_COPY.busy : RAW_EXPORT_COPY.button}
+          </Text>
+        </Pressable>
+        {exportNote === null ? null : (
+          <Text style={styles.exportNote} maxFontSizeMultiplier={1.3}>
+            {exportNote}
+          </Text>
         )}
         <Pressable
           style={[styles.button, styles.secondaryButton]}
@@ -207,4 +295,6 @@ const styles = StyleSheet.create({
   primaryButtonText: { ...typography.subtitle, color: colors.onAccent },
   secondaryButton: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   secondaryButtonText: { ...typography.subtitle, color: colors.textPrimary },
+  buttonBusy: { opacity: 0.6 },
+  exportNote: { ...typography.caption, color: colors.textSecondary },
 });

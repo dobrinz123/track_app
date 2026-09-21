@@ -248,8 +248,14 @@ interface YawEvaluation {
    * when the sample rate is too low for the rule to mean anything.
    */
   available: boolean;
-  /** Which signal the measured turn came from -- the one coverage is judged on. */
-  source: 'yawRateDps' | 'headingDeg' | null;
+  /**
+   * Which signal(s) the measured turns actually came from. Ticket P7D R3: the
+   * choice is made PER WINDOW, so a lap can legitimately be `'mixed'` -- gyro
+   * where the gyro covered the window, GNSS heading everywhere else. Reported
+   * for diagnosis only; coverage is no longer judged on it (see
+   * `checkCoverage.yawSpike`, which asks for yaw evidence of EITHER kind).
+   */
+  source: 'yawRateDps' | 'headingDeg' | 'mixed' | null;
   /** Worst excess over the implied yaw that satisfied every guard, deg/s. */
   worstDps: number | null;
   /** The duration window the rule actually used, ms. */
@@ -292,7 +298,25 @@ function yawUncoveredFraction(samples: readonly CornerLapSample[], totalLengthM:
   return totalLengthM > 0 ? uncoveredM / totalLengthM : 0;
 }
 
-/** Degrees the gyro says the car turned between two indices. */
+/**
+ * Degrees the gyro says the car turned between two indices, or `null` when the
+ * gyro does not ADEQUATELY COVER that window (ticket P7D R3).
+ *
+ * "Adequately covered" is defined here, and deliberately at its strictest:
+ * EVERY sample interval inside the window must carry a finite `yawRateDps` and
+ * a strictly positive dt. The threshold is 100 % of the window's intervals,
+ * and that is not a tuning choice -- it follows from what the function does.
+ * The turn is an INTEGRAL, `sum(rate * dt)`; an interval with no rate
+ * contributes nothing, so a window covered 80 % by the gyro does not return an
+ * 80 %-confident turn, it returns a turn that is silently SHORT by whatever
+ * happened in the other 20 %. Under-integrating is precisely the failure this
+ * ticket exists to remove: a real rotation gets explained away and the
+ * `SLIDE_ROTATION` label disappears. Any partial-coverage rule would have to
+ * interpolate a rate nobody measured; falling back to the GNSS heading -- a
+ * signal that DID observe the whole window, end to end -- is strictly better
+ * evidence than an invented one, and it is already the tested default for a
+ * lap with no gyro at all.
+ */
 function integratedGyroTurn(
   samples: readonly CornerLapSample[],
   from: number,
@@ -314,9 +338,10 @@ function integratedGyroTurn(
 
 /**
  * Yaw anomaly per `analysis-engine.md` §3: the yaw the car ACTUALLY turned
- * through -- the recorded gyro when the session has one, else the GNSS course
- * over ground -- against the yaw the CENTRELINE's own curvature implies over
- * the same stretch. A car following a hairpin turns fast and is not sliding; a
+ * through -- the recorded gyro over every window the gyro adequately covers,
+ * the GNSS course over ground over every window it does not (ticket P7D R3;
+ * the choice is per window, never once for the whole lap) -- against the yaw
+ * the CENTRELINE's own curvature implies over the same stretch. A car following a hairpin turns fast and is not sliding; a
  * car turning fast where the track does not is.
  *
  * Both signals are compared over a fixed DURATION window rather than per sample
@@ -339,11 +364,21 @@ function evaluateYaw(
     if (finite(sample.channels?.yawRateDps)) gyroCount += 1;
     if (finite(sample.headingDeg)) headingCount += 1;
   }
-  const useGyro = gyroCount >= 2;
-  const source = useGyro ? 'yawRateDps' : headingCount >= 2 ? 'headingDeg' : null;
-  if (source === null) {
+  // Ticket P7D R3: these two counts decide only whether the lap carries ANY
+  // yaw evidence. WHICH signal answers for a given stretch of track is decided
+  // per window in the loop below -- see `integratedGyroTurn` for what makes a
+  // window adequately covered, and the `measuredTurn` line for the fallback.
+  // The lap-level `useGyro = gyroCount >= 2` this replaces handed the ENTIRE
+  // lap to the gyro as soon as two finite samples existed anywhere in it, so
+  // two stray zero-yaw samples at the start of an otherwise heading-only lap
+  // silently deleted a real 250 deg/s rotation from the report.
+  const hasGyroEvidence = gyroCount >= 2;
+  const hasHeadingEvidence = headingCount >= 2;
+  if (!hasGyroEvidence && !hasHeadingEvidence) {
     return { available: false, source: null, worstDps: null, windowMs: yawSpikeMs };
   }
+  /** What the lap would be judged on if no window can be measured at all. */
+  const source: 'yawRateDps' | 'headingDeg' = hasGyroEvidence ? 'yawRateDps' : 'headingDeg';
   // The rule is a DURATION rule, so a rate that cannot resolve that duration
   // widens the window to one sample interval instead of skipping every window
   // and reporting "no spike".
@@ -361,6 +396,9 @@ function evaluateYaw(
   const maxWindowMs = Math.max(yawSpikeMs * 4, windowMs * 1.5);
 
   let worstDps: number | null = null;
+  // Which signals the windows that COULD be measured actually drew on.
+  let anyWindowUsedGyro = false;
+  let anyWindowUsedHeading = false;
   for (let index = 0; index < samples.length; index += 1) {
     const start = samples[index];
     if (start === undefined) continue;
@@ -374,12 +412,21 @@ function evaluateYaw(
     // The window must be the duration the rule asks for, and must not straddle
     // a data gap (which is already reported on its own).
     if (spanMs < windowMs || spanMs > maxWindowMs) continue;
-    const measuredTurn = useGyro
-      ? integratedGyroTurn(samples, index, end)
-      : finite(start.headingDeg) && finite(finish.headingDeg)
+    // Ticket P7D R3 -- PER-WINDOW source selection. The gyro is preferred
+    // wherever it adequately covers THIS window (it is the direct measurement,
+    // and it sees rotations the course over ground cannot); wherever it does
+    // not, the window falls back to GNSS heading, which is exactly what a lap
+    // with no gyro at all has always used. Nothing is skipped merely because
+    // the gyro was absent here and present somewhere else in the lap.
+    const gyroTurn = hasGyroEvidence ? integratedGyroTurn(samples, index, end) : null;
+    const headingTurn =
+      finite(start.headingDeg) && finite(finish.headingDeg)
         ? wrappedHeadingDelta(start.headingDeg, finish.headingDeg)
         : null;
+    const measuredTurn = gyroTurn ?? headingTurn;
     if (measuredTurn === null) continue;
+    if (gyroTurn === null) anyWindowUsedHeading = true;
+    else anyWindowUsedGyro = true;
     // The projected distance carries a few metres of GNSS/projection
     // uncertainty, and a catalog centreline turns in discrete vertex steps (a
     // single OSM vertex can be worth 35 degrees). Comparing two step functions
@@ -397,7 +444,15 @@ function evaluateYaw(
     if (excessLatG !== null && excessLatG <= yawSpikeLatG) continue;
     if (worstDps === null || excessDps > worstDps) worstDps = excessDps;
   }
-  return { available: true, source, worstDps, windowMs };
+  const measuredSource =
+    anyWindowUsedGyro && anyWindowUsedHeading
+      ? 'mixed'
+      : anyWindowUsedGyro
+        ? 'yawRateDps'
+        : anyWindowUsedHeading
+          ? 'headingDeg'
+          : source;
+  return { available: true, source: measuredSource, worstDps, windowMs };
 }
 
 interface AbsEvaluation {
@@ -641,10 +696,18 @@ export function classifyLap(
     channelCoverageFraction(samples, carries, options.totalLengthM, checkBridgeM);
   const checkCoverage: Record<LapCheckId, number> = {
     offTrack: coverageOf((sample) => finite(sample.lateralM)),
-    yawSpike:
-      yaw.source === 'yawRateDps'
-        ? coverageOf((sample) => finite(sample.channels?.yawRateDps))
-        : coverageOf((sample) => finite(sample.headingDeg)),
+    // Ticket P7D R3: the yaw rule reads whichever of the two signals covers a
+    // given window (see `evaluateYaw`), so its coverage is the coverage of
+    // EITHER -- a stretch of track with a gyro reading or a heading is a
+    // stretch the rule could look at. Judging this on one chosen signal is
+    // what reported a fully heading-covered lap as 0.4 % covered the moment
+    // two gyro samples appeared at the start of it. For the two cases that
+    // have ever actually been recorded -- heading only (every lap to date) or
+    // gyro on every sample -- this predicate is the same set of samples the
+    // single-signal version selected, so their coverage is unchanged.
+    yawSpike: coverageOf(
+      (sample) => finite(sample.channels?.yawRateDps) || finite(sample.headingDeg),
+    ),
     decelSpike: coverageOf((sample) => finite(sample.speedKph)),
     gnssPoor: coverageOf((sample) => finite(sample.accuracyM)),
     coverage: coverageFraction,

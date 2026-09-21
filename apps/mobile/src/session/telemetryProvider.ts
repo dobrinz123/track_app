@@ -640,8 +640,29 @@ const INIT_TIMEOUT_MS = 5_000;
 const COMMAND_TIMEOUT_MS = 1_500;
 const MAX_CONSECUTIVE_ERRORS = 5;
 
-/** Reconnect policy (binding, kept simple): on 'failed', exactly ONE retry after this delay, then stay failed until the next `start()` (a fresh session). */
+/**
+ * Reconnect policy -- ticket P7M M3.
+ *
+ * Was: on 'failed', exactly ONE retry after this delay, then stay failed
+ * until the next `start()`. On a track day that reads as "one WiFi hiccup
+ * ends OBD recording for the rest of the stint" -- `MAX_CONSECUTIVE_ERRORS`
+ * (5) trips a 'failed' from a momentary adapter stall, the single retry is
+ * spent, and nothing tries again until the driver notices from the car and
+ * restarts the whole session. The adapter is a consumer WiFi dongle in a
+ * moving car; it WILL drop.
+ *
+ * Now: reconnection continues for the life of the `start()`..`stop()`
+ * lifecycle, backing off 3 s -> 6 s -> 12 s -> 24 s -> 30 s and holding at
+ * the cap so a genuinely absent adapter is polled twice a minute rather than
+ * hammered. The backoff resets the moment a generation reaches 'polling', so
+ * the SECOND hiccup of a session recovers as fast as the first did.
+ *
+ * GNSS timing is untouched by any of this: this provider feeds vehicle
+ * channels only and `SessionController` never waits on it.
+ */
 const RETRY_DELAY_MS = 3_000;
+/** Ceiling on the backed-off reconnect interval, ms. */
+const RETRY_MAX_DELAY_MS = 30_000;
 
 export interface TelemetryProviderDeps {
   settingsStore: SettingsStore;
@@ -799,8 +820,12 @@ export interface TelemetryProviderDiagnostics {
   observedHzByChannel: Record<string, number>;
   errorCount: number;
   lastError?: string;
-  /** 0 or 1 -- whether the single reconnect retry has been used for the current `start()`..`stop()` lifecycle. */
+  /** Ticket P7M M3: how many reconnect attempts this `start()`..`stop()` lifecycle has made. No longer capped at 1 -- reconnection is now indefinite and backed off, so this simply counts. */
   retriesUsed: number;
+  /** Ticket P7M M3: consecutive reconnect attempts since the last time a generation reached 'polling'; drives the backoff and resets on recovery. */
+  retryBackoffStep: number;
+  /** Ticket P7M M3: the delay the pending reconnect was scheduled with, ms; `undefined` when no reconnect is pending. */
+  retryDelayMs?: number;
   /** ENET telemetry addendum: which adapter this provider is currently configured for -- always known (read from settings), regardless of whether a session has been built yet. */
   adapterType: AdapterType;
   /** ENET-only (present once an ENET session has been built): the UDS target address the current/last ENET session sent requests to. */
@@ -942,6 +967,15 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   let currentState: Elm327State = 'idle';
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   let retriesUsed = 0;
+  /**
+   * Ticket P7M M3: consecutive reconnect attempts since the last successful
+   * 'polling'. Held separately from `retriesUsed` (a lifetime counter for
+   * diagnostics) because the BACKOFF has to forget: a stint that reconnected
+   * once an hour ago must not start its next recovery at a 30-second wait.
+   */
+  let retryBackoffStep = 0;
+  /** The delay the currently-pending reconnect was scheduled with, for diagnostics. */
+  let pendingRetryDelayMs: number | undefined;
   let running = false;
   let generationCounter = 0;
   /** P4e-FIX3 H2: set when `launchSession()`'s ENET branch was blocked by the adapter reservation (the probe holds it) -- surfaced via `getDiagnostics()` even though `current` stays `null` (no active generation to read diagnostics FROM). Cleared as soon as a session is actually launched. */
@@ -1573,6 +1607,13 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   }
 
   function emitState(state: Elm327State, detail?: string): void {
+    // Ticket P7M M3: reaching 'polling' is the definition of a healthy link,
+    // so the backoff ladder is forgotten here -- and ONLY here. Reconnects
+    // that merely got as far as 'connecting' keep climbing it.
+    if (state === 'polling' && retryBackoffStep > 0) {
+      console.log(`[telemetryProvider] reconnected after ${retryBackoffStep} attempt(s)`);
+      retryBackoffStep = 0;
+    }
     currentState = state;
     for (const listener of [...stateListeners]) listener(state, detail);
   }
@@ -2057,8 +2098,17 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   }
 
   function scheduleRetry(genId: number): void {
-    if (retryTimer !== null || retriesUsed >= 1 || !running) return;
+    // Ticket P7M M3: no attempt cap any more -- only "one pending timer at a
+    // time" and "the provider is still running". `doStop()` clears the timer,
+    // so a stop can always end the ladder.
+    if (retryTimer !== null || !running) return;
     retriesUsed += 1;
+    const delayMs = Math.min(RETRY_MAX_DELAY_MS, RETRY_DELAY_MS * 2 ** retryBackoffStep);
+    retryBackoffStep += 1;
+    pendingRetryDelayMs = delayMs;
+    console.warn(
+      `[telemetryProvider] link lost -- reconnect attempt ${retriesUsed} in ${delayMs} ms (backoff step ${retryBackoffStep})`,
+    );
     // Field revision (2026-08-27, binding): captured at SCHEDULE time --
     // compared against CURRENT settings when the timer actually fires, so a
     // retry never resurrects the OLD adapterType/host/port after the user
@@ -2068,6 +2118,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
     const fingerprintAtSchedule = activeFingerprint;
     retryTimer = setTimeout(() => {
       retryTimer = null;
+      pendingRetryDelayMs = undefined;
       if (!running) return;
       // Stale generation (e.g. a stop()/start() happened while this timer
       // was pending) -- the CURRENT generation's own lifecycle owns whatever
@@ -2095,7 +2146,7 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       } catch (error) {
         handleLaunchFailure(error);
       }
-    }, RETRY_DELAY_MS);
+    }, delayMs);
   }
 
   /**
@@ -2314,6 +2365,9 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
   function launchFresh(): void {
     running = true;
     retriesUsed = 0;
+    // Ticket P7M M3: a fresh lifecycle starts at the bottom of the ladder.
+    retryBackoffStep = 0;
+    pendingRetryDelayMs = undefined;
     // ENET auto-discovery addendum (binding): "runs discovery ONCE per
     // start" -- reset here (a fresh start()..stop() lifecycle), mirroring
     // `retriesUsed`'s own reset discipline (NOT reset in `stop()`).
@@ -2485,6 +2539,8 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
         return {
           state: currentState,
           retriesUsed,
+          retryBackoffStep,
+          ...(pendingRetryDelayMs === undefined ? {} : { retryDelayMs: pendingRetryDelayMs }),
           observedHzByChannel: diag.observedHzByChannel,
           errorCount: diag.errorCount,
           ...(diag.lastError === undefined ? {} : { lastError: diag.lastError }),
@@ -2517,6 +2573,8 @@ export function createTelemetryProvider(deps: TelemetryProviderDeps): TelemetryP
       return {
         state: currentState,
         retriesUsed,
+        retryBackoffStep,
+        ...(pendingRetryDelayMs === undefined ? {} : { retryDelayMs: pendingRetryDelayMs }),
         observedHzByChannel: base.observedHzByChannel,
         errorCount: base.errorCount,
         ...(lastError === undefined ? {} : { lastError }),

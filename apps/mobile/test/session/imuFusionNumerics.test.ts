@@ -419,3 +419,184 @@ describe('P6a-FIX2 M7 -- "fusion is on but not fusing" is visible, not silent', 
     await provider.stop();
   });
 });
+
+/**
+ * Ticket P7D R1 — A CORRECTION LARGER THAN THE PHYSICS ALLOWS.
+ *
+ * `MadgwickAhrs.update()` takes one NORMALISED gradient step per call: the
+ * attitude is turned `2 * beta * dt` radians towards the accelerometer
+ * whatever the actual disagreement is. That is a rate limit, and it is only
+ * meaningful at the cadence the gain was chosen for. The first over-threshold
+ * interval reseeds (M3) and the second onwards integrates (M7) -- and each of
+ * those fed its WHOLE duration into one such step, so at 1 Hz a disagreement
+ * of 0.001 rad was answered with a 0.2 rad turn, and then turned back.
+ */
+describe('P7D R1 -- a long interval cannot produce a correction bigger than the error', () => {
+  /** One nominal filter step, `2 * beta * UPDATE_INTERVAL_MS`, as a g reading. */
+  const ONE_STEP_G = Math.sin(2 * 0.1 * 0.04);
+  /** MEASURED on the pre-P7D provider: 25 nominal 40 ms samples, still phone. */
+  const PRE_P7D_STILL_PHONE_LONG_G = -0.000002801599203960947;
+
+  it('the reviewer scenario: 1 Hz alternating {0,0,1} / {0.001,0,1} no longer swings 0.19702 g', async () => {
+    const rig = await fusedRig();
+    const readings = [
+      { x: 0, y: 0, z: 1 },
+      { x: 0.001, y: 0, z: 1 },
+    ];
+    for (let i = 0; i < 10; i += 1) {
+      rig.advance(1_000);
+      rig.accel(readings[i % 2]!);
+    }
+    const latG = rig.samples.filter((s) => s.channel === 'latG').map((s) => s.value);
+    // Pre-fix, measured: the series alternated
+    //   [0, 5.0e-10, 0.19705882400519, -3.77e-5, 0.1970225799402656, ...]
+    // -- a still phone reporting a fifth of a g of lateral acceleration.
+    expect(latG.every((value) => Math.abs(value) < 0.19702)).toBe(true);
+    expect(Math.max(...latG.map(Math.abs))).toBeCloseTo(0.006999928475779539, 12);
+    // The residual is bounded by ONE nominal filter step, which is what the
+    // substepping buys, and sits well under the 0.02-0.05 g accelerometer
+    // noise floor this provider documents for its `absSwingG` threshold.
+    expect(Math.max(...latG.map(Math.abs))).toBeLessThan(ONE_STEP_G);
+    await rig.provider.stop();
+  });
+
+  it('the nominal 25 Hz path takes exactly ONE step per sample -- unchanged arithmetic', async () => {
+    // `Math.ceil(40 / 40)` is 1, so a nominal interval runs the same single
+    // `update()` it always did and every number the M1/M2/M3/M5/M6/M7 tests
+    // above pin is untouched. Pinned to the full double here, against the
+    // value the PRE-P7D provider produced for the identical stream, so a
+    // future change to the substep rule that leaks into the healthy cadence
+    // fails on sight rather than merely drifting.
+    const rig = await fusedRig();
+    for (let i = 0; i < 25; i += 1) {
+      rig.advance(40);
+      rig.gyro({ x: 0, y: 0, z: 0 });
+      rig.accel({ x: 0, y: -1, z: 0 });
+    }
+    expect(lastLongG(rig.samples)).toBe(PRE_P7D_STILL_PHONE_LONG_G);
+    await rig.provider.stop();
+  });
+
+  it('the gyro-evidenced rotation is preserved exactly across the split', async () => {
+    // Substepping divides the interval but not the rotation: the same average
+    // rate over `n` substeps of `dt/n` integrates to the same angle. Driven at
+    // a sustained 1 Hz (the substepping regime) with a gyro that says the
+    // phone is still, the attitude must stay where the accelerometer puts it.
+    const rig = await fusedRig();
+    for (let i = 0; i < 8; i += 1) {
+      rig.advance(1_000);
+      rig.gyro({ x: 0, y: 0, z: 0 });
+      rig.accel({ x: 0, y: 0, z: 1 });
+    }
+    expect(Math.abs(lastLongG(rig.samples))).toBeLessThan(1e-9);
+    await rig.provider.stop();
+  });
+});
+
+/**
+ * Ticket P7D R2 — GYRO INTERVALS MUST NOT CROSS THE SEED BOUNDARY.
+ *
+ * Seeding states the attitude AS OF the seed instant, so every rotation
+ * before it is already inside the seed. The accumulator was cleared but the
+ * HELD gyro reading kept its older timestamp, so the next gyro sample closed
+ * its interval from there and re-applied rotation the seed had absorbed.
+ */
+describe('P7D R2 -- the pending gyro interval is clipped at the seed timestamp', () => {
+  it('the reviewer scenario: 120 ms of rotation is no longer applied where 20 ms remains', async () => {
+    const rig = await fusedRig();
+    rig.gyro({ x: 1, y: 0, z: 0 }); // t0: 1 rad/s about x
+    rig.advance(100);
+    rig.accel({ x: 0, y: Math.sin(0.1), z: Math.cos(0.1) }); // t0+100: seeds
+    rig.advance(20);
+    rig.gyro({ x: 1, y: 0, z: 0 }); // t0+120: closes a 20 ms interval, not 120
+    rig.accel({ x: 0, y: Math.sin(0.12), z: Math.cos(0.12) });
+
+    const longG = lastLongG(rig.samples);
+    // Reviewer measured -0.1022215785 g of longG on a phone in PURE rotation.
+    expect(Math.abs(longG)).toBeLessThan(Math.abs(-0.1022215785) / 10);
+    expect(longG).toBeCloseTo(-0.003944787921410356, 12);
+    // For scale: the same filter tracking the same 1 rad/s rotation at the
+    // healthy 25 Hz cadence carries a residual of 0.021-0.026 g (measured),
+    // so what is left here is inside the filter's own tracking error.
+    expect(Math.abs(longG)).toBeLessThan(0.02);
+    await rig.provider.stop();
+  });
+
+  it('the 20 ms that really did elapse is still integrated -- clipped, not discarded', async () => {
+    // Had the interval been DISCARDED instead of clipped, the gyro would have
+    // had no evidence for this update at all and the run would count starved.
+    const rig = await fusedRig();
+    rig.gyro({ x: 1, y: 0, z: 0 });
+    rig.advance(100);
+    rig.accel({ x: 0, y: Math.sin(0.1), z: Math.cos(0.1) });
+    rig.advance(20);
+    rig.gyro({ x: 1, y: 0, z: 0 });
+    rig.accel({ x: 0, y: Math.sin(0.12), z: Math.cos(0.12) });
+    expect(rig.provider.getFusionDiagnostics().gyroStarvedUpdates).toBe(0);
+    await rig.provider.stop();
+  });
+});
+
+/**
+ * Ticket P7D R6 — WHAT `getFusionDiagnostics()` MEANS AFTER `stop()`.
+ *
+ * THE CHOICE MADE, and why. The reviewer found `stop()` reporting
+ * `fusionActive: false` while the three counters kept their values, against a
+ * doc comment promising all zeroes whenever fusion was inactive. Either half
+ * could have been changed. The counters were KEPT and the contract rewritten,
+ * because zeroing them at `stop()` destroys the run's diagnosis at the one
+ * moment a caller has reason to ask for it -- the session just ended, was the
+ * IMU data worth trusting? A diagnostic that forgets the session it is
+ * diagnosing is not a diagnostic. Nothing leaks between runs: `start()`
+ * zeroes every field, which is the property the second test pins.
+ */
+describe('P7D R6 -- live state resets at stop(), the run counters are retained', () => {
+  it('stop() clears the live fields and keeps the tally of the run that just ended', async () => {
+    const rig = await fusedRig();
+    for (let i = 0; i < 6; i += 1) {
+      rig.advance(1_000);
+      rig.accel({ x: 0, y: 0, z: 1 });
+    }
+    const running = rig.provider.getFusionDiagnostics();
+    expect(running.fusionActive).toBe(true);
+    expect(running.seeded).toBe(true);
+    expect(running.reseeds).toBe(1);
+    expect(running.slowIntervals).toBe(5);
+    expect(running.gyroStarvedUpdates).toBe(4);
+    expect(running.degraded).toBe(true);
+
+    await rig.provider.stop();
+    expect(rig.provider.getFusionDiagnostics()).toEqual({
+      // LIVE: the filter is gone, so these describe nothing any more.
+      fusionActive: false,
+      seeded: false,
+      degraded: false,
+      // COUNTERS: the run's own tally, still readable.
+      reseeds: 1,
+      slowIntervals: 5,
+      gyroStarvedUpdates: 4,
+    });
+  });
+
+  it('the NEXT start() zeroes them, so no run ever reads the previous run figures', async () => {
+    const rig = await fusedRig();
+    for (let i = 0; i < 6; i += 1) {
+      rig.advance(1_000);
+      rig.accel({ x: 0, y: 0, z: 1 });
+    }
+    await rig.provider.stop();
+    expect(rig.provider.getFusionDiagnostics().slowIntervals).toBe(5);
+
+    rig.provider.start();
+    await flushMicrotasks();
+    expect(rig.provider.getFusionDiagnostics()).toEqual({
+      fusionActive: true,
+      seeded: false,
+      reseeds: 0,
+      slowIntervals: 0,
+      gyroStarvedUpdates: 0,
+      degraded: false,
+    });
+    await rig.provider.stop();
+  });
+});

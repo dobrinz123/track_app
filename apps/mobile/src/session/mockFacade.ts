@@ -48,6 +48,8 @@ function initialState(): FacadeState {
     laps: [],
     speedKph: null,
     coachCue: null,
+    trackMatch: { state: 'unknown', lateralM: null, confidence: null },
+    recording: { persistedSampleCount: 0, failedWriteCount: 0 },
     lastError: null,
   };
 }

@@ -20,5 +20,6 @@ export type {
   SessionControllerConfig,
   SessionControllerDeps,
   SessionControllerDiagnostics,
+  TrackMatchState,
   WatchdogScheduler,
 } from './sessionController';

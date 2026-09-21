@@ -21,24 +21,100 @@
       "lon": 26.4720758
     },
     {
+      "lat": 44.77982544444444,
+      "lon": 26.471876255555554
+    },
+    {
+      "lat": 44.779931488888884,
+      "lon": 26.47167671111111
+    },
+    {
+      "lat": 44.780037533333335,
+      "lon": 26.471477166666666
+    },
+    {
+      "lat": 44.78014357777778,
+      "lon": 26.47127762222222
+    },
+    {
+      "lat": 44.78024962222222,
+      "lon": 26.47107807777778
+    },
+    {
+      "lat": 44.780355666666665,
+      "lon": 26.470878533333334
+    },
+    {
+      "lat": 44.780461711111116,
+      "lon": 26.47067898888889
+    },
+    {
+      "lat": 44.78056775555556,
+      "lon": 26.470479444444447
+    },
+    {
       "lat": 44.7806738,
       "lon": 26.4702799
+    },
+    {
+      "lat": 44.7807845,
+      "lon": 26.4700712
+    },
+    {
+      "lat": 44.7808952,
+      "lon": 26.4698625
+    },
+    {
+      "lat": 44.7810059,
+      "lon": 26.4696538
+    },
+    {
+      "lat": 44.7811166,
+      "lon": 26.4694451
     },
     {
       "lat": 44.7812273,
       "lon": 26.4692364
     },
     {
+      "lat": 44.78132772,
+      "lon": 26.46905692
+    },
+    {
+      "lat": 44.78142814,
+      "lon": 26.46887744
+    },
+    {
+      "lat": 44.78152856,
+      "lon": 26.46869796
+    },
+    {
+      "lat": 44.78162898,
+      "lon": 26.46851848
+    },
+    {
       "lat": 44.7817294,
       "lon": 26.468339
+    },
+    {
+      "lat": 44.781836600000005,
+      "lon": 26.46816645
     },
     {
       "lat": 44.7819438,
       "lon": 26.4679939
     },
     {
+      "lat": 44.78208405904931,
+      "lon": 26.467841603480103
+    },
+    {
       "lat": 44.7822378,
       "lon": 26.4677178
+    },
+    {
+      "lat": 44.782334790514014,
+      "lon": 26.467687594293633
     },
     {
       "lat": 44.7824337,
@@ -65,48 +141,128 @@
       "lon": 26.4683121
     },
     {
+      "lat": 44.78293612525254,
+      "lon": 26.46849501588595
+    },
+    {
       "lat": 44.7829348,
       "lon": 26.4686781
+    },
+    {
+      "lat": 44.7829189,
+      "lon": 26.46886316666667
+    },
+    {
+      "lat": 44.782903000000005,
+      "lon": 26.469048233333332
     },
     {
       "lat": 44.7828871,
       "lon": 26.4692333
     },
     {
+      "lat": 44.7828633,
+      "lon": 26.4695048
+    },
+    {
+      "lat": 44.7828395,
+      "lon": 26.4697763
+    },
+    {
+      "lat": 44.7828157,
+      "lon": 26.4700478
+    },
+    {
       "lat": 44.7827919,
       "lon": 26.4703193
+    },
+    {
+      "lat": 44.78277814198654,
+      "lon": 26.47054887413772
+    },
+    {
+      "lat": 44.782766574624034,
+      "lon": 26.47077868796226
     },
     {
       "lat": 44.7827572,
       "lon": 26.4710087
     },
     {
+      "lat": 44.782766883252876,
+      "lon": 26.47122570804423
+    },
+    {
+      "lat": 44.782785671896974,
+      "lon": 26.471441527158543
+    },
+    {
       "lat": 44.7828135,
       "lon": 26.4716554
+    },
+    {
+      "lat": 44.782866707810044,
+      "lon": 26.471907239607344
+    },
+    {
+      "lat": 44.78292512449193,
+      "lon": 26.47215677753386
     },
     {
       "lat": 44.7829887,
       "lon": 26.4724038
     },
     {
+      "lat": 44.78305150184989,
+      "lon": 26.47262797497051
+    },
+    {
+      "lat": 44.78311855127697,
+      "lon": 26.472849694856166
+    },
+    {
       "lat": 44.7831898,
       "lon": 26.4730688
+    },
+    {
+      "lat": 44.78328104824699,
+      "lon": 26.473315155726812
     },
     {
       "lat": 44.7833798,
       "lon": 26.4735557
     },
     {
+      "lat": 44.78349505,
+      "lon": 26.4737129
+    },
+    {
       "lat": 44.7836103,
       "lon": 26.4738701
+    },
+    {
+      "lat": 44.78372576666666,
+      "lon": 26.4740084
+    },
+    {
+      "lat": 44.783841233333334,
+      "lon": 26.4741467
     },
     {
       "lat": 44.7839567,
       "lon": 26.474285
     },
     {
+      "lat": 44.7840628,
+      "lon": 26.47447415
+    },
+    {
       "lat": 44.7841689,
       "lon": 26.4746633
+    },
+    {
+      "lat": 44.784243599999996,
+      "lon": 26.4748082
     },
     {
       "lat": 44.7843183,
@@ -141,44 +297,104 @@
       "lon": 26.4754961
     },
     {
+      "lat": 44.78384177540938,
+      "lon": 26.47542285194491
+    },
+    {
       "lat": 44.783751,
       "lon": 26.4753435
+    },
+    {
+      "lat": 44.7836292,
+      "lon": 26.475214100000002
     },
     {
       "lat": 44.7835074,
       "lon": 26.4750847
     },
     {
+      "lat": 44.78337573333333,
+      "lon": 26.474942333333335
+    },
+    {
+      "lat": 44.78324406666667,
+      "lon": 26.474799966666666
+    },
+    {
+      "lat": 44.7831124,
+      "lon": 26.4746576
+    },
+    {
+      "lat": 44.78298073333333,
+      "lon": 26.474515233333335
+    },
+    {
+      "lat": 44.78284906666667,
+      "lon": 26.474372866666666
+    },
+    {
       "lat": 44.7827174,
       "lon": 26.4742305
+    },
+    {
+      "lat": 44.78259627959107,
+      "lon": 26.474069036745323
     },
     {
       "lat": 44.7824786,
       "lon": 26.4739026
     },
     {
+      "lat": 44.782392253514125,
+      "lon": 26.47373177687708
+    },
+    {
       "lat": 44.7823194,
       "lon": 26.4735489
+    },
+    {
+      "lat": 44.7822704,
+      "lon": 26.4733634
     },
     {
       "lat": 44.7822214,
       "lon": 26.4731779
     },
     {
+      "lat": 44.7821724,
+      "lon": 26.4729967
+    },
+    {
       "lat": 44.7821234,
       "lon": 26.4728155
+    },
+    {
+      "lat": 44.78204241140928,
+      "lon": 26.472614258931525
     },
     {
       "lat": 44.7819458,
       "lon": 26.4724272
     },
     {
+      "lat": 44.78185555665991,
+      "lon": 26.472290945429826
+    },
+    {
       "lat": 44.7817559,
       "lon": 26.4721684
     },
     {
+      "lat": 44.78166108713991,
+      "lon": 26.472078962427876
+    },
+    {
       "lat": 44.78156,
       "lon": 26.4720044
+    },
+    {
+      "lat": 44.78146015104662,
+      "lon": 26.471973185872656
     },
     {
       "lat": 44.7813579,
@@ -193,8 +409,24 @@
       "lon": 26.4722215
     },
     {
+      "lat": 44.78093215681125,
+      "lon": 26.4723952959782
+    },
+    {
+      "lat": 44.78082330617415,
+      "lon": 26.472571573800774
+    },
+    {
+      "lat": 44.78071647905688,
+      "lon": 26.472750291660624
+    },
+    {
       "lat": 44.7806117,
       "lon": 26.4729314
+    },
+    {
+      "lat": 44.78054075,
+      "lon": 26.473058950000002
     },
     {
       "lat": 44.7804698,
@@ -213,60 +445,152 @@
       "lon": 26.4738704
     },
     {
+      "lat": 44.78046775,
+      "lon": 26.4739982
+    },
+    {
       "lat": 44.7805224,
       "lon": 26.474126
+    },
+    {
+      "lat": 44.78059445987081,
+      "lon": 26.474272441679854
     },
     {
       "lat": 44.780671,
       "lon": 26.4744143
     },
     {
+      "lat": 44.7807817,
+      "lon": 26.47458875
+    },
+    {
       "lat": 44.7808924,
       "lon": 26.4747632
+    },
+    {
+      "lat": 44.7809852942272,
+      "lon": 26.47494454525322
     },
     {
       "lat": 44.7810693,
       "lon": 26.4751343
     },
     {
+      "lat": 44.78109311145358,
+      "lon": 26.47528021971799
+    },
+    {
       "lat": 44.7810978,
       "lon": 26.4754298
+    },
+    {
+      "lat": 44.78107626880003,
+      "lon": 26.475593219515194
     },
     {
       "lat": 44.7810361,
       "lon": 26.4757495
     },
     {
+      "lat": 44.78092225,
+      "lon": 26.475946649999997
+    },
+    {
       "lat": 44.7808084,
       "lon": 26.4761438
+    },
+    {
+      "lat": 44.78069173365491,
+      "lon": 26.476338804707126
+    },
+    {
+      "lat": 44.780573468126335,
+      "lon": 26.476531888013934
+    },
+    {
+      "lat": 44.780453619368885,
+      "lon": 26.476723023909766
+    },
+    {
+      "lat": 44.7803322035452,
+      "lon": 26.476912186641076
+    },
+    {
+      "lat": 44.78020923702367,
+      "lon": 26.477099350713974
+    },
+    {
+      "lat": 44.78008473637633,
+      "lon": 26.477284490897077
+    },
+    {
+      "lat": 44.77995871837707,
+      "lon": 26.477467582224623
     },
     {
       "lat": 44.7798312,
       "lon": 26.4776486
     },
     {
+      "lat": 44.77967470557991,
+      "lon": 26.477776876290473
+    },
+    {
       "lat": 44.7795125,
       "lon": 26.4778902
+    },
+    {
+      "lat": 44.779389038820625,
+      "lon": 26.477924575155797
     },
     {
       "lat": 44.7792633,
       "lon": 26.477932
     },
     {
+      "lat": 44.779164906792325,
+      "lon": 26.4778982250425
+    },
+    {
       "lat": 44.7790734,
       "lon": 26.4778371
+    },
+    {
+      "lat": 44.77900352852133,
+      "lon": 26.477732212157303
     },
     {
       "lat": 44.7789571,
       "lon": 26.4776041
     },
     {
+      "lat": 44.778959074203144,
+      "lon": 26.477411834625187
+    },
+    {
       "lat": 44.7789719,
       "lon": 26.4772204
     },
     {
+      "lat": 44.7790224711023,
+      "lon": 26.476995243299584
+    },
+    {
+      "lat": 44.77907565443326,
+      "lon": 26.476771284361927
+    },
+    {
+      "lat": 44.77913143573156,
+      "lon": 26.476548583332384
+    },
+    {
       "lat": 44.7791898,
       "lon": 26.4763272
+    },
+    {
+      "lat": 44.77923575,
+      "lon": 26.47616325
     },
     {
       "lat": 44.7792817,
@@ -297,16 +621,48 @@
       "lon": 26.4758181
     },
     {
+      "lat": 44.77867043333333,
+      "lon": 26.476001133333334
+    },
+    {
+      "lat": 44.77857976666667,
+      "lon": 26.476184166666666
+    },
+    {
       "lat": 44.7784891,
       "lon": 26.4763672
+    },
+    {
+      "lat": 44.77837983871373,
+      "lon": 26.476526630873
+    },
+    {
+      "lat": 44.77826280800552,
+      "lon": 26.476674713951724
     },
     {
       "lat": 44.7781386,
       "lon": 26.4768107
     },
     {
+      "lat": 44.77801350076847,
+      "lon": 26.47692027716914
+    },
+    {
+      "lat": 44.777886025718836,
+      "lon": 26.47702427787011
+    },
+    {
       "lat": 44.7777563,
       "lon": 26.4771226
+    },
+    {
+      "lat": 44.777585433333336,
+      "lon": 26.47722956666667
+    },
+    {
+      "lat": 44.777414566666664,
+      "lon": 26.477336533333332
     },
     {
       "lat": 44.7772437,
@@ -321,12 +677,40 @@
       "lon": 26.477621
     },
     {
+      "lat": 44.7767708,
+      "lon": 26.4777322
+    },
+    {
+      "lat": 44.7766017,
+      "lon": 26.477843399999998
+    },
+    {
+      "lat": 44.7764326,
+      "lon": 26.4779546
+    },
+    {
+      "lat": 44.7762635,
+      "lon": 26.4780658
+    },
+    {
       "lat": 44.7760944,
       "lon": 26.478177
     },
     {
+      "lat": 44.77593132192197,
+      "lon": 26.478320455011456
+    },
+    {
       "lat": 44.7757726,
       "lon": 26.4784733
+    },
+    {
+      "lat": 44.775658166666666,
+      "lon": 26.4786037
+    },
+    {
+      "lat": 44.775543733333336,
+      "lon": 26.4787341
     },
     {
       "lat": 44.7754293,
@@ -353,6 +737,18 @@
       "lon": 26.4788156
     },
     {
+      "lat": 44.7745122283634,
+      "lon": 26.47868666031804
+    },
+    {
+      "lat": 44.774387873020196,
+      "lon": 26.47853966012026
+    },
+    {
+      "lat": 44.77427446074981,
+      "lon": 26.478376034919215
+    },
+    {
       "lat": 44.7741731,
       "lon": 26.4781974
     },
@@ -377,6 +773,34 @@
       "lon": 26.4771732
     },
     {
+      "lat": 44.7744113,
+      "lon": 26.4770269875
+    },
+    {
+      "lat": 44.7745721,
+      "lon": 26.476880774999998
+    },
+    {
+      "lat": 44.774732900000004,
+      "lon": 26.4767345625
+    },
+    {
+      "lat": 44.7748937,
+      "lon": 26.47658835
+    },
+    {
+      "lat": 44.7750545,
+      "lon": 26.4764421375
+    },
+    {
+      "lat": 44.7752153,
+      "lon": 26.476295925
+    },
+    {
+      "lat": 44.7753761,
+      "lon": 26.4761497125
+    },
+    {
       "lat": 44.7755369,
       "lon": 26.4760035
     },
@@ -393,8 +817,24 @@
       "lon": 26.4758339
     },
     {
+      "lat": 44.77608325,
+      "lon": 26.47585205
+    },
+    {
       "lat": 44.7761822,
       "lon": 26.4758702
+    },
+    {
+      "lat": 44.77636085,
+      "lon": 26.475938149999998
+    },
+    {
+      "lat": 44.776539500000005,
+      "lon": 26.4760061
+    },
+    {
+      "lat": 44.77671815,
+      "lon": 26.47607405
     },
     {
       "lat": 44.7768968,
@@ -403,6 +843,10 @@
     {
       "lat": 44.7770426,
       "lon": 26.4761975
+    },
+    {
+      "lat": 44.77714585,
+      "lon": 26.476230800000003
     },
     {
       "lat": 44.7772491,
@@ -417,15 +861,83 @@
       "lon": 26.4761803
     },
     {
+      "lat": 44.77761505,
+      "lon": 26.47598415
+    },
+    {
+      "lat": 44.7777206,
+      "lon": 26.475788
+    },
+    {
+      "lat": 44.77782615,
+      "lon": 26.47559185
+    },
+    {
+      "lat": 44.777931699999996,
+      "lon": 26.4753957
+    },
+    {
+      "lat": 44.77803725,
+      "lon": 26.47519955
+    },
+    {
+      "lat": 44.7781428,
+      "lon": 26.4750034
+    },
+    {
+      "lat": 44.77824835,
+      "lon": 26.47480725
+    },
+    {
       "lat": 44.7783539,
       "lon": 26.4746111
+    },
+    {
+      "lat": 44.77847098181818,
+      "lon": 26.47439350909091
+    },
+    {
+      "lat": 44.77858806363636,
+      "lon": 26.474175918181817
+    },
+    {
+      "lat": 44.778705145454545,
+      "lon": 26.47395832727273
+    },
+    {
+      "lat": 44.77882222727273,
+      "lon": 26.473740736363638
+    },
+    {
+      "lat": 44.77893930909091,
+      "lon": 26.473523145454546
+    },
+    {
+      "lat": 44.77905639090909,
+      "lon": 26.473305554545455
+    },
+    {
+      "lat": 44.77917347272727,
+      "lon": 26.473087963636363
+    },
+    {
+      "lat": 44.779290554545454,
+      "lon": 26.47287037272727
+    },
+    {
+      "lat": 44.779407636363636,
+      "lon": 26.472652781818184
+    },
+    {
+      "lat": 44.77952471818182,
+      "lon": 26.472435190909092
     },
     {
       "lat": 44.7796418,
       "lon": 26.4722176
     }
   ],
-  "totalLengthM": 4056.2614023331853,
+  "totalLengthM": 4058.1348802532984,
   "startFinishGate": {
     "id": "start-finish",
     "kind": "startFinish",
@@ -572,5 +1084,5 @@
   "corridorWidthM": 16,
   "createdAtUtc": "2026-08-26T00:00:00Z",
   "updatedAtUtc": "2026-08-26T00:00:00Z",
-  "confidenceNotes": "Geometry OpenStreetMap © OpenStreetMap contributors, ODbL 1.0 -- attribution mandatory wherever this circuit is shown. Traced from OSM aerial mapping and NOT validated on-site. Nothing in this asset is \"official\": start/finish, sector, and pit gates are app-defined (ADR-0002), not sanctioning-body-provided. Way IDs: main loop 333031201 (83 nodes incl. closing duplicate, 3326.1 m closed), full-layout extension 949617051 (26 nodes) splicing in for the main-loop segment between node-index 74 (node 3401455119) and node-index 79 (node 8791129031, same orientation) -- short-config chord way 333031200 (120 m) is excluded, it is not part of this full layout. Computed closed length 4056.3 m vs published 4052 m (racingcircuits.info, 0.11% delta) vs 4129 m (motorparkromania.ro, 1.76% delta) -- both published figures recorded for reference. Pit lane: way 953930215 (SE, track-side entry) then way 953930214 (NW, rejoins track); the two ways SHARE node 8829181316 -- there is NO unmapped gap (corrected after Codex CN-REV1; the earlier \"~41 m gap\" claim wrongly compared endpoint coordinates instead of node ids). Way 953930214 node[0] (8829250717) is a short-configuration pit connector, excluded because it is not part of the full-layout pit lane; pitLane.polyline = way215.geometry followed by way214.geometry after the shared node (deduped). corridorWidthM=16 combines the published 11-16 m [PLAUSIBLE] track width with a GNSS matching margin. Sector gates use the TMR v2 \"straight vertex\" rule verbatim: for each target fraction (1/3, 2/3 of lap distance), find the nearest qualifying straight vertex within +/-180 m of the target distance; place the gate there (perpendicular, same width rules as the start/finish gate). A vertex qualifies as straight when its mean absolute turning angle over a +/-40 m centerline window is < 0.008 rad/m. If no qualifying vertex exists in the window, fall back to the exact fraction and note it here. No fallback was required."
+  "confidenceNotes": "Geometry OpenStreetMap © OpenStreetMap contributors, ODbL 1.0 -- attribution mandatory wherever this circuit is shown. Traced from OSM aerial mapping and NOT validated on-site. Nothing in this asset is \"official\": start/finish, sector, and pit gates are app-defined (ADR-0002), not sanctioning-body-provided. Way IDs: main loop 333031201 (83 nodes incl. closing duplicate, 3326.1 m closed), full-layout extension 949617051 (26 nodes) splicing in for the main-loop segment between node-index 74 (node 3401455119) and node-index 79 (node 8791129031, same orientation) -- short-config chord way 333031200 (120 m) is excluded, it is not part of this full layout. CENTERLINE IS RESAMPLED, AND MOST OF ITS POINTS ARE INTERPOLATED -- NOT SURVEYED. The 102 mapped OSM vertices are all still here, unmoved and in order; 128 further points were computed between them and carry no independent evidence. Reason: the raw trace averaged 39.8 m between points with 8 chords over 100 m and a longest of 237.1 m, and a straight chord across a curve cuts inside the real arc, so a car on the real track can read as laterally displaced and even as off-corridor. Method: for each source segment, fit a circle through each neighbouring point-triple; bend the segment only when BOTH fits exist, lie on the same side of the chord and are tighter than 2000 m radius, and then follow the FLATTER of the two -- the curvature both neighbourhoods agree on. One-sided evidence buys no bend, so a corner apex mapped as a single sharp vertex followed by a long straight chord (this circuit has several) does not bow that straight. Segments left straight are subdivided along their exact chord, shifting nothing. Result: 59 of 102 source segments bent, largest lateral shift anywhere 3.57 m, longest spacing now 22 m. Raw chord-sum of the mapped vertices was 4056.3 m; following the implied arcs makes it 4058.1 m. NONE OF THIS VALIDATES THE GEOMETRY. It is the same OSM trace, read less lossily; it is still unverified on-site and still has no survey behind it, and the true radius of any corner here remains unknown until someone drives it. Computed closed length 4058.1 m vs published 4052 m (racingcircuits.info, 0.15% delta) vs 4129 m (motorparkromania.ro, 1.72% delta) -- both published figures recorded for reference. Pit lane: way 953930215 (SE, track-side entry) then way 953930214 (NW, rejoins track); the two ways SHARE node 8829181316 -- there is NO unmapped gap (corrected after Codex CN-REV1; the earlier \"~41 m gap\" claim wrongly compared endpoint coordinates instead of node ids). Way 953930214 node[0] (8829250717) is a short-configuration pit connector, excluded because it is not part of the full-layout pit lane; pitLane.polyline = way215.geometry followed by way214.geometry after the shared node (deduped). corridorWidthM=16 combines the published 11-16 m [PLAUSIBLE] track width with a GNSS matching margin. Sector gates are placed against the PRE-densification mapped vertices, so resampling cannot move a gate. Sector gates use the TMR v2 \"straight vertex\" rule verbatim: for each target fraction (1/3, 2/3 of lap distance), find the nearest qualifying straight vertex within +/-180 m of the target distance; place the gate there (perpendicular, same width rules as the start/finish gate). A vertex qualifies as straight when its mean absolute turning angle over a +/-40 m centerline window is < 0.008 rad/m. If no qualifying vertex exists in the window, fall back to the exact fraction and note it here. No fallback was required."
 }

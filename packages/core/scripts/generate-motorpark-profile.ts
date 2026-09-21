@@ -12,6 +12,10 @@ const curvatureModule = (await import(
   new URL('../src/geometry/curvature.ts', import.meta.url).href
 )) as typeof import('../src/geometry/curvature');
 const { curvatureAtDistance, curvatureProfile } = curvatureModule;
+const densifyModule = (await import(
+  new URL('../src/geometry/densify.ts', import.meta.url).href
+)) as typeof import('../src/geometry/densify');
+const { densifyClosedCenterline } = densifyModule;
 
 // ---------------------------------------------------------------------------
 // Way IDs (data/osm/overpass-motorpark-{geom,tags}.json, archived read-only).
@@ -52,6 +56,29 @@ const GATE_WIDTH_M = CORRIDOR_WIDTH_M * 2;
 export const MOTORPARK_CURVATURE_HALF_WINDOW_M = 40;
 export const MOTORPARK_STRAIGHT_CURVATURE_THRESHOLD_RAD_PER_M = 0.008;
 const SECTOR_SNAP_HALF_WINDOW_M = 180;
+
+// --- Centerline densification (ticket P7G) ---------------------------------
+// The raw OSM trace stores this circuit as 102 chords averaging 39.8 m, eight
+// of them over 100 m and the longest 237.1 m. Where a long chord spans a real
+// curve the chord cuts inside the arc, so a car on the real track reads as
+// laterally displaced and, past corridorWidthM, as OFF TRACK -- which leaves
+// coverage bins permanently unreachable and stalls calibration. Resampling
+// along the arc the mapped points already imply is a better reading of the SAME
+// data; it adds no survey information, and `densifyClosedCenterline` refuses to
+// bend any chord its two neighbourhoods do not BOTH support (see that module).
+const DENSIFY_MAX_SPACING_M = 22;
+/**
+ * Guard, not a tuning knob: no segment's resampling may shift the line further
+ * than this. The measured worst case on the archived data is 3.57 m (the 71.8 m
+ * chord at source segment 83, flanked by 19.1 m and 17.0 m segments whose two
+ * circle fits agree closely at 182 m and 173 m radius -- a real corner);
+ * anything approaching corridorWidthM would mean the input data changed shape
+ * and must be reviewed, not silently shipped.
+ */
+const DENSIFY_MAX_LATERAL_SHIFT_M = 8;
+/** Shape guard: the archived trace must still resample to this many points. */
+const EXPECTED_DENSIFIED_POINT_COUNT = 230;
+
 const EARTH_RADIUS_M = 6_371_008.8;
 const DEG_TO_RAD = Math.PI / 180;
 const RAD_TO_DEG = 180 / Math.PI;
@@ -602,14 +629,10 @@ export function generateMotorparkProfile(
   const projection = createLocalProjection(boundingCenter);
   const centerlineLocal = sourceCenterline.map((point) => projection.toLocal(point));
   const pitLaneLocal = pitLanePolyline.map((point) => projection.toLocal(point));
-  const totalLengthM = closedLength(centerlineLocal);
-  const lengthErrorFraction = Math.abs(totalLengthM - RESEARCH_LENGTH_M) / RESEARCH_LENGTH_M;
-  if (lengthErrorFraction > RESEARCH_LENGTH_TOLERANCE) {
-    throw new Error(
-      `Computed centerline length ${totalLengthM.toFixed(3)} m is not within 1% of the ` +
-        `${RESEARCH_LENGTH_M} m published length (racingcircuits.info).`,
-    );
-  }
+  // `sourceLengthM` is the raw chord-sum of the OSM trace. EVERY gate below is
+  // placed against `centerlineLocal`/`sourceLengthM`, i.e. against the exact
+  // pre-densification geometry, so densification cannot move a timing gate.
+  const sourceLengthM = closedLength(centerlineLocal);
 
   const direction = signedArea(centerlineLocal) > 0 ? 'counterclockwise' : 'clockwise';
   if (direction !== 'clockwise') {
@@ -642,17 +665,98 @@ export function generateMotorparkProfile(
   // SHORT arc bypassed by the pit lane -- same circular check as TMR.
   const firstToLastForwardM = modulo(
     pitLastProjection.distanceM - pitFirstProjection.distanceM,
-    totalLengthM,
+    sourceLengthM,
   );
-  if (!(firstToLastForwardM > 0 && firstToLastForwardM < totalLengthM / 2)) {
+  if (!(firstToLastForwardM > 0 && firstToLastForwardM < sourceLengthM / 2)) {
     throw new Error('Pit-lane node order is inconsistent with centerline travel direction');
   }
 
-  const allLocalPoints = [...centerlineLocal, ...pitLaneLocal];
+  // --- Densification (ticket P7G) -- AFTER every gate is placed --------------
+  const densified = densifyClosedCenterline(centerlineLocal, {
+    maxSpacingM: DENSIFY_MAX_SPACING_M,
+  });
+  const densifiedLocal = densified.points;
+  if (densifiedLocal.length !== EXPECTED_DENSIFIED_POINT_COUNT) {
+    throw new Error(
+      `Densified centerline has ${densifiedLocal.length} points, expected ` +
+        `${EXPECTED_DENSIFIED_POINT_COUNT} -- the archived OSM data no longer has the shape ` +
+        'ticket P7G measured.',
+    );
+  }
+  // Every mapped OSM vertex must survive densification unmoved and in order.
+  for (let index = 0; index < centerlineLocal.length; index += 1) {
+    const emittedIndex = densified.sourceVertexAt[index];
+    const source = centerlineLocal[index];
+    const emitted = emittedIndex === undefined ? undefined : densifiedLocal[emittedIndex];
+    if (source === undefined || emitted === undefined) {
+      throw new Error(`Densified centerline lost source vertex ${index}`);
+    }
+    if (emitted.e !== source.e || emitted.n !== source.n) {
+      throw new Error(`Densification moved source vertex ${index}; it must be preserved exactly`);
+    }
+  }
+  // Straights must stay straight: a segment the densifier declined to bend gets
+  // subdivided along its exact chord and reports a zero lateral shift.
+  let maximumLateralShiftM = 0;
+  for (const segment of densified.segments) {
+    if (segment.arcRadiusM === null && segment.maxLateralShiftM !== 0) {
+      throw new Error(
+        `Source segment ${segment.sourceIndex} was left straight but reports a ` +
+          `${segment.maxLateralShiftM} m lateral shift`,
+      );
+    }
+    maximumLateralShiftM = Math.max(maximumLateralShiftM, segment.maxLateralShiftM);
+  }
+  if (maximumLateralShiftM > DENSIFY_MAX_LATERAL_SHIFT_M) {
+    throw new Error(
+      `Densification shifts the centerline by ${maximumLateralShiftM.toFixed(2)} m, above the ` +
+        `${DENSIFY_MAX_LATERAL_SHIFT_M} m review threshold.`,
+    );
+  }
+  const bentSegmentCount = densified.segments.filter(
+    (segment) => segment.arcRadiusM !== null,
+  ).length;
+
+  const centerline = densifiedLocal.map((point) => projection.toLatLon(point));
+  const totalLengthM = closedLength(densifiedLocal);
+  const lengthErrorFraction = Math.abs(totalLengthM - RESEARCH_LENGTH_M) / RESEARCH_LENGTH_M;
+  if (lengthErrorFraction > RESEARCH_LENGTH_TOLERANCE) {
+    throw new Error(
+      `Computed centerline length ${totalLengthM.toFixed(3)} m is not within 1% of the ` +
+        `${RESEARCH_LENGTH_M} m published length (racingcircuits.info).`,
+    );
+  }
+
+  const allLocalPoints = [...densifiedLocal, ...pitLaneLocal];
   const maximumDistanceM = Math.max(...allLocalPoints.map((point) => Math.hypot(point.e, point.n)));
 
+  // HONESTY (ticket P7G): this text must say plainly that most centerline
+  // points are interpolated, and must not imply the geometry got more
+  // trustworthy. It did not. geometryStatus stays 'community-derived'.
+  const densifyNotes =
+    `CENTERLINE IS RESAMPLED, AND MOST OF ITS POINTS ARE INTERPOLATED -- NOT SURVEYED. The ` +
+    `${sourceCenterline.length} mapped OSM vertices are all still here, unmoved and in order; ` +
+    `${centerline.length - sourceCenterline.length} further points were computed between them ` +
+    'and carry no independent evidence. Reason: the raw trace averaged 39.8 m between points ' +
+    'with 8 chords over 100 m and a longest of 237.1 m, and a straight chord across a curve ' +
+    'cuts inside the real arc, so a car on the real track can read as laterally displaced and ' +
+    'even as off-corridor. Method: for each source segment, fit a circle through each ' +
+    'neighbouring point-triple; bend the segment only when BOTH fits exist, lie on the same ' +
+    'side of the chord and are tighter than 2000 m radius, and then follow the FLATTER of the ' +
+    'two -- the curvature both neighbourhoods agree on. One-sided evidence buys no bend, so a ' +
+    'corner apex mapped as a single sharp vertex followed by a long straight chord (this ' +
+    'circuit has several) does not bow that straight. Segments left straight are subdivided ' +
+    `along their exact chord, shifting nothing. Result: ${bentSegmentCount} of ` +
+    `${sourceCenterline.length} source segments bent, largest lateral shift anywhere ` +
+    `${maximumLateralShiftM.toFixed(2)} m, longest spacing now ` +
+    `${DENSIFY_MAX_SPACING_M} m. Raw chord-sum of the mapped vertices was ` +
+    `${sourceLengthM.toFixed(1)} m; following the implied arcs makes it ` +
+    `${totalLengthM.toFixed(1)} m. NONE OF THIS VALIDATES THE GEOMETRY. It is the same OSM ` +
+    'trace, read less lossily; it is still unverified on-site and still has no survey behind ' +
+    'it, and the true radius of any corner here remains unknown until someone drives it. ';
   const sectorNotes =
-    'Sector gates use the TMR v2 "straight vertex" rule verbatim: for each target fraction ' +
+    'Sector gates are placed against the PRE-densification mapped vertices, so resampling ' +
+    'cannot move a gate. Sector gates use the TMR v2 "straight vertex" rule verbatim: for each target fraction ' +
     '(1/3, 2/3 of lap distance), find the nearest qualifying straight vertex within +/-180 m ' +
     'of the target distance; place the gate there (perpendicular, same width rules as the ' +
     'start/finish gate). A vertex qualifies as straight when its mean absolute turning angle ' +
@@ -681,7 +785,7 @@ export function generateMotorparkProfile(
     geometryStatus: 'community-derived',
     sectorStatus: 'app-defined',
     direction,
-    centerline: sourceCenterline,
+    centerline,
     totalLengthM,
     startFinishGate: makeGate('start-finish', 'startFinish', startFinishPosition, projection),
     sectorGates: [
@@ -705,7 +809,9 @@ export function generateMotorparkProfile(
       '(83 nodes incl. closing duplicate, 3326.1 m closed), full-layout extension 949617051 ' +
       '(26 nodes) splicing in for the main-loop segment between node-index 74 (node ' +
       '3401455119) and node-index 79 (node 8791129031, same orientation) -- short-config ' +
-      'chord way 333031200 (120 m) is excluded, it is not part of this full layout. Computed ' +
+      'chord way 333031200 (120 m) is excluded, it is not part of this full layout. ' +
+      densifyNotes +
+      'Computed ' +
       `closed length ${totalLengthM.toFixed(1)} m vs published 4052 m (racingcircuits.info, ` +
       `${(lengthErrorFraction * 100).toFixed(2)}% delta) vs 4129 m (motorparkromania.ro, ` +
       `${(Math.abs(totalLengthM - 4129) / 4129 * 100).toFixed(2)}% delta) -- both published ` +

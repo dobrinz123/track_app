@@ -6,7 +6,13 @@ import type { RootStackParamList } from '../navigation/types';
 import { colors, radii, spacing, typography } from '../theme';
 import { TimeDisplay } from '../components/TimeDisplay';
 import { formatDateUtc } from '../format';
-import { sessionHistoryStore, settingsStore } from '../../session/composition';
+import {
+  buildRawSessionExport,
+  isSessionMatchingUnvalidated,
+  sessionHistoryStore,
+  settingsStore,
+} from '../../session/composition';
+import { shareRawSessionExport } from '../../session/rawSessionShare';
 import { resolveSelectedCircuit } from '../../session/circuitCatalog';
 import { layoutLabel } from '../data/circuit';
 import { useSettings } from '../hooks/useSettings';
@@ -16,6 +22,29 @@ import { resolveAnalysisScreenStrings } from './analysisStrings';
 import { resolveTestLoopStrings } from './testLoopStrings';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'SessionHistory'>;
+
+/**
+ * Ticket P7R E1 — the copy for the raw export control, in one place.
+ *
+ * It is a SECOND control, next to the analysis one, and the distinction has
+ * to survive being read quickly in a paddock: analysis needs laps, this does
+ * not. A session with no laps still has a full GPS trace and full telemetry
+ * on disk (ticket P7M M1), and until this button existed there was no way to
+ * get either off the phone.
+ */
+const RAW_EXPORT_COPY = {
+  button: 'Export raw data',
+  buttonA11y: (date: string): string => `Export the raw recorded data of the session on ${date}`,
+  busy: 'Exporting…',
+  done: 'Raw data shared.',
+  written: 'Raw data written to the app cache (no share sheet on this platform).',
+  failed: 'Could not export the raw data.',
+  missing: 'That session is no longer on this device.',
+  unavailable: 'Storage is not ready yet — try again in a moment.',
+  /** Ticket P7R E2: the honest label on a session run past a rejected calibration. */
+  uncalibrated: 'UNCALIBRATED',
+  uncalibratedHint: 'Started without a validated calibration — lap times may be unreliable.',
+} as const;
 
 /** S9 — list of stored sessions (mock data via session store for now) with drill-down into lap detail. Header names the SELECTED circuit (ticket CN-W3): `sessionHistoryStore` is already rebuilt per-circuit by `selectCircuit()`, so its own listings already reflect this. */
 export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
@@ -31,6 +60,34 @@ export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
   // P5d-FIX6: a learned circuit is shown by the NAME the driver gave it; the
   // generic label is only the fallback for one that was never named.
   const learnedRowLabel = selected.profile.displayName.trim() || testLoopStrings.historyLabel;
+  // Ticket P7R E1: one in-flight export at a time, and its outcome reported
+  // against the session it belonged to -- a driver who taps twice must not
+  // see the first result attributed to the second row.
+  const [exportingSessionId, setExportingSessionId] = React.useState<string | null>(null);
+  const [exportNote, setExportNote] = React.useState<{ sessionId: string; text: string } | null>(null);
+
+  const exportRaw = React.useCallback(async (sessionId: string): Promise<void> => {
+    if (exportingSessionId !== null) return;
+    setExportingSessionId(sessionId);
+    setExportNote(null);
+    const doc = await buildRawSessionExport(sessionId);
+    if (doc === 'session-not-found') {
+      setExportNote({ sessionId, text: RAW_EXPORT_COPY.missing });
+    } else if (doc === 'storage-unavailable') {
+      setExportNote({ sessionId, text: RAW_EXPORT_COPY.unavailable });
+    } else {
+      const outcome = await shareRawSessionExport(doc);
+      setExportNote({
+        sessionId,
+        text: !outcome.ok
+          ? RAW_EXPORT_COPY.failed
+          : outcome.shared
+            ? RAW_EXPORT_COPY.done
+            : RAW_EXPORT_COPY.written,
+      });
+    }
+    setExportingSessionId(null);
+  }, [exportingSessionId]);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -67,6 +124,8 @@ export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
           sessions.map((session) => {
             const validLaps = session.laps.filter((l) => l.valid);
             const bestMs = validLaps.length > 0 ? Math.min(...validLaps.map((l) => l.durationMs)) : null;
+            const uncalibrated = isSessionMatchingUnvalidated(session.sessionId);
+            const note = exportNote?.sessionId === session.sessionId ? exportNote.text : null;
             return (
               <View key={session.sessionId} style={styles.sessionCard}>
                 <View style={styles.sessionHeader}>
@@ -78,6 +137,18 @@ export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
                     {session.laps.length} laps · best <TimeDisplayInline ms={bestMs} />
                   </Text>
                 </View>
+                {/* Ticket P7R E2: a session run past a rejected calibration is
+                    never presented as an ordinary one. */}
+                {uncalibrated ? (
+                  <View style={styles.uncalibratedBlock} accessibilityLabel={RAW_EXPORT_COPY.uncalibratedHint}>
+                    <Text style={styles.uncalibratedBadge} maxFontSizeMultiplier={1.3}>
+                      {RAW_EXPORT_COPY.uncalibrated}
+                    </Text>
+                    <Text style={styles.uncalibratedHint} maxFontSizeMultiplier={1.3}>
+                      {RAW_EXPORT_COPY.uncalibratedHint}
+                    </Text>
+                  </View>
+                ) : null}
                 <View style={styles.lapChipsRow}>
                   {session.laps.map((lap) => (
                     <Pressable
@@ -93,16 +164,45 @@ export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
                     </Pressable>
                   ))}
                 </View>
-                <Pressable
-                  style={styles.analysisButton}
-                  onPress={() => navigation.navigate('Analysis', { sessionId: session.sessionId })}
-                  accessibilityRole="button"
-                  accessibilityLabel={analysisStrings.entryButtonA11y(formatDateUtc(session.displayDateUtc))}
-                >
-                  <Text style={styles.analysisButtonText} maxFontSizeMultiplier={1.3}>
-                    {analysisStrings.entryButton}
+                <View style={styles.actionRow}>
+                  {/* Ticket P7R E1: the analysis entry point needs laps to
+                      have anything to say; the raw export beside it does not,
+                      and is offered for EVERY session for exactly that
+                      reason. A zero-lap session is listed here (the stored
+                      row has no lap join) and this is how its drive leaves
+                      the phone. */}
+                  <Pressable
+                    style={styles.analysisButton}
+                    onPress={() => navigation.navigate('Analysis', { sessionId: session.sessionId })}
+                    accessibilityRole="button"
+                    accessibilityLabel={analysisStrings.entryButtonA11y(formatDateUtc(session.displayDateUtc))}
+                  >
+                    <Text style={styles.analysisButtonText} maxFontSizeMultiplier={1.3}>
+                      {analysisStrings.entryButton}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.exportButton, exportingSessionId !== null && styles.exportButtonBusy]}
+                    onPress={() => {
+                      void exportRaw(session.sessionId);
+                    }}
+                    disabled={exportingSessionId !== null}
+                    accessibilityRole="button"
+                    accessibilityState={{ disabled: exportingSessionId !== null }}
+                    accessibilityLabel={RAW_EXPORT_COPY.buttonA11y(formatDateUtc(session.displayDateUtc))}
+                  >
+                    <Text style={styles.exportButtonText} maxFontSizeMultiplier={1.3}>
+                      {exportingSessionId === session.sessionId
+                        ? RAW_EXPORT_COPY.busy
+                        : RAW_EXPORT_COPY.button}
+                    </Text>
+                  </Pressable>
+                </View>
+                {note === null ? null : (
+                  <Text style={styles.exportNote} maxFontSizeMultiplier={1.3}>
+                    {note}
                   </Text>
-                </Pressable>
+                )}
               </View>
             );
           })
@@ -163,6 +263,22 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.xs,
   },
   analysisButtonText: { ...typography.caption, color: colors.accent },
+  actionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, alignItems: 'center' },
+  exportButton: {
+    alignSelf: 'flex-start',
+    backgroundColor: colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radii.pill,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  exportButtonBusy: { opacity: 0.6 },
+  exportButtonText: { ...typography.caption, color: colors.textPrimary },
+  exportNote: { ...typography.caption, color: colors.textSecondary },
+  uncalibratedBlock: { gap: 2 },
+  uncalibratedBadge: { ...typography.label, color: colors.warning },
+  uncalibratedHint: { ...typography.caption, color: colors.textSecondary },
   lapChipText: { ...typography.caption, color: colors.textPrimary },
   inlineTime: { fontSize: 13 },
 });

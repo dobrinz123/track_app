@@ -78,10 +78,14 @@ describe('circuitCatalog corners (ticket CN-W3: catalog entries carry {profile, 
     expect(tmr!.corners.some((c) => c.speedSource === 'observed')).toBe(true);
   });
 
-  it('MotorPark corners: length 10, model-derived only (NO observed-speed overlay)', () => {
+  // Was 10 before ticket P7G densified the MotorPark centerline. Resampling
+  // separated T13 from T14, which the old 71.8 m chord at source segment 83 had
+  // fused into one 198-degree compound corner -- see the reviewed re-pin in
+  // packages/core/test/profile/motorpark-profile.asset.test.ts.
+  it('MotorPark corners: length 11, model-derived only (NO observed-speed overlay)', () => {
     const motorpark = circuitCatalog.get(MOTORPARK_CIRCUIT_PROFILE.circuitId);
     expect(motorpark).not.toBeNull();
-    expect(motorpark!.corners).toHaveLength(10);
+    expect(motorpark!.corners).toHaveLength(11);
     expect(motorpark!.corners.every((c) => c.speedSource !== 'observed')).toBe(true);
   });
 });

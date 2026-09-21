@@ -9,7 +9,7 @@ import { colors, radii, spacing, typography } from '../theme';
 import { ProgressRing } from '../components/ProgressRing';
 import { LongPressButton } from '../components/LongPressButton';
 import { StatusBanner } from '../components/StatusBanner';
-import { facade, settingsStore } from '../../session/composition';
+import { facade, proceedWithoutCalibration, settingsStore } from '../../session/composition';
 import { resolveSelectedCircuit } from '../../session/circuitCatalog';
 import {
   CALIBRATION_CANCEL_CONFIRM_BODY,
@@ -29,6 +29,38 @@ type Props = NativeStackScreenProps<RootStackParamList, 'ActiveCalibration'>;
  * it clips against other screen content or reads as a sliver. */
 const MAP_HEIGHT_MIN_FRACTION_OF_WIDTH = 0.4;
 const MAP_HEIGHT_MAX_FRACTION_OF_WIDTH = 0.75;
+
+/**
+ * Ticket P7R E2 (binding) — the escape hatch's copy, and WHY IT LIVES ON THIS
+ * SCREEN rather than only on the result screen.
+ *
+ * A Learn lap reaches `CalibrationResultScreen` only once coverage passes the
+ * controller's 0.98 completion trigger. A lap stuck below the 0.85 ACCEPTANCE
+ * bar — the owner's Transilvania Motor Ring failure, twice — therefore never
+ * produces a result at all: it does not fail, it never finishes, and the only
+ * remaining control is Cancel. That is what cost a whole track day, so this
+ * is the screen the way out has to exist on.
+ *
+ * The wording is plain and it is not alarming: it is read in a paddock by
+ * someone deciding whether to go out. It says what is kept (the drive is
+ * recorded either way) and what is not promised (the timing), because those
+ * are the two facts the decision turns on. The 0.85 / 250 m thresholds are
+ * untouched — the engine still judges the lap, and if it rejects it the
+ * session is labelled for as long as it exists.
+ */
+const CALIBRATION_ESCAPE_COPY = {
+  offer: 'Start session anyway',
+  offerA11y: 'Stop calibrating and start a timed session anyway',
+  heading: 'Start without finishing calibration',
+  body: 'Calibration has not covered enough of the circuit to be confident yet. You can stop here and drive: the app records the full GPS trace and all sensor data either way, so the session is never wasted.',
+  bodySecond:
+    'Lap and sector times may be wrong or may not appear at all, because the app is not confident it can tell where you are on this circuit. The session is marked as uncalibrated so you can tell it apart afterwards.',
+  confirm: 'Start session',
+  confirmA11y: 'Confirm, start an uncalibrated session',
+  keep: 'Keep Calibrating',
+  keepA11y: 'Dismiss, keep calibrating',
+  failed: 'Could not start a session from here. Cancel calibration and start again.',
+} as const;
 
 /** S5 — live coverage progress ring + on-track indicator; navigates to S6 once a calibration result arrives. */
 export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Element {
@@ -63,6 +95,10 @@ export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Elemen
   }, [navigation]);
 
   const [confirmingCancel, setConfirmingCancel] = useState(false);
+  // Ticket P7R E2: a two-step, exactly like the Cancel confirm beside it --
+  // the first tap opens the consequence card, only the second arms a session.
+  const [confirmingEscape, setConfirmingEscape] = useState(false);
+  const [escapeFailed, setEscapeFailed] = useState(false);
   // Both a `GO_BACK` navigation action (header chevron tap OR the edge-swipe
   // gesture -- React Navigation dispatches the SAME action for either) are
   // intercepted below; this holds that pending action so confirming can
@@ -112,6 +148,24 @@ export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Elemen
       exitInterceptorRef.current.reset(); // a REPLACE never needed the bypass -- do not leave it armed.
       navigation.replace('CalibrationInstructions');
     }
+  }, [navigation]);
+
+  const startWithoutCalibration = useCallback(() => {
+    // The controller finishes the Learn lap through the ENGINE, so a result
+    // appears the instant this runs -- which would otherwise trip the
+    // navigate-to-CalibrationResult effect above and race this screen's own
+    // navigation. Claiming the one-shot FIRST is what keeps the driver going
+    // where they asked to go.
+    navigatedRef.current = true;
+    const outcome = proceedWithoutCalibration();
+    if (outcome === 'refused') {
+      navigatedRef.current = false;
+      setEscapeFailed(true);
+      return;
+    }
+    setEscapeFailed(false);
+    // A `REPLACE` action, which the exit interceptor never flags.
+    navigation.replace('ActiveDashboard');
   }, [navigation]);
 
   const dismissCancelExit = useCallback(() => {
@@ -266,17 +320,78 @@ export function ActiveCalibrationScreen({ navigation }: Props): React.JSX.Elemen
                 </Pressable>
               </View>
             </View>
+          ) : confirmingEscape ? (
+            /* Ticket P7R E2: the way past the wall. Same sticky footer, same
+               two-step shape as the cancel confirm above -- but a neutral
+               border, because this is an ordinary decision, not an alarm. */
+            <View style={[styles.confirmCard, styles.escapeCard]}>
+              <Text style={styles.confirmTitle} maxFontSizeMultiplier={1.3}>
+                {CALIBRATION_ESCAPE_COPY.heading}
+              </Text>
+              <Text style={styles.confirmBody} maxFontSizeMultiplier={1.3}>
+                {CALIBRATION_ESCAPE_COPY.body}
+              </Text>
+              <Text style={styles.confirmBody} maxFontSizeMultiplier={1.3}>
+                {CALIBRATION_ESCAPE_COPY.bodySecond}
+              </Text>
+              {escapeFailed ? (
+                <Text style={styles.escapeError} maxFontSizeMultiplier={1.3}>
+                  {CALIBRATION_ESCAPE_COPY.failed}
+                </Text>
+              ) : null}
+              <View style={styles.confirmButtonsRow}>
+                <Pressable
+                  style={styles.keepGoingButton}
+                  onPress={() => {
+                    setConfirmingEscape(false);
+                    setEscapeFailed(false);
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel={CALIBRATION_ESCAPE_COPY.keepA11y}
+                >
+                  <Text style={styles.keepGoingButtonText} maxFontSizeMultiplier={1.3}>
+                    {CALIBRATION_ESCAPE_COPY.keep}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={styles.escapeConfirmButton}
+                  onPress={startWithoutCalibration}
+                  accessibilityRole="button"
+                  accessibilityLabel={CALIBRATION_ESCAPE_COPY.confirmA11y}
+                >
+                  <Text style={styles.escapeConfirmButtonText} maxFontSizeMultiplier={1.3}>
+                    {CALIBRATION_ESCAPE_COPY.confirm}
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
           ) : (
-            <LongPressButton
-              label="Cancel Calibration"
-              accessibilityLabel="Cancel calibration, press and hold"
-              onLongPressComplete={() => {
-                facade.rejectCalibration();
-                navigation.replace('CalibrationInstructions');
-              }}
-              durationMs={1200}
-              danger
-            />
+            <>
+              {/* Ticket P7R E2: offered BEFORE the destructive control and
+                  visually quieter than it -- going out with the data is a
+                  better outcome than cancelling, and cancelling remains the
+                  only thing that throws the Learn lap away. */}
+              <Pressable
+                style={styles.escapeButton}
+                onPress={() => setConfirmingEscape(true)}
+                accessibilityRole="button"
+                accessibilityLabel={CALIBRATION_ESCAPE_COPY.offerA11y}
+              >
+                <Text style={styles.escapeButtonText} maxFontSizeMultiplier={1.3}>
+                  {CALIBRATION_ESCAPE_COPY.offer}
+                </Text>
+              </Pressable>
+              <LongPressButton
+                label="Cancel Calibration"
+                accessibilityLabel="Cancel calibration, press and hold"
+                onLongPressComplete={() => {
+                  facade.rejectCalibration();
+                  navigation.replace('CalibrationInstructions');
+                }}
+                durationMs={1200}
+                danger
+              />
+            </>
           )}
         </View>
       </View>
@@ -347,4 +462,28 @@ const styles = StyleSheet.create({
     backgroundColor: colors.danger,
   },
   confirmCancelButtonText: { ...typography.subtitle, color: colors.onAccent },
+  // Ticket P7R E2: the escape hatch. Deliberately NOT danger-coloured -- it
+  // is the constructive option (go out and record), sitting quietly above
+  // the destructive one.
+  escapeButton: {
+    width: '100%',
+    borderRadius: radii.lg,
+    paddingVertical: spacing.md,
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginBottom: spacing.sm,
+  },
+  escapeButtonText: { ...typography.subtitle, color: colors.textPrimary },
+  escapeConfirmButton: {
+    flex: 1,
+    borderRadius: radii.lg,
+    paddingVertical: spacing.md,
+    alignItems: 'center',
+    backgroundColor: colors.accent,
+  },
+  escapeConfirmButtonText: { ...typography.subtitle, color: colors.onAccent },
+  escapeError: { ...typography.caption, color: colors.danger },
+  escapeCard: { borderColor: colors.border },
 });

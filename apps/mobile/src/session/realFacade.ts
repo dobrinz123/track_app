@@ -16,6 +16,8 @@ function mapState(core: FacadeStateCore, lastError: string | null): FacadeState 
     laps: core.laps,
     speedKph: core.speedKph,
     coachCue: core.coachCue,
+    trackMatch: core.trackMatch,
+    recording: core.recording,
     lastError,
   };
 }

@@ -274,34 +274,96 @@ describe('telemetryProvider: reconnect policy (real-adapter path, mocked TcpObdT
     vi.useRealTimers();
   });
 
-  it("reaches 'failed', retries exactly ONCE after 3s, then stays failed (no further retries)", async () => {
-    const store = new InMemorySettingsStore();
-    store.update({ telemetryEnabled: true, telemetrySimulate: false });
+  /**
+   * Ticket P7M M3 (SUPERSEDES the pre-P7M "exactly ONE retry, then stay
+   * failed until the next start()" policy this test previously pinned). One
+   * WiFi-adapter hiccup mid-stint used to end OBD recording for the rest of
+   * the stint; reconnection now continues for the life of the
+   * `start()`..`stop()` lifecycle, backed off and capped so a genuinely
+   * absent adapter is polled twice a minute instead of hammered.
+   */
+  it("reaches 'failed' and keeps reconnecting indefinitely on a 3/6/12/24/30s capped backoff (P7M M3)", async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const store = new InMemorySettingsStore();
+      store.update({ telemetryEnabled: true, telemetrySimulate: false });
 
-    const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter() });
-    const states: Elm327State[] = [];
-    provider.onStateChange((s) => states.push(s));
+      const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter() });
+      const states: Elm327State[] = [];
+      provider.onStateChange((s) => states.push(s));
 
-    provider.start();
-    await flushMicrotasks();
-    expect(tracker.connectCalls).toBe(1);
-    expect(states.at(-1)).toBe('failed');
+      provider.start();
+      await flushMicrotasks();
+      expect(tracker.connectCalls).toBe(1);
+      expect(states.at(-1)).toBe('failed');
 
-    // Before the 3s retry delay elapses: no second attempt yet.
-    await vi.advanceTimersByTimeAsync(2_000);
-    await flushMicrotasks();
-    expect(tracker.connectCalls).toBe(1);
+      // Each attempt waits its own backoff step, and NOT a millisecond less.
+      const backoffMs = [3_000, 6_000, 12_000, 24_000, 30_000, 30_000, 30_000];
+      let expectedConnects = 1;
+      for (const delayMs of backoffMs) {
+        await vi.advanceTimersByTimeAsync(delayMs - 1);
+        await flushMicrotasks();
+        expect(tracker.connectCalls).toBe(expectedConnects); // still waiting out this step.
+        await vi.advanceTimersByTimeAsync(1);
+        await flushMicrotasks();
+        expectedConnects += 1;
+        expect(tracker.connectCalls).toBe(expectedConnects);
+        expect(states.at(-1)).toBe('failed');
+      }
 
-    // The single retry fires at 3s.
-    await vi.advanceTimersByTimeAsync(1_000);
-    await flushMicrotasks();
-    expect(tracker.connectCalls).toBe(2);
-    expect(states.at(-1)).toBe('failed');
+      // The cap holds: a provider left running keeps trying at 30s forever,
+      // which is the whole point -- an adapter that comes back mid-stint is
+      // picked up without the driver touching the phone.
+      await vi.advanceTimersByTimeAsync(300_000);
+      await flushMicrotasks();
+      expect(tracker.connectCalls).toBe(expectedConnects + 10);
 
-    // No further retries, no matter how long the provider is left running.
-    await vi.advanceTimersByTimeAsync(60_000);
-    await flushMicrotasks();
-    expect(tracker.connectCalls).toBe(2);
+      // Every transition is logged, never silent.
+      expect(warnSpy.mock.calls.some((call) => String(call[0]).includes('reconnect attempt'))).toBe(true);
+
+      // stop() ends the ladder -- no attempt survives it.
+      await provider.stop();
+      const afterStop = tracker.connectCalls;
+      await vi.advanceTimersByTimeAsync(300_000);
+      await flushMicrotasks();
+      expect(tracker.connectCalls).toBe(afterStop);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  /** P7M M3: the backoff FORGETS. A stint that already recovered once must not start its next recovery at the 30s cap. */
+  it('a fresh start() after stop() resets the backoff ladder to its first 3s step', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const store = new InMemorySettingsStore();
+      store.update({ telemetryEnabled: true, telemetrySimulate: false });
+      const provider = createTelemetryProvider({ settingsStore: store, monotonicNow: monotonicCounter() });
+
+      provider.start();
+      await flushMicrotasks();
+      // Climb several steps of the ladder.
+      for (const delayMs of [3_000, 6_000, 12_000]) {
+        await vi.advanceTimersByTimeAsync(delayMs);
+        await flushMicrotasks();
+      }
+      expect(tracker.connectCalls).toBe(4);
+      expect(provider.getDiagnostics().retryBackoffStep).toBe(4);
+
+      await provider.stop();
+      provider.start();
+      await flushMicrotasks();
+      expect(tracker.connectCalls).toBe(5);
+      // Back at the bottom: the next attempt is 3s away, not 30s.
+      await vi.advanceTimersByTimeAsync(2_999);
+      await flushMicrotasks();
+      expect(tracker.connectCalls).toBe(5);
+      await vi.advanceTimersByTimeAsync(1);
+      await flushMicrotasks();
+      expect(tracker.connectCalls).toBe(6);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('a fresh start() after stop() resets the retry budget (a new session gets its own one retry)', async () => {

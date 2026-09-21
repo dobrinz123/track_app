@@ -36,7 +36,12 @@ import {
   type GnssDiagnostics,
 } from '../platform';
 import { openAppDatabase } from '../persistence/expoSqlDatabase';
-import { SqlSettingsStore } from '../persistence/sqlSettingsStore';
+import {
+  SqlSettingsStore,
+  clearUnvalidatedMatchingSessionIds,
+  markSessionMatchingUnvalidated,
+  readUnvalidatedMatchingSessionIds,
+} from '../persistence/sqlSettingsStore';
 import type { FacadeState, SessionFacade } from './facade';
 import { MockSessionFacade } from './mockFacade';
 import type { PersonalBestEntry, SessionHistoryStore, StoredSession } from './mockHistory';
@@ -45,6 +50,13 @@ import { SqlSessionHistoryStore } from './sqlSessionHistoryStore';
 import type { AppSettings, SettingsStore } from './settingsStore';
 import { InMemorySettingsStore, chooseInitialActiveVehicleProfileId } from './settingsStore';
 import { RealSessionFacade, type RealSessionFacadeCallbacks } from './realFacade';
+import {
+  loadRawSessionExportDocument,
+  readAllSessionTelemetry,
+  readUnclaimedGnssTrace,
+  type RawSessionExportDocument,
+  type RawSessionExportUnavailable,
+} from './rawSessionExport';
 import { ReplayTimeSource, ReplayTimestampedLocationProvider, ScaledReplayClock } from './liveTimestampedProvider';
 import { TMR_CIRCUIT_PROFILE, TMR_CORNERS, TMR_RUNTIME_PROFILE } from './tmrProfile';
 import {
@@ -565,6 +577,8 @@ const PENDING_FACADE_STATE: FacadeState = {
   laps: [],
   speedKph: null,
   coachCue: null,
+  trackMatch: { state: 'unknown', lateralM: null, confidence: null },
+  recording: { persistedSampleCount: 0, failedWriteCount: 0 },
   lastError: null,
 };
 
@@ -1017,6 +1031,12 @@ export const gForceProvider: GForceProvider = createGForceProvider({
   // default) leaves this provider exactly as it has always been: accelerometer
   // only, low-pass gravity, no `yawRateDps`.
   imuFusionEnabled: () => settingsStore.getSettings().imuFusionEnabled,
+  // Ticket P7R E3 (binding): gyroscope CAPTURE, wired on identical terms but
+  // as its OWN setting -- on by default. With capture on and fusion off the
+  // provider subscribes the gyroscope and records `yawRateDps`, while
+  // `latG`/`longG` keep coming out of the same low-pass path they always
+  // have, value for value.
+  imuGyroCaptureEnabled: () => settingsStore.getSettings().imuGyroCaptureEnabled,
 });
 
 /**
@@ -2827,6 +2847,11 @@ async function runBootstrap(): Promise<void> {
       // The prime above ran before settings existed, so it read the DEFAULT
       // profile; re-read now that the ACTIVE one is known.
       await refreshVehicleProfileBindingsCache();
+      // Ticket P7R E2: which stored sessions were run on matching the
+      // calibration gate rejected. Hydrated here so `SessionHistoryScreen`
+      // (a synchronous render, like every other list it draws) can label
+      // them without an effect of its own. Never throws.
+      unvalidatedMatchingSessionIds = new Set(await readUnvalidatedMatchingSessionIds(db));
     }
 
     // Ticket P5d T6 (binding): learned circuits are registered in the catalog
@@ -3394,6 +3419,17 @@ async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDa
   // all stored data is gone -- cleared together, the SAME way session
   // end/discard/vanished-checkpoint do (`setActiveSession(db, null)`).
   if (finalResult.ok && db !== null) await setActiveSession(db, null);
+  // Ticket P7R E2: the unvalidated-matching log is a list of facts about
+  // sessions that no longer exist -- cleared with them, for the same reason
+  // the active-session pointer above is. Best-effort, exactly like the log's
+  // own writes: a stale label on a deleted session must never turn a
+  // successful wipe into a failed one.
+  if (finalResult.ok) {
+    unvalidatedMatchingSessionIds = new Set();
+    if (db !== null && !(await clearUnvalidatedMatchingSessionIds(db))) {
+      console.warn('[composition] could not clear the unvalidated-matching log');
+    }
+  }
   if (finalResult.ok && historyStore !== null) await historyStore.refresh();
 
   const errorText = finalResult.ok
@@ -3807,6 +3843,117 @@ export function getSessionRepository(): LocalSessionRepository | null {
  */
 export function getMostRecentSessionId(): string | null {
   return mostRecentSessionId;
+}
+
+// ---------------------------------------------------------------------------
+// Ticket P7R E2 — the calibration escape hatch.
+// ---------------------------------------------------------------------------
+
+/**
+ * Session ids known to have been run on matching the calibration gate
+ * REFUSED to vouch for. Hydrated once from the durable log during bootstrap
+ * and kept in step by {@link proceedWithoutCalibration}, so the synchronous
+ * screens can read it the same way they read `sessionHistoryStore`.
+ */
+let unvalidatedMatchingSessionIds: ReadonlySet<string> = new Set();
+
+/** Ticket P7R E2: was this stored session run on unvalidated matching? */
+export function isSessionMatchingUnvalidated(sessionId: string): boolean {
+  return unvalidatedMatchingSessionIds.has(sessionId);
+}
+
+/** Ticket P7R E2: every such session id this launch knows about. */
+export function listUnvalidatedMatchingSessionIds(): readonly string[] {
+  return [...unvalidatedMatchingSessionIds];
+}
+
+/**
+ * Ticket P7R E2 (binding) -- go out and collect data rather than lose the day
+ * to a calibration that cannot be satisfied.
+ *
+ * The escape hatch behind `ActiveCalibrationScreen`'s and
+ * `CalibrationResultScreen`'s "Start session anyway". Both screens reach the
+ * SAME controller call, because the wall shows up in both places: a Learn lap
+ * stalled below the acceptance bar never produces a result at all (it sits in
+ * `calibrating` forever), while one that does produce a rejected result sits
+ * on the review screen with nothing but Retry.
+ *
+ * `SessionController.proceedWithoutValidatedCalibration()` concludes the
+ * calibration through the ENGINE -- the 0.85 / 250 m thresholds are untouched
+ * and the engine's verdict is used as it stands -- and then either arms an
+ * ordinary session (the engine accepted it after all) or arms a LABELLED one.
+ * Only the labelled outcome is recorded here.
+ *
+ * The durable write is deliberately NOT awaited and cannot fail this call: a
+ * driver in a paddock must never be held at a screen, or refused a session,
+ * by a settings-table write. The in-memory set is updated up front either
+ * way, so the history list and the raw export label the session correctly for
+ * the rest of this launch even if the row never lands.
+ *
+ * Returns the controller's own outcome, so a screen can distinguish "armed,
+ * and it is honestly an ordinary session" from "armed, and labelled" from
+ * "nothing happened" -- and never shows a button that silently does nothing.
+ */
+export function proceedWithoutCalibration(): 'armed-accepted' | 'armed-unvalidated' | 'refused' {
+  const ctrl = activeController;
+  if (ctrl === null) return 'refused';
+  const outcome = ctrl.proceedWithoutValidatedCalibration();
+  if (outcome !== 'armed-unvalidated') return outcome;
+  const sessionId = mostRecentSessionId;
+  if (sessionId !== null) {
+    unvalidatedMatchingSessionIds = new Set([...unvalidatedMatchingSessionIds, sessionId]);
+    const database = db;
+    if (database !== null) {
+      void markSessionMatchingUnvalidated(database, sessionId).then((stored) => {
+        if (!stored) {
+          console.warn(
+            `[composition] could not durably record that session "${sessionId}" ran on unvalidated matching`,
+          );
+        }
+      });
+    }
+  }
+  return outcome;
+}
+
+/**
+ * Ticket P7R E1 (binding) — the RAW export of one stored session, reachable
+ * with no analysis and therefore with no laps.
+ *
+ * Wires `rawSessionExport.ts`'s pure loader to the same two stores the rest
+ * of the app reads: the session repository (lap traces and the P7M unclaimed
+ * chunk rows, both in the `telemetry` table) and the shared database
+ * (`telemetry_samples`, INCLUDING the `lap_number IS NULL` rows that are the
+ * entire OBD/IMU record of a session in which no lap was ever detected).
+ *
+ * Resolves a NAMED reason rather than throwing: `'session-not-found'` when
+ * the id is not on the device, `'storage-unavailable'` before bootstrap has
+ * built a repository (or on the web preview, which has no on-device SQLite).
+ * A missing `db` is NOT itself storage-unavailable — the GNSS trace lives in
+ * the repository, so a session still exports its whole drive with the
+ * telemetry half simply absent, which is the right trade when the purpose is
+ * getting the data off the phone.
+ */
+export async function buildRawSessionExport(
+  sessionId: string,
+  generatedAtUtc: string = new Date().toISOString(),
+): Promise<RawSessionExportDocument | RawSessionExportUnavailable> {
+  const repo = repository;
+  const store = historyStore;
+  if (repo === null || store === null) return 'storage-unavailable';
+  const database = db;
+  return loadRawSessionExportDocument(
+    {
+      getSession: (id) => store.getSession(id),
+      loadLapGnss: (id, lapNumber) => repo.loadTelemetry(id, lapNumber),
+      loadUnclaimedGnss: async (id) =>
+        database === null ? [] : readUnclaimedGnssTrace(database, id),
+      loadTelemetry: async (id) => (database === null ? [] : readAllSessionTelemetry(database, id)),
+      isMatchingUnvalidated: (id) => isSessionMatchingUnvalidated(id),
+    },
+    sessionId,
+    generatedAtUtc,
+  );
 }
 
 /**

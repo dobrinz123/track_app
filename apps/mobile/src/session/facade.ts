@@ -5,6 +5,7 @@ import type {
   LapRecord,
   QualityLevel,
   SessionState,
+  TrackMatchState,
 } from '@circuit/core';
 
 /**
@@ -60,6 +61,28 @@ export interface FacadeState {
    * render it inline via the existing `StatusBanner` -- never a modal.
    */
   lastError: string | null;
+  /**
+   * Ticket P7M M2: whether the car is matched to the mapped circuit at all,
+   * mirrored 1:1 from `FacadeStateCore.trackMatch` (`@circuit/core`) -- see
+   * that field for why `gnssQuality` cannot answer this. `MockSessionFacade`
+   * and the bootstrap `PendingFacade` always report `'unknown'`.
+   */
+  trackMatch: {
+    state: TrackMatchState;
+    /** Absolute distance from the centerline of the last matched fix, metres; `null` when the last fix produced no match. */
+    lateralM: number | null;
+    confidence: number | null;
+  };
+  /**
+   * Ticket P7M M6: how much of this drive is actually on disk, mirrored 1:1
+   * from `FacadeStateCore.recording` (`@circuit/core`). `persistedSampleCount`
+   * advances only as a write RESOLVES, so a driver watching it is watching
+   * storage, not memory. `MockSessionFacade` and `PendingFacade` report zeroes.
+   */
+  recording: {
+    persistedSampleCount: number;
+    failedWriteCount: number;
+  };
 }
 
 /**

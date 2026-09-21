@@ -116,6 +116,71 @@ describe('CrossingDetector', () => {
     expect(cross(detector, 0, 10, 0, 2_000, -100, 100)).toEqual([]);
   });
 
+  /**
+   * Ticket P7M M4. The bound used to be a flat 120 m regardless of how long
+   * the gap it spanned lasted, so a three-second dropout at 150 km/h
+   * (~126 m) silently skipped the crossing and cost the lap.
+   */
+  describe('P7M M4 -- the step bound is scaled by elapsed time, not flat', () => {
+    it('a 126 m step across a 3 s fix gap (150 km/h) is tested, not discarded', () => {
+      const detector = new CrossingDetector([projectedGate('sf')], projection);
+      const events = cross(detector, 0, 130, 0, 3_000, -63, 63);
+      expect(events).toHaveLength(1);
+      expect(events[0]?.direction).toBe('forward');
+      expect(detector.stepDiagnostics().skippedSteps).toBe(0);
+    });
+
+    it('the SAME 126 m step across a nominal 1 s interval is still refused -- no car covers it', () => {
+      const detector = new CrossingDetector([projectedGate('sf')], projection);
+      expect(cross(detector, 0, 130, 0, 1_000, -63, 63)).toEqual([]);
+      expect(detector.stepDiagnostics()).toEqual({ skippedSteps: 1, widestSkippedStepM: 126 });
+    });
+
+    it('a teleport -- 200 m in 100 ms, 7200 km/h -- is refused however short the interval', () => {
+      const detector = new CrossingDetector([projectedGate('sf')], projection);
+      expect(cross(detector, 0, 200, 0, 100, -100, 100)).toEqual([]);
+      expect(detector.stepDiagnostics().skippedSteps).toBe(1);
+    });
+
+    it('past the 500 m ceiling a step is refused even at a plausible implied speed', () => {
+      const detector = new CrossingDetector([projectedGate('sf')], projection);
+      // 600 m over 20 s is 108 km/h -- perfectly drivable, but the straight
+      // line between the two fixes is no longer an approximation of the path.
+      expect(cross(detector, 0, 600, 0, 20_000, -300, 300)).toEqual([]);
+      expect(detector.stepDiagnostics().widestSkippedStepM).toBe(600);
+    });
+
+    it('a refused step is counted, and reset() clears the record', () => {
+      const detector = new CrossingDetector([projectedGate('sf')], projection);
+      cross(detector, 0, 130, 0, 1_000, -63, 63);
+      cross(detector, 0, 400, 2_000, 3_000, -200, 200);
+      expect(detector.stepDiagnostics()).toEqual({ skippedSteps: 2, widestSkippedStepM: 400 });
+      detector.reset();
+      expect(detector.stepDiagnostics()).toEqual({ skippedSteps: 0, widestSkippedStepM: 0 });
+    });
+
+    it('a non-advancing or non-finite timestamp falls back to the flat bound', () => {
+      const detector = new CrossingDetector([projectedGate('sf')], projection);
+      // Same tMono on both fixes: no elapsed time to scale by, so 126 m is
+      // refused exactly as the pre-P7M bound would have refused it.
+      expect(cross(detector, 0, 130, 5_000, 5_000, -63, 63)).toEqual([]);
+      expect(detector.stepDiagnostics().skippedSteps).toBe(1);
+    });
+
+    it('an explicit maxStepSpeedMps / maxStepCeilingM override is honoured', () => {
+      const strict = new CrossingDetector([projectedGate('sf')], projection, { maxStepSpeedMps: 0 });
+      // Speed scaling off: only the flat 120 m bound applies, whatever the gap.
+      expect(
+        strict.update(
+          match(0, 0),
+          match(10_000, 130),
+          sample(0, -63),
+          sample(10_000, 63),
+        ),
+      ).toEqual([]);
+    });
+  });
+
   it('excludes timing gates in pit while allowing pit entry and exit gates', () => {
     const gates = [
       projectedGate('sf', 'startFinish'),

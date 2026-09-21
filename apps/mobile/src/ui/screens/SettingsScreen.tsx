@@ -39,6 +39,7 @@ import { SUGGESTION_SETTING_STRINGS } from './trackdayStrings';
 import {
   ANALYSIS_SMOOTHING_SETTING_STRINGS,
   IMU_FUSION_SETTING_STRINGS,
+  IMU_GYRO_CAPTURE_SETTING_STRINGS,
 } from './imuSettingsStrings';
 
 /** Session states that mean "there is an active session in progress" -- the delete-my-data control is hidden/disabled during all of these so it can never race a live write (M3 fix). */
@@ -154,6 +155,9 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
   const suggestionStrings = SUGGESTION_SETTING_STRINGS[settings.language];
   // Ticket P6a: the two experimental signal-processing rows, in the app language.
   const imuFusionStrings = IMU_FUSION_SETTING_STRINGS[settings.language];
+  // Ticket P7R E3: gyroscope CAPTURE is its own row -- it records a channel,
+  // it does not change how latG/longG are computed.
+  const imuGyroCaptureStrings = IMU_GYRO_CAPTURE_SETTING_STRINGS[settings.language];
   const analysisSmoothingStrings = ANALYSIS_SMOOTHING_SETTING_STRINGS[settings.language];
   const facadeState = useFacadeState(facade);
   // eslint-disable-next-line no-undef -- `__DEV__` is a React Native global (see react-native/src/types/globals.d.ts); not covered by this project's flat eslint config globals.
@@ -644,6 +648,31 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
           <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
             MOTION SENSORS (EXPERIMENTAL)
           </Text>
+          {/* Ticket P7R E3: capture FIRST -- it is the additive one, it is on
+              by default, and the fusion row below reads as the further,
+              riskier step once this one has been read. */}
+          <View style={styles.toggleRow}>
+            <View style={styles.toggleTextGroup}>
+              <Text style={styles.toggleTitle} maxFontSizeMultiplier={1.3}>
+                {imuGyroCaptureStrings.title}
+              </Text>
+              <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                {imuGyroCaptureStrings.help}
+              </Text>
+              <Text style={styles.helperText} maxFontSizeMultiplier={1.3}>
+                {imuGyroCaptureStrings.helpBounds}
+              </Text>
+            </View>
+            <Switch
+              value={settings.imuGyroCaptureEnabled}
+              onValueChange={(value) => settingsStore.update({ imuGyroCaptureEnabled: value })}
+              trackColor={{ false: colors.border, true: colors.accentDim }}
+              thumbColor={settings.imuGyroCaptureEnabled ? colors.accent : colors.textMuted}
+              accessibilityRole="switch"
+              accessibilityLabel={imuGyroCaptureStrings.a11y}
+              accessibilityState={{ checked: settings.imuGyroCaptureEnabled }}
+            />
+          </View>
           <View style={styles.toggleRow}>
             <View style={styles.toggleTextGroup}>
               <Text style={styles.toggleTitle} maxFontSizeMultiplier={1.3}>

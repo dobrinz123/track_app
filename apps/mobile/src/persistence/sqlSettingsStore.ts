@@ -158,6 +158,17 @@ export class SqlSettingsStore implements SettingsStore {
     if (typeof initial.imuFusionEnabled !== 'boolean') {
       initial = { ...initial, imuFusionEnabled: false };
     }
+    // Ticket P7R E3: the same defensive repair for the gyroscope-CAPTURE
+    // flag, but back to its OWN default (`true`) rather than to `false`. The
+    // rule being applied is "a malformed value is never trusted, the declared
+    // default wins" -- not "a malformed value means off". Capture is additive
+    // and cannot alter latG/longG, so its default is the safe answer here the
+    // same way `false` is the safe answer for the flags that replace a
+    // field-proven path. An install from before this setting existed carries
+    // no key at all and likewise takes `DEFAULT_SETTINGS`' `true`.
+    if (typeof initial.imuGyroCaptureEnabled !== 'boolean') {
+      initial = { ...initial, imuGyroCaptureEnabled: DEFAULT_SETTINGS.imuGyroCaptureEnabled };
+    }
     if (typeof initial.analysisSmoothingEnabled !== 'boolean') {
       initial = { ...initial, analysisSmoothingEnabled: false };
     }
@@ -193,5 +204,109 @@ export class SqlSettingsStore implements SettingsStore {
       // applied above) as the source of truth for the rest of this process
       // launch; it will be retried on the next `update()`.
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Ticket P7R E2 — the durable record of which sessions were run on matching
+// the calibration gate refused to vouch for.
+// ---------------------------------------------------------------------------
+
+/**
+ * The `settings` key this log lives under. A SEPARATE key from
+ * {@link SETTINGS_KEY}: it is not a user preference, it is a growing list of
+ * facts about past sessions, and mixing the two would make every session note
+ * rewrite the whole preferences blob (and a corrupt preferences row take the
+ * record down with it).
+ *
+ * WHY THE SETTINGS TABLE AND NOT A COLUMN ON `sessions`. The honest home for
+ * this fact is the session row itself. That row is owned by
+ * `@circuit/core`'s `SessionSummary` + `persistence-sql/schema.ts`, neither of
+ * which this ticket may touch, so the fact is stored BESIDE the session,
+ * keyed by its id, in the one durable table this ticket does own. It is read
+ * back by session id everywhere it matters (the history list and the export),
+ * so from the outside it behaves as if it were on the row; what it is not is
+ * transactional with the session write. A crash between the two would lose
+ * the label rather than invent one -- the failure direction that under-claims
+ * rather than over-claims, which is the right way round for an honesty flag.
+ */
+const UNVALIDATED_MATCHING_KEY = 'unvalidated-matching-sessions';
+
+/**
+ * How many session ids the log keeps, newest last. Bounded because it is
+ * rewritten whole on every append and lives in a key-value row; 200 sessions
+ * is years of track days for one driver, and the oldest ids falling off is
+ * strictly better than an unbounded row.
+ */
+export const UNVALIDATED_MATCHING_LOG_LIMIT = 200;
+
+function parseSessionIdList(raw: string | undefined): string[] {
+  if (raw === undefined) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((id): id is string => typeof id === 'string' && id.length > 0);
+  } catch {
+    // A corrupt row reads as "nothing recorded", never as a throw: this log
+    // is read on the path to EXPORTING a session's data, and losing a label
+    // must not be able to lose the data.
+    return [];
+  }
+}
+
+/**
+ * Every session id previously recorded by
+ * {@link markSessionMatchingUnvalidated}, oldest first. Never throws: a
+ * failed read resolves to an empty list.
+ */
+export async function readUnvalidatedMatchingSessionIds(db: SqlDatabase): Promise<string[]> {
+  try {
+    const rows = await db.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
+      UNVALIDATED_MATCHING_KEY,
+    ]);
+    return parseSessionIdList(rows[0]?.value);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Records that `sessionId` was run on matching the calibration gate rejected.
+ * Idempotent (a second call for the same id is a no-op), bounded by
+ * {@link UNVALIDATED_MATCHING_LOG_LIMIT}, and never throws -- a failed write
+ * must never be able to stop a driver going out.
+ *
+ * Resolves `true` when the log now contains the id.
+ */
+export async function markSessionMatchingUnvalidated(
+  db: SqlDatabase,
+  sessionId: string,
+): Promise<boolean> {
+  if (sessionId.length === 0) return false;
+  try {
+    const existing = await readUnvalidatedMatchingSessionIds(db);
+    if (existing.includes(sessionId)) return true;
+    const next = [...existing, sessionId].slice(-UNVALIDATED_MATCHING_LOG_LIMIT);
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      UNVALIDATED_MATCHING_KEY,
+      JSON.stringify(next),
+    ]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Drops the whole log. Used by delete-all: these are facts about sessions
+ * that no longer exist. Never throws; resolves `false` when the row could
+ * not be removed.
+ */
+export async function clearUnvalidatedMatchingSessionIds(db: SqlDatabase): Promise<boolean> {
+  try {
+    await db.runAsync('DELETE FROM settings WHERE key = ?', [UNVALIDATED_MATCHING_KEY]);
+    return true;
+  } catch {
+    return false;
   }
 }

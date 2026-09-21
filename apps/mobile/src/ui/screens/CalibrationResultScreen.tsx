@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, radii, spacing, typography } from '../theme';
-import { facade } from '../../session/composition';
+import { facade, proceedWithoutCalibration } from '../../session/composition';
 import { useFacadeState } from '../hooks/useFacadeState';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'CalibrationResult'>;
@@ -89,10 +89,58 @@ function describeUncoveredGap(startM: number | undefined, endM: number | undefin
   return `No signal match between ${startKm} km and ${endKm} km from start/finish.`;
 }
 
+/**
+ * Ticket P7R E2 — the escape hatch's copy, in one place.
+ *
+ * The driver reads this standing in a paddock, deciding whether to go out. So
+ * it is plain and it is not alarming: it says what is lost (timing may be
+ * unreliable) and what is kept (the drive is still recorded), because those
+ * are the two facts the decision actually turns on. It does not scold, and it
+ * does not pretend the session will be normal — this project's honesty gates
+ * are deliberate, and a session run on matching the gate rejected is labelled
+ * as one in the history list and in every export of it.
+ *
+ * Retry stays the PRIMARY action: when calibration can succeed, it is still
+ * the better outcome. This is the second button, and it takes a deliberate
+ * second tap to use.
+ */
+const ESCAPE_COPY = {
+  offer: 'Start session anyway',
+  offerA11y: 'Start a timed session without a validated calibration',
+  heading: 'Starting without a validated calibration',
+  body: 'You can go out and drive now. The app will record the full GPS trace and all sensor data exactly as usual, so nothing about this session is lost.',
+  bodySecond:
+    'What it cannot promise is the timing: lap and sector times may be wrong or may not appear at all, because the app is not confident it can tell where you are on this circuit. The session is marked as uncalibrated so you can tell it apart later.',
+  confirm: 'Start session',
+  confirmA11y: 'Confirm, start an uncalibrated session',
+  back: 'Not now',
+  backA11y: 'Dismiss, go back to the calibration result',
+  /** Shown only if the controller refuses -- never a silent no-op button. */
+  failed: 'Could not start a session from here. Retry the calibration, or go back and start again.',
+} as const;
+
 /** S6 — accepted: confidence + Continue (→ armed, S7); rejected: plain-language reasons + Retry (→ S4). */
 export function CalibrationResultScreen({ navigation }: Props): React.JSX.Element {
   const state = useFacadeState(facade);
   const result = state.calibrationResult;
+  // Ticket P7R E2: the escape hatch is a two-step. The first tap opens the
+  // consequence card; only the second tap arms a session. Nothing about the
+  // 0.85 / 250 m thresholds moves -- this is about the wall, not the bar.
+  const [confirmingEscape, setConfirmingEscape] = React.useState(false);
+  const [escapeFailed, setEscapeFailed] = React.useState(false);
+
+  const startWithoutCalibration = React.useCallback(() => {
+    // `'armed-accepted'` is possible and is not an error: the engine may
+    // accept a result this screen is showing as rejected only when the
+    // driver has since retried. Either armed outcome goes to the dashboard;
+    // only a refusal is reported, so the button is never a silent no-op.
+    if (proceedWithoutCalibration() === 'refused') {
+      setEscapeFailed(true);
+      return;
+    }
+    setEscapeFailed(false);
+    navigation.replace('ActiveDashboard');
+  }, [navigation]);
 
   if (!result) {
     return (
@@ -197,6 +245,64 @@ export function CalibrationResultScreen({ navigation }: Props): React.JSX.Elemen
                 Retry
               </Text>
             </Pressable>
+
+            {/* Ticket P7R E2 (binding): calibration must never be a dead end.
+                A quality gate may refuse to VOUCH for data; it must never
+                refuse to let the data be COLLECTED. The 0.85 coverage / 250 m
+                gap thresholds are untouched -- this is the way past the wall,
+                with the consequence stated. */}
+            {confirmingEscape ? (
+              <View style={styles.escapeCard}>
+                <Text style={styles.escapeHeading} maxFontSizeMultiplier={1.3}>
+                  {ESCAPE_COPY.heading}
+                </Text>
+                <Text style={styles.escapeText} maxFontSizeMultiplier={1.3}>
+                  {ESCAPE_COPY.body}
+                </Text>
+                <Text style={styles.escapeText} maxFontSizeMultiplier={1.3}>
+                  {ESCAPE_COPY.bodySecond}
+                </Text>
+                {escapeFailed ? (
+                  <Text style={styles.escapeError} maxFontSizeMultiplier={1.3}>
+                    {ESCAPE_COPY.failed}
+                  </Text>
+                ) : null}
+                <Pressable
+                  style={[styles.button, styles.escapeConfirmButton]}
+                  onPress={startWithoutCalibration}
+                  accessibilityRole="button"
+                  accessibilityLabel={ESCAPE_COPY.confirmA11y}
+                >
+                  <Text style={styles.escapeConfirmText} maxFontSizeMultiplier={1.3}>
+                    {ESCAPE_COPY.confirm}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.button, styles.secondaryButton]}
+                  onPress={() => {
+                    setConfirmingEscape(false);
+                    setEscapeFailed(false);
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel={ESCAPE_COPY.backA11y}
+                >
+                  <Text style={styles.secondaryButtonText} maxFontSizeMultiplier={1.3}>
+                    {ESCAPE_COPY.back}
+                  </Text>
+                </Pressable>
+              </View>
+            ) : (
+              <Pressable
+                style={[styles.button, styles.secondaryButton]}
+                onPress={() => setConfirmingEscape(true)}
+                accessibilityRole="button"
+                accessibilityLabel={ESCAPE_COPY.offerA11y}
+              >
+                <Text style={styles.secondaryButtonText} maxFontSizeMultiplier={1.3}>
+                  {ESCAPE_COPY.offer}
+                </Text>
+              </Pressable>
+            )}
           </>
         )}
       </ScrollView>
@@ -233,4 +339,21 @@ const styles = StyleSheet.create({
   button: { borderRadius: radii.lg, paddingVertical: spacing.md, alignItems: 'center' },
   primaryButton: { backgroundColor: colors.accent },
   primaryButtonText: { ...typography.subtitle, color: colors.onAccent },
+  // Ticket P7R E2: deliberately quieter than the Retry button above it --
+  // this is the second-best outcome, offered without being pushed.
+  secondaryButton: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  secondaryButtonText: { ...typography.subtitle, color: colors.textPrimary },
+  escapeCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.md,
+    gap: spacing.sm,
+  },
+  escapeHeading: { ...typography.subtitle, color: colors.textPrimary },
+  escapeText: { ...typography.body, color: colors.textSecondary },
+  escapeError: { ...typography.caption, color: colors.danger },
+  escapeConfirmButton: { backgroundColor: colors.surfaceRaised, borderWidth: 1, borderColor: colors.accent },
+  escapeConfirmText: { ...typography.subtitle, color: colors.accent },
 });

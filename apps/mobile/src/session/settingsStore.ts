@@ -282,6 +282,25 @@ export interface AppSettings {
    */
   imuFusionEnabled: boolean;
   /**
+   * Ticket P7R E3 (binding): records the phone's gyroscope as the
+   * `yawRateDps` telemetry channel, WITHOUT switching the live gravity
+   * estimate to the Madgwick filter.
+   *
+   * Split out of {@link imuFusionEnabled}, which used to decide both. The two
+   * carry different risk and therefore get different defaults. Capture is
+   * purely ADDITIVE -- it adds a channel and changes no existing value, so
+   * `latG`/`longG` come out of the same field-proven low-pass path they
+   * always have -- and it defaults to `true`, because a yaw trace recorded at
+   * a real circuit is what the fusion sign convention can finally be settled
+   * against offline. Fusion REPLACES the estimator behind those two channels
+   * and stays off by default until that is settled.
+   *
+   * Read once per G-provider `start()` and frozen for that run, exactly like
+   * {@link imuFusionEnabled}, and equally unable to affect lap timing -- the
+   * G provider never touches `SessionFacade`/`SessionController`.
+   */
+  imuGyroCaptureEnabled: boolean;
+  /**
    * Ticket P6a (binding): applies a Savitzky-Golay smoother
    * (`@circuit/core`'s `savitzkyGolay`, 9-sample window, quadratic) to the
    * recorded `latG`/`longG` series in the POST-SESSION analysis read path
@@ -424,6 +443,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   // Ticket P6a (binding): both experimental paths are OPT-IN. These two
   // `false`s are the guarantee that this ticket changed nothing in the field.
   imuFusionEnabled: false,
+  // Ticket P7R E3 (binding): capture ON, fusion OFF. The gyroscope channel is
+  // additive and cannot move latG/longG; the fused estimator can, and its
+  // sign has never been checked against a real corner.
+  imuGyroCaptureEnabled: true,
   analysisSmoothingEnabled: false,
 };
 

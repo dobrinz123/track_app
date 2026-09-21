@@ -166,12 +166,24 @@ describe('P6a -- imuFusionEnabled OFF (the default): the provider is byte-for-by
     }
 
     const rig = await startRig(false);
+    const stamps: number[] = [];
     for (const raw of stream) {
       rig.clock.advance(40);
+      stamps.push(rig.clock.now(), rig.clock.now());
       rig.accel.emit(raw);
     }
 
     expect(rig.samples.map((s) => s.value)).toEqual(expected);
+    // Ticket P7D: VALUES, CHANNELS AND TIMESTAMPS, not values alone. The
+    // off-path guarantee is that a recording made with the flags off is the
+    // same rows in the same order at the same instants as before the flags
+    // existed, and a change that reordered or re-stamped the stream while
+    // preserving the numbers would still be a change to a shipped recording.
+    expect(rig.samples).toHaveLength(200);
+    expect(channelsOf(rig.samples)).toEqual(
+      Array.from({ length: 100 }, () => ['latG', 'longG'] as const).flat(),
+    );
+    expect(rig.samples.map((s) => s.tMonoMs)).toEqual(stamps);
     await rig.provider.stop();
   });
 });
@@ -391,10 +403,21 @@ describe('P6a-FIX2 H1 -- mount-independent axis AND platform-correct sign', () =
     expect(ANDROID_ACCELEROMETER_REST_VECTOR).toBe('up');
   });
 
-  it('with NO convention injected it resolves one, and degrades to iOS -- the platform this app ships on', async () => {
-    // The only test that lets the real resolution path run. Under vitest the
-    // lazy `import('react-native')` rejects, which is exactly the documented
-    // degradation, so this also pins the fallback.
+  it('P7D R5/R4 -- with NO convention injected the REAL lazy resolution runs; under vitest it rejects, and yawRateDps is SUPPRESSED', async () => {
+    // TICKET P7D R5: the version of this test that stood here was VACUOUS --
+    // it was titled "NO convention injected" and then passed
+    // `accelerometerRestVector: 'down'`, so the lazy resolver it claimed to
+    // cover never ran and a broken one would have passed it unnoticed. The
+    // injection is gone; the real `import('react-native')` is reached, and
+    // under vitest it rejects (React Native's Flow-typed source will not
+    // parse), which is exactly the unresolved case.
+    //
+    // TICKET P7D R4: an unresolved convention no longer degrades to the iOS
+    // sign. That guess is right on iOS and inverts every rotation on Android,
+    // and an inverted yaw is worse than an absent one because `cleanLap.ts`
+    // has a tested GNSS fallback for absent and none for inverted. So the
+    // channel is suppressed -- while latG/longG, which do not depend on the
+    // convention, keep flowing.
     const accel = new FakeSensorSource();
     const gyro = new FakeSensorSource();
     const samples: TelemetrySample[] = [];
@@ -404,8 +427,7 @@ describe('P6a-FIX2 H1 -- mount-independent axis AND platform-correct sign', () =
       accelerometerSource: async () => accel,
       gyroscopeSource: async () => gyro,
       imuFusionEnabled: () => true,
-// P6a-FIX2 H1: stated explicitly so the lazy platform read is never reached under vitest.
-accelerometerRestVector: 'down',
+      // NO accelerometerRestVector -- that omission is the point of the test.
     });
     provider.onSample((s) => samples.push(s));
     provider.start();
@@ -414,16 +436,26 @@ accelerometerRestVector: 'down',
     await flushMicrotasks();
     const rig: Rig = { accel, gyro, samples, clock, provider };
     const up = { x: 0, y: 1, z: 0 };
-    const atRest = { x: 0, y: -1, z: 0 }; // the iOS reading for that mount
+    const atRest = { x: 0, y: -1, z: 0 };
     for (let i = 0; i < 80; i += 1) {
       rig.clock.advance(40);
       rig.gyro.emit({ x: 0, y: 0, z: 0 });
       rig.accel.emit(atRest);
     }
+    // latG/longG flowed throughout, and are finite -- the fusion itself is
+    // unaffected by an unknown yaw convention.
+    const linear = rig.samples.filter((s) => s.channel !== 'yawRateDps');
+    expect(linear.length).toBeGreaterThan(100);
+    expect(linear.every((s) => Number.isFinite(s.value))).toBe(true);
+    // ... and not one yaw sample was emitted under a guessed sign.
+    expect(rig.samples.filter((s) => s.channel === 'yawRateDps')).toHaveLength(0);
+
     rig.samples.length = 0;
     rig.clock.advance(40);
     rig.gyro.emit(rightTurnGyro(up, NINETY_DPS_RAD));
-    expect(yawOf(rig)).toBeCloseTo(90, YAW_DIGITS);
+    // Pre-P7D this emitted +90 deg/s on the iOS guess -- and would have
+    // emitted -90 on an Android device reached by the same failed resolution.
+    expect(rig.samples.filter((s) => s.channel === 'yawRateDps')).toHaveLength(0);
     await rig.provider.stop();
   });
 
