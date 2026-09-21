@@ -570,3 +570,127 @@ LEAD DESIGN DECISIONS (not delegated):
 CODEX CHANNEL VERIFIED: `codex login status` = "Logged in using ChatGPT" (subscription billing); echo check via `codex exec --sandbox read-only` returned "ok" (2,850 tokens). Account default model used (no -m pin). Wave B unblocked.
 
 P6a | 1 | opus FRONTIER | rev1 (.foreman/scratch/p6a-ticket.md, 58 lines) | DISPATCHED | - | - | 2026-09-21
+P6a | 1 | opus FRONTIER | rev1 | REPORTED(DONE_WITH_CONCERNS) | LEAD re-ran gates independently: typecheck 0, lint 0 errors (6 pre-existing warnings, unchanged), test 2869 = 1506 core + 1363 mobile (+46 vs 2823 baseline) | commit 071583f, 23 files, +2757/-13 | 2026-09-21
+  -> LEAD spot-verification of the three claims that matter (not taken on the worker's word):
+     * Flags default false: settingsStore.ts:426-427 both `false`. CONFIRMED.
+     * SG absent from the live path: grep savitzkyGolay over gforceProvider.ts + telemetryProvider.ts = 0 hits; only analysisAssembly.ts (analysis read path). CONFIRMED.
+     * OFF path branched around, not rewritten: gforceProvider.ts:295-309 -- `if (fusionActive) { handleFusedReading(raw); return; }` then the original three lines verbatim. CONFIRMED.
+     * WRITE SET DEVIATION reviewed and ACCEPTED: LapDetailScreen.tsx +5 lines, an exhaustiveness entry in Readonly<Record<TelemetryChannelId,...>>, forced by the ticket's own mandated contract change (TS2741 without it); follows the two neighbouring placeholder rows. Worker disclosed it unprompted.
+  -> Concerns dispositioned: (1) yawRateDps sign/axis convention-derived, NOT field-verified -> ACCEPTED as documented residual, inert while the flag is off, recorded in the commit message for field validation. (2) beta=0.1 untuned for a car -> same. (3) composition wiring proved by typecheck+expo export, not a test (singleton builds the real lazy expo-sensors source; a test would load the native module) -> ACCEPTED, module-level deps are tested. (4) SG deliberately not in stintCoaching -> CORRECT, matches the LEAD non-causality ruling. (5) enetChannelSpecs generic rejection message -> LOW, no hole (ENET_SPEC_CHANNELS is an allowlist). (6) pre-existing dirty files -> matches BASELINE, kicad left unstaged.
+
+COMMIT 071583f (P6a). kicad working-tree changes deliberately NOT staged (pre-existing, unrelated to this run).
+
+P6a-VERIFY | 1 | foreman-verifier opus (blind, read-only, original task verbatim) | rev1 | DISPATCHED | - | - | 2026-09-21
+P6b | 1 | Codex (account default, ChatGPT sub, --sandbox read-only) | rev1 (.foreman/scratch/p6b-codex-review.md) | DISPATCHED | - | job bkyhro7m5 -> .foreman/scratch/p6b-codex-out.txt | 2026-09-21
+P6c | - | sonnet | rev1 (.foreman/scratch/p6c-ticket.md) | PENDING — HELD | - | - | 2026-09-21
+  -> HOLD REASON: P6c's write set (.github/**, root package.json/package-lock.json) is disjoint from P6a's, but P6c must run `npm install` for the @onebeyond/license-checker devDependency while P6a-VERIFY is executing `npm test` against the same node_modules. That is a real race on shared state, not a file conflict. Dispatch only after P6a-VERIFY returns. (User sequencing "a si b si apoi c" independently required this order.)
+P6b | 1 | Codex account-default, read-only sandbox | rev1 | REPORTED(FAIL) | 2 HIGH + 4 MEDIUM + 0 LOW; math independently re-derived and CONFIRMED correct (Madgwick objective/Jacobian/quaternion/Euler clamp/gravity; SG construction, derivative factors, edge offsets, pivots -- cubic derivatives matched to 7e-13) | .foreman/scratch/p6b-codex-out.txt (4289 lines) | 2026-09-21
+  H1 gforceProvider.ts:292 yaw axis. H2 analysisViewModel.ts:260 flag TOCTOU contaminates the flags-off cache (reproduced with the real runner).
+  M1 gforceProvider.ts:350 identity-init startup transient (-0.80245 g longG after 1 s stationary). M2 :265 stale gyro integrated indefinitely (-0.98971 g). M3 :258 dt gaps/duplicates fabricate integration time (-0.68966 g after a 5 s gap). M4 savitzky-golay.ts:185 unscaled Vandermonde ill-conditioned at extreme orders (25/20 returns 0.9737744 for constant input; production 9/2 clean).
+  Codex ALSO independently confirmed: both flag defaults and hydration repairs are false; the flags-off provider matched the PREVIOUS COMMIT exactly across 100 probe samples with no gyro subscription; generation guards and teardown present; SG confined to post-session analysis. That is a second, cross-family confirmation of the OFF-path guarantee.
+
+  LEAD ADJUDICATION of H1 (the two reviewers disagree and the disagreement is substantive):
+    Worker chose gyro Z, reasoning from the EXISTING latG=deviceX / longG=deviceY mapping, which implies a FLAT mount (screen up) where Z is vertical -- internally consistent.
+    Codex chose gyro Y, reasoning from the word "portrait" (upright), where Y is vertical -- also internally consistent, but it implies the EXISTING longG mapping is itself measuring vertical acceleration, i.e. the pre-existing code would be wrong.
+    Unresolvable from source: it depends on how the phone is physically mounted, which is a field fact nobody in this run has.
+    RULING: do not guess a mount. Madgwick already estimates the gravity direction, and the vertical axis in the sensor frame IS that vector. Project the gyro vector onto the estimated gravity direction -> yaw rate becomes MOUNT-INDEPENDENT and the ambiguity disappears. This supersedes both reviewers' answers and is mandated in the fix ticket.
+
+FIX WAVE HELD until P6a-VERIFY returns, so Codex's and the verifier's findings batch into ONE fix ticket (delegation.md: one fix worker per findings list, never one per finding).
+P6a-VERIFY | 1 | foreman-verifier opus (blind) | rev1 | REPORTED(PASS_WITH_NOTES) | ran the gates itself: typecheck 0, lint 6 warnings/0 errors, test 2869 = 1506 + 1363. Independently re-derived SG 9-point quadratic weights (-21,14,39,54,59,54,39,14,-21)/231 exactly; Madgwick gradient matched published J^T f term by term; gyro unit checked at node_modules/expo-sensors/src/Gyroscope.ts:6 | HEAD unchanged 071583f, tree as found | 2026-09-21
+  Criteria 1,2,3,5,6 PASS. Criterion 4 FAIL.
+  V1 MEDIUM — THE LAP-TIME INVARIANCE TEST IS VACUOUS (imuFlagsFixture.test.ts:175). fixtureLapTimes() takes no arguments and touches neither the settings store nor the provider, so off/on/baseline at :209-211 are three calls to the same pure function; the assertion cannot fail. This was acceptance criterion E, reported as met, and it was not. The property IS true (verifier independently traced gForceProvider.onSample -> recorder.record + test-loop buffer only, never facade/SessionController, composition.ts:1207-1209 and :2386) but the test gives FALSE REGRESSION COVER.
+  V2 LOW — enabling imuFusionEnabled silently re-sources cleanLap's yaw check from GNSS heading to yawRateDps (cleanLap.ts:341-343, useGyro = gyroCount >= 2); integratedGyroTurn is sign-sensitive. Subsumed by the H1 fix.
+  V3 COSMETIC — LEAD ERROR: commit 071583f's message says SG costs "360 ms of lag". Wrong. 360 ms is the WINDOW WIDTH; the non-causal lag is the lookahead, 4 samples x 40 ms = 160 ms. The source comments (analysisAssembly.ts:254, settingsStore.ts:293) say 160 ms correctly. My error in the commit prose, not in the code. No decision changes -- SG stays out of the live path either way. To be corrected in the next commit message.
+  Verifier explicitly did NOT verify: the 2823 baseline counts (would require checking out 3ef8dcd, which its constraints forbade), expo export, real on-device Gyroscope behaviour, UI rendering, beta suitability. Honest about it.
+
+P6a-FIX1 | 1 | opus FRONTIER (same worker as P6a, resumed with context) | rev1 (.foreman/scratch/p6a-fix1.md) | DISPATCHED | - | 7 findings batched: Codex H1,H2,M1,M2,M3,M4 + verifier V1 | 2026-09-21
+  Batched per delegation.md (one fix worker per findings list). savitzky-golay.ts unfrozen for this wave. LEAD mandated the H1 resolution (gravity-projected yaw) rather than letting the worker re-pick an axis.
+
+P6c still HELD: the fix worker is running npm test against the shared node_modules; P6c must npm install. Same race as before.
+P6a-FIX1 | 1 | opus FRONTIER (resumed) | rev1 | REPORTED(DONE_WITH_CONCERNS) | LEAD re-ran gates independently: typecheck 0, lint 0 errors, test 2893 = 1511 core + 1382 mobile (+24 vs 2869) | commit 671d5da | 2026-09-21
+  All 7 dispositioned FIXED with measured before/after on Codex's own scenarios:
+    H1 -> yaw projected onto MadgwickAhrs.gravity() (the estimated vertical); mount drops out. Flat/upright/inverted/45-deg tilt all report +90 deg/s for one real right turn, incl. Codex's {x:0,y:-pi/2,z:0} counter-example which read 0 before. Gated on `seeded`. madgwick.ts logic untouched. LEAD spot-verified at gforceProvider.ts:478-489.
+    H2 -> flag read once in run(), threaded into key + compute. Red-then-green shown (2 failed -> 11 passed).
+    M1 -> shortest-arc seed from a validated 0.5-1.5 g reading, antiparallel case explicit, nothing emitted until seeded. -0.80245 g -> -2.8e-6 g.
+    M2 -> gyro timestamped, GYRO_MAX_AGE_MS=120 ms then zero rate. -0.98971 g -> -6.5e-5 g. Companion test proves a fresh gyro still integrates (not a mute button).
+    M3 -> non-positive deltas skip integration; gaps > MAX_FUSION_GAP_MS=500 ms reseed. -0.68966 g -> 0; 25 callbacks on one timestamp -> 0.
+    M4 -> polyOrder capped at 7 via MEASURED sweep (every odd windowLength 3-101; order 7 = 7.1e-10, order 8 = 9.0e-9, tolerance 1e-9). Rejection chosen over an orthogonal basis because a basis change would move numbers a shipped field-confirmed analysis already reads. Shipped 9/2 config measured at 1.4e-14.
+    V1 -> test rewritten around a sink parameter; shipped sensitivity test proves a LEAKY_SINK does separate lap times. Red-then-green shown. Worker also found a second flaw unprompted: the stimulus drove the accelerometer at the fixture's 1 Hz GNSS rate, which no device produces -> now ~25 Hz.
+  Worker respected the write set (did not touch madgwick.ts; briefly added a constant to signal/index.ts then reverted it as out of set, and said so).
+
+LEAD SELF-CORRECTION (verifier V3, my error): commit 071583f's prose said SG costs "360 ms of lag". 360 ms is the WINDOW WIDTH; the non-causal lag is the lookahead, 4 x 40 ms = 160 ms. Source comments were correct throughout. Corrected in 671d5da's message.
+LEAD EDIT (doc-only, verifier-exempt per verification.md -- single file, no logic): MadgwickAhrs.gravity() now warns that it points UP, not down. My docstring was accurate but the name invited exactly the sign confusion that made H1 hard to adjudicate.
+
+COMMIT 671d5da (P6a-FIX1).
+P6b | 2 | Codex, read-only | rev2 (.foreman/scratch/p6b-rev2.md) | DISPATCHED | - | job bi8etkrrk -> .foreman/scratch/p6b-rev2-out.txt | 2026-09-21
+  Round 2 asked to re-run its own numeric scenarios, judge whether the M4 cap is a resolution or an evasion, judge whether the rewritten V1 test now proves anything, hunt for NEW defects in the new state machines (seeding / 120 ms freshness / 500 ms reseed interaction), and rule on the low-power-throttling concern.
+  PRECEDENCE NOTE: this is fix wave 1 against this findings list. Per delegation.md row 5, two consecutive FAILED fix waves would force a stop-and-report to the user.
+P6b | 2 | Codex read-only | rev2 | REPORTED(FAIL) | 53 in-memory test bodies + numeric probes; native vitest/build/device UNVERIFIED | .foreman/scratch/p6b-rev2-out.txt | 2026-09-21
+  CONFIRMED FIXED: H2, M1 (-2.8e-6 g), M2 (-6.5e-5 g), M3 (0 g on both scenarios), M4 (cap accepted as sound; bound reproduced: order 7 = 7.055e-10, order 8 = 9.037e-9). Projection confirmed mount-independent: all four UP-vector mounts returned +90 deg/s.
+  FLAGS-OFF RE-CONFIRMED for 671d5da: 100 inputs vs 071583f, all 200 emitted rows byte-identical INCLUDING timestamps.
+  H1 STILL HIGH -- iOS sign inversion. V1 PARTIAL. 3 NEW MEDIUM (M5 stale attitude in gyro callback; M6 fresh gyro integrated backwards across the whole accel interval, -0.4705882353 g; M7 sustained slow delivery reseeds every sample, 90 deg/s yaw reads 80.4984472, 11% error, silent).
+
+  LEAD INDEPENDENT VERIFICATION OF H1 (did not take Codex's word; the two reviewers had already disagreed once on this exact axis):
+    node_modules/expo-sensors/ios/AccelerometerModule.swift -- forwards CMAccelerometerData.acceleration UNCHANGED (x/y/z straight through). Core Motion reports a face-up device at rest as z = -1 => the rest vector points DOWN.
+    node_modules/expo-sensors/android/.../AccelerometerModule.kt:18-20 -- values[i] / SensorManager.GRAVITY_EARTH, NO sign change. Android TYPE_ACCELEROMETER is specific force => face-up at rest is +1 g => the rest vector points UP.
+    CONCLUSION: the platforms are OPPOSITE and expo-sensors does not reconcile them. MadgwickAhrs.gravity() therefore converges DOWN on iOS and UP on Android. The unconditional negation is correct only for Android. THIS APP SHIPS iOS. Codex's finding is CORRECT and is a real HIGH on the shipping platform.
+
+  LEAD ERROR, SECOND ONE THIS RUN: the gravity() docstring warning I added in 671d5da asserted flatly that the vector "points UP". True only under the Android/specific-force convention. I introduced a misleading doc while fixing a sign confusion. Corrected: the docstring now states that the filter adopts whatever convention the sensor uses, names both platforms explicitly, and warns that the projection sign must be established rather than assumed.
+
+P6a-FIX2 | 1 | opus FRONTIER (resumed) | rev1 (.foreman/scratch/p6a-fix2.md) | DISPATCHED | - | H1 + M5 + M6 + M7 + V1 | 2026-09-21
+  PRECEDENCE: this is fix wave 2 of 2 permitted (delegation.md row 5). A FAIL here stops the run and hands it to the owner with the evidence -- no wave 3.
+  Worker told this explicitly, so it reports honestly rather than over-claiming.
+P6c still HELD.
+P6a-FIX2 | 1 | opus FRONTIER (resumed) | rev1 | REPORTED(DONE) | LEAD re-ran gates: typecheck 0, lint 0 errors, test 2916 = 1511 core + 1405 mobile (+23 vs 2893) | commit aae7163 | 2026-09-21
+  H1 FIXED: sign derived from an injected AccelerometerRestVector; yawRateProjectionSign() = +1 for 'down' (iOS), -1 for 'up' (Android). Reviewer's iOS case -89.99969 -> +90.00, red-then-green. Both conventions x 4 mounts x both turn directions.
+  LEAD INDEPENDENT RE-DERIVATION (did not accept the worker's): v = gravity(), u = true up. Android v = u; iOS v = -u. A right turn is clockwise from above so omega = |omega|*(-u), hence omega.u = -|omega| < 0, and a clockwise-positive compass rate requires rate = -(omega.u). Substituting: 'up' -> -(omega.v) i.e. factor -1; 'down' -> +(omega.v) i.e. factor +1. Matches gforceProvider.ts:217-219 exactly. CONFIRMED.
+  M5 FIXED (attitude-freshness gate, 500 ms, then silence; resumes). M6 FIXED (timestamped gyro intervals; only evidenced rotation applied; -0.4705882353 g -> <1e-9; worker rewrote its OWN earlier test that had been pinning the defect and said so). V1 FIXED (connectGForceRecording seam extracted and executed by tests; 8 composition suites' mocks now delegate to importActual; red-then-green for both a mutated seam and a leaky sink).
+  M7 FIXED AS OBSERVABILITY, with a refusal the LEAD ACCEPTS: the worker declined to "fix" the 0.0527864 degraded lateral figure and measured why -- the SHIPPING flags-off low-pass gives 0.0344 g on the same input where truth is 0.5 g, so the fused degraded value is the CLOSER of the two. Neither estimator can separate tilt from sustained lateral acceleration without a gyro. Suppressing it would create a hole strictly worse than the imprecision. yawRateDps IS suppressed while degraded (cleanLap has a tested GNSS fallback), latG/longG keep flowing. Correct call; a worker pushing back with measurements beats a worker complying.
+  DEVIATION ACCEPTED: platform default lives in gforceProvider.ts as a lazy import('react-native') inside start(), not composition.ts. Measured cause: any react-native reference in composition.ts makes Vite resolve RN's Flow-typed source and the file fails to parse -- composition.ts:26 already documents the same constraint for its web detection. Same lazy idiom the module already uses for expo-sensors; resolved before the gyro listener installs.
+  RESIDUAL DISCLOSED BY WORKER (not hidden): a second independent onSample subscription added ELSEWHERE in composition still would not fail the V1 tests; closing that needs composition itself to be vitest-importable (a react-native alias in vitest.config.ts, outside the write set).
+
+COMMIT aae7163 (P6a-FIX2).
+P6b | 3 | Codex read-only | rev3 (.foreman/scratch/p6b-rev3.md) | DISPATCHED | - | job bbtan69ew -> .foreman/scratch/p6b-rev3-out.txt | 2026-09-21
+  FINAL round. Asked to re-derive the sign itself, re-run its own scenarios, judge the M7 refusal on its merits, and probe the interaction of the three overlapping timeouts (120 ms gyro expiry / 500 ms attitude gate / 500 ms fusion-gap reseed).
+  PRECEDENCE: fix waves 1 and 2 are spent. A FAIL here = two consecutive failed waves -> STOP and hand to the owner with evidence. No wave 3.
+P6b | 3 | Codex read-only | rev3 | REPORTED(PASS_WITH_NOTES) | ZERO HIGH -- the owner's shipping gate is MET at aae7163 | .foreman/scratch/p6b-rev3-out.txt | 2026-09-21
+  H1 FIXED -- Codex re-derived the sign independently (upright iPhone: true up = +Y, right turn omega along -Y, rest vector also -Y => dot must be POSITIVE) and replayed its own case: -89.9996888421 at 671d5da -> +89.9996888421 at aae7163. 16 further checks (2 conventions x 4 mounts x 2 directions) passed. Lazy resolution before subscribing judged SOUND: pending resolution still records accelerometer; resolution after stop() installs no listener.
+  M5 FIXED (40 yaw samples over 1.6 s -> 12, covering 480 ms; resumes). V1 FIXED within the seam's scope (all 8 composition mocks delegate to importActual; 6 seam/fixture tests pass incl. sensitivity, lap tagging, unsubscribe).
+  M6 PARTIAL, M7 PARTIAL -- both now bounded and measured, neither HIGH.
+  FLAGS-OFF VERIFIED ACROSS ALL THREE COMMITS: 100 deterministic readings replayed against 071583f, 671d5da and aae7163 -- all 200 rows matched exactly (values, channels, timestamps); no gyro subscription started; both defaults still false.
+  Codex ADJUDICATED the worker's M7 refusal and upheld it numerically: truth 0.5 g; fused 0.0527864045 (error 0.4472135955) vs legacy 0.0343597384 (error 0.4656402616). It correctly narrowed the claim: this supports retaining THIS estimate, not a general "degraded is better" rule.
+
+  RESIDUALS AT aae7163 -- 4 MEDIUM + 2 LOW, NO HIGH. All inert while both flags are false:
+    R1 MEDIUM gforceProvider.ts:692 slow-update correction overshoots (1 Hz, a 0.001 g input change swings lateral to ~-0.197 g; flags-off gives +0.0008 g).
+    R2 MEDIUM gforceProvider.ts:776 a gyro interval can cross the initial seed boundary and re-apply motion the seed already represents (-0.1022215785 g). This is the residue of M6.
+    R3 MEDIUM cleanLap.ts:342 yaw suppression does NOT guarantee the GNSS fallback: two finite yaw samples select gyro for the WHOLE lap, so a later gyro-less window never falls back to heading -- two initial zero-yaw samples can erase a real 250 deg/s SLIDE_ROTATION. Pre-existing cleanLap design, newly REACHABLE once the flag is on.
+    R4 MEDIUM gforceProvider.ts:341 if lazy platform resolution FAILS it defaults to iOS -- right for the shipping platform, wrong sign on Android (-90 for a right turn).
+    R5 LOW imuFusionProvider.test.ts:408 the test named "NO convention injected" explicitly supplies 'down', so a broken lazy resolver would go undetected -- a test claiming coverage it lacks, same class as V1.
+    R6 LOW gforceProvider.ts:934 diagnostics keep counters after stop(), contradicting the documented all-zero inactive contract.
+
+LEAD DECISION -- STOP WAVE A HERE, do not open a third fix wave:
+  The owner's stated gate (ZERO HIGH) is met, and every residual is unreachable while both flags default false, which two independent reviewers confirmed byte-for-byte across three commits. A third wave would spend the owner's budget hardening code that cannot execute in the shipped app. The six residuals are recorded as a BEFORE-YOU-ENABLE-THE-FLAGS list and must be cleared before either flag is turned on -- R3 and R4 in particular, since R3 can SILENTLY REMOVE a real slide label and R4 is a wrong sign on Android.
+  Note also: this is NOT a precedence-row-5 stop. Round 3 PASSED, which breaks the consecutive-failure chain; the findings above are NEW, not the same list re-failed.
+
+P6c | 1 | sonnet WORKHORSE | rev1 (.foreman/scratch/p6c-ticket.md) | DISPATCHED | - | baseline corrected for the worker: 2916, not the ticket's stale 2823 | 2026-09-21
+P6c | 1 | sonnet WORKHORSE | rev1 | REPORTED(DONE_WITH_CONCERNS) | LEAD re-ran gates: typecheck 0, lint 0 errors, test 2916 unchanged; manifest diff PURELY ADDITIVE (616 insertions, 0 deletions) | commit 989e4a6 | 2026-09-21
+  DELIVERED: .github/workflows/security-and-ci.yml (4 jobs: gates / gitleaks / osv-scan / license-policy, on push + pull_request, permissions contents:read with a job-level grant only on osv-scan for SARIF, concurrency group, timeouts, every action SHA-pinned with the resolution recorded inline), .gitleaksignore (1 fingerprint), .pre-commit-config.yaml (opt-in local gitleaks), +1 devDependency.
+  THE ACCREDITATION GATE EARNED ITS KEEP HERE. The natural CI target `gitleaks/gitleaks-action` is a DIFFERENT REPO from the accredited `gitleaks/gitleaks`. LEAD verified independently via gh api:
+      gitleaks/gitleaks        MIT           29,413 stars   <- accredited
+      gitleaks/gitleaks-action NOASSERTION      647 stars   <- its own EULA; README confirms GITLEAKS_LICENSE is REQUIRED for organization-owned repos
+    The worker refused the substitution unprompted and ran the accredited MIT CLI binary with checksum verification against the project's published checksums file instead (gitleaks/gitleaks ships no action.yml, so it cannot be `uses:`-pinned; a verified checksum is the honest equivalent).
+  LICENSE POLICY: reported honestly, NOT loosened. 9 packages outside the allowlist, none AGPL/GPL: 3x @expo-google-fonts (MIT AND OFL-1.1), caniuse-lite (CC-BY-4.0), lightningcss + win32 binary (MPL-2.0), spdx-exceptions/spdx-expression-validate/spdx-ranges (CC-BY-3.0 -- transitive deps of the licence checker itself).
+  LEAD CORRECTION TO THE WORKER'S REPORT: it described the osv-scanner advisories as "all in dev-only chains". Not supportable. `npm audit --omit=dev` = 22 (8 high, 14 moderate) against production deps; full tree = 29 (1 critical, 10 high, 18 moderate). The single critical (vitest) IS dev-only. But npm's prod/dev split is not the same question as what ships in an Expo binary -- metro, @expo/metro and vite are build tooling Expo declares as production dependencies. Neither "dev-only" nor "ships" is provable without inspecting the bundle; recorded as an open question.
+  EXPECTED-RED: license-policy and osv-scan are wired to FAIL on first run, by ticket design. Not a broken pipeline.
+
+COMMIT 989e4a6 (P6c). PUSHED origin/main 3ef8dcd..989e4a6 (4 commits). Repo is PUBLIC (dobrinz123/track_app) -- Actions minutes free, SARIF/Code Scanning available.
+CI RUN TRIGGERED on 989e4a6, outcome pending (job bwbez4l4f watching).
+
+RUN P6 SUMMARY: P6a-SCOUT ACCEPTED | P6a VERIFIED (blind PASS_WITH_NOTES + Codex) | P6a-FIX1, P6a-FIX2 VERIFIED | P6b rounds 1-2 FAIL -> round 3 PASS_WITH_NOTES, ZERO HIGH | P6c VERIFIED by LEAD gates.
+OPEN, for the owner: 6 residuals before either IMU flag is enabled (R1-R6 above; R3 and R4 matter most), on-car validation of the yaw sign, the licence-policy backlog, and the advisory backlog.
+CI RUN 35624656015 on 989e4a6 — COMPLETE. Gates (typecheck/lint/test) SUCCESS. Secret scan (gitleaks) SUCCESS. osv-scan FAILURE. License policy FAILURE.
+  BOTH FAILURES VERIFIED AS REAL FINDINGS, NOT CONFIG ERRORS:
+    license-policy ran to completion and exited 1 after enumerating the violating buckets (2x MPL-2.0, 1x CC-BY-3.0, 2x "MIT AND CC-BY-3.0", plus the OFL/CC-BY-4.0 ones).
+    osv-scan ran, UPLOADED SARIF TO THE SECURITY TAB SUCCESSFULLY (https://github.com/dobrinz123/track_app/security/code-scanning?query=is%3Aopen+branch%3Amain+tool%3Aosv-scanner) and failed on the advisories it found. The SARIF upload was the one part that could not be validated locally -- it works.
+  => The workflow itself is CORRECT on first run. The repo now has a working test gate for the first time.
+RUN P6 CLOSED.
