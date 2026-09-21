@@ -603,6 +603,32 @@ function recoverySkippedCalibrationResult(): CalibrationResult {
 }
 
 /**
+ * V2 fix (blind-verifier finding, MEDIUM binding) -- `restoreFromCheckpoint`'s
+ * monotonic merge of a restored session's calibration provenance.
+ *
+ * `SessionCalibrationStatus` is a three-valued lattice with `'unknown'` at
+ * the bottom (contracts.ts's binding rule: `'unknown'` is never rendered,
+ * exported or summarised as calibrated -- it carries strictly LESS
+ * information than either `'validated'` or `'unvalidated'`, never more).
+ * `carried` is what this controller already knows in memory for the SAME
+ * session id; `incoming` is what THIS restore call was told. An incoming
+ * KNOWN value is always new information and always wins -- even over a
+ * carried one, because the host may have read a genuine transition (a
+ * process that crashed between `acceptCalibration()` and its durable write,
+ * say). An incoming `'unknown'`, though, asserts nothing -- it must never
+ * erase a carried known value, which is exactly the loss the reviewer
+ * reproduced (a durable `'unvalidated'` overwritten with `'unknown'` by a
+ * restore that had nothing better to report).
+ */
+function mergeCalibrationStatus(
+  carried: SessionCalibrationStatus | null,
+  incoming: SessionCalibrationStatus,
+): SessionCalibrationStatus {
+  if (incoming !== 'unknown') return incoming;
+  return carried ?? 'unknown';
+}
+
+/**
  * The production session orchestrator (MUST DO #1). Composes the SAME
  * pipeline pieces as `runSessionPipeline` (via the shared
  * `SessionPipelineCore`, `./pipelineCore.ts`) driven live, one
@@ -1420,8 +1446,29 @@ export class SessionController {
     sessionId: string,
     snapshot: SessionMachineSnapshot,
     laps: LapRecord[],
-    options?: {
-      calibrationStatus?: SessionCalibrationStatus;
+    options: {
+      /**
+       * V2 fix (blind-verifier finding, MEDIUM binding): mandatory, not
+       * optional. A restore that simply forgot to pass this used to fall
+       * through to `'unknown'` with nothing to stop it, and the very next
+       * `start('session')` wrote that guess through to the durable session
+       * row -- the reviewer watched a stored `'unvalidated'` (a REJECTED
+       * calibration the driver was told about and drove past anyway) become
+       * `'unknown'` (no memory of that warning at all) this way. Production
+       * was never at risk (`composition.ts`'s `resumeRecovery()` always
+       * supplies `resolveSessionCalibrationStatus(...)`, read off the
+       * durable record) but nothing stopped a future or test caller from
+       * doing the same by omission. Making the field mandatory turns that
+       * omission into a compile error instead of a silent, permanent loss.
+       *
+       * Passing `'unknown'` here is still allowed -- sometimes that IS the
+       * honest answer (the host could not read the record) -- but it is now
+       * always a typed-out decision at the call site, not a default nobody
+       * chose. And even an honest `'unknown'` here can never regress a value
+       * this SAME controller already carries in memory for this SAME
+       * session id: see the monotonic merge below.
+       */
+      calibrationStatus: SessionCalibrationStatus;
       /**
        * Ticket P10B H4-B: lap numbers this session ALREADY has telemetry
        * rows for on disk, as the host can enumerate them (mobile:
@@ -1439,11 +1486,14 @@ export class SessionController {
       storedLapNumbers?: readonly number[];
     },
   ): void {
-    // Ticket P10A H5: the restored run's provenance, before `this.sessionId`
-    // is overwritten. Explicit wins (the host read it back from the durable
-    // session record); otherwise, restoring the SAME session id this
-    // controller is already running preserves what it already knows; and
-    // failing both, the answer is `'unknown'` -- never `'validated'`.
+    // Ticket P10A H5 / V2 fix: the restored run's provenance, before
+    // `this.sessionId` is overwritten. Restoring the SAME session id this
+    // controller is already running carries forward what it already knows
+    // (`carriedStatus`); `mergeCalibrationStatus` below is what makes that
+    // carry-forward MONOTONIC -- an incoming `'unknown'` can report new
+    // information (`'validated'`/`'unvalidated'`) and always wins, but can
+    // never overwrite a known carried value, because `'unknown'` is never
+    // new information, only its absence.
     const carriedStatus = this.sessionId === sessionId ? this.calibrationStatus : null;
     this.sessionId = sessionId;
 
@@ -1464,7 +1514,7 @@ export class SessionController {
     // Ticket P10B H4-B: a lap number that STORAGE has already committed a
     // telemetry row for is taken, whatever the checkpoint says -- reusing it
     // would replace that row and destroy every fix in it.
-    for (const stored of options?.storedLapNumbers ?? []) {
+    for (const stored of options.storedLapNumbers ?? []) {
       if (Number.isFinite(stored) && stored > 0) restoredLapNumbers.push(stored);
     }
     this.lapNumberOffset = restoredLapNumbers.length === 0 ? 0 : Math.max(...restoredLapNumbers);
@@ -1479,7 +1529,7 @@ export class SessionController {
     this.calibrationEngine = null;
     this.calibrationSnapshot = null;
     this.calibrationResult = null;
-    this.calibrationStatus = options?.calibrationStatus ?? carriedStatus ?? 'unknown';
+    this.calibrationStatus = mergeCalibrationStatus(carriedStatus, options.calibrationStatus);
     this.paused = false;
     this.resetTrackMatch();
     // Ticket P7M M1: a restore is a new run of the trace writer. Its own
@@ -2082,6 +2132,36 @@ export class SessionController {
   }
 
   /**
+   * V3 fix (blind-verifier finding, LOW binding) -- `attemptLapCommit`'s
+   * `loadTelemetry` call failing while reclaiming a chunk (the reviewer's
+   * exact reproduction: 20 such failures across three driven laps) counted
+   * correctly in memory -- `noteTraceFailure` bumps `traceWriteFailures`,
+   * which `diagnostics()` reports live as `rawTraceWriteFailures` -- but the
+   * DURABLE session row's `trace.failedWriteCount` (`buildSessionSummary`)
+   * is only rewritten at fixed points: recording start, calibration
+   * accepted/escaped, and `endSession()`. None of those run between two lap
+   * completions, so the durable row kept reading `traceFailedWrites=0` for
+   * the whole mid-session stretch the reviewer measured -- a storage layer
+   * under-reporting its own failures, which is worse than one that loses
+   * data loudly.
+   *
+   * So THIS failure -- `loadTelemetry` rejecting, BEFORE any write is even
+   * attempted -- now also re-persists the session record immediately (same
+   * durable-write pattern as `acceptCalibration()`'s
+   * `persistSessionRecord('calibration-accepted')`): fire-and-forget, never
+   * awaited and never able to reject (`persistSessionRecord` catches and
+   * reports its own failures via `noteRecordFailure`), so a storage hiccup
+   * here can still never block or fail the lap-commit retry path it is
+   * reporting on. Deliberately NOT shared with `writeLapCommit`'s own catch
+   * below (a WRITE failing, not a READ) -- see that branch's comment for why
+   * re-persisting there would conflict with a separate, pinned invariant.
+   */
+  private noteReclaimFailure(error: unknown): void {
+    this.noteTraceFailure('reclaim', error);
+    this.persistSessionRecord('reclaim-failure');
+  }
+
+  /**
    * Ticket P10A H4 (binding) -- ONE LAP'S TELEMETRY IS ONE ATOMIC WRITE.
    *
    * Writes the lap's own row AND rewrites every unclaimed chunk row that
@@ -2191,7 +2271,7 @@ export class SessionController {
       } catch (error) {
         // A chunk that cannot be READ cannot be safely reclaimed: emptying it
         // unseen would be the data loss this whole path exists to prevent.
-        this.noteTraceFailure('reclaim', error);
+        this.noteReclaimFailure(error);
         return { ok: false, error };
       }
       const kept = stored.filter((sample) => sample.tMono < lap.tStart || sample.tMono > lap.tEnd);
@@ -2205,6 +2285,20 @@ export class SessionController {
     } catch (error) {
       // Surfaced on the driving screen through `recording.failedWriteCount`
       // (the trace is what did not move).
+      //
+      // V3 fix scope note: this failure does NOT also re-persist the durable
+      // session record the way `noteReclaimFailure` (the `loadTelemetry`
+      // read-failure branch above) now does. `writeLapCommit`'s own success
+      // is what is ALLOWED to change `buildSessionSummary()`'s `laps` --
+      // re-persisting here, before that write ever succeeded, would publish
+      // a lap the durable checkpoint does not yet agree happened (pinned by
+      // `sessionController.test.ts`'s C4-fix regression test: a rejected
+      // `endSession()` must leave the durable row exactly as recording-start
+      // left it, zero laps, because `endSession()`'s own `saveSession` never
+      // ran). The `loadTelemetry` branch has no such conflict -- it fails
+      // BEFORE any write is attempted, so there is nothing pending its
+      // outcome, and it stays the one path this fix touches: the reviewer's
+      // own reproduction was `loadTelemetry` failing while writes succeed.
       this.noteTraceFailure('reclaim', error);
       return { ok: false, error };
     }

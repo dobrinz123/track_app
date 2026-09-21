@@ -339,7 +339,9 @@ describe('P7M M1 -- a recovery resume does not overwrite the pre-crash trace', (
     // Launch 2: a brand-new controller resumes the SAME session id.
     const second = setup(repository);
     const checkpoint = await repository.loadCheckpoint(sessionId);
-    second.controller.restoreFromCheckpoint(sessionId, checkpoint!.snapshot, checkpoint!.laps);
+    second.controller.restoreFromCheckpoint(sessionId, checkpoint!.snapshot, checkpoint!.laps, {
+      calibrationStatus: 'unknown',
+    });
     await second.controller.start('session');
     second.controller.arm();
     second.feed(driveLap(second.profile, { seed: 4_091 }).slice(0, 30));

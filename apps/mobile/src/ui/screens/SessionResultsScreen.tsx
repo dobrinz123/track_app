@@ -18,19 +18,9 @@ import { useFacadeState } from '../hooks/useFacadeState';
 import { useSettings } from '../hooks/useSettings';
 import { resolveAnalysisScreenStrings } from './analysisStrings';
 import { formatDateUtc } from '../format';
+import { explainInvalidReason as explainInvalid } from './invalidReasonCopy';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'SessionResults'>;
-
-const INVALID_REASON_COPY: Record<string, string> = {
-  PIT_TRANSIT: 'Included a pit lane transit.',
-  MISSED_SECTOR_GATE: 'Missed a sector timing gate.',
-  SHORT_LAP: 'Lap distance was too short to be valid.',
-  LOW_QUALITY: 'GNSS quality was too low during this lap.',
-};
-
-function explainInvalid(reason: string): string {
-  return INVALID_REASON_COPY[reason] ?? reason.replace(/_/g, ' ').toLowerCase();
-}
 
 function sectorBests(laps: readonly LapRecord[]): (number | null)[] {
   const bests: (number | null)[] = [null, null, null];

@@ -198,7 +198,9 @@ describe('SessionController', () => {
       context: { lapNumber: 2, priorState: null, pendingInvalidReasons: [], gnssDegraded: false, preflightFailureReasons: [] },
     };
 
-    controller.restoreFromCheckpoint('driver-1--recovered-session', snapshot, historicalLaps);
+    controller.restoreFromCheckpoint('driver-1--recovered-session', snapshot, historicalLaps, {
+      calibrationStatus: 'unknown',
+    });
 
     const restored = last(states);
     expect(restored.sessionState).toBe('awaitingCalibration');
@@ -390,7 +392,9 @@ describe('SessionController', () => {
       lapNumber: 0,
       context: { lapNumber: 0, priorState: null, pendingInvalidReasons: [], gnssDegraded: false, preflightFailureReasons: [] },
     };
-    controller.restoreFromCheckpoint('driver-1--recovered', snapshot, historicalLaps);
+    controller.restoreFromCheckpoint('driver-1--recovered', snapshot, historicalLaps, {
+      calibrationStatus: 'unknown',
+    });
     // Skip straight to armed off the stored reference, per the documented
     // recovery flow (no live recalibration).
     await controller.start('session');

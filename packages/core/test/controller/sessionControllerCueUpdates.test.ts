@@ -426,7 +426,9 @@ describe('SessionController — the apply-time context re-check (E1)', () => {
     const stale = request(controller, entriesFor(before.cornerId, target));
     const first = controller.cueContext();
 
-    controller.restoreFromCheckpoint('recovered-outing', RESTORED_SNAPSHOT, []);
+    controller.restoreFromCheckpoint('recovered-outing', RESTORED_SNAPSHOT, [], {
+      calibrationStatus: 'unknown',
+    });
     const second = controller.cueContext();
     expect(second.generation).toBeGreaterThan(first.generation);
     expect(second.sessionId).toBe('recovered-outing');

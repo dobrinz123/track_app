@@ -225,7 +225,7 @@ export function controllerRig(
     },
   });
   if (sessionId !== null) {
-    controller.restoreFromCheckpoint(sessionId, EMPTY_ARMED_SNAPSHOT, []);
+    controller.restoreFromCheckpoint(sessionId, EMPTY_ARMED_SNAPSHOT, [], { calibrationStatus: 'unknown' });
   }
   const states: FacadeStateCore[] = [];
   controller.subscribe((state) => states.push(state));
@@ -531,7 +531,9 @@ describe.sequential('TMR v2 production track-day soak', () => {
     expect(pbBefore).not.toBeNull();
 
     const recovered = controllerRig(tmr, sql.recording, null);
-    recovered.controller.restoreFromCheckpoint(sessionId, stored!.snapshot, stored!.laps);
+    recovered.controller.restoreFromCheckpoint(sessionId, stored!.snapshot, stored!.laps, {
+      calibrationStatus: 'unknown',
+    });
     const recoveryLap = last(last(recovered.states).laps);
     expect(recoveryLap.valid).toBe(false);
     expect(recoveryLap.invalidReasons).toContain('RECOVERY');

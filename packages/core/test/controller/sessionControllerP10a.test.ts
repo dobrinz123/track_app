@@ -349,11 +349,27 @@ describe('P10A H5 -- a resumed session never sheds its calibration label', () =>
     const sessionId = controller.diagnostics().sessionId!;
     const checkpoint = await repository.loadCheckpoint(sessionId);
 
-    controller.restoreFromCheckpoint(sessionId, checkpoint!.snapshot, checkpoint!.laps);
+    // V2 fix: the caller here has nothing better than 'unknown' to report --
+    // exactly the reviewer's reproduction -- and the monotonic merge in
+    // `restoreFromCheckpoint` is what keeps the carried 'unvalidated' (this
+    // SAME controller, SAME session id) from being overwritten by it.
+    controller.restoreFromCheckpoint(sessionId, checkpoint!.snapshot, checkpoint!.laps, {
+      calibrationStatus: 'unknown',
+    });
     await controller.start('session');
+    await controller.flush();
 
     expect(snapshot().matchingUnvalidated).toBe(true); // WAS: false
-    expect(snapshot().calibrationStatus).toBe('unvalidated');
+    expect(snapshot().calibrationStatus).toBe('unvalidated'); // WAS (V2 bug): 'unknown'
+
+    // V2 fix -- the DURABLE row, not just the in-memory snapshot: this is
+    // exactly what `start('session')`'s `persistInitialSessionRecord()`
+    // writes through to `repository.saveSession(...)`. Pre-fix, this is
+    // where the reviewer watched a stored `'unvalidated'` become `'unknown'`.
+    const durable = (await repository.listSessions(USER_ID, profile.circuitId)).find(
+      (s) => s.sessionId === sessionId,
+    );
+    expect(durable?.calibrationStatus).toBe('unvalidated'); // WAS (V2 bug): 'unknown'
   });
 
   it('a restore in a FRESH process reads the provenance back from the durable record', async () => {
@@ -377,7 +393,7 @@ describe('P10A H5 -- a resumed session never sheds its calibration label', () =>
     const second = setup(repository);
     const checkpoint = await repository.loadCheckpoint(sessionId);
     second.controller.restoreFromCheckpoint(sessionId, checkpoint!.snapshot, checkpoint!.laps, {
-      calibrationStatus: storedStatus,
+      calibrationStatus: storedStatus ?? 'unknown',
     });
     await second.controller.start('session');
     expect(second.snapshot().matchingUnvalidated).toBe(true);
@@ -395,8 +411,11 @@ describe('P10A H5 -- a resumed session never sheds its calibration label', () =>
 
     const second = setup(repository);
     // The host could not read the record (a corrupt row, a failed read) and
-    // therefore says nothing.
-    second.controller.restoreFromCheckpoint(sessionId, checkpoint!.snapshot, checkpoint!.laps);
+    // therefore says nothing -- an honest, explicit 'unknown' (V2 fix: no
+    // longer an implicit default).
+    second.controller.restoreFromCheckpoint(sessionId, checkpoint!.snapshot, checkpoint!.laps, {
+      calibrationStatus: 'unknown',
+    });
     await second.controller.start('session');
     expect(second.snapshot().calibrationStatus).toBe('unknown');
     expect(second.snapshot().matchingUnvalidated).toBe(false);

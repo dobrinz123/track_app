@@ -33,6 +33,8 @@ const USER_ID = 'driver-1';
 class LapCommitFailingRepository implements LocalSessionRepository {
   failLapCommit = false;
   lapCommitAttempts = 0;
+  /** V3 fix coverage: fails a chunk READ during reclaim (`attemptLapCommit`'s `loadTelemetry` call), distinct from `failLapCommit` (the WRITE). */
+  failLoadTelemetry = false;
 
   constructor(
     private readonly delegate: LocalSessionRepository,
@@ -85,6 +87,7 @@ class LapCommitFailingRepository implements LocalSessionRepository {
     return this.delegate.saveCheckpoint(sessionId, checkpoint.snapshot, checkpoint.laps);
   };
   loadTelemetry(sessionId: string, lapNumber: number): Promise<LocationSample[]> {
+    if (this.failLoadTelemetry) return Promise.reject(new Error('loadTelemetry failed (test double)'));
     return this.delegate.loadTelemetry(sessionId, lapNumber);
   }
   getReferenceLap(
@@ -228,6 +231,53 @@ describe('P10B H3-B -- a lap whose transaction fails keeps its fixes, and says s
     expect(snapshot().recording.unwrittenSampleCount).toBeGreaterThan(0);
     expect(snapshot().recording.unwrittenSampleCount).toBe(retained.size);
     expect(snapshot().recording.failedWriteCount).toBeGreaterThan(0);
+  });
+
+  /**
+   * V3 fix (blind-verifier finding, LOW binding).
+   *
+   * REVIEWER REPRODUCTION: `loadTelemetry` failing while writes succeed (here:
+   * the lap commit write itself failing, the same `noteReclaimFailure` path)
+   * counted 20 reclaim failures in `diagnostics().rawTraceWriteFailures`, but
+   * the DURABLE session row still read `traceFailedWrites=0` -- it is only
+   * rewritten at recording start, calibration accepted/escaped, and
+   * `endSession()`, none of which run between two lap completions.
+   *
+   * No `endSession()` here -- the whole point is the durable row mid-session,
+   * before any of those fixed points would otherwise have caught it up.
+   */
+  it('a reclaim READ failure is in the durable row immediately, not only at endSession()', async () => {
+    const repository = new LapCommitFailingRepository(new InMemorySessionRepository());
+    const { profile, controller, feed, snapshot } = setup(repository);
+
+    await controller.start('calibration');
+    // Same fixture as the P10A H4 "successful lap reclaims its range exactly
+    // once" test -- calibration plus two driven laps naturally leaves a
+    // trace-flush chunk straddling a lap boundary, so its reclaim genuinely
+    // calls `loadTelemetry` (not the "wholly inside, no read needed" case).
+    feed(cleanRecognitionLap(profile, 10_311));
+    controller.acceptCalibration();
+    await controller.flush();
+    controller.arm();
+
+    repository.failLoadTelemetry = true;
+    feed(driveLap(profile, { seed: 10_312, speedMps: 40, noiseSigmaM: 1 }));
+    feed(driveLap(profile, { seed: 10_313, speedMps: 40, noiseSigmaM: 1 }));
+    // The first failure rethrows its ORIGINAL cause through `flush()` (same
+    // contract as P10A H4's sibling test) -- this test's concern is the
+    // durable row, not `flush()`'s own rejection.
+    await controller.flush().catch(() => undefined);
+
+    const sessionId = controller.diagnostics().sessionId!;
+    const liveFailures = snapshot().recording.failedWriteCount;
+    expect(liveFailures).toBeGreaterThan(0); // the reclaim READ genuinely failed
+
+    const record = (await repository.listSessions(USER_ID, profile.circuitId)).find(
+      (s) => s.sessionId === sessionId,
+    );
+    // WAS (V3 bug): 0 -- the durable row never heard about the reclaim
+    // failure until a calibration event or endSession() happened to run.
+    expect(record?.trace?.failedWriteCount).toBe(liveFailures);
   });
 
   /**
@@ -391,6 +441,7 @@ describe('P10B H4-B -- the lap commit, its reclaim and the recovery checkpoint a
     // The host enumerates what storage actually holds (mobile:
     // `readStoredGnssLapNumbers`) and hands it to the restore.
     controller.restoreFromCheckpoint(sessionId, checkpoint!.snapshot, checkpoint!.laps, {
+      calibrationStatus: 'unknown',
       storedLapNumbers: [1],
     });
     await controller.start('session');
@@ -428,7 +479,9 @@ describe('P10B H4-B -- the lap commit, its reclaim and the recovery checkpoint a
     const { profile, controller, feed } = setup(repository);
     const checkpoint = await repository.loadCheckpoint(sessionId);
 
-    controller.restoreFromCheckpoint(sessionId, checkpoint!.snapshot, checkpoint!.laps);
+    controller.restoreFromCheckpoint(sessionId, checkpoint!.snapshot, checkpoint!.laps, {
+      calibrationStatus: 'unknown',
+    });
     await controller.start('session');
     controller.arm();
     feed(driveLap(profile, { seed: 10_412, speedMps: 40, noiseSigmaM: 1, sampleRateHz: 1 }));

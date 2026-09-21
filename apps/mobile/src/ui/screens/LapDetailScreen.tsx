@@ -14,6 +14,7 @@ import {
   TELEMETRY_CHART_CHANNELS,
   type TelemetrySampleRow,
 } from '../../persistence/telemetryRead';
+import { explainInvalidReason } from './invalidReasonCopy';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'LapDetail'>;
 
@@ -182,7 +183,7 @@ export function LapDetailScreen({ route }: Props): React.JSX.Element {
             </Text>
             {lap.invalidReasons.map((r) => (
               <Text key={r} style={styles.invalidReason} maxFontSizeMultiplier={1.3}>
-                {r.replace(/_/g, ' ').toLowerCase()}
+                {explainInvalidReason(r)}
               </Text>
             ))}
           </View>
