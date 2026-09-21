@@ -199,15 +199,28 @@ export class MadgwickAhrs {
    * accelerometer sample leaves the vehicle's own linear acceleration -- the
    * longitudinal and lateral g the coaching engine cares about.
    *
-   * MIND THE DIRECTION: despite the name, this vector points UP, not down.
-   * The filter drives it towards the normalised accelerometer reading, and an
-   * accelerometer at rest measures SPECIFIC FORCE -- the normal force holding
-   * it up, +1 g skywards -- not the gravitational field pulling it down. That
-   * is precisely why the subtraction above is unnegated. It also makes this
-   * vector the estimated VERTICAL in sensor coordinates, which is what lets a
-   * caller derive a mount-independent yaw axis by projecting the gyroscope
-   * onto it (see `apps/mobile/src/session/gforceProvider.ts`); a caller who
-   * assumes it points down gets the sign of that projection backwards.
+   * MIND THE DIRECTION -- AND DO NOT ASSUME IT. This filter has no opinion of
+   * its own about which way is up: it drives this vector towards whatever the
+   * normalised accelerometer reading is, so the direction it settles on is
+   * entirely the SENSOR's convention, and the two mobile platforms disagree.
+   *
+   *   Android (`Sensor.TYPE_ACCELEROMETER`, specific force): a device at rest
+   *     reads +1 g along the axis pointing SKYWARD. This vector points UP.
+   *   iOS (Core Motion `CMAccelerometerData.acceleration`): a device at rest
+   *     face-up reads z = -1. This vector points DOWN.
+   *
+   * (expo-sensors forwards Core Motion unchanged on iOS and only rescales by
+   * `GRAVITY_EARTH` on Android, so it does not reconcile the two.)
+   *
+   * Either way this is the estimated VERTICAL in sensor coordinates, which is
+   * what lets a caller build a mount-independent yaw axis by projecting the
+   * gyroscope onto it. But the SIGN of that projection depends on the
+   * convention above, so a caller must establish which one its input follows
+   * rather than assuming -- getting it backwards silently reverses every
+   * measured rotation. See `apps/mobile/src/session/gforceProvider.ts`.
+   *
+   * The subtraction described above is unaffected: removing this vector from
+   * the raw sample isolates linear acceleration under either convention.
    */
   gravity(): Vector3 {
     const { w, x, y, z } = this.quaternion;

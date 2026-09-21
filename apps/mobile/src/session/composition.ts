@@ -87,7 +87,11 @@ import { createVehicleProfileBindingStore } from '../persistence/didSweepStore';
 import { createRawUdsChannel } from './didSweepController';
 import { EnetTcpTransport } from './enetTcpTransport';
 import { enetAdapterReservation as sharedEnetAdapterReservation } from './enetAdapterReservation';
-import { createGForceProvider, type GForceProvider } from './gforceProvider';
+import {
+  connectGForceRecording,
+  createGForceProvider,
+  type GForceProvider,
+} from './gforceProvider';
 import { TelemetryRecorder } from '../persistence/telemetryRecorder';
 import { PASSTHROUGH_WRITE_GATE, type SqlWriteGate } from '../persistence/sqlWriteGate';
 import { createAnalysisRunner, sessionIsActive, type AnalysisRunner } from './analysisViewModel';
@@ -982,6 +986,28 @@ export const telemetryProvider: TelemetryProvider = {
 // but INDEPENDENT of it: neither provider's start/stop/failure ever gates the
 // other, and both feed the SAME `TelemetryRecorder`.
 // ---------------------------------------------------------------------------
+/**
+ * Ticket P6a-FIX2 H1 (binding): which way THIS platform's accelerometer reads
+ * at rest decides the sign of `yawRateDps`. iOS forwards Core Motion
+ * unchanged (a device at rest reads towards the earth); Android rescales
+ * specific force (towards the sky). The two are opposite and `expo-sensors`
+ * does not reconcile them.
+ *
+ * THE PLATFORM READ DELIBERATELY DOES NOT LIVE HERE, and that is a constraint
+ * of this module rather than a preference. `composition.ts` must stay
+ * importable by vitest -- eight suites import it directly -- and any
+ * reference to `react-native`, static `import` or `require` alike, makes Vite
+ * resolve React Native's Flow-typed source and fail the whole file to parse
+ * ("Expected 'from', got 'typeOf'"), which was measured on this exact change.
+ * That is the same reason `gforceProvider.ts` loads `expo-sensors` lazily
+ * rather than importing it.
+ *
+ * So the provider resolves it the SAME way it resolves its sensors: a lazy
+ * `import('react-native')` inside `start()`, behind an injectable dependency
+ * (`GForceProviderDeps.accelerometerRestVector`) that tests set directly and
+ * that both conventions are tested under. Passing nothing here is what asks
+ * for that platform resolution; an explicit value would override it.
+ */
 export const gForceProvider: GForceProvider = createGForceProvider({
   monotonicNow: () => telemetryClock.now(),
   // Ticket P6a (binding): the opt-in IMU-fusion path. Read through the live
@@ -1203,9 +1229,13 @@ function startTelemetryRecording(sessionId: string): void {
   // Channel revision: `gForceProvider`'s latG/longG samples flow into the
   // SAME recorder/lap-number tagging as the OBD provider's -- a separate
   // subscription, independent lifecycle (see `gForceProvider.ts`'s own doc
-  // comment), but one shared `TelemetryRecorder`.
-  unsubscribeGForceSample = gForceProvider.onSample((sample) => {
-    recorder.record(sample, telemetryCurrentLapNumber);
+  // comment), but one shared `TelemetryRecorder`. Ticket P6a-FIX2 V1: routed
+  // through the extracted `connectGForceRecording` seam so a test can execute
+  // THIS code rather than a copy of it.
+  unsubscribeGForceSample = connectGForceRecording({
+    provider: gForceProvider,
+    record: (sample, lapNumber) => recorder.record(sample, lapNumber),
+    currentLapNumber: () => telemetryCurrentLapNumber,
   });
   unsubscribeTelemetryLapWatch = facade.subscribe((state) => {
     // F4 fix (WPT3, binding): `facade.subscribe()` calls back synchronously

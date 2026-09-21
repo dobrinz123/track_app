@@ -112,7 +112,15 @@ vi.mock('../../src/session/telemetryProvider', () => ({
 }));
 
 /** `gForceProvider` double: tracks whether `start()` was reached, independent of whatever `telemetryProvider.start()`'s mock just did. */
-vi.mock('../../src/session/gforceProvider', () => ({
+vi.mock('../../src/session/gforceProvider', async () => ({
+  // Ticket P6a-FIX2 V1: everything EXCEPT the provider factory stays the real
+  // module -- `connectGForceRecording` above all, which is the production
+  // seam `composition.ts` routes G samples through. Re-declaring it here
+  // would make these suites pass against a copy of the wiring instead of the
+  // wiring, which is the defect that fix exists to close.
+  ...(await vi.importActual<typeof import('../../src/session/gforceProvider')>(
+    '../../src/session/gforceProvider',
+  )),
   createGForceProvider: () => ({
     start: () => {
       gForceDouble.startCalls += 1;

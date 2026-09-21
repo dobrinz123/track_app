@@ -9,6 +9,7 @@ import {
 
 import { InMemorySettingsStore } from '../../src/session/settingsStore';
 import {
+  connectGForceRecording,
   createGForceProvider,
   type AccelerometerReading,
   type AccelerometerSubscription,
@@ -160,38 +161,52 @@ const flushMicrotasks = async (times = 12): Promise<void> => {
   for (let i = 0; i < times; i += 1) await Promise.resolve();
 };
 
-/** Where a G-force sample goes. The whole point of this file is that this is a variable. */
+/**
+ * Ticket P6a-FIX2 V1: where a recorded G-force sample ends up.
+ *
+ * `record` is the dependency `connectGForceRecording` -- the REAL production
+ * seam, imported from `composition.ts` -- is given. In production
+ * `startTelemetryRecording` passes `recorder.record`; here the test passes one
+ * of the two below. The subscription itself, the lap-number tagging and the
+ * callback body are production code in both cases, executed by this test.
+ */
 interface SinkContext {
   /** The telemetry recorder stand-in -- where production samples go. */
   recorded: TelemetrySample[];
   /** The location stream the TIMING pipeline will consume. */
   timingStream: LocationSample[];
-  /** The GNSS sample currently being processed. */
-  current: LocationSample;
+  /** The GNSS fix currently being processed. */
+  current: () => LocationSample | null;
 }
-type GSampleSink = (sample: TelemetrySample, context: SinkContext) => void;
+type GSampleSink = (
+  sample: TelemetrySample,
+  lapNumber: number | null,
+  context: SinkContext,
+) => void;
 
-/** Exactly `composition.ts:1207` -- the sample reaches the recorder and stops there. */
-const PRODUCTION_SINK: GSampleSink = (sample, context) => {
-  context.recorded.push(sample);
+/** What a `TelemetryRecorder` does: store the sample against its lap. Nothing else. */
+const PRODUCTION_SINK: GSampleSink = (sample, lapNumber, context) => {
+  context.recorded.push({ ...sample, lapNumber } as TelemetrySample & { lapNumber: number | null });
 };
 
 /**
- * The isolation deliberately broken: the same sample ALSO becomes a location
- * fix the timing pipeline will read. The displacement is derived from the
- * sample's own value, so the flags-ON stream (different fused values, plus
- * `yawRateDps` rows that do not exist at all when off) perturbs the trace
- * differently from the flags-OFF one.
+ * The isolation deliberately broken AT THE SAME BOUNDARY: the recorder also
+ * turns the sample into a location fix the timing pipeline will read. This is
+ * the realistic shape of the mistake -- something downstream of the provider
+ * feeding the positioning path -- and it is injected exactly where production
+ * injects its own sink, so the sensitivity test exercises the same code.
  */
-const LEAKY_SINK: GSampleSink = (sample, context) => {
-  context.recorded.push(sample);
+const LEAKY_SINK: GSampleSink = (sample, lapNumber, context) => {
+  PRODUCTION_SINK(sample, lapNumber, context);
+  const current = context.current();
+  if (current === null) return;
   context.timingStream.push({
-    ...context.current,
+    ...current,
     // The G sample's OWN monotonic stamp, so the leaked fix is a distinct
     // sample in the stream rather than a duplicate the pipeline discards.
     tMono: sample.tMonoMs,
-    lat: context.current.lat + sample.value * 1e-4,
-    lon: context.current.lon + sample.value * 1e-4,
+    lat: current.lat + sample.value * 1e-4,
+    lon: current.lon + sample.value * 1e-4,
   });
 };
 
@@ -217,6 +232,7 @@ async function runTimedFixture(flags: Flags, sink: GSampleSink): Promise<Fixture
   const recorded: TelemetrySample[] = [];
   const timingStream: LocationSample[] = [];
   let current: LocationSample | null = null;
+  let currentLap: number | null = null;
   let clockMs = 0;
 
   const provider = createGForceProvider({
@@ -225,16 +241,27 @@ async function runTimedFixture(flags: Flags, sink: GSampleSink): Promise<Fixture
     gyroscopeSource: async () => gyro,
     // The wiring `composition.ts` uses.
     imuFusionEnabled: () => store.getSettings().imuFusionEnabled,
+// P6a-FIX2 H1: stated explicitly so the lazy platform read is never reached under vitest.
+accelerometerRestVector: 'down',
   });
-  provider.onSample((sample) => {
-    if (current === null) return;
-    sink(sample, { recorded, timingStream, current });
+  // THE PRODUCTION WIRING, executed -- not a copy of it. `composition.ts`'s
+  // `startTelemetryRecording` calls this exact function with the session's
+  // recorder; the only thing this test substitutes is where `record` puts the
+  // sample, which is the same seam the sensitivity mutation is injected at.
+  const unsubscribe = connectGForceRecording({
+    provider,
+    record: (sample, lapNumber) => {
+      sink(sample, lapNumber, { recorded, timingStream, current: () => current });
+    },
+    currentLapNumber: () => currentLap,
   });
   provider.start();
   await flushMicrotasks();
 
-  for (const group of groups) {
+  for (const [index, group] of groups.entries()) {
     current = group.base;
+    // A plausible lap number so the seam's own tagging is exercised too.
+    currentLap = Math.floor(index / Math.max(1, Math.ceil(groups.length / FIXTURE_LAPS))) + 1;
     // The GNSS fix first, then the ~25 Hz IMU samples that arrive while it is
     // the newest one -- the sink fires from inside those, so anything it
     // appends lands after the fix it belongs to.
@@ -245,6 +272,7 @@ async function runTimedFixture(flags: Flags, sink: GSampleSink): Promise<Fixture
       accel.listener?.(step.accel); // the sink fires from inside here
     }
   }
+  unsubscribe();
   await provider.stop();
 
   const result = runSessionPipeline(circuit.runtime, timingStream, {
@@ -344,6 +372,8 @@ describe('P6a requirement E -- the analysis half of the same fixture session', (
         accelerometerSource: async () => accel,
         gyroscopeSource: async () => gyro,
         imuFusionEnabled: () => store.getSettings().imuFusionEnabled,
+// P6a-FIX2 H1: stated explicitly so the lazy platform read is never reached under vitest.
+accelerometerRestVector: 'down',
       });
       provider.onSample((sample) => lapG.push(sample));
       provider.start();
@@ -382,5 +412,45 @@ describe('P6a requirement E -- the analysis half of the same fixture session', (
       .filter((sample) => Number.isFinite(sample.channels?.yawRateDps));
     expect(carrying.length).toBeGreaterThan(100);
     expect(on.assembled.usedChannels).toContain('yawRateDps');
+  });
+});
+
+describe('P6a-FIX2 V1 -- the production seam itself', () => {
+  it('connectGForceRecording routes a sample to `record` and does nothing else with it', () => {
+    // The seam is the ONE place `startTelemetryRecording` routes G samples,
+    // so "it only records" is the property that keeps the provider away from
+    // lap timing -- asserted here on the real function.
+    const listeners = new Set<(s: TelemetrySample) => void>();
+    const provider = {
+      onSample(cb: (s: TelemetrySample) => void): () => void {
+        listeners.add(cb);
+        return () => listeners.delete(cb);
+      },
+    };
+    const calls: { sample: TelemetrySample; lapNumber: number | null }[] = [];
+    let lap: number | null = null;
+    const unsubscribe = connectGForceRecording({
+      provider,
+      record: (sample, lapNumber) => calls.push({ sample, lapNumber }),
+      currentLapNumber: () => lap,
+    });
+
+    const emit = (sample: TelemetrySample): void => {
+      for (const listener of [...listeners]) listener(sample);
+    };
+    emit({ channel: 'latG', value: 0.4, tMonoMs: 10 });
+    lap = 3;
+    emit({ channel: 'yawRateDps', value: -12, tMonoMs: 20 });
+
+    // Exactly one `record` per sample, the sample passed through unchanged,
+    // and the lap number read at DELIVERY time rather than captured.
+    expect(calls).toEqual([
+      { sample: { channel: 'latG', value: 0.4, tMonoMs: 10 }, lapNumber: null },
+      { sample: { channel: 'yawRateDps', value: -12, tMonoMs: 20 }, lapNumber: 3 },
+    ]);
+
+    unsubscribe();
+    emit({ channel: 'latG', value: 9, tMonoMs: 30 });
+    expect(calls).toHaveLength(2); // the handle really detaches
   });
 });

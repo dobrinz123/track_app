@@ -1,4 +1,9 @@
-import { MadgwickAhrs, type Quaternion, type TelemetrySample } from '@circuit/core';
+import {
+  MadgwickAhrs,
+  type Quaternion,
+  type TelemetrySample,
+  type Vector3,
+} from '@circuit/core';
 
 /**
  * G-force telemetry provider (Telemetry addendum — channel revision,
@@ -98,6 +103,37 @@ const GYRO_MAX_AGE_MS = 3 * UPDATE_INTERVAL_MS;
 const MAX_FUSION_GAP_MS = 500;
 
 /**
+ * Ticket P6a-FIX2 M5: how old the ATTITUDE estimate may be before
+ * `yawRateDps` stops being emitted. The vertical the gyroscope is projected
+ * onto is only refreshed by accelerometer samples, so once those stop the
+ * estimate freezes -- and a mount that is moved meanwhile makes a real yaw
+ * project onto a vertical that no longer exists, reading zero or the wrong
+ * sign. The same {@link MAX_FUSION_GAP_MS} threshold: past the point where
+ * the fused path would call the stream broken, the vertical is not evidence
+ * any more either.
+ */
+const ATTITUDE_MAX_AGE_MS = MAX_FUSION_GAP_MS;
+
+/**
+ * Ticket P6a-FIX2 M7: how many CONSECUTIVE over-threshold accelerometer
+ * intervals it takes to call the delivery rate "sustainedly slow" rather than
+ * "one broken stream". The first such interval is a break and is reseeded
+ * (M3); from the second on, reseeding every sample is itself the bug -- it
+ * pins the attitude to the raw accelerometer direction, which cannot tell a
+ * tilt from a lateral acceleration, and silently reports a tenth of the real
+ * lateral g. Sustained slow delivery therefore integrates normally instead,
+ * and raises {@link GForceFusionDiagnostics.degraded}.
+ */
+const SUSTAINED_SLOW_INTERVALS = 2;
+
+/**
+ * Ticket P6a-FIX2 M7: consecutive fused updates with no gyroscope evidence
+ * before the fusion is called degraded -- one second at the nominal rate, so
+ * an ordinary delivery hiccup does not flip the flag.
+ */
+const DEGRADED_GYRO_STARVED_UPDATES = 25;
+
+/**
  * Ticket P6a-FIX1 M1: an accelerometer reading may seed the filter's attitude
  * only if its magnitude is plausibly gravity. A reading taken mid-bump or
  * mid-braking carries the vehicle's own acceleration, and seeding from it
@@ -124,6 +160,63 @@ export interface AccelerometerReading {
  * only the emitted value is scaled by {@link RAD_TO_DEG}).
  */
 export type GyroscopeReading = AccelerometerReading;
+
+/**
+ * Ticket P6a-FIX2 H1 (HIGH) -- WHICH WAY AN ACCELEROMETER AT REST POINTS.
+ *
+ * The two mobile platforms disagree, `expo-sensors` does NOT reconcile them,
+ * and the difference silently reverses every measured rotation. Verified at
+ * the source in this repo's own `node_modules`:
+ *
+ *   `'down'` -- iOS. `ios/AccelerometerModule.swift` forwards
+ *     `CMAccelerometerData.acceleration` UNCHANGED, and Core Motion reports a
+ *     face-up device at rest as `z = -1`. The at-rest vector points at the
+ *     EARTH. THIS IS THE PLATFORM TRACE SHIPS ON.
+ *   `'up'` -- Android. `AccelerometerModule.kt` divides
+ *     `Sensor.TYPE_ACCELEROMETER` by `GRAVITY_EARTH` with no sign change, and
+ *     Android reports specific force, so the same device reads `+1`. The
+ *     at-rest vector points at the SKY.
+ *
+ * This is a property of the SENSOR, so it is named, injected and tested --
+ * never sniffed inside the projection where a test cannot reach it.
+ */
+export type AccelerometerRestVector = 'up' | 'down';
+
+/** iOS: Core Motion, forwarded unchanged -- a device at rest reads towards the earth. */
+export const IOS_ACCELEROMETER_REST_VECTOR: AccelerometerRestVector = 'down';
+/** Android: specific force, rescaled only -- a device at rest reads towards the sky. */
+export const ANDROID_ACCELEROMETER_REST_VECTOR: AccelerometerRestVector = 'up';
+
+/**
+ * The factor the projection of the gyroscope onto `MadgwickAhrs.gravity()`
+ * must be multiplied by to come out in the COMPASS sense (a right turn
+ * positive), given which way the accelerometer's at-rest reading points.
+ *
+ * DERIVED, not pattern-matched. Write `v` for `gravity()` -- the filter's
+ * estimate of the accelerometer's own at-rest direction -- and `u` for true
+ * UP in sensor coordinates. By the definition above, `u = v` when the rest
+ * vector points up and `u = -v` when it points down.
+ *
+ * A RIGHT turn is clockwise seen from above. By the right-hand rule the
+ * angular-velocity vector of a clockwise-from-above rotation points DOWN,
+ * i.e. along `-u`. So during a right turn `w . u < 0`, while the compass
+ * heading rate the channel must report is POSITIVE. The compass-sense rate is
+ * therefore always `-(w . u)`, and substituting for `u`:
+ *
+ *   rest vector UP   (Android):  u =  v  ->  rate = -(w . v)   ->  factor -1
+ *   rest vector DOWN (iOS):      u = -v  ->  rate = +(w . v)   ->  factor +1
+ *
+ * Worked check against the reviewer's iOS counter-example: an upright iPhone
+ * at rest reads `{x: 0, y: -1, z: 0}`, so `v = (0,-1,0)` and (pointing down)
+ * `u = (0,1,0)` -- device +y is skyward, which is what "upright" means. A
+ * 90 deg/s right turn is `w = (0, -pi/2, 0)`: `w . u = -pi/2 < 0`, correct for
+ * a right turn, and `rate = -(w . u) = +90 deg/s`. Via this factor:
+ * `+1 * (w . v) = +1 * (pi/2) = +90 deg/s`. The pre-fix code computed
+ * `-(w . v) = -90 deg/s` -- exactly the inversion that was measured.
+ */
+export function yawRateProjectionSign(restVector: AccelerometerRestVector): 1 | -1 {
+  return restVector === 'down' ? 1 : -1;
+}
 
 export interface AccelerometerSubscription {
   remove(): void;
@@ -169,6 +262,46 @@ export interface GForceProviderDeps {
    * fusion of gyroscope + accelerometer AND starts capturing the gyroscope.
    */
   imuFusionEnabled?: () => boolean;
+  /**
+   * Ticket P6a-FIX2 H1 (binding): which way this device's accelerometer reads
+   * at rest -- see {@link AccelerometerRestVector}. `composition.ts` resolves
+   * it once from `Platform.OS`; tests inject it directly, which is the whole
+   * point of it being a dependency rather than a platform sniff inside the
+   * projection.
+   *
+   * Defaults to {@link IOS_ACCELEROMETER_REST_VECTOR} -- the platform TRACE
+   * ships on -- so an omission is never silently wrong for the shipping
+   * build. It affects ONLY the sign of `yawRateDps`; latG/longG are
+   * convention-independent (see {@link handleFusedReading}).
+   */
+  accelerometerRestVector?: AccelerometerRestVector;
+}
+
+/**
+ * Ticket P6a-FIX2 M7: what the fused path is actually managing to do, as
+ * opposed to what the flag says it is doing. "Fusion is on but not fusing"
+ * must not look identical to healthy operation from the outside.
+ */
+export interface GForceFusionDiagnostics {
+  /** Is IMU fusion running at all this session (the frozen flag value)? */
+  fusionActive: boolean;
+  /** Has the filter got a real attitude estimate right now? */
+  seeded: boolean;
+  /** Stream-break reseeds so far -- see `MAX_FUSION_GAP_MS`. */
+  reseeds: number;
+  /** Fused updates whose accelerometer interval was longer than the fused path expects. */
+  slowIntervals: number;
+  /** Fused updates that had NO timestamped gyroscope evidence to integrate. */
+  gyroStarvedUpdates: number;
+  /**
+   * True while the fused estimate cannot be trusted as a fusion: the
+   * accelerometer is sustainedly slower than the fused path needs, or the
+   * gyroscope has contributed nothing for a while. In this state the attitude
+   * is effectively accelerometer-only, which cannot tell a tilt from a
+   * sustained lateral acceleration. `yawRateDps` is SUPPRESSED while it holds
+   * (see {@link handleGyroReading}); latG/longG keep flowing.
+   */
+  degraded: boolean;
 }
 
 export interface GForceProvider {
@@ -177,11 +310,36 @@ export interface GForceProvider {
   /** Tears down the active subscription (if any). Idempotent; safe to call even if `start()` was never called. */
   stop(): Promise<void>;
   onSample(cb: (s: TelemetrySample) => void): () => void;
+  /** Ticket P6a-FIX2 M7: whether the fused path is actually fusing. Always safe to call; all zeroes while fusion is off. */
+  getFusionDiagnostics(): GForceFusionDiagnostics;
 }
 
 async function defaultAccelerometerSource(): Promise<AccelerometerSource> {
   const { Accelerometer } = await import('expo-sensors');
   return Accelerometer as unknown as AccelerometerSource;
+}
+
+/**
+ * Ticket P6a-FIX2 H1: the platform's accelerometer sign convention, loaded on
+ * exactly the same terms as the sensors above -- a LAZY `import('react-native')`
+ * inside `start()`, never a module-level import.
+ *
+ * It has to be lazy for the same reason `expo-sensors` does, and for one more:
+ * `composition.ts` imports this module and is itself imported directly by
+ * vitest, where any reference to `react-native` makes Vite try to parse React
+ * Native's Flow-typed source and fail the file outright. Every test injects
+ * `accelerometerRestVector` instead, so this line is never reached under
+ * vitest. A failure to load degrades to the platform TRACE ships on.
+ */
+async function defaultAccelerometerRestVector(): Promise<AccelerometerRestVector> {
+  try {
+    const { Platform } = (await import('react-native')) as { Platform?: { OS?: string } };
+    return Platform?.OS === 'android'
+      ? ANDROID_ACCELEROMETER_REST_VECTOR
+      : IOS_ACCELEROMETER_REST_VECTOR;
+  } catch {
+    return IOS_ACCELEROMETER_REST_VECTOR;
+  }
 }
 
 /** Ticket P6a: the gyroscope's own lazy load, on exactly the same terms as the accelerometer's above. */
@@ -279,10 +437,65 @@ export function computeLinearAcceleration(
   return { gravity: nextGravity, linear };
 }
 
+/**
+ * Ticket P6a-FIX2 V1 (binding) -- THE ONE ROUTE A G-FORCE SAMPLE TAKES INTO
+ * THE APP, extracted so it is EXECUTABLE by a test instead of correct only by
+ * inspection.
+ *
+ * The property this protects is the product's most important one: the G-force
+ * provider must not be able to influence lap timing. That used to be
+ * guaranteed by the shape of `composition.ts`'s `startTelemetryRecording` --
+ * the subscription's callback did one thing, `recorder.record(...)` -- but a
+ * test could only assert it about a hand-written COPY of that callback, so a
+ * leak introduced in composition would not have failed anything.
+ *
+ * So the callback is this function, `startTelemetryRecording` calls it, and
+ * the tests drive this same function with a recording sink of their own. It
+ * lives HERE rather than in `composition.ts` for a mechanical reason worth
+ * recording: `composition.ts` reaches `react-native` through `src/platform`,
+ * whose Flow-typed source Vite cannot parse, so importing composition from a
+ * test requires mocking half the app -- while this module is deliberately
+ * `react-native`-free and imports directly. A seam nobody can run is not a
+ * seam.
+ *
+ * The body is deliberately trivial and deliberately total: a sample is tagged
+ * with the current lap number and handed to `record`, and NOTHING else
+ * happens to it. No facade, no `SessionController`, no location stream -- and
+ * since this is the only route `startTelemetryRecording` gives a G sample,
+ * adding any of those would now change code a test runs.
+ *
+ * Returns the unsubscribe handle, exactly as `provider.onSample` does.
+ */
+export function connectGForceRecording(deps: {
+  provider: Pick<GForceProvider, 'onSample'>;
+  /** Where a sample goes. In production: the session's `TelemetryRecorder`. */
+  record: (sample: TelemetrySample, lapNumber: number | null) => void;
+  /** The lap a sample belongs to, read at DELIVERY time (`null` = no lap in progress). */
+  currentLapNumber: () => number | null;
+}): () => void {
+  return deps.provider.onSample((sample) => {
+    deps.record(sample, deps.currentLapNumber());
+  });
+}
+
 export function createGForceProvider(deps: GForceProviderDeps): GForceProvider {
   const { monotonicNow } = deps;
   const getAccelerometerSource = deps.accelerometerSource ?? defaultAccelerometerSource;
   const getGyroscopeSource = deps.gyroscopeSource ?? defaultGyroscopeSource;
+  /**
+   * Ticket P6a-FIX2 H1: the yaw projection sign, derived from the
+   * accelerometer's at-rest direction -- never a hardcoded negation, and
+   * never sniffed from `Platform.OS` inside the projection where no test
+   * could reach it.
+   *
+   * An injected `accelerometerRestVector` wins and is used as-is (every test
+   * does this, and an app that knows its platform can too). With none
+   * injected, `startGyroscope` resolves it from the real platform BEFORE it
+   * subscribes, so no `yawRateDps` sample is ever emitted under an
+   * unresolved convention. The initial value is only the safe default for the
+   * platform this app ships on.
+   */
+  let yawSign = yawRateProjectionSign(deps.accelerometerRestVector ?? IOS_ACCELEROMETER_REST_VECTOR);
   const sampleListeners = new Set<(s: TelemetrySample) => void>();
 
   let subscription: AccelerometerSubscription | null = null;
@@ -308,8 +521,25 @@ export function createGForceProvider(deps: GForceProviderDeps): GForceProvider {
    * on longG two seconds after one 1 rad/s sample).
    */
   let latestGyro: { reading: GyroscopeReading; atMs: number } | null = null;
+  /**
+   * Ticket P6a-FIX2 M6: the rotation the timestamped gyroscope intervals
+   * ACTUALLY support since the last fused update, in radians, plus the span
+   * they cover. A gyroscope reading is evidence about the interval it ends,
+   * not about however long the accelerometer happened to be silent -- the
+   * pre-fix code applied the newest reading across the whole accelerometer
+   * gap, which manufactured -0.4705882353 g out of a 500 ms silence followed
+   * by one 1 rad/s sample.
+   */
+  let gyroRotation = { x: 0, y: 0, z: 0 };
+  let gyroCoveredMs = 0;
   /** `monotonicNow()` at the previous fused update, for `dt`. Never `Date.now()`. */
   let lastFusionMs: number | null = null;
+  // --- P6a-FIX2 M7: is the fused path actually fusing? -------------------
+  let reseeds = 0;
+  let slowIntervals = 0;
+  let consecutiveSlowIntervals = 0;
+  let gyroStarvedUpdates = 0;
+  let consecutiveGyroStarvedUpdates = 0;
   /**
    * Ticket P6a-FIX1 M1: has the filter been given a real starting attitude
    * yet? Until it has, NOTHING fused is emitted -- no latG/longG and no
@@ -362,22 +592,47 @@ export function createGForceProvider(deps: GForceProviderDeps): GForceProvider {
    * path. The portrait mount assumption is unchanged too: latG is still the
    * device X axis and longG still the device Y axis.
    */
+  /** P6a-FIX2 M7: is the fused estimate currently something other than a real fusion? */
+  function isDegraded(): boolean {
+    return (
+      consecutiveSlowIntervals >= SUSTAINED_SLOW_INTERVALS ||
+      consecutiveGyroStarvedUpdates >= DEGRADED_GYRO_STARVED_UPDATES
+    );
+  }
+
   function handleFusedReading(raw: AccelerometerReading): void {
     const filter = ahrs;
     if (filter === null || !isFiniteReading(raw)) return;
     const now = monotonicNow();
 
-    // --- M1/M3: decide whether this sample advances the filter, seeds it, or
-    // does neither. ---------------------------------------------------------
     const elapsedMs = lastFusionMs === null ? null : now - lastFusionMs;
-    // M3: a gap this long is a broken stream, not jitter -- reseed rather than
-    // integrate across it (and drop the held gyro, which is far past its own
-    // freshness limit by then anyway).
-    const streamBroke = elapsedMs !== null && elapsedMs > MAX_FUSION_GAP_MS;
+
+    // --- M3 / M7: is this a broken stream, or just a slow one? ------------
+    // A single over-threshold interval is a break (backgrounded app,
+    // suspended sensor) and is reseeded rather than integrated across. A RUN
+    // of them is not a break at all -- it is the delivery rate -- and
+    // reseeding every sample would pin the attitude to the raw accelerometer
+    // direction, which cannot tell a tilt from a lateral acceleration and
+    // reports a tenth of the real lateral g. From the second consecutive slow
+    // interval on, integrate normally and raise `degraded` instead. This is
+    // safe precisely because M6 below bounds the rotation to what the
+    // gyroscope actually evidences, so a long interval no longer fabricates
+    // attitude the way it once did.
+    const slow = elapsedMs !== null && elapsedMs > MAX_FUSION_GAP_MS;
+    if (slow) {
+      slowIntervals += 1;
+      consecutiveSlowIntervals += 1;
+    } else if (elapsedMs !== null) {
+      consecutiveSlowIntervals = 0;
+    }
+    const streamBroke = slow && consecutiveSlowIntervals < SUSTAINED_SLOW_INTERVALS;
     if (streamBroke) {
       seeded = false;
       latestGyro = null;
+      gyroRotation = { x: 0, y: 0, z: 0 };
+      gyroCoveredMs = 0;
     }
+
     if (!seeded) {
       // M1: seed from a plausible gravity reading, and emit NOTHING until one
       // arrives -- a fused value without an attitude estimate is a guess.
@@ -385,13 +640,14 @@ export function createGForceProvider(deps: GForceProviderDeps): GForceProvider {
       if (seed === null) return;
       filter.reset(seed);
       seeded = true;
+      if (elapsedMs !== null) reseeds += 1;
       lastFusionMs = now;
+      gyroRotation = { x: 0, y: 0, z: 0 };
+      gyroCoveredMs = 0;
       // The seeded attitude explains THIS reading exactly, so the linear
       // acceleration it implies is the honest one for this sample -- no
       // integration has happened and none is needed.
-      const seededGravity = filter.gravity();
-      emit('latG', raw.x - seededGravity.x);
-      emit('longG', raw.y - seededGravity.y);
+      emitLinear(raw, filter.gravity());
       return;
     }
 
@@ -401,33 +657,64 @@ export function createGForceProvider(deps: GForceProviderDeps): GForceProvider {
     // The accelerometer sample is still real, so it is still reported, using
     // the attitude estimate unchanged.
     if (elapsedMs === null || !Number.isFinite(elapsedMs) || elapsedMs <= 0) {
-      const held = filter.gravity();
-      emit('latG', raw.x - held.x);
-      emit('longG', raw.y - held.y);
+      emitLinear(raw, filter.gravity());
       return;
     }
     lastFusionMs = now;
 
-    // M2: the held gyro rate is only integrated while it is FRESH. Past
-    // `GYRO_MAX_AGE_MS` the rotation rate is taken as zero and the filter
-    // levels on the accelerometer alone.
-    const gyroHold = latestGyro;
-    const gyro =
-      gyroHold !== null && now - gyroHold.atMs <= GYRO_MAX_AGE_MS
-        ? gyroHold.reading
-        : { x: 0, y: 0, z: 0 };
+    // --- M6: integrate exactly the rotation the gyroscope evidences -------
+    // `gyroRotation` is the sum of (rate x its own interval) over the
+    // timestamped gyroscope intervals that closed since the last fused
+    // update. Dividing it by this accelerometer interval gives the AVERAGE
+    // rate which, applied over that interval, reproduces precisely that
+    // rotation and no more. The accelerometer correction inside `update()`
+    // is independent of the gyroscope term, so it still runs over the full
+    // interval, which is what it should do.
+    const dtSeconds = elapsedMs / 1_000;
+    const hasGyroEvidence = gyroCoveredMs > 0;
+    if (hasGyroEvidence) {
+      consecutiveGyroStarvedUpdates = 0;
+    } else {
+      gyroStarvedUpdates += 1;
+      consecutiveGyroStarvedUpdates += 1;
+    }
+    const gyro = hasGyroEvidence
+      ? {
+          x: gyroRotation.x / dtSeconds,
+          y: gyroRotation.y / dtSeconds,
+          z: gyroRotation.z / dtSeconds,
+        }
+      : { x: 0, y: 0, z: 0 };
+    gyroRotation = { x: 0, y: 0, z: 0 };
+    gyroCoveredMs = 0;
 
     try {
-      filter.update(gyro, raw, elapsedMs / 1_000);
+      filter.update(gyro, raw, dtSeconds);
     } catch {
       // `update()` validates its own inputs with `RangeError`. All of them are
       // pre-checked above, so this is defense in depth only: a sensor sample
       // must never escape into the native event emitter as a throw.
       return;
     }
-    const estimated = filter.gravity();
-    emit('latG', raw.x - estimated.x);
-    emit('longG', raw.y - estimated.y);
+    emitLinear(raw, filter.gravity());
+  }
+
+  /**
+   * latG/longG from the raw sample and the estimated vertical.
+   *
+   * CONVENTION-INDEPENDENT, deliberately (ticket P6a-FIX2 H1): `gravity()`
+   * converges on whatever the accelerometer reports at rest, so subtracting it
+   * from the raw sample removes exactly that component and leaves the
+   * vehicle's own linear acceleration -- whether the platform's rest vector
+   * points up (Android) or down (iOS). Only the YAW projection needs to know
+   * which, because a dot product carries the sign through. This path is
+   * therefore NOT touched by the rest-vector setting, and the portrait axis
+   * mapping (latG = device X, longG = device Y) is unchanged from the
+   * pre-P6a provider.
+   */
+  function emitLinear(raw: AccelerometerReading, estimatedVertical: Vector3): void {
+    emit('latG', raw.x - estimatedVertical.x);
+    emit('longG', raw.y - estimatedVertical.y);
   }
 
   /**
@@ -436,56 +723,77 @@ export function createGForceProvider(deps: GForceProviderDeps): GForceProvider {
    * measured channel and `coaching/cleanLap.ts` integrates it against its own
    * `tMonoMs` stamps, so inventing intermediate values would only blur it.
    *
-   * TICKET P6a-FIX1 H1 (HIGH) -- MOUNT-INDEPENDENT YAW AXIS. The first version
-   * read the yaw rate off a FIXED device axis (z), reasoning from the
-   * pre-existing latG=x / longG=y mapping that the mount must be flat. An
-   * independent reviewer argued just as consistently for y, reasoning from the
-   * word "portrait" (upright, where the device z axis points out through the
-   * screen and y is vertical). Both readings of the evidence are sound and
-   * NEITHER is decidable from the source, because the answer is a physical
-   * fact about how the phone is clamped in the car that nobody has measured.
-   * So no axis is chosen at all.
+   * TICKET P6a-FIX1 H1 -- MOUNT-INDEPENDENT YAW AXIS. The first version read
+   * the yaw rate off a FIXED device axis, which required knowing how the phone
+   * is physically clamped in the car -- a fact nobody has measured, and one
+   * two careful readers can disagree about in good faith. So no axis is
+   * chosen. Yaw is rotation about the VERTICAL, whatever the mount makes
+   * vertical in sensor coordinates, and `MadgwickAhrs.gravity()` estimates
+   * exactly that direction; a dot product extracts the component about it. A
+   * flat mount then recovers device z and an upright mount device y, from one
+   * line, with no assumption in it.
    *
-   * Instead the rate is PROJECTED onto the vertical direction the filter has
-   * already estimated. Yaw is rotation about the vertical, whatever the mount
-   * happens to make "vertical" in sensor coordinates, and a dot product with
-   * a unit vector extracts exactly that component. A flat mount then recovers
-   * the old z reading and an upright mount recovers y, from the same line of
-   * code, with no assumption in it. The reviewer's own counter-example --
-   * `{x: 0, y: -PI/2, z: 0}` with the phone upright, a 90 deg/s RIGHT turn,
-   * which the fixed-z version recorded as 0 -- now reads +90 deg/s.
+   * TICKET P6a-FIX2 H1 -- AND THE SIGN IS NOT UNIVERSAL. `gravity()` points
+   * wherever the SENSOR says it does at rest, and the two platforms are
+   * opposite: Core Motion reports a face-up device as z = -1 (the vector
+   * points DOWN) while Android reports specific force, +1 (it points UP).
+   * Negating unconditionally, as the first fix did, is right on Android and
+   * inverts every rotation on iOS -- the platform this app ships on. The
+   * convention is therefore an injected value and the sign is DERIVED from it;
+   * see {@link yawRateProjectionSign} for the derivation and the worked iOS
+   * case.
    *
-   * WHICH VECTOR, AND THE SIGN. `MadgwickAhrs.gravity()` is named for the
-   * quantity it references but it points UP: the filter drives it towards the
-   * NORMALISED ACCELEROMETER READING, and an accelerometer at rest measures
-   * the specific force holding the device up (+1 g on the axis pointing at the
-   * sky), not the downward acceleration of gravity. That is also why the same
-   * vector is subtracted, unnegated, to isolate linear acceleration. So this
-   * projects onto +`gravity()`, the UP direction -- and then NEGATES.
+   * P6a-FIX1 M1 / P6a-FIX2 M5: nothing is emitted before the filter is seeded,
+   * and nothing once the attitude estimate has gone STALE. The vertical is
+   * refreshed only by accelerometer samples; when those stop the estimate
+   * freezes, and a mount rotated meanwhile would project a real yaw onto a
+   * vertical that no longer exists -- reading zero, or the wrong sign.
+   * Emitting nothing is the honest answer, because `cleanLap.ts` has a tested
+   * GNSS course-over-ground fallback for an absent yaw channel.
    *
-   * The negation is the compass convention. A gyroscope is right-handed, so a
-   * positive rate about the UP axis is counterclockwise seen from above, which
-   * is a LEFT turn. `cleanLap.ts` compares the integral of this channel
-   * against GNSS course over ground, which grows CLOCKWISE (a RIGHT turn is
-   * positive). One of the two has to be flipped to share a sense, and it is
-   * this one. Pinned by a test that encodes an actual right turn, in both a
-   * flat and an upright mount.
-   *
-   * P6a-FIX1 M1: nothing is emitted before the filter is seeded -- an
-   * unseeded estimate would project onto a GUESSED vertical, which is the very
-   * thing this fix exists to avoid.
+   * P6a-FIX2 M7: also suppressed while the fusion is DEGRADED. There the
+   * attitude is effectively accelerometer-only, so a sustained lateral
+   * acceleration tilts the estimated vertical and the projection loses a
+   * measurable fraction of the true yaw (an independent review measured a
+   * nominal 90 deg/s reading 80.5). A silently 11%-wrong yaw is worse than no
+   * yaw, precisely because that fallback exists.
    */
   function handleGyroReading(reading: GyroscopeReading): void {
     if (!isFiniteReading(reading)) return;
     const now = monotonicNow();
-    // Timestamped (M2) even when nothing is emitted: the fused update needs
-    // its age, and freshness is judged from when it ARRIVED.
+
+    // --- P6a-FIX2 M6: close the interval this reading ENDS ----------------
+    // The PREVIOUS reading is the rate that held over the span just elapsed
+    // (zero-order hold backwards -- the causally honest choice, since the new
+    // reading is evidence about now, not about the span behind it). A span
+    // longer than the freshness limit means the gyroscope itself had a gap,
+    // and nothing is accumulated across it. This is what stops a single fresh
+    // reading being smeared over an arbitrarily long accelerometer silence.
+    const previous = latestGyro;
+    if (previous !== null) {
+      const spanMs = now - previous.atMs;
+      if (spanMs > 0 && spanMs <= GYRO_MAX_AGE_MS) {
+        const spanSeconds = spanMs / 1_000;
+        gyroRotation = {
+          x: gyroRotation.x + previous.reading.x * spanSeconds,
+          y: gyroRotation.y + previous.reading.y * spanSeconds,
+          z: gyroRotation.z + previous.reading.z * spanSeconds,
+        };
+        gyroCoveredMs += spanMs;
+      }
+    }
     latestGyro = { reading, atMs: now };
+
     const filter = ahrs;
     if (filter === null || !seeded) return;
-    const up = filter.gravity();
-    const aboutUp = reading.x * up.x + reading.y * up.y + reading.z * up.z;
-    emit('yawRateDps', -aboutUp * RAD_TO_DEG);
+    // M5: the vertical must be current evidence, not a frozen memory.
+    if (lastFusionMs === null || now - lastFusionMs > ATTITUDE_MAX_AGE_MS) return;
+    // M7: and the fusion must actually be fusing.
+    if (isDegraded()) return;
+    const vertical = filter.gravity();
+    const aboutVertical =
+      reading.x * vertical.x + reading.y * vertical.y + reading.z * vertical.z;
+    emit('yawRateDps', yawSign * aboutVertical * RAD_TO_DEG);
   }
 
   function handleReading(raw: AccelerometerReading): void {
@@ -515,6 +823,13 @@ export function createGForceProvider(deps: GForceProviderDeps): GForceProvider {
    */
   async function startGyroscope(myGeneration: number): Promise<void> {
     try {
+      // P6a-FIX2 H1: settle the sign convention BEFORE any sample can be
+      // emitted under the wrong one. Only when the caller did not state it.
+      if (deps.accelerometerRestVector === undefined) {
+        const resolved = await defaultAccelerometerRestVector();
+        if (!running || myGeneration !== generation) return;
+        yawSign = yawRateProjectionSign(resolved);
+      }
       const gyroscope = await getGyroscopeSource();
       const available = await gyroscope.isAvailableAsync();
       if (!available || !running || myGeneration !== generation) return;
@@ -548,6 +863,15 @@ export function createGForceProvider(deps: GForceProviderDeps): GForceProvider {
       lastFusionMs = null;
       // P6a-FIX1 M1: every run re-seeds from its own first plausible reading.
       seeded = false;
+      // P6a-FIX2 M6/M7: a run never inherits the previous run's gyro evidence
+      // or its health counters.
+      gyroRotation = { x: 0, y: 0, z: 0 };
+      gyroCoveredMs = 0;
+      reseeds = 0;
+      slowIntervals = 0;
+      consecutiveSlowIntervals = 0;
+      gyroStarvedUpdates = 0;
+      consecutiveGyroStarvedUpdates = 0;
       const myGeneration = ++generation;
       if (fusionActive) void startGyroscope(myGeneration);
       void (async () => {
@@ -589,11 +913,29 @@ export function createGForceProvider(deps: GForceProviderDeps): GForceProvider {
       latestGyro = null;
       lastFusionMs = null;
       seeded = false;
+      gyroRotation = { x: 0, y: 0, z: 0 };
+      gyroCoveredMs = 0;
     },
 
     onSample(cb) {
       sampleListeners.add(cb);
       return () => sampleListeners.delete(cb);
+    },
+
+    /**
+     * Ticket P6a-FIX2 M7: the fused path's own health. All zeroes and
+     * `degraded: false` while fusion is off, so a caller never has to ask
+     * whether the numbers mean anything.
+     */
+    getFusionDiagnostics(): GForceFusionDiagnostics {
+      return {
+        fusionActive,
+        seeded,
+        reseeds,
+        slowIntervals,
+        gyroStarvedUpdates,
+        degraded: fusionActive && isDegraded(),
+      };
     },
   };
 }

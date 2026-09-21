@@ -81,7 +81,15 @@ vi.mock('../../src/session/telemetryProvider', () => ({
 }));
 
 /** Passive `GForceProvider` double -- exists ONLY so composition.ts's unconditional `createGForceProvider(...)` import/construction never reaches the real, lazy `import('expo-sensors')` inside `gforceProvider.ts` (vitest must never load it); this file's own tests don't need G samples. */
-vi.mock('../../src/session/gforceProvider', () => ({
+vi.mock('../../src/session/gforceProvider', async () => ({
+  // Ticket P6a-FIX2 V1: everything EXCEPT the provider factory stays the real
+  // module -- `connectGForceRecording` above all, which is the production
+  // seam `composition.ts` routes G samples through. Re-declaring it here
+  // would make these suites pass against a copy of the wiring instead of the
+  // wiring, which is the defect that fix exists to close.
+  ...(await vi.importActual<typeof import('../../src/session/gforceProvider')>(
+    '../../src/session/gforceProvider',
+  )),
   createGForceProvider: () => ({
     start: () => {},
     stop: async () => {},

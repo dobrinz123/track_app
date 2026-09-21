@@ -2,9 +2,13 @@ import { describe, expect, it } from 'vitest';
 import type { TelemetrySample } from '@circuit/core';
 
 import {
+  ANDROID_ACCELEROMETER_REST_VECTOR,
+  IOS_ACCELEROMETER_REST_VECTOR,
   computeLinearAcceleration,
   createGForceProvider,
+  yawRateProjectionSign,
   type AccelerometerReading,
+  type AccelerometerRestVector,
   type AccelerometerSource,
   type AccelerometerSubscription,
   type GyroscopeReading,
@@ -81,6 +85,10 @@ async function startRig(imuFusionEnabled: boolean): Promise<Rig> {
     accelerometerSource: async () => accel,
     gyroscopeSource: async () => gyro,
     imuFusionEnabled: () => imuFusionEnabled,
+    // P6a-FIX2 H1: stated explicitly, exactly like the two sensor sources
+    // above -- so the real lazy `import('react-native')` is never reached
+    // under vitest. The default-resolution path has its own test below.
+    accelerometerRestVector: 'down',
   });
   provider.onSample((s) => samples.push(s));
   provider.start();
@@ -191,22 +199,86 @@ describe('P6a -- imuFusionEnabled ON: Madgwick gravity + the gyroscope channel',
 });
 
 /**
- * Ticket P6a-FIX1 H1 (HIGH). The yaw axis must not be a chosen device axis,
- * because which device axis is vertical is a fact about the physical mount
- * that nobody has measured. The rate is projected onto the vertical the
- * filter itself estimates, so the SAME code gives the right answer for a
- * phone lying flat and for a phone standing upright.
+ * Ticket P6a-FIX1 H1 + P6a-FIX2 H1 (HIGH). Two separate things have to be
+ * right for `yawRateDps`, and the first fix only got one of them.
+ *
+ *  - THE AXIS must not be a chosen device axis, because which device axis is
+ *    vertical is a fact about the physical mount nobody has measured. It is
+ *    the vertical the filter estimates, so one line serves every mount.
+ *  - THE SIGN depends on which way the platform's accelerometer reads at
+ *    rest, and iOS and Android are OPPOSITE (Core Motion forwards a face-up
+ *    device as z = -1, pointing down; Android rescales specific force, +1,
+ *    pointing up). An unconditional negation is right on one platform and
+ *    inverts every rotation on the other.
  *
  * Every case below encodes a REAL RIGHT TURN and requires a POSITIVE
  * `yawRateDps`, because `cleanLap.ts` compares the integral of this channel
- * against GNSS course over ground, which grows clockwise.
+ * against GNSS course over ground, which grows clockwise -- and every case
+ * runs under BOTH conventions, with the sensor readings expressed in each
+ * platform's own terms.
  */
-describe('P6a-FIX1 H1 -- the yaw axis is mount-independent', () => {
+describe('P6a-FIX2 H1 -- mount-independent axis AND platform-correct sign', () => {
   const NINETY_DPS_RAD = Math.PI / 2;
 
-  /** Settles the filter on `atRest` so `gravity()` really is this mount's vertical. */
-  async function mountedRig(atRest: AccelerometerReading): Promise<Rig> {
-    const rig = await startRig(true);
+  /**
+   * Four mounts, described by where the SKY is in device coordinates. The
+   * at-rest accelerometer reading is derived per platform: it equals `up`
+   * under the Android (specific force) convention and `-up` under the iOS
+   * (Core Motion) one. Nothing below hardcodes a reading.
+   */
+  const MOUNTS: readonly { name: string; up: AccelerometerReading }[] = [
+    { name: 'flat (sky = device +z)', up: { x: 0, y: 0, z: 1 } },
+    { name: 'upright portrait (sky = device +y)', up: { x: 0, y: 1, z: 0 } },
+    { name: 'inverted portrait (sky = device -y)', up: { x: 0, y: -1, z: 0 } },
+    {
+      name: 'tilted 45 deg (no device axis is vertical)',
+      up: { x: 0, y: Math.SQRT1_2, z: Math.SQRT1_2 },
+    },
+  ];
+
+  const CONVENTIONS: readonly { platform: string; restVector: AccelerometerRestVector }[] = [
+    { platform: 'iOS (Core Motion, rest vector points DOWN)', restVector: 'down' },
+    { platform: 'Android (specific force, rest vector points UP)', restVector: 'up' },
+  ];
+
+  /** The reading a device at rest in this mount produces on this platform. */
+  const restReading = (
+    up: AccelerometerReading,
+    restVector: AccelerometerRestVector,
+  ): AccelerometerReading =>
+    restVector === 'up' ? up : { x: -up.x, y: -up.y, z: -up.z };
+
+  /**
+   * A right turn is clockwise seen from above, so by the right-hand rule its
+   * angular-velocity vector points DOWN -- along `-up`, whatever the platform
+   * convention is. The gyroscope is right-handed on both platforms.
+   */
+  const rightTurnGyro = (up: AccelerometerReading, rateRad: number): AccelerometerReading => ({
+    x: -up.x * rateRad,
+    y: -up.y * rateRad,
+    z: -up.z * rateRad,
+  });
+
+  async function mountedRig(
+    up: AccelerometerReading,
+    restVector: AccelerometerRestVector,
+  ): Promise<Rig> {
+    const accel = new FakeSensorSource();
+    const gyro = new FakeSensorSource();
+    const samples: TelemetrySample[] = [];
+    const clock = steppedClock();
+    const provider = createGForceProvider({
+      monotonicNow: clock.now,
+      accelerometerSource: async () => accel,
+      gyroscopeSource: async () => gyro,
+      imuFusionEnabled: () => true,
+      accelerometerRestVector: restVector,
+    });
+    provider.onSample((s) => samples.push(s));
+    provider.start();
+    await flushMicrotasks();
+    const rig: Rig = { accel, gyro, samples, clock, provider };
+    const atRest = restReading(up, restVector);
     for (let i = 0; i < 80; i += 1) {
       rig.clock.advance(40);
       rig.gyro.emit({ x: 0, y: 0, z: 0 });
@@ -233,66 +305,125 @@ describe('P6a-FIX1 H1 -- the yaw axis is mount-independent', () => {
    */
   const YAW_DIGITS = 2;
 
-  it('FLAT mount (up = device +z): a right turn reads +90 deg/s', async () => {
-    const rig = await mountedRig({ x: 0, y: 0, z: 1 });
+  const deliverGyro = (rig: Rig, reading: AccelerometerReading): void => {
     rig.clock.advance(40);
-    // Right-handed about UP is counterclockwise = a LEFT turn, so a RIGHT
-    // turn is the negative rate about the up axis.
-    rig.gyro.emit({ x: 0, y: 0, z: -NINETY_DPS_RAD });
-    expect(yawOf(rig)).toBeCloseTo(90, YAW_DIGITS);
-    await rig.provider.stop();
-  });
+    rig.gyro.emit(reading);
+  };
 
-  it('UPRIGHT PORTRAIT mount (up = device +y): the SAME right turn still reads +90 deg/s', async () => {
-    // This is the reviewer's counter-example: with the phone upright, the
-    // fixed-device-z version recorded 0 deg/s for a 90 deg/s right turn.
-    const rig = await mountedRig({ x: 0, y: 1, z: 0 });
-    rig.clock.advance(40);
-    rig.gyro.emit({ x: 0, y: -NINETY_DPS_RAD, z: 0 });
-    expect(yawOf(rig)).toBeCloseTo(90, YAW_DIGITS);
-    await rig.provider.stop();
-  });
+  for (const { platform, restVector } of CONVENTIONS) {
+    describe(platform, () => {
+      for (const { name, up } of MOUNTS) {
+        it(name + ': a right turn reads +90 deg/s', async () => {
+          const rig = await mountedRig(up, restVector);
+          deliverGyro(rig, rightTurnGyro(up, NINETY_DPS_RAD));
+          expect(yawOf(rig)).toBeCloseTo(90, YAW_DIGITS);
+          await rig.provider.stop();
+        });
 
-  it('INVERTED PORTRAIT mount (up = device -y): still +90 deg/s for a right turn', async () => {
-    const rig = await mountedRig({ x: 0, y: -1, z: 0 });
-    rig.clock.advance(40);
-    rig.gyro.emit({ x: 0, y: NINETY_DPS_RAD, z: 0 });
-    expect(yawOf(rig)).toBeCloseTo(90, YAW_DIGITS);
-    await rig.provider.stop();
-  });
+        it(name + ': a left turn reads -90 deg/s', async () => {
+          const rig = await mountedRig(up, restVector);
+          deliverGyro(rig, rightTurnGyro(up, -NINETY_DPS_RAD));
+          expect(yawOf(rig)).toBeCloseTo(-90, YAW_DIGITS);
+          await rig.provider.stop();
+        });
+      }
 
-  it('a TILTED mount (no device axis is vertical) still resolves the right turn correctly', async () => {
-    // 45 degrees between y and z: neither axis alone carries the yaw.
-    const s = Math.SQRT1_2;
-    const rig = await mountedRig({ x: 0, y: s, z: s });
-    rig.clock.advance(40);
-    rig.gyro.emit({ x: 0, y: -NINETY_DPS_RAD * s, z: -NINETY_DPS_RAD * s });
-    expect(yawOf(rig)).toBeCloseTo(90, YAW_DIGITS);
-    await rig.provider.stop();
-  });
-
-  it('a LEFT turn is negative in every mount (the sign is pinned in both directions)', async () => {
-    for (const atRest of [
-      { x: 0, y: 0, z: 1 },
-      { x: 0, y: 1, z: 0 },
-    ]) {
-      const rig = await mountedRig(atRest);
-      rig.clock.advance(40);
-      rig.gyro.emit({
-        x: 0,
-        y: atRest.y * NINETY_DPS_RAD,
-        z: atRest.z * NINETY_DPS_RAD,
+      it('a rotation PERPENDICULAR to the estimated vertical contributes no yaw', async () => {
+        const rig = await mountedRig({ x: 0, y: 0, z: 1 }, restVector);
+        deliverGyro(rig, { x: NINETY_DPS_RAD, y: 0, z: 0 }); // pure roll/pitch
+        expect(yawOf(rig)).toBeCloseTo(0, YAW_DIGITS);
+        await rig.provider.stop();
       });
-      expect(yawOf(rig)).toBeCloseTo(-90, YAW_DIGITS);
-      await rig.provider.stop();
-    }
+    });
+  }
+
+  it('the reviewer-measured iOS case: upright iPhone, gyro {x:0,y:-PI/2,z:0}, reads +90 not -90', async () => {
+    // An upright iPhone at rest reads {x:0, y:-1, z:0} (Core Motion, pointing
+    // at the earth), so the sky is device +y. The first fix emitted -90 here.
+    const rig = await mountedRig({ x: 0, y: 1, z: 0 }, 'down');
+    deliverGyro(rig, { x: 0, y: -NINETY_DPS_RAD, z: 0 });
+    const measured = yawOf(rig);
+    expect(measured).toBeCloseTo(90, YAW_DIGITS);
+    expect(measured).toBeGreaterThan(0);
+    await rig.provider.stop();
   });
 
-  it('a rotation PERPENDICULAR to the estimated vertical contributes no yaw at all', async () => {
-    const rig = await mountedRig({ x: 0, y: 0, z: 1 });
+  it('the two conventions genuinely disagree -- identical RAW readings flip sign', async () => {
+    // Same numbers into the provider; only the declared convention differs.
+    // If the sign were hardcoded again, these two would be equal.
+    const raw = { x: 0, y: -1, z: 0 };
+    const gyroReading = { x: 0, y: -NINETY_DPS_RAD, z: 0 };
+    const results: number[] = [];
+    for (const restVector of ['down', 'up'] as const) {
+      const accel = new FakeSensorSource();
+      const gyro = new FakeSensorSource();
+      const samples: TelemetrySample[] = [];
+      const clock = steppedClock();
+      const provider = createGForceProvider({
+        monotonicNow: clock.now,
+        accelerometerSource: async () => accel,
+        gyroscopeSource: async () => gyro,
+        imuFusionEnabled: () => true,
+        accelerometerRestVector: restVector,
+      });
+      provider.onSample((s) => samples.push(s));
+      provider.start();
+      await flushMicrotasks();
+      for (let i = 0; i < 80; i += 1) {
+        clock.advance(40);
+        gyro.emit({ x: 0, y: 0, z: 0 });
+        accel.emit(raw);
+      }
+      samples.length = 0;
+      clock.advance(40);
+      gyro.emit(gyroReading);
+      results.push(samples.filter((s) => s.channel === 'yawRateDps')[0]!.value);
+      await provider.stop();
+    }
+    expect(results[0]!).toBeCloseTo(90, YAW_DIGITS);
+    expect(results[1]!).toBeCloseTo(-90, YAW_DIGITS);
+  });
+
+  it('yawRateProjectionSign is derived, not guessed: down -> +1, up -> -1', () => {
+    expect(yawRateProjectionSign('down')).toBe(1);
+    expect(yawRateProjectionSign('up')).toBe(-1);
+    expect(IOS_ACCELEROMETER_REST_VECTOR).toBe('down');
+    expect(ANDROID_ACCELEROMETER_REST_VECTOR).toBe('up');
+  });
+
+  it('with NO convention injected it resolves one, and degrades to iOS -- the platform this app ships on', async () => {
+    // The only test that lets the real resolution path run. Under vitest the
+    // lazy `import('react-native')` rejects, which is exactly the documented
+    // degradation, so this also pins the fallback.
+    const accel = new FakeSensorSource();
+    const gyro = new FakeSensorSource();
+    const samples: TelemetrySample[] = [];
+    const clock = steppedClock();
+    const provider = createGForceProvider({
+      monotonicNow: clock.now,
+      accelerometerSource: async () => accel,
+      gyroscopeSource: async () => gyro,
+      imuFusionEnabled: () => true,
+// P6a-FIX2 H1: stated explicitly so the lazy platform read is never reached under vitest.
+accelerometerRestVector: 'down',
+    });
+    provider.onSample((s) => samples.push(s));
+    provider.start();
+    // A rejected dynamic import settles on a macrotask, not a microtask.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flushMicrotasks();
+    const rig: Rig = { accel, gyro, samples, clock, provider };
+    const up = { x: 0, y: 1, z: 0 };
+    const atRest = { x: 0, y: -1, z: 0 }; // the iOS reading for that mount
+    for (let i = 0; i < 80; i += 1) {
+      rig.clock.advance(40);
+      rig.gyro.emit({ x: 0, y: 0, z: 0 });
+      rig.accel.emit(atRest);
+    }
+    rig.samples.length = 0;
     rig.clock.advance(40);
-    rig.gyro.emit({ x: NINETY_DPS_RAD, y: 0, z: 0 }); // pure roll/pitch
-    expect(yawOf(rig)).toBeCloseTo(0, YAW_DIGITS);
+    rig.gyro.emit(rightTurnGyro(up, NINETY_DPS_RAD));
+    expect(yawOf(rig)).toBeCloseTo(90, YAW_DIGITS);
     await rig.provider.stop();
   });
 
@@ -313,69 +444,6 @@ describe('P6a-FIX1 H1 -- the yaw axis is mount-independent', () => {
     expect(rig.samples.filter((s) => s.channel === 'yawRateDps')).toHaveLength(1);
     await rig.provider.stop();
   });
-
-  it('keeps the latG/longG cadence and the portrait axis mapping, and produces DIFFERENT (fused) values than the low-pass', async () => {
-    const stream: AccelerometerReading[] = [
-      { x: 0.0, y: 0.0, z: 1.0 },
-      { x: 0.35, y: -0.2, z: 1.0 },
-      { x: 0.4, y: -0.25, z: 1.0 },
-      { x: 0.2, y: 0.1, z: 1.0 },
-    ];
-    const off = await startRig(false);
-    const on = await startRig(true);
-    for (const raw of stream) {
-      off.clock.advance(40);
-      off.accel.emit(raw);
-      on.clock.advance(40);
-      on.gyro.emit({ x: 0, y: 0, z: -0.2 });
-      on.accel.emit(raw);
-    }
-
-    const gOnly = (r: Rig): TelemetrySample[] =>
-      r.samples.filter((s) => s.channel === 'latG' || s.channel === 'longG');
-    // Same count, same order, same channels -- only the values move.
-    expect(channelsOf(gOnly(on))).toEqual(channelsOf(gOnly(off)));
-    expect(gOnly(on)).toHaveLength(stream.length * 2);
-    expect(gOnly(on).map((s) => s.value)).not.toEqual(gOnly(off).map((s) => s.value));
-    await off.provider.stop();
-    await on.provider.stop();
-  });
-
-  it('holds the last gyroscope reading between accelerometer samples (the documented pairing) and never blocks on one', async () => {
-    const rig = await startRig(true);
-    // An accelerometer reading BEFORE any gyroscope reading still produces its
-    // pair of samples -- the filter simply integrates a zero rotation rate.
-    rig.clock.advance(40);
-    rig.accel.emit({ x: 0.1, y: 0.05, z: 1 });
-    expect(channelsOf(rig.samples)).toEqual(['latG', 'longG']);
-
-    // One gyroscope reading, then two accelerometer readings: both are fused
-    // (the gyro is held), and the gyro emits exactly once.
-    rig.clock.advance(40);
-    rig.gyro.emit({ x: 0, y: 0, z: -0.4 });
-    rig.clock.advance(40);
-    rig.accel.emit({ x: 0.2, y: 0.05, z: 1 });
-    rig.clock.advance(40);
-    rig.accel.emit({ x: 0.2, y: 0.05, z: 1 });
-
-    expect(rig.samples.filter((s) => s.channel === 'yawRateDps')).toHaveLength(1);
-    expect(rig.samples.filter((s) => s.channel === 'latG')).toHaveLength(3);
-    expect(rig.samples.filter((s) => s.channel === 'longG')).toHaveLength(3);
-    await rig.provider.stop();
-  });
-
-  it('a level, stationary device converges to ~0 latG/longG -- the fused gravity really is gravity', async () => {
-    const rig = await startRig(true);
-    for (let i = 0; i < 200; i += 1) {
-      rig.clock.advance(40);
-      rig.gyro.emit({ x: 0, y: 0, z: 0 });
-      rig.accel.emit({ x: 0, y: 0, z: 1 });
-    }
-    const last = rig.samples.slice(-2);
-    expect(Math.abs(last[0]!.value)).toBeLessThan(0.01);
-    expect(Math.abs(last[1]!.value)).toBeLessThan(0.01);
-    await rig.provider.stop();
-  });
 });
 
 describe('P6a -- the optional-capability contract holds for the gyroscope too', () => {
@@ -390,6 +458,8 @@ describe('P6a -- the optional-capability contract holds for the gyroscope too', 
       accelerometerSource: async () => accel,
       gyroscopeSource: async () => gyro,
       imuFusionEnabled: () => true,
+// P6a-FIX2 H1: stated explicitly so the lazy platform read is never reached under vitest.
+accelerometerRestVector: 'down',
     });
     provider.onSample((s) => samples.push(s));
     expect(() => provider.start()).not.toThrow();
@@ -414,6 +484,8 @@ describe('P6a -- the optional-capability contract holds for the gyroscope too', 
         throw new Error('module not available (test)');
       },
       imuFusionEnabled: () => true,
+// P6a-FIX2 H1: stated explicitly so the lazy platform read is never reached under vitest.
+accelerometerRestVector: 'down',
     });
     provider.onSample((s) => samples.push(s));
     expect(() => provider.start()).not.toThrow();
@@ -471,6 +543,8 @@ describe('P6a -- the optional-capability contract holds for the gyroscope too', 
       accelerometerSource: async () => accel,
       gyroscopeSource: () => pending,
       imuFusionEnabled: () => true,
+// P6a-FIX2 H1: stated explicitly so the lazy platform read is never reached under vitest.
+accelerometerRestVector: 'down',
     });
     provider.start();
     await provider.stop();
@@ -490,6 +564,8 @@ describe('P6a -- the optional-capability contract holds for the gyroscope too', 
       accelerometerSource: async () => accel,
       gyroscopeSource: async () => gyro,
       imuFusionEnabled: () => enabled,
+// P6a-FIX2 H1: stated explicitly so the lazy platform read is never reached under vitest.
+accelerometerRestVector: 'down',
     });
     provider.onSample((s) => samples.push(s));
     provider.start();

@@ -53,6 +53,8 @@ async function fusedRig() {
     accelerometerSource: async () => accel,
     gyroscopeSource: async () => gyro,
     imuFusionEnabled: () => true,
+// P6a-FIX2 H1: stated explicitly so the lazy platform read is never reached under vitest.
+accelerometerRestVector: 'down',
   });
   provider.onSample((sample) => samples.push(sample));
   provider.start();
@@ -204,15 +206,216 @@ describe('P6a-FIX1 M3 -- discontinuous timestamps never fabricate integration ti
     await rig.provider.stop();
   });
 
-  it('a gap just INSIDE the limit still integrates normally (the threshold is a cliff, not a mute)', async () => {
+  it('a gap just INSIDE the limit still integrates the rotation the gyro EVIDENCES', async () => {
+    // Rewritten for P6a-FIX2 M6. The previous version of this test delivered
+    // ONE gyro reading and asserted that a 120 ms accelerometer gap integrated
+    // it across the whole span -- which is precisely the defect M6 names, so
+    // the assertion was pinning a bug. Two readings now close a real 40 ms
+    // interval, and that 40 ms of rotation (not 120 ms of it) is what may be
+    // applied.
     const rig = await fusedRig();
     rig.advance(40);
     rig.accel({ x: 0, y: 0, z: 1 }); // seed
     rig.advance(40);
     rig.gyro({ x: 1, y: 0, z: 0 });
-    rig.advance(80); // 120 ms since the gyro: inside both limits
+    rig.advance(40);
+    rig.gyro({ x: 1, y: 0, z: 0 }); // closes a 40 ms interval at 1 rad/s
+    rig.advance(40); // 120 ms since the seed: inside both limits
     rig.accel({ x: 0, y: 0, z: 1 });
-    expect(Math.abs(lastLongG(rig.samples))).toBeGreaterThan(0.01);
+    const measured = Math.abs(lastLongG(rig.samples));
+    // 40 ms at 1 rad/s is 0.04 rad of pitch, so roughly 0.04 g on longG once
+    // the accelerometer correction has had its say -- present, but nowhere
+    // near the 0.12 rad the whole 120 ms gap would have fabricated.
+    expect(measured).toBeGreaterThan(0.005);
+    expect(measured).toBeLessThan(Math.sin(0.12));
     await rig.provider.stop();
+  });
+});
+
+describe('P6a-FIX2 M6 -- a gyro reading is never smeared across the interval before it', () => {
+  it('the exact reviewer scenario: 500 ms silence then one fresh 1 rad/s reading emits ~0, not -0.4705882353 g', async () => {
+    const rig = await fusedRig();
+    rig.advance(40);
+    rig.accel({ x: 0, y: 0, z: 1 }); // seed level
+    rig.advance(500);
+    // Age ZERO, so the freshness check of M2 passes -- but this reading is
+    // evidence about now, not about the 500 ms of silence behind it.
+    rig.gyro({ x: 1, y: 0, z: 0 });
+    rig.accel({ x: 0, y: 0, z: 1 }); // level, stationary
+    expect(Math.abs(lastLongG(rig.samples))).toBeLessThan(1e-9);
+    await rig.provider.stop();
+  });
+
+  it('rotation is integrated in proportion to the gyro intervals that actually closed', async () => {
+    // Half the accelerometer interval is covered by gyro evidence, so half
+    // the rotation may be applied -- not all of it, and not none of it.
+    const halfCovered = await fusedRig();
+    halfCovered.advance(40);
+    halfCovered.accel({ x: 0, y: 0, z: 1 });
+    halfCovered.advance(40);
+    halfCovered.gyro({ x: 1, y: 0, z: 0 });
+    halfCovered.advance(40);
+    halfCovered.gyro({ x: 1, y: 0, z: 0 }); // 40 ms of evidence
+    halfCovered.advance(40);
+    halfCovered.accel({ x: 0, y: 0, z: 1 }); // over an 80 ms interval
+
+    const fullyCovered = await fusedRig();
+    fullyCovered.advance(40);
+    fullyCovered.accel({ x: 0, y: 0, z: 1 });
+    fullyCovered.advance(40);
+    fullyCovered.gyro({ x: 1, y: 0, z: 0 });
+    fullyCovered.advance(40);
+    fullyCovered.gyro({ x: 1, y: 0, z: 0 });
+    fullyCovered.advance(40);
+    fullyCovered.gyro({ x: 1, y: 0, z: 0 }); // 80 ms of evidence
+    fullyCovered.accel({ x: 0, y: 0, z: 1 }); // over the same 80 ms interval
+
+    expect(Math.abs(lastLongG(fullyCovered.samples))).toBeGreaterThan(
+      Math.abs(lastLongG(halfCovered.samples)) * 1.5,
+    );
+    await halfCovered.provider.stop();
+    await fullyCovered.provider.stop();
+  });
+});
+
+describe('P6a-FIX2 M5 -- yawRateDps stops when the attitude estimate goes stale', () => {
+  it('gyro callbacks after the accelerometer stops emit nothing rather than project onto a frozen vertical', async () => {
+    const rig = await fusedRig();
+    for (let i = 0; i < 40; i += 1) {
+      rig.advance(40);
+      rig.gyro({ x: 0, y: 0, z: 0 });
+      rig.accel({ x: 0, y: 0, z: 1 });
+    }
+    const healthy = rig.samples.filter((s) => s.channel === 'yawRateDps').length;
+    expect(healthy).toBeGreaterThan(30);
+
+    // The accelerometer stops; the gyroscope keeps firing for 1.6 s.
+    for (let i = 0; i < 40; i += 1) {
+      rig.advance(40);
+      rig.gyro({ x: 0, y: 0, z: -1 });
+    }
+    const afterwards = rig.samples.filter((s) => s.channel === 'yawRateDps').length - healthy;
+    // Only the readings inside ATTITUDE_MAX_AGE_MS (500 ms) of the last
+    // accelerometer sample are emitted; everything past that is silence.
+    expect(afterwards).toBeGreaterThan(0);
+    expect(afterwards).toBeLessThanOrEqual(13); // 500 ms / 40 ms, inclusive
+    await rig.provider.stop();
+  });
+
+  it('the channel resumes as soon as the accelerometer comes back', async () => {
+    const rig = await fusedRig();
+    rig.advance(40);
+    rig.accel({ x: 0, y: 0, z: 1 });
+    rig.advance(2_000); // attitude now stale
+    rig.gyro({ x: 0, y: 0, z: -1 });
+    rig.gyro({ x: 0, y: 0, z: -1 });
+    expect(rig.samples.filter((s) => s.channel === 'yawRateDps')).toHaveLength(0);
+
+    rig.accel({ x: 0, y: 0, z: 1 }); // reseeds, attitude fresh again
+    rig.advance(40);
+    rig.gyro({ x: 0, y: 0, z: -1 });
+    rig.advance(40);
+    rig.gyro({ x: 0, y: 0, z: -1 });
+    expect(
+      rig.samples.filter((s) => s.channel === 'yawRateDps').length,
+    ).toBeGreaterThan(0);
+    await rig.provider.stop();
+  });
+});
+
+describe('P6a-FIX2 M7 -- "fusion is on but not fusing" is visible, not silent', () => {
+  it('healthy 25 Hz delivery reports a clean bill of health', async () => {
+    const rig = await fusedRig();
+    const rate = Math.PI / 2;
+    for (let i = 0; i < 100; i += 1) {
+      rig.advance(40);
+      rig.gyro({ x: 0, y: 0, z: -rate });
+      rig.accel({ x: 0, y: 0, z: 1 });
+    }
+    const diagnostics = rig.provider.getFusionDiagnostics();
+    expect(diagnostics).toEqual({
+      fusionActive: true,
+      seeded: true,
+      reseeds: 0,
+      slowIntervals: 0,
+      gyroStarvedUpdates: 0,
+      degraded: false,
+    });
+    await rig.provider.stop();
+  });
+
+  it('the exact reviewer scenario: sustained 1 Hz delivery raises `degraded` instead of passing silently', async () => {
+    const rig = await fusedRig();
+    for (let i = 0; i < 12; i += 1) {
+      rig.advance(1_000);
+      rig.accel({ x: 0.5, y: 0, z: 1 });
+    }
+    const diagnostics = rig.provider.getFusionDiagnostics();
+    expect(diagnostics.degraded).toBe(true);
+    expect(diagnostics.slowIntervals).toBeGreaterThan(1);
+    expect(diagnostics.gyroStarvedUpdates).toBeGreaterThan(1);
+
+    // The lateral reading itself is NOT a fusion regression and is not
+    // claimed to be fixed: an attitude estimate with no gyroscope cannot tell
+    // a tilt from a sustained lateral acceleration, so it leans into it. The
+    // measured 0.0528 g is in fact CLOSER to the truth than the legacy
+    // low-pass path gives for the same input (0.0344 g, measured) -- which is
+    // why this state is reported rather than suppressed.
+    const latG = rig.samples.filter((s) => s.channel === 'latG').at(-1)?.value;
+    expect(latG).toBeCloseTo(0.0527864, 6);
+    await rig.provider.stop();
+  });
+
+  it('the 90 deg/s yaw that silently read 80.4984472 is now not emitted at all', async () => {
+    const rig = await fusedRig();
+    const rate = Math.PI / 2;
+    for (let i = 0; i < 12; i += 1) {
+      rig.advance(1_000);
+      rig.gyro({ x: 0, y: 0, z: -rate });
+      rig.accel({ x: 0.5, y: 0, z: 1 });
+    }
+    expect(rig.samples.filter((s) => s.channel === 'yawRateDps')).toHaveLength(0);
+    expect(rig.provider.getFusionDiagnostics().degraded).toBe(true);
+    // ... while latG/longG keep flowing, because there the fused value is no
+    // worse than the flags-off path and an absent channel would be worse.
+    expect(rig.samples.filter((s) => s.channel === 'latG').length).toBeGreaterThan(5);
+    await rig.provider.stop();
+  });
+
+  it('ONE long gap is a stream break, not degradation -- M3 behaviour is preserved', async () => {
+    const rig = await fusedRig();
+    for (let i = 0; i < 25; i += 1) {
+      rig.advance(40);
+      rig.gyro({ x: 0, y: 0, z: 0 });
+      rig.accel({ x: 0, y: 0, z: 1 });
+    }
+    rig.advance(5_000);
+    rig.gyro({ x: 1, y: 0, z: 0 });
+    rig.accel({ x: 0, y: 0, z: 1 });
+    expect(Math.abs(lastLongG(rig.samples))).toBeLessThan(1e-9); // reseeded
+    const diagnostics = rig.provider.getFusionDiagnostics();
+    expect(diagnostics.reseeds).toBe(1);
+    expect(diagnostics.degraded).toBe(false);
+    await rig.provider.stop();
+  });
+
+  it('diagnostics are all-clear and inert while the flag is OFF', async () => {
+    const accel = new ScriptedSensor();
+    const provider = createGForceProvider({
+      monotonicNow: () => 0,
+      accelerometerSource: async () => accel,
+      imuFusionEnabled: () => false,
+    });
+    provider.start();
+    await flushMicrotasks();
+    expect(provider.getFusionDiagnostics()).toEqual({
+      fusionActive: false,
+      seeded: false,
+      reseeds: 0,
+      slowIntervals: 0,
+      gyroStarvedUpdates: 0,
+      degraded: false,
+    });
+    await provider.stop();
   });
 });
