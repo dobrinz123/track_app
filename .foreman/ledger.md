@@ -694,3 +694,115 @@ CI RUN 35624656015 on 989e4a6 — COMPLETE. Gates (typecheck/lint/test) SUCCESS.
     osv-scan ran, UPLOADED SARIF TO THE SECURITY TAB SUCCESSFULLY (https://github.com/dobrinz123/track_app/security/code-scanning?query=is%3Aopen+branch%3Amain+tool%3Aosv-scanner) and failed on the advisories it found. The SARIF upload was the one part that could not be validated locally -- it works.
   => The workflow itself is CORRECT on first run. The repo now has a working test gate for the first time.
 RUN P6 CLOSED.
+
+---
+# RUN P7 — clear the readiness-ledger backlog (2026-09-21)
+
+BASELINE: d4d42d1 | clean except hardware/kicad/* (pre-existing) | 2026-09-21
+USER INSTRUCTION: "citeste toate problemele si da deploy la agenti sa le rezolve pe rand" — work the whole readiness backlog, SEQUENTIALLY.
+MODE: Codex-boosted Full. LEAD = Opus 5 (1M).
+
+## Plan (sequential, per the user's "pe rand")
+- P7D  six code residuals R1-R6 from Codex's final P6 review
+- P7E  licence-policy backlog: 9 packages outside the allowlist + 3 UNLICENSED workspace packages + the App Store NOTICES obligation
+- P7F  advisory backlog: 29 advisories (1 critical dev-only, 10 high), most transitive through expo/metro
+- then Codex review of the lot, gates, commit, push
+
+## Routing
+- P7D -> opus (FRONTIER): R3 is a design change to shipped analysis semantics, not a mechanical fix
+- P7E -> sonnet (WORKHORSE) with a LEAD-set policy frame: widening a licence allowlist is a judgement the LEAD scopes, the worker implements and documents
+- P7F -> opus (FRONTIER): dependency-resolution changes can break an Expo build; needs judgement about what is safely fixable vs what must be accepted with reasons
+
+## Decisions
+- SEQUENTIAL, not parallel. P7E and P7F both touch the root manifest so they must serialise anyway; P7D is disjoint but the user asked for one-at-a-time and npm install during another worker's test run is a real race.
+- NOT DELEGATED, stays with the owner: the on-car yaw-sign validation (no agent can drive the car), and the CI blocking-vs-advisory decision (which evaporates if P7E and P7F actually clear the backlogs — that is the outcome to aim for, rather than reaching for continue-on-error).
+- P7E framing set by LEAD: the earlier "do not loosen the policy" rule existed so the findings would be UNDERSTOOD before being admitted. They now are — none is AGPL/GPL; the classes are OFL-1.1 (font files), CC-BY (data), MPL-2.0 (file-level copyleft). A deliberate documented policy plus a NOTICES file that discharges attribution is the correct answer, NOT a silent widening. Every admission must carry its reason so the owner can veto any single line.
+
+P7D | 1 | opus FRONTIER | rev1 (.foreman/scratch/p7d-ticket.md) | DISPATCHED | - | R1-R6 | 2026-09-21
+
+## RUN P7 RE-PLANNED — MONDAY TRACK DAY (2026-09-28, MotorPark/Adancata)
+USER: "luni o sa merg pe circuit la adancata sa testez aplicatia si trebuie sa fie functionala si accurate ca sa luam cat mai multe date valide". User then REJECTED a clarifying-questions prompt and repeated the same sentence verbatim -> they want decisions made and executed, not to be quizzed. LEAD decides.
+
+FACTS ESTABLISHED (LEAD, verified in-repo):
+ - ADANCATA IS MOTORPARK. packages/core/assets/circuits/motorpark-romania.v1.json -> locality "Adancata, Ialomita". NOT a new circuit; the learned-circuit flow is a FALLBACK, not the path.
+ - MotorPark profile: 4056.26 m, 102 centerline points, corridorWidthM 16, direction clockwise, startFinishGate PRESENT (44.77960/26.47195 -> 44.77983/26.47220) + 2 sectorGates + pitLane. geometryStatus community-derived, sectorStatus app-defined. confidenceNotes: traced from OSM aerial, NOT validated on-site, nothing "official".
+   (LEAD self-correction: I first read `gates: []` and raised a false alarm about there being no start/finish line. Wrong key — the schema uses startFinishGate/sectorGates. Corrected before acting.)
+ - CONSEQUENCE: lap times will be self-consistent but will NOT match the circuit's official timing line; and the honesty gate keeps coaching suggestions OFF because geometry is not "official".
+ - THE DECISIVE FACT: NO LAP HAS EVER BEEN TIMED ON A REAL CIRCUIT BY THIS APP. Every field test (5,7,8,9,10,11) was OBD/signal work on street or driveway. data/field/ holds only signal-finder and sweeps -- zero session or lap data. Monday is the first real circuit session in the project's history.
+ - Device runs BUILD 11 (b549ffc, 31 Aug). HEAD is 6 commits ahead, including the user's own requested "Circuit nou" copy fix (3ef8dcd) and all of P6. None of it is on the phone.
+
+LEAD DECISIONS (made without asking, per the user's rejection of the question prompt):
+ 1. PRIORITY = a verified build before Monday. P7E (licences) and P7F (advisories) are PARKED -- zero relevance to a track day, and both touch the root manifest/lockfile, which is the last thing to churn before a build the user depends on trackside.
+ 2. SPLIT THE IMU FLAG. `imuFusionEnabled` currently bundles two unrelated things: gyroscope CAPTURE (additive, feeds no existing calculation) and Madgwick gravity separation (replaces the field-proven low-pass, changes latG/longG). Ship gyro capture ON, fusion OFF. Strictly more data, zero risk to channels that already work, and it yields the real-world trace needed to validate the yaw sign OFFLINE instead of betting on it live.
+ 3. Geometry validation = post-session analysis of the GPS trace. NO new UI in a build going straight to a racetrack.
+ 4. Real risk is NOT the residuals or the flags. It is: does the OSM-derived S/F gate trigger, does matching hold at 16 m corridor, does failure show, and does the raw trace survive if the circuit logic fails. Scout dispatched on exactly that.
+
+P7D | (in flight) | opus | rev1 | DISPATCHED — continues; R3/R4 still matter for any IMU path and R3 touches shipped analysis
+P7-MONDAY-SCOUT | 1 | opus FAST-role recon | rev1 | DISPATCHED | read-only | Q1 raw-trace survival, Q2 gate trigger failure modes, Q3 driver-visible failure, Q4 learned-circuit fallback mid-visit, Q5 OBD+GNSS long-session risk | 2026-09-21
+P7E | PARKED | - | - | - | deferred until after the Monday build
+P7F | PARKED | - | - | - | deferred until after the Monday build
+P7-MONDAY-SCOUT | 1 | opus recon | rev1 | REPORTED(DONE_WITH_CONCERNS) -> ACCEPTED | read-only | 2026-09-21
+  Q1 *** THE GPS TRACE DOES NOT SURVIVE *** sessionController.ts:1015 pushes samples to an IN-MEMORY rawSamples array; :1117-1140 onLapCompleted() is the ONLY caller of repository.saveTelemetry. endSession() (:787-810) writes SessionSummary + checkpoint ONLY. No crossing -> no lap -> NOTHING of the GPS trace is ever written; force-quit loses it too. OBD is the exception and DOES survive (composition.ts:1226-1251, 25-sample/1 s batches, lap_number NULL). So a zero-lap day = OBD channels + ZERO GPS.
+  Good news within Q1: laps that complete but are INVALID still persist (pipelineCore.ts:377-381) -- SHORT_LAP/LOW_QUALITY/PIT_TRANSIT keep their trace.
+  Q2 gate miss modes: >120 m step between fixes (crossing-detector.ts:78 -- 3 s dropout at 150 km/h = 126 m, skipped); onPitLane on either sample suppresses gates (:82); the driven line must actually intersect the ~32 m gate SEGMENT (:84); 50 m re-arm (:94-100); non-forward direction discarded (lap-timing-engine.ts:135). Off-corridor does NOT block crossings (track-matcher.ts:315-318 only lowers confidence) -- so a 20 m tracing error degrades but does not kill timing. THE GATE SEGMENT GEOMETRY IS THE REAL RISK.
+  Q3 failure is INVISIBLE on the driving screen: FacadeStateCore (sessionController.ts:41-90) has NO matched/lateral/confidence field; QualityPill shows raw GNSS assessment, so 100 m off-centerline under clear sky reads "good". Only the pre-session ActiveCalibrationScreen (:200-220) shows ON TRACK/OFF TRACK + live lateral offset.
+  Q4 fallback exists but NOT mid-session: selectCircuit() refuses while a session is live (composition.ts:2062-2085, lifecycleLock, MID_SESSION_STATES). Procedure: End Session -> Results -> back -> New circuit. Learn phase keeps every fix and saves the learn lap as lap 0 -- the data-safe option.
+  Q5 OBD reconnect = EXACTLY ONE retry at 3 s then dead until the next session (telemetryProvider.ts:643-644). Storage growth: no cap/quota/pruning anywhere. Battery/thermal: only useKeepAwake. GNSS has a 5 s staleness watchdog; OBD has no stall watchdog.
+
+LEAD GEOMETRY VERIFICATION (done by LEAD directly with a local node script, NOT delegated -- cheaper than an agent re-reading the asset):
+  MotorPark startFinishGate: length 32.0 m (covers the 16 m corridor), midpoint EXACTLY on the centerline (0.00 m, segment 0, t=0), perpendicular to the track (-90.0 deg). Geometry is sound.
+  LEAD SELF-CORRECTION #3 THIS PROJECT: my first script reported the crossing sense as "INVERS". My label was inverted -- cross(ax,ay,bx,by) = ax*by - ay*bx (intersection.ts:10-14) and my hand-rolled normal computed the NEGATIVE of directionCross. Re-derived: travelling in centerline order gives directionCross > 0 = 'forward' = VALID. The scout independently reached the same conclusion (forward = north-west at the line). I verified the convention in source before reporting rather than trusting my own arithmetic -- the same discipline that finally settled the yaw sign.
+
+P7M | 1 | opus FRONTIER | rev1 (.foreman/scratch/p7m-ticket.md) | DISPATCHED | - | M1 trace survival (CRITICAL) / M2 visible match failure / M3 OBD reconnect loop / M4 fix-gap / M5 split the IMU flag | 2026-09-21
+  Running IN PARALLEL with P7D. Write sets are disjoint: P7D owns cleanLap.ts + gforceProvider.ts; P7M is fenced OFF both and told to report BLOCKED rather than edit around the fence.
+  USER EFFICIENCY INSTRUCTION ("sa nu se consume tokenele de 2 ori"): the scout's findings are pasted INTO the P7M ticket with file:line so the implementer does not re-explore ground the scout already mapped.
+
+## *** ROOT CAUSE OF THE TMR LOST DAY — USER-SUPPLIED FIELD FACT + LEAD MEASUREMENT ***
+USER (2026-09-21, unprompted, correcting my speculation): "la TMR se blocase calibrarea pentru ca circuitul era desenat ca o linie fina si daca nu eram pe ea imi zicea ca sunt off track... se blocase la TMR calibrarea mereu pe la 83%".
+So the TMR day was NOT lost to the discarded-trace defect (M1). It was lost BEFORE any session existed: calibration never completed, so the owner never got to drive a timed lap. I had asserted M1 "explains it exactly" — that was speculation and it was wrong. Memory [[ask-dont-assume]] updated: field facts come from the user, never guessed.
+
+LEAD MEASUREMENT (own node scripts, no agent — cheaper and this is arithmetic, not exploration):
+  Calibration completion requires coverageFraction >= 0.85 (calibration-engine.ts:401) and longest uncovered gap <= 250 m (:405). No skip/override exists anywhere in the calibration screens. Owner parked at 0.83 => hard wall, retry forever.
+  The D1 mitigation already in build 11 (3e441a2, b0549de — LEARN_WIDE_CORRIDOR_M = 40 + bias-corrected coverage) is GENERIC, no per-circuit branching, so it does apply at MotorPark. BUT it estimates a SYSTEMATIC bias (a constant translation). Chord-cutting is not systematic: local, corner-only, always toward the inside, vanishing on straights. A single bias vector cannot cancel it. That mitigation will not save Monday.
+  MotorPark centerline is COARSER than the circuit that already failed: 102 pts / 4056 m = 39.8 m mean spacing vs TMR 150 pts / 3706 m = 24.7 m. Spacing is not uniform — 8 segments > 100 m, longest 237.3 m; 1219 m of 4056 (30 %) of the lap sits on >100 m segments.
+  Circumscribed-circle sagitta per vertex triple (chord deviation from the implied arc):
+      vertex 99  R 161 m  chord 155.6 m -> 20.00 m   (125 % of the 16 m corridor)
+      vertex 56  R 303 m  chord 161.2 m -> 10.93 m
+      vertex 89  R 492 m  chord 170.4 m ->  7.44 m
+      median 0.93 m
+  => A car on the real track through vertex 99 reads as OFF TRACK. Those bins can never be covered, however well the owner drives. This is the TMR failure mode, worse.
+  OSM has only 83 + 26 nodes for the circuit ways — the asset already uses essentially all of them. No extra information is obtainable; the fix is to stop discarding the curvature three consecutive points already imply.
+  TMR asset is v2 (sector-gate placement rule only — density and corridor unchanged from v1). MotorPark is v1 and was never revisited.
+
+P7D | 1 | opus | rev1 | REPORTED(DONE) -> ACCEPTED | R1 0.197->0.0070 g (28x), R2 -0.1022->-0.0039 g (26x), R4 79-80 mis-signed samples -> 0, R3/R5 fixed, R6 contract changed with reasoning | +27 tests | 2026-09-21
+  R3 resolved BETTER than specified: worker rejected my "coverage threshold" framing — a turn is an integral, so a partly covered window returns a silently SHORT turn, which is the suppression bug in miniature. Gyro is used only where EVERY interval in the window has data; otherwise GNSS heading, which observed the whole window. Not a tunable.
+  R3 non-regression proven properly: full classifyLap results serialised before/after over 8 no-gyro laps on both circuits, 15 synthetic heading-only laps at 1/2/5/10/25 Hz and 4 continuous-gyro laps — diff EMPTY.
+P7M | 1 | opus | rev1 | REPORTED(M1-M4,M6 DONE; M5 BLOCKED on fence) -> ACCEPTED | gates 2969 (core 1551 / mobile 1418) | 2026-09-21
+  M1 DONE — continuous flush is the single writer; capture moved above the mode branches so a Learn lap that never reaches coverage is also saved. Schema finding: `telemetry` is keyed (sessionId, lapNumber) with one JSON payload per row, so there is no per-row tag to rewrite; chunks live at NEGATIVE lapNumber and a completed lap reclaims its own window after its row is durable. Proven both directions incl. no duplicate rows and nothing lost.
+  M2 DONE — trackMatch{state,lateralM,confidence} on FacadeStateCore; offTrack after 3 s continuous non-match. Correctly did NOT use `match !== null` as the test: the matcher still returns a match ~100 m off centerline at confidence ~0, which IS the silent failure.
+  M3 DONE — indefinite backoff 3/6/12/24/30 s. M4 DONE — bound now min(500, max(120, 90 m/s x dt)). M6 DONE — counter reads the resolved write continuation, not a tally beside it, with five blind spots written down.
+  *** M5 BLOCKED correctly *** — gyro capture shares fusionActive inside the fenced gforceProvider.ts. Worker refused to ship the settings half alone ("a toggle the provider ignores is worse than none"). Right call.
+  *** CONCERN THAT BECAME P7R/E1 *** — a zero-lap session's trace is on disk but NOT reachable by any export: analysisExport needs an analysis, which needs laps. The M1 fix is currently useless to the owner on exactly the day it exists for.
+
+P7G | 1 | opus | rev1 (.foreman/scratch/p7g-ticket.md) | DISPATCHED | densify the MotorPark centerline along fitted arcs; honesty requirement on confidenceNotes; TMR analysed but NOT changed | 2026-09-21
+P7R | 1 | opus | rev1 (.foreman/scratch/p7r-ticket.md) | DISPATCHED | E1 export a zero-lap session (CRITICAL) / E2 calibration escape hatch that never lowers the bar / E3 the now-unblocked flag split | 2026-09-21
+  Running in parallel; write sets disjoint (P7G owns the generator + assets + geometry, P7R is fenced off all three).
+P7G | 1 | opus | rev1 | REPORTED(DONE_WITH_CONCERNS) -> ACCEPTED | densify.ts (new, reusable) + regenerated asset | 2026-09-21
+  RESULT: 102 -> 230 points; longest segment 237.1 -> 21.9 m; segments >100 m: 8 (1218 m, 30%) -> 0; length 4056.261 -> 4058.135 m (+0.046%). All 102 OSM vertices preserved bit-identically and in order. Gates byte-identical (startFinish, sectors, pit, boundingRegion, corridorWidthM, geometryStatus all JSON-equal). Coverage bins @25 m unchanged at 163. confidenceNotes now opens "CENTERLINE IS RESAMPLED, AND MOST OF ITS POINTS ARE INTERPOLATED -- NOT SURVEYED" and closes "NONE OF THIS VALIDATES THE GEOMETRY."
+  *** THE WORKER CORRECTED MY MEASUREMENT AND WAS RIGHT. *** My 20.00 m sagitta at vertex 99 is largely an ESTIMATOR ARTEFACT: the circumscribed circle through three points fits a 31.4-degree single-vertex kink followed by a chord collinear with the 237 m main straight to within 0.05 deg. A naive C1 blend there BOWS THAT STRAIGHT BY 11.9 m -- my proposed fix, applied without guards, would have made the geometry worse. The largest DEFENSIBLE chord-cut on this circuit is 3.57 m, not 20 m. Hence the implementation bends a chord only when two independent 3-point fits agree in side and radius and the flanking segments are long enough to be a real lever arm; everything else is subdivided along its exact chord. Straightness proof: 9 straight segments (761 m, 18.8% of the lap, 29 new points) deviate by max 2.9e-10 m -- float noise.
+  *** CONSEQUENCE FOR THE TMR DIAGNOSIS: MY HYPOTHESIS IS ELIMINATED. *** Same analysis on TMR: its long chords are STRAIGHTS; only 7 of 150 segments would bend at all, largest shift 0.35 m; its 5.87 m sagitta is entirely artefact. Chord-cutting is NOT what stalled TMR at 83%. The real cause of that day remains UNKNOWN. What is known: the D1 commits (3e441a2, b0549de) were written IN RESPONSE to a real "81-90% coverage" field failure, diagnosed as a systematic centerline offset, and shipped the 40 m wide learn corridor + bias-corrected coverage. That fix IS in build 11 and has never been field-tested, because the owner has not been to a circuit since. So the TMR stall is addressed-but-unproven, not unaddressed.
+  => E2 (the calibration escape hatch, in flight as P7R) is therefore THE guarantee for Monday, not a backup. Densification is a real but smaller improvement (3.6 m = 22% of the corridor) and must not be sold as the fix.
+  Concern 2 accepted: corner count 10 -> 11 (densifying separated T13 from T14, previously fused by a 71.8 m chord into one 198-degree corner). Worker re-pinned the asset test and, disclosed, also updated circuitCatalog.test.ts outside its write set -- mechanical consequence, accepted. CORNER_ANALYSIS_VERSION deliberately NOT bumped: nothing bundled depends on MotorPark per-corner data and the owner has never driven it, so a bump that would also invalidate TMR's stored data is the worse trade.
+LEAD FIX (concern 1, one line + provenance comment): yawSourcePerWindow.test.ts pinned MotorPark yawSpike coverage at 0.9989086979942551; densification raised it to 0.9999660637603721 -- coverage went UP, the expected direction. Re-pinned at 12 places with the reason recorded beside it so the next reader does not mistake it for an R3 regression. Verified: 95 tests green across coaching/geometry/profile.
+P7R | 1 | opus | rev1 | REPORTED(DONE_WITH_CONCERNS) -> ACCEPTED | gates 3017; expo export 0 | commit a7e8b94 | 2026-09-21
+  *** E2 CORRECTED MY PREMISE, AND IT EXPLAINS THE TMR EXPERIENCE EXACTLY. *** The wall is NOT the result screen. A Learn lap only reaches `calibrationReview` at coverage >= 0.98 (sessionController.ts:292); the 0.85 in finish() is the accept/reject verdict AFTERWARDS. At 0.83 no result is ever produced -- the session sits in `calibrating` with only Cancel. That is the "mereu pe la 83%" loop the owner described: not a failure screen, a hang. proceedWithoutValidatedCalibration() therefore spans BOTH states and force-finishes through the engine's own finish(), honouring its verdict; thresholds untouched, forced result still accepted:false.
+  E1 DONE — standalone rawSessionExport.ts reads the two sources no existing reader does (telemetry rows at negative lapNumber; telemetry_samples with lap_number IS NULL, which telemetryRead.ts excludes). Proven end-to-end through the real controller/repository/readers: 149 GNSS fixes out of a zero-lap session. Split into rawSessionShare.ts after the first attempt broke 136 composition tests by pulling react-native into composition's graph.
+  E3 DONE — capture/fusion split; capture-only projects yaw onto the low-pass vertical; emit() returns its stamp so the low-pass path makes the SAME clock calls in the same order; latG/longG values AND stamps toEqual the both-off run.
+P7-FIX | 1 | sonnet | rev1 (inline) | REPORTED(DONE) -> ACCEPTED | gates 3023 (1571 + 1452) | commit a9265b0 | 2026-09-21
+  Closed the two fence-limited honesty gaps. Export field is REQUIRED, not optional-defaulting-false (an omitted field means "written before this existed"; a false field would assert the session WAS calibrated). Schema 4->5. Dashboard chip lives in topRow, never bannerSlot, so it cannot mask OFF TRACK.
+
+USER (going to sleep, autonomous overnight): "deocamdata scopul e sa ajungem la un produs de testing functional dupa evoluam".
+=> PRIORITY RULE FOR TONIGHT: functional and testable on Monday beats precision. P8 (Doppler + along-track fusion) ships in build 12 ONLY if its report shows no risk to crossing DETECTION; otherwise it is held for build 13. The ticket was written with detection decoupled from timing precision precisely so this call can be made on evidence.
+
+IN FLIGHT: P8 (opus, Doppler crossing time + 1-D along-track filter, measurement table is the deliverable) | GNSS device design (opus, docs/hardware/gnss-device-design.md, research + design only, no repo code).
+NEXT AFTER THEM: full gates -> Codex review (0 HIGH, user's standing rule) -> E2E smoke -> BUILD 12 -> update TEST-12-PROTOCOL for the calibration escape + raw export -> send the owner the ipa + protocol.
