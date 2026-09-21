@@ -49,6 +49,16 @@ interface ActiveLap {
   invalidReasons: Set<string>;
 }
 
+/**
+ * Ticket P9-FIX2. The lap exists and its boundary is real, but whether the car
+ * was in the pit lane when it crossed is UNDECIDED -- see
+ * {@link CrossingEvent.pitAmbiguous}. Distinct from `PIT_TRANSIT`, which is a
+ * claim that the car WAS in the pits; this one is the refusal to claim
+ * either way, and the reason a lap under it must never be silently dropped
+ * nor silently presented as an ordinary one.
+ */
+export const PIT_AMBIGUOUS_REASON = 'PIT_AMBIGUOUS';
+
 const DEFAULT_MIN_LAP_MS = 60_000;
 const DEFAULT_LOW_QUALITY_WINDOW_MS = 10_000;
 const DEFAULT_REVERSE_TRAVEL_THRESHOLD_M = 30;
@@ -177,6 +187,12 @@ export class LapTimingEngine implements LapTimingEngineContract {
   private startLap(event: CrossingEvent, quality: QualityLevel, inPit: boolean): void {
     const invalidReasons = new Set<string>();
     if (inPit) invalidReasons.add('PIT_TRANSIT');
+    // Ticket P9-FIX2. The boundary this lap STARTS from is one the detector
+    // could not place either inside or outside the pit lane, so this lap's
+    // start time is not a claim the app is entitled to make silently. The lap
+    // is still timed and still keeps its full telemetry -- marked, it can be
+    // reconciled later; suppressed, it would simply not exist.
+    if (event.pitAmbiguous === true) invalidReasons.add(PIT_AMBIGUOUS_REASON);
     this.activeLap = {
       lapNumber: this.nextLapNumber,
       tStart: event.tCross,
@@ -205,6 +221,9 @@ export class LapTimingEngine implements LapTimingEngineContract {
     lap.quality = worstQuality(lap.quality, quality);
     lap.sectorQuality = worstQuality(lap.sectorQuality, quality);
     if (inPit) lap.invalidReasons.add('PIT_TRANSIT');
+    // Ticket P9-FIX2: and the lap this boundary CLOSES carries the same mark,
+    // because an undecided boundary makes both of its neighbours undecided.
+    if (event.pitAmbiguous === true) lap.invalidReasons.add(PIT_AMBIGUOUS_REASON);
 
     if (isLowQuality(quality)) {
       lap.lowQualitySince ??= event.tCross;

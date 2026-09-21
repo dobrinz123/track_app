@@ -96,6 +96,29 @@ export interface CrossingEvent {
   direction: 'forward' | 'reverse';
   confidence: number;
   lapDistanceM: number;
+  /**
+   * Ticket P9-FIX2. The crossing happened, but whether the car was in the pit
+   * lane when it did is UNDECIDED. Set only by `CrossingDetector` and only on
+   * timing gates (`startFinish`/`sector`).
+   *
+   * The pit lane at both shipped circuits runs within metres of the
+   * centerline beside the start/finish line -- the OSM ways share junction
+   * nodes -- so near the line the "is the car in the pits?" question is
+   * decided from noisy proximity between two barely distinguishable
+   * polylines. Two silent failures follow from answering it anyway: suppress
+   * and a real lap disappears with nothing recorded; emit and a lap the car
+   * never drove appears indistinguishable from a real one.
+   *
+   * So the detector answers it three ways, not two, and this flag is the
+   * third: the boundary is EMITTED (a lap that exists can be reconciled
+   * afterwards; a lap that was never emitted is gone) and marked, and
+   * `LapTimingEngine` turns the mark into a `PIT_AMBIGUOUS` invalid reason on
+   * both the lap this boundary closes and the lap it opens.
+   *
+   * Absent means "not ambiguous", so every producer that predates this field
+   * keeps its exact meaning.
+   */
+  pitAmbiguous?: boolean;
 }
 
 export interface CrossingDetector {
@@ -274,6 +297,25 @@ export interface LocalSessionRepository {
   saveTelemetryBatch(
     sessionId: string,
     entries: readonly { lapNumber: number; samples: LocationSample[] }[],
+  ): Promise<void>;
+  /**
+   * Ticket P10B H4-B — {@link LocalSessionRepository.saveTelemetryBatch} AND
+   * the recovery checkpoint, committed as ONE unit.
+   *
+   * Optional, because not every store can offer it. A repository that does
+   * implement it promises full atomicity: after a failure, neither the
+   * telemetry rows nor the checkpoint changed. `SessionController` uses it
+   * when present, and otherwise falls back to writing the checkpoint FIRST
+   * and the telemetry batch second — the safe order, because a checkpoint
+   * that names a lap whose telemetry never landed merely reserves that lap
+   * number (the fixes are still in their unclaimed chunk rows), whereas the
+   * reverse leaves a committed lap row that the next run's lap numbering
+   * overwrites. The reviewer measured that overwrite at 93 lost fixes.
+   */
+  saveLapCommit?(
+    sessionId: string,
+    entries: readonly { lapNumber: number; samples: LocationSample[] }[],
+    checkpoint: { snapshot: SessionMachineSnapshot; laps: LapRecord[] },
   ): Promise<void>;
   loadTelemetry(sessionId: string, lapNumber: number): Promise<LocationSample[]>;
   getReferenceLap(userId: string, circuitId: string, layoutId: string, layoutVersion: number): Promise<ReferenceLap | null>;
