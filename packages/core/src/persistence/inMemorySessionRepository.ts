@@ -81,6 +81,24 @@ export class InMemorySessionRepository implements LocalSessionRepository {
     this.telemetry.set(telemetryKey(sessionId, lapNumber), structuredClone(samples));
   }
 
+  /**
+   * Ticket P10A H4. The Map has no transactions, so atomicity is achieved the
+   * only way it can be here: every entry is validated and deep-copied FIRST,
+   * and only then are the copies committed in one synchronous, un-awaited
+   * loop -- nothing can interleave, and nothing is applied if any entry was
+   * rejected.
+   */
+  async saveTelemetryBatch(
+    sessionId: string,
+    entries: readonly { lapNumber: number; samples: LocationSample[] }[],
+  ): Promise<void> {
+    const staged = entries.map((entry) => ({
+      key: telemetryKey(sessionId, entry.lapNumber),
+      samples: structuredClone(entry.samples),
+    }));
+    for (const entry of staged) this.telemetry.set(entry.key, entry.samples);
+  }
+
   async loadTelemetry(sessionId: string, lapNumber: number): Promise<LocationSample[]> {
     const entry = this.telemetry.get(telemetryKey(sessionId, lapNumber));
     return entry ? structuredClone(entry) : [];

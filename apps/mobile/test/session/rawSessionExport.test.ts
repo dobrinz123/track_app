@@ -28,6 +28,7 @@ import {
   driveLap,
   multiLapSession,
   type LocationSample,
+  type SessionCalibrationStatus,
   type SqlDatabase,
 } from '@circuit/core';
 
@@ -41,7 +42,8 @@ import {
   loadRawSessionExportDocument,
   rawSessionExportFileName,
   readAllSessionTelemetry,
-  readUnclaimedGnssTrace,
+  readStoredGnssLapNumbers,
+  readUnclaimedGnssChunks,
   type RawSessionExportDocument,
 } from '../../src/session/rawSessionExport';
 import { bundled, TMR_CIRCUIT_ID } from '../support/analysisHarness';
@@ -124,9 +126,15 @@ function exportDeps(h: Harness, history: SqlSessionHistoryStore, unvalidated: Se
   return {
     getSession: (id: string) => history.getSession(id),
     loadLapGnss: (id: string, lapNumber: number) => h.repository.loadTelemetry(id, lapNumber),
-    loadUnclaimedGnss: (id: string) => readUnclaimedGnssTrace(h.db, id),
+    // Ticket P10A: chunk rows with their run identity, the stored-row
+    // enumeration, and the three-valued provenance -- exactly what
+    // `composition.ts` now wires.
+    loadUnclaimedGnss: (id: string) => readUnclaimedGnssChunks(h.db, id),
+    listStoredGnssLapNumbers: (id: string) => readStoredGnssLapNumbers(h.db, id),
     loadTelemetry: (id: string) => readAllSessionTelemetry(h.db, id),
-    isMatchingUnvalidated: (id: string) => unvalidated.has(id),
+    calibrationStatus: (id: string): SessionCalibrationStatus =>
+      unvalidated.has(id) ? 'unvalidated' : (history.getSession(id)?.calibrationStatus ?? 'unknown'),
+    unwrittenSampleCount: (id: string) => history.getSession(id)?.unwrittenSampleCount ?? null,
   };
 }
 
@@ -179,7 +187,8 @@ describe('P7R E1 -- a zero-lap session exports its drive', () => {
     const circuit = bundled(TMR_CIRCUIT_ID);
 
     await h.controller.start('calibration');
-    feedSamples(h.clock, h.provider, cleanRecognitionLap(circuit.profile, 9_003));
+    const calibrationLap = cleanRecognitionLap(circuit.profile, 9_003);
+    feedSamples(h.clock, h.provider, calibrationLap);
     h.controller.acceptCalibration();
     await h.controller.flush();
     h.controller.arm();
@@ -224,10 +233,23 @@ describe('P7R E1 -- a zero-lap session exports its drive', () => {
     const fedTimes = fed.map((s) => s.tMono);
     expect(fedTimes.length).toBeGreaterThan(40);
     expect(fedTimes.filter((t) => !exportedTimes.has(t))).toEqual([]);
-    // Chronological, so the file reads as a drive.
-    for (let i = 1; i < doc.gnss.unclaimed.length; i += 1) {
-      expect(doc.gnss.unclaimed[i]!.tMono).toBeGreaterThanOrEqual(doc.gnss.unclaimed[i - 1]!.tMono);
-    }
+    // In CAPTURE order, so the file reads as a drive.
+    //
+    // Ticket P10A (MEDIUM, ordering): this used to assert `tMono` ascending,
+    // and the export used to deliver that by sorting on `tMono`. Both were
+    // wrong, and this very fixture shows why -- `driveLap` restarts its
+    // timestamps at 0 after the recognition lap's ~91 s, exactly as a
+    // resumed process does, so a `tMono` sort interleaves two separate
+    // stretches of driving into one scrambled trace. The right invariant is
+    // the order the fixes were CAPTURED in, which is what the chunk keys
+    // record and what the export now preserves.
+    expect(doc.gnss.unclaimed.map((s) => s.tMono)).toEqual([
+      ...calibrationLap.map((s) => s.tMono),
+      ...fed.map((s) => s.tMono),
+    ]);
+    // One run, so one entry: this session was never resumed.
+    expect(doc.gnss.runs).toHaveLength(1);
+    expect(doc.gnss.runs[0]!.sampleCount).toBe(doc.gnss.unclaimedSampleCount);
 
     // ... and the telemetry half, including the lap-less rows.
     expect(doc.telemetry.sampleCount).toBe(3);

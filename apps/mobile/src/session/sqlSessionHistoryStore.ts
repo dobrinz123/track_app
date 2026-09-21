@@ -49,6 +49,11 @@ export class SqlSessionHistoryStore implements SessionHistoryStore {
         layoutId: s.layoutId,
         displayDateUtc: s.startedAtUtc,
         laps: s.laps,
+        // Ticket P10A H6/H7: carried straight through from the stored row.
+        // An absent value stays absent here -- the readers turn that into
+        // `'unknown'`, never into `'validated'`.
+        ...(s.calibrationStatus === undefined ? {} : { calibrationStatus: s.calibrationStatus }),
+        ...(s.trace === undefined ? {} : { unwrittenSampleCount: s.trace.unwrittenSampleCount }),
       }));
 
     const ref = await this.repository.getReferenceLap(this.userId, this.circuitId, this.layoutId, this.layoutVersion);

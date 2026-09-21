@@ -19,6 +19,7 @@ function mapState(core: FacadeStateCore, lastError: string | null): FacadeState 
     trackMatch: core.trackMatch,
     recording: core.recording,
     matchingUnvalidated: core.matchingUnvalidated,
+    calibrationStatus: core.calibrationStatus,
     lastError,
   };
 }

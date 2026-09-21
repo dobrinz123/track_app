@@ -15,6 +15,7 @@ import type {
   LapInsight,
   LapStatus,
   Limitation,
+  SessionCalibrationStatus,
   SessionInsights,
   TimeLossCause,
 } from '@circuit/core';
@@ -83,7 +84,7 @@ import { resolveAnalysisScreenStrings } from '../ui/screens/analysisStrings';
  */
 type LapLabel = LapInsight['labels'][number];
 
-export const ANALYSIS_EXPORT_SCHEMA_VERSION = 5;
+export const ANALYSIS_EXPORT_SCHEMA_VERSION = 6;
 export const ANALYSIS_EXPORT_KIND = 'trace-analysis-report';
 
 export interface AnalysisExportChannelCoverage {
@@ -343,6 +344,14 @@ export interface AnalysisExportDocument {
      * by accident (see {@link AnalysisExportOptions.matchingUnvalidated}).
      */
     matchingUnvalidated: boolean;
+    /**
+     * Ticket P10A H6/H7: the DURABLE three-valued provenance.
+     * `matchingUnvalidated` above cannot distinguish "the gate accepted this
+     * session" from "this device cannot say", and reporting the second as
+     * the first is precisely the dishonesty H6 is about. REQUIRED for the
+     * same reason `matchingUnvalidated` is.
+     */
+    calibrationStatus: SessionCalibrationStatus;
   };
   /** What the RECORDING itself could support -- the honesty half of the export. */
   recording: {
@@ -379,6 +388,8 @@ interface SummaryStrings {
   recordedOn: string;
   /** Ticket P7R E2 — shown only when `session.matchingUnvalidated` is true. */
   matchingUnvalidated: string;
+  /** Ticket P10A H6 — shown when the device holds no statement about this session's calibration. */
+  calibrationUnknown: string;
   cornerTableHeader: string;
   cornerTableSeparator: string;
   limitations: string;
@@ -395,6 +406,8 @@ const EN: SummaryStrings = {
   observations: 'Observations',
   recordedOn: 'Session',
   matchingUnvalidated: 'Calibration: NOT VALIDATED — lap and sector times may be wrong or missing',
+  calibrationUnknown:
+    'Calibration: UNKNOWN — no record of whether this session was calibrated; treat lap and sector times as unverified',
   cornerTableHeader: '| Corner | Time lost | Best through | Min speed | Exit |',
   cornerTableSeparator: '|---|---|---|---|---|',
   limitations: 'What this data cannot tell you',
@@ -411,6 +424,8 @@ const RO: SummaryStrings = {
   observations: 'Observații',
   recordedOn: 'Sesiune',
   matchingUnvalidated: 'Calibrare: NEVALIDATĂ — timpii pe tur și pe sector pot fi greșiți sau lipsă',
+  calibrationUnknown:
+    'Calibrare: NECUNOSCUTĂ — nu există nicio consemnare că sesiunea a fost calibrată; tratează timpii ca neverificați',
   cornerTableHeader: '| Viraj | Timp pierdut | Cel mai bun | Viteză minimă | Ieșire |',
   cornerTableSeparator: '|---|---|---|---|---|',
   limitations: 'Ce nu putem spune din aceste date',
@@ -488,14 +503,23 @@ export interface AnalysisExportOptions {
   /** ISO-8601 UTC instant the export was produced (injected, never `Date.now()` inside). */
   generatedAtUtc: string;
   /**
-   * Ticket P7R E2: was this session run on unvalidated (rejected-calibration)
-   * matching? REQUIRED, deliberately not optional-defaulting-to-`false` --
-   * `false` is an active claim that the session WAS calibrated, and a caller
-   * must state which is true rather than get that claim for free. Callers
-   * read this from `isSessionMatchingUnvalidated(sessionId)`
+   * Ticket P7R E2 / P10A H6: how was this session's matching calibrated?
+   * REQUIRED, deliberately not optional-defaulting to anything -- a default
+   * is an active claim, and a caller must state which is true rather than
+   * get the flattering answer for free. It replaces P7R E2's
+   * `matchingUnvalidated` boolean, which could not express "unknown" and so
+   * reported an unreadable provenance as a calibrated one. Callers read it
+   * from `resolveSessionCalibrationStatus(sessionId)`
    * (`session/composition.ts`).
+   *
+   * Ticket P10A H6: the durable three-valued provenance, read at export time
+   * from `resolveSessionCalibrationStatus(sessionId)`
+   * (`session/composition.ts`). REQUIRED, and it supersedes
+   * `matchingUnvalidated` above (now derived from it): a boolean cannot say
+   * "unknown", and defaulting an unknown provenance to `false` is exactly
+   * the claim this ticket exists to stop the app making.
    */
-  matchingUnvalidated: boolean;
+  calibrationStatus: SessionCalibrationStatus;
   /**
    * Ticket P5c-B D4: what the trackday stage actually did during this session —
    * the cue moves applied and the pit suggestions the driver was SHOWN. Omit
@@ -764,7 +788,8 @@ export function buildAnalysisExportDocument(
       cleanLapCount: insights.cleanLapCount,
       referenceLapNumber: insights.referenceLapNumber,
       comparisonLapNumber: insights.comparisonLapNumber,
-      matchingUnvalidated: options.matchingUnvalidated,
+      matchingUnvalidated: options.calibrationStatus === 'unvalidated',
+      calibrationStatus: options.calibrationStatus,
     },
     recording: {
       sampleCount: assembled.sampleCount,
@@ -893,8 +918,12 @@ export function buildAnalysisSummaryMarkdown(doc: AnalysisExportDocument): strin
   lines.push(`**${doc.report.observationsOnlyNote}**`);
   // Ticket P7R E2: the same honesty line `rawSessionExport.ts`'s markdown
   // companion carries, in the document the driver actually forwards.
-  if (doc.session.matchingUnvalidated) {
+  if (doc.session.calibrationStatus === 'unvalidated') {
     lines.push(`**${s.matchingUnvalidated}**`);
+  } else if (doc.session.calibrationStatus === 'unknown') {
+    // Ticket P10A H6: stated, not omitted. An omitted line reads as
+    // "calibrated" to the person the report is forwarded to.
+    lines.push(`**${s.calibrationUnknown}**`);
   }
   lines.push('');
 

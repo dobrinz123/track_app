@@ -199,13 +199,82 @@ export interface LiveDeltaEngine {
 }
 
 // ---------- Persistence (implemented in app via SQLite; in-memory impl for tests) ----------
-export interface SessionSummary { sessionId: string; circuitId: string; layoutId: string; layoutVersion: number; startedAtUtc: string; laps: LapRecord[]; userId: string }
+/**
+ * Ticket P10A H6 — how this session's matching was calibrated, as a DURABLE
+ * fact stored beside the session itself.
+ *
+ * Deliberately three-valued. The previous design carried one boolean in a
+ * side log (`apps/mobile/src/persistence/sqlSettingsStore.ts`'s
+ * `unvalidated-matching-sessions` row), which conflated "we know this ran on
+ * accepted calibration" with "we could not read the label" — a failed label
+ * write, a read error, or the log's own eviction all reported `false`, i.e.
+ * CALIBRATED, about a session nobody had vouched for.
+ *
+ *  - `'validated'`   — the calibration engine ACCEPTED this session's Learn lap.
+ *  - `'unvalidated'` — the engine REJECTED it and the driver went out anyway
+ *                      (`SessionController.proceedWithoutValidatedCalibration`).
+ *  - `'unknown'`     — nobody can say. A session recorded before the outcome
+ *                      was decided (the record is written at RECORDING START,
+ *                      see `SessionController.start`), a recovery resume whose
+ *                      prior status could not be read, or a legacy row that
+ *                      predates this field.
+ *
+ * The binding rule for every reader: `'unknown'` is never rendered, exported
+ * or summarised as calibrated.
+ */
+export type SessionCalibrationStatus = 'validated' | 'unvalidated' | 'unknown';
+
+export interface SessionSummary {
+  sessionId: string;
+  circuitId: string;
+  layoutId: string;
+  layoutVersion: number;
+  startedAtUtc: string;
+  laps: LapRecord[];
+  userId: string;
+  /**
+   * Ticket P10A H6. Optional so a row written by an older build still reads
+   * back — and a missing value means {@link SessionCalibrationStatus}'s
+   * `'unknown'`, never `'validated'`.
+   */
+  calibrationStatus?: SessionCalibrationStatus;
+  /**
+   * Ticket P10A H3 — whether the raw GNSS trace of this session is COMPLETE.
+   *
+   * `unwrittenSampleCount` is the number of captured fixes the controller
+   * never got onto disk (every retry exhausted); `failedWriteCount` is how
+   * many individual write attempts failed, including ones a retry later
+   * rescued. A session with `unwrittenSampleCount > 0` has a SHORT trace and
+   * must say so wherever it is shown or exported: a silent partial trace is
+   * indistinguishable from a complete one, which is the failure mode this
+   * whole area exists to remove.
+   */
+  trace?: { unwrittenSampleCount: number; failedWriteCount: number };
+}
 export interface LocalSessionRepository {
   saveCheckpoint(sessionId: string, snapshot: SessionMachineSnapshot, laps: LapRecord[]): Promise<void>;
   loadCheckpoint(sessionId: string): Promise<{ snapshot: SessionMachineSnapshot; laps: LapRecord[] } | null>;
   saveSession(s: SessionSummary): Promise<void>;
   listSessions(userId: string, circuitId: string): Promise<SessionSummary[]>;
   saveTelemetry(sessionId: string, lapNumber: number, samples: LocationSample[]): Promise<void>;
+  /**
+   * Ticket P10A H4 — several telemetry rows of ONE session written ATOMICALLY.
+   *
+   * Exists because a completed lap's persistence is two logically inseparable
+   * edits to the same table: the lap's own row is written, and the unclaimed
+   * chunk rows that already hold those same fixes are rewritten without them
+   * (`SessionController`'s reclaim). Done as separate writes, a failure or a
+   * process death between them leaves the SAME fixes in both places, and the
+   * raw export then reports one drive twice. All-or-nothing here makes that
+   * state unreachable rather than merely unlikely.
+   *
+   * Semantics per entry are exactly {@link LocalSessionRepository.saveTelemetry}'s
+   * (replace, not append); an empty `samples` array empties that row.
+   */
+  saveTelemetryBatch(
+    sessionId: string,
+    entries: readonly { lapNumber: number; samples: LocationSample[] }[],
+  ): Promise<void>;
   loadTelemetry(sessionId: string, lapNumber: number): Promise<LocationSample[]>;
   getReferenceLap(userId: string, circuitId: string, layoutId: string, layoutVersion: number): Promise<ReferenceLap | null>;
   putReferenceLap(ref: ReferenceLap): Promise<void>;   // atomic replace; caller enforces PB rules

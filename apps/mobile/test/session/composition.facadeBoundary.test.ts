@@ -371,7 +371,17 @@ describe('C (ticket CN-FIX4): delete-all is durable against controller persisten
 
     expect(result.ok).toBe(false);
     expect(result.reason).toBe('SESSION_ACTIVE');
-    expect(await countRows(db, 'sessions')).toBe(1);
+    // Two rows, not one: the seeded session PLUS the live mid-session one.
+    // Ticket P10A H2 gives every session a row from RECORDING START, so a
+    // session that is still being driven is already in the table -- that is
+    // the whole point (a crash right now must leave it findable). Both
+    // survive the refusal, which is what this assertion is for.
+    expect(await countRows(db, 'sessions')).toBe(2);
+    const keptRows = await db.getAllAsync<{ sessionId: string }>(
+      'SELECT sessionId FROM sessions WHERE sessionId = ?',
+      ['driver-1--keep-me'],
+    );
+    expect(keptRows).toHaveLength(1);
     // The live session is untouched by the refusal.
     expect(latestFacadeState(composition).sessionState).toBe(midState);
   });

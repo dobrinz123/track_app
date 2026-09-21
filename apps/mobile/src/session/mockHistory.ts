@@ -1,4 +1,4 @@
-import type { LapRecord, SectorTime } from '@circuit/core';
+import type { LapRecord, SectorTime, SessionCalibrationStatus } from '@circuit/core';
 
 /**
  * Minimal shape of a stored session as consumed by the history/PB screens
@@ -15,6 +15,17 @@ export interface StoredSession {
   layoutId: string;
   displayDateUtc: string;
   laps: LapRecord[];
+  /**
+   * Ticket P10A H6/H7: the DURABLE calibration provenance of this session,
+   * carried through from `SessionSummary.calibrationStatus` so every
+   * synchronous screen (history, results, analysis) can state it without an
+   * effect of its own. Optional only because the mock store and older
+   * fixtures do not set it -- and an absent value means `'unknown'`, never
+   * `'validated'` (`resolveStoredCalibrationStatus` in `composition.ts`).
+   */
+  calibrationStatus?: SessionCalibrationStatus;
+  /** Ticket P10A H3: GNSS fixes the recorder captured and could not write, or `undefined` for a session recorded before that was tracked. */
+  unwrittenSampleCount?: number;
 }
 
 export interface PersonalBestEntry {

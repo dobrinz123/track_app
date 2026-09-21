@@ -539,9 +539,17 @@ describe('SessionController', () => {
 
     // A reverted flush() (Promise.allSettled instead of Promise.all) would
     // swallow the rejection, let endSession() proceed past it, and save the
-    // session summary anyway -- this is exactly what this assertion catches.
+    // session summary anyway -- this is exactly what these assertions catch.
+    //
+    // Ticket P10A H2 changed WHICH row proves it. A session row now exists
+    // from RECORDING START (that is the whole point: a crashed zero-lap
+    // session has to be findable), so "no row at all" is no longer the
+    // signal. The signal is that the row is still the recording-start one --
+    // zero laps, provenance not yet concluded -- because `endSession()`'s
+    // own `saveSession` is downstream of the rejection and never ran.
     const sessions = await inner.listSessions('driver-1', profile.circuitId);
-    expect(sessions).toHaveLength(0);
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]?.laps).toHaveLength(0);
   });
 
   // -------------------------------------------------------------------

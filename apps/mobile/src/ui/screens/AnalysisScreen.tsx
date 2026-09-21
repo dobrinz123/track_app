@@ -18,7 +18,7 @@ import {
   facade,
   getAnalysisRunner,
   getTrackdayRecord,
-  isSessionMatchingUnvalidated,
+  resolveSessionCalibrationStatus,
   settingsStore,
 } from '../../session/composition';
 
@@ -95,7 +95,10 @@ export function AnalysisScreen({ route }: Props): React.JSX.Element {
       // setting above, rather than trusted from anywhere earlier.
       const doc = buildAnalysisExportDocument(state, {
         generatedAtUtc: new Date().toISOString(),
-        matchingUnvalidated: isSessionMatchingUnvalidated(sessionId),
+        // Ticket P10A H6: three-valued and DURABLE. `isSessionMatchingUnvalidated`
+        // could only say "rejected" or "not rejected", so a session whose
+        // provenance the device cannot read was exported as an ordinary one.
+        calibrationStatus: resolveSessionCalibrationStatus(sessionId),
         trackday: {
           enabled: settings.suggestionsEnabled,
           cueUpdates: trackday.cueUpdates,

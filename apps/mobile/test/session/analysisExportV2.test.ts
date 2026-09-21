@@ -67,12 +67,12 @@ async function readyState(circuitIndex: number, language: 'ro' | 'en') {
 }
 
 describe('P5b-FIX1 C7 -- a standalone, versioned export DTO', () => {
-  it('is the current schema version (5 as of P7R E2) and pins its own key shape', async () => {
+  it('is the current schema version (6 as of P10A H6) and pins its own key shape', async () => {
     const state = await readyState(0, 'en');
-    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, matchingUnvalidated: false });
+    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, calibrationStatus: 'validated' as const });
 
-    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(5);
-    expect(doc.schemaVersion).toBe(5);
+    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(6);
+    expect(doc.schemaVersion).toBe(6);
     expect(Object.keys(doc).sort()).toEqual(
       [
         'analysis',
@@ -146,7 +146,7 @@ describe('P5b-FIX1 C7 -- a standalone, versioned export DTO', () => {
 
   it('omits every advisory / suggestion-derived field (V1 is observations only)', async () => {
     const state = await readyState(0, 'en');
-    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, matchingUnvalidated: false });
+    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, calibrationStatus: 'validated' as const });
     const json = JSON.stringify(doc);
     expect(doc.observationsOnly).toBe(true);
     expect(json).not.toMatch(/advisorySpeedKph/);
@@ -159,7 +159,7 @@ describe('P5b-FIX1 C7 -- a standalone, versioned export DTO', () => {
 
   it('maps the engine values through faithfully, corner for corner', async () => {
     const state = await readyState(0, 'en');
-    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, matchingUnvalidated: false });
+    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, calibrationStatus: 'validated' as const });
     expect(doc.analysis.corners).toHaveLength(state.insights.corners.length);
     for (const [index, corner] of doc.analysis.corners.entries()) {
       const source = state.insights.corners[index]!;
@@ -183,7 +183,7 @@ describe('P5b-FIX1 C8 -- one tap hands over both files', () => {
     shareAsync.mockClear();
     isAvailableAsync.mockResolvedValue(true);
     const state = await readyState(0, 'en');
-    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, matchingUnvalidated: false });
+    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, calibrationStatus: 'validated' as const });
 
     const result = await shareAnalysisExport(doc);
     expect(result.ok).toBe(true);
@@ -198,7 +198,7 @@ describe('P5b-FIX1 C8 -- one tap hands over both files', () => {
     writes.length = 0;
     isAvailableAsync.mockResolvedValue(false);
     const state = await readyState(0, 'en');
-    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, matchingUnvalidated: false });
+    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, calibrationStatus: 'validated' as const });
 
     const result = await shareAnalysisExport(doc);
     expect(result.ok).toBe(true);
@@ -223,7 +223,7 @@ describe('P5b-FIX1 C8 -- one tap hands over both files', () => {
 describe('P5b-FIX1 C9 -- one filename sanitizer for every dynamic segment', () => {
   it('normalises the date and sanitises the circuit id', async () => {
     const state = await readyState(0, 'en');
-    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, matchingUnvalidated: false });
+    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, calibrationStatus: 'validated' as const });
     const malformed = {
       ...doc,
       session: { ...doc.session, circuitId: '../../etc/pass wd', dateUtc: '2026/08/29 09:15' },

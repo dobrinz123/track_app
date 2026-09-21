@@ -291,7 +291,12 @@ describe('composition.ts recovery operation lock (C10 fix)', () => {
       return originalLoadCheckpoint(sessionId);
     };
     repo.saveCheckpoint = (sessionId: string, snapshot: SessionMachineSnapshot, laps: LapRecord[]) => {
-      saveCheckpointCalls += 1;
+      // Ticket P10A H2: `start('session')` now also writes an INITIAL
+      // checkpoint, so counting every `saveCheckpoint` would no longer
+      // measure what this test is about. `discardRecovery()`'s own write is
+      // the terminal one -- the `sessionComplete` snapshot it stamps to stop
+      // the recovery ever being offered again -- so that is what is counted.
+      if (snapshot.state === 'sessionComplete') saveCheckpointCalls += 1;
       return originalSaveCheckpoint(sessionId, snapshot, laps);
     };
 

@@ -5,6 +5,7 @@ import type {
   LocationProvider,
   LocationSample,
   RuntimeProfile,
+  SessionCalibrationStatus,
   SessionControllerDiagnostics,
   SessionMachineSnapshot,
   SessionState,
@@ -53,7 +54,8 @@ import { RealSessionFacade, type RealSessionFacadeCallbacks } from './realFacade
 import {
   loadRawSessionExportDocument,
   readAllSessionTelemetry,
-  readUnclaimedGnssTrace,
+  readStoredGnssLapNumbers,
+  readUnclaimedGnssChunks,
   type RawSessionExportDocument,
   type RawSessionExportUnavailable,
 } from './rawSessionExport';
@@ -578,9 +580,11 @@ const PENDING_FACADE_STATE: FacadeState = {
   speedKph: null,
   coachCue: null,
   trackMatch: { state: 'unknown', lateralM: null, confidence: null },
-  recording: { persistedSampleCount: 0, failedWriteCount: 0 },
+  recording: { persistedSampleCount: 0, failedWriteCount: 0, unwrittenSampleCount: 0 },
   // Ticket P7R E2: nothing is running yet, so there is no session to label.
   matchingUnvalidated: false,
+  // Ticket P10A H6: and nothing has been calibrated, so nothing may claim it was.
+  calibrationStatus: 'unknown',
   lastError: null,
 };
 
@@ -3197,7 +3201,16 @@ export async function resumeRecovery(): Promise<boolean> {
       }
       const ctrl = controller;
       if (ctrl === null) throw new Error('composition: resumeRecovery() found no production controller');
-      ctrl.restoreFromCheckpoint(info.sessionId, checkpoint.snapshot, checkpoint.laps);
+      // Ticket P10A H5 (binding): the recovered run resumes under the
+      // provenance the CRASHED run was recorded with. Read from the durable
+      // session record (via the history cache the store just rebuilt for the
+      // recovery circuit), and `'unknown'` when the device cannot say -- the
+      // one thing it must never come back as is "calibrated". Without this,
+      // `start('session')` reset the live label to false and the dashboard
+      // showed a never-calibrated resumed session as an ordinary one.
+      ctrl.restoreFromCheckpoint(info.sessionId, checkpoint.snapshot, checkpoint.laps, {
+        calibrationStatus: resolveSessionCalibrationStatus(info.sessionId),
+      });
       await ctrl.start('session');
       // F6 fix (WPT3, binding): normal session start reaches
       // `startTelemetryRecording()` through `RealSessionFacadeCallbacks.onSessionStarted`
@@ -3859,9 +3872,75 @@ export function getMostRecentSessionId(): string | null {
  */
 let unvalidatedMatchingSessionIds: ReadonlySet<string> = new Set();
 
-/** Ticket P7R E2: was this stored session run on unvalidated matching? */
+/**
+ * Ticket P10A H6 (binding) -- WHAT THIS DEVICE ACTUALLY KNOWS ABOUT HOW A
+ * STORED SESSION WAS CALIBRATED.
+ *
+ * Resolution order, and each step's reason:
+ *
+ *  1. the session's OWN durable record (`SessionSummary.calibrationStatus`,
+ *     written by `SessionController` at recording start and again the moment
+ *     the calibration concludes). This is the authority: it is written in the
+ *     same store, at the same time, as the data it describes.
+ *  2. the legacy side log (`sqlSettingsStore`'s
+ *     `unvalidated-matching-sessions` row), consulted ONLY when the record
+ *     carries no status -- i.e. for sessions stored before (1) existed. The
+ *     log is no longer allowed to be the answer for anything else: it evicts
+ *     its oldest entries at 200 sessions, reads as empty on any error, and
+ *     its write was never required to succeed, so a `false` from it meant
+ *     "not recorded as rejected", which is NOT the same as "calibrated".
+ *  3. `'unknown'`.
+ *
+ * Nothing in this chain can return `'validated'` without a stored statement
+ * that it was.
+ */
+export function resolveSessionCalibrationStatus(sessionId: string): SessionCalibrationStatus {
+  const stored = historyStore?.getSession(sessionId)?.calibrationStatus;
+  if (stored === 'validated' || stored === 'unvalidated') return stored;
+  if (unvalidatedMatchingSessionIds.has(sessionId)) return 'unvalidated';
+  return stored ?? 'unknown';
+}
+
+/**
+ * Ticket P10A H7: what the RESULTS screen must say, given the live
+ * controller's view and the durable record of the session that just ended.
+ *
+ * Both are consulted because each can be the better-informed one. The live
+ * state knows an escape hatch the durable write may not have landed yet; the
+ * durable record knows a provenance a rebuilt or resumed controller has lost.
+ * So `'unvalidated'` from EITHER wins (the label a session is not entitled to
+ * shed), `'validated'` requires BOTH, and everything else is `'unknown'`.
+ *
+ * Lives here rather than in the screen so the precedence rule is testable --
+ * `SessionResultsScreen.tsx` reaches into react-native and cannot be
+ * imported by the test runner.
+ */
+export function resolveResultsCalibrationStatus(
+  live: SessionCalibrationStatus,
+  sessionId: string | null,
+): SessionCalibrationStatus {
+  const stored: SessionCalibrationStatus =
+    sessionId === null ? 'unknown' : resolveSessionCalibrationStatus(sessionId);
+  if (live === 'unvalidated' || stored === 'unvalidated') return 'unvalidated';
+  if (live === 'validated' && stored === 'validated') return 'validated';
+  return 'unknown';
+}
+
+/** Ticket P10A H3: GNSS fixes this stored session captured and never wrote, or `null` when it predates that bookkeeping. */
+export function sessionUnwrittenSampleCount(sessionId: string): number | null {
+  return historyStore?.getSession(sessionId)?.unwrittenSampleCount ?? null;
+}
+
+/**
+ * Ticket P7R E2: was this stored session run on unvalidated matching?
+ *
+ * Ticket P10A H6: strictly `'unvalidated'`. Callers that must not present an
+ * UNKNOWN provenance as an ordinary one read
+ * {@link resolveSessionCalibrationStatus} instead -- this predicate cannot
+ * express the difference and every screen has been moved off it.
+ */
 export function isSessionMatchingUnvalidated(sessionId: string): boolean {
-  return unvalidatedMatchingSessionIds.has(sessionId);
+  return resolveSessionCalibrationStatus(sessionId) === 'unvalidated';
 }
 
 /** Ticket P7R E2: every such session id this launch knows about. */
@@ -3949,9 +4028,16 @@ export async function buildRawSessionExport(
       getSession: (id) => store.getSession(id),
       loadLapGnss: (id, lapNumber) => repo.loadTelemetry(id, lapNumber),
       loadUnclaimedGnss: async (id) =>
-        database === null ? [] : readUnclaimedGnssTrace(database, id),
+        database === null ? [] : readUnclaimedGnssChunks(database, id),
+      // Ticket P10A (MEDIUM, lap 0): only the SQL store can enumerate stored
+      // rows; the web preview's in-memory repository cannot, and there the
+      // export falls back to the lap records exactly as before.
+      ...(database === null
+        ? {}
+        : { listStoredGnssLapNumbers: (id: string) => readStoredGnssLapNumbers(database, id) }),
       loadTelemetry: async (id) => (database === null ? [] : readAllSessionTelemetry(database, id)),
-      isMatchingUnvalidated: (id) => isSessionMatchingUnvalidated(id),
+      calibrationStatus: (id) => resolveSessionCalibrationStatus(id),
+      unwrittenSampleCount: (id) => sessionUnwrittenSampleCount(id),
     },
     sessionId,
     generatedAtUtc,

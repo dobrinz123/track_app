@@ -8,8 +8,9 @@ import { TimeDisplay } from '../components/TimeDisplay';
 import { formatDateUtc } from '../format';
 import {
   buildRawSessionExport,
-  isSessionMatchingUnvalidated,
+  resolveSessionCalibrationStatus,
   sessionHistoryStore,
+  sessionUnwrittenSampleCount,
   settingsStore,
 } from '../../session/composition';
 import { shareRawSessionExport } from '../../session/rawSessionShare';
@@ -44,6 +45,17 @@ const RAW_EXPORT_COPY = {
   /** Ticket P7R E2: the honest label on a session run past a rejected calibration. */
   uncalibrated: 'UNCALIBRATED',
   uncalibratedHint: 'Started without a validated calibration — lap times may be unreliable.',
+  /**
+   * Ticket P10A H6: the device holds no statement either way. Shown, not
+   * omitted -- an omitted calibration line reads as "calibrated", and that
+   * is a claim an unreadable provenance is not entitled to make.
+   */
+  unknownCalibration: 'CALIBRATION UNKNOWN',
+  unknownCalibrationHint:
+    'No record of whether this session’s calibration was validated — treat its lap times as unverified.',
+  /** Ticket P10A H3: the trace on disk is shorter than the drive. */
+  incompleteTrace: (missing: number): string =>
+    `INCOMPLETE RECORDING — ${String(missing)} GPS fix(es) could not be saved.`,
 } as const;
 
 /** S9 — list of stored sessions (mock data via session store for now) with drill-down into lap detail. Header names the SELECTED circuit (ticket CN-W3): `sessionHistoryStore` is already rebuilt per-circuit by `selectCircuit()`, so its own listings already reflect this. */
@@ -124,7 +136,10 @@ export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
           sessions.map((session) => {
             const validLaps = session.laps.filter((l) => l.valid);
             const bestMs = validLaps.length > 0 ? Math.min(...validLaps.map((l) => l.durationMs)) : null;
-            const uncalibrated = isSessionMatchingUnvalidated(session.sessionId);
+            // Ticket P10A H6: three-valued. `'unknown'` gets its own,
+            // quieter notice -- never silence, which would read as validated.
+            const calibrationStatus = resolveSessionCalibrationStatus(session.sessionId);
+            const unwritten = sessionUnwrittenSampleCount(session.sessionId) ?? 0;
             const note = exportNote?.sessionId === session.sessionId ? exportNote.text : null;
             return (
               <View key={session.sessionId} style={styles.sessionCard}>
@@ -139,7 +154,7 @@ export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
                 </View>
                 {/* Ticket P7R E2: a session run past a rejected calibration is
                     never presented as an ordinary one. */}
-                {uncalibrated ? (
+                {calibrationStatus === 'unvalidated' ? (
                   <View style={styles.uncalibratedBlock} accessibilityLabel={RAW_EXPORT_COPY.uncalibratedHint}>
                     <Text style={styles.uncalibratedBadge} maxFontSizeMultiplier={1.3}>
                       {RAW_EXPORT_COPY.uncalibrated}
@@ -148,6 +163,29 @@ export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
                       {RAW_EXPORT_COPY.uncalibratedHint}
                     </Text>
                   </View>
+                ) : calibrationStatus === 'unknown' ? (
+                  <View
+                    style={styles.uncalibratedBlock}
+                    accessibilityLabel={RAW_EXPORT_COPY.unknownCalibrationHint}
+                  >
+                    <Text style={styles.unknownCalibrationBadge} maxFontSizeMultiplier={1.3}>
+                      {RAW_EXPORT_COPY.unknownCalibration}
+                    </Text>
+                    <Text style={styles.uncalibratedHint} maxFontSizeMultiplier={1.3}>
+                      {RAW_EXPORT_COPY.unknownCalibrationHint}
+                    </Text>
+                  </View>
+                ) : null}
+                {/* Ticket P10A H3: a short trace says so here, where the
+                    export button that would hand it over also lives. */}
+                {unwritten > 0 ? (
+                  <Text
+                    style={styles.incompleteTrace}
+                    maxFontSizeMultiplier={1.3}
+                    accessibilityLabel={RAW_EXPORT_COPY.incompleteTrace(unwritten)}
+                  >
+                    {RAW_EXPORT_COPY.incompleteTrace(unwritten)}
+                  </Text>
                 ) : null}
                 <View style={styles.lapChipsRow}>
                   {session.laps.map((lap) => (
@@ -279,6 +317,8 @@ const styles = StyleSheet.create({
   uncalibratedBlock: { gap: 2 },
   uncalibratedBadge: { ...typography.label, color: colors.warning },
   uncalibratedHint: { ...typography.caption, color: colors.textSecondary },
+  unknownCalibrationBadge: { ...typography.label, color: colors.textMuted },
+  incompleteTrace: { ...typography.caption, color: colors.warning },
   lapChipText: { ...typography.caption, color: colors.textPrimary },
   inlineTime: { fontSize: 13 },
 });

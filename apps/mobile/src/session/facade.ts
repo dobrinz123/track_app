@@ -4,6 +4,7 @@ import type {
   DeltaUpdate,
   LapRecord,
   QualityLevel,
+  SessionCalibrationStatus,
   SessionState,
   TrackMatchState,
 } from '@circuit/core';
@@ -82,6 +83,8 @@ export interface FacadeState {
   recording: {
     persistedSampleCount: number;
     failedWriteCount: number;
+    /** Ticket P10A H3: captured fixes NOT on disk right now -- the unflushed tail plus every batch a failed write retained. Non-zero after a session ends means the stored trace is SHORT. */
+    unwrittenSampleCount: number;
   };
   /**
    * Ticket P7R E2: is this session running on matching the calibration gate
@@ -94,6 +97,15 @@ export interface FacadeState {
    * competing with the OFF TRACK banner.
    */
   matchingUnvalidated: boolean;
+  /**
+   * Ticket P10A H5/H6: the three-valued provenance behind
+   * `matchingUnvalidated`, mirrored 1:1 from
+   * `FacadeStateCore.calibrationStatus`. Screens that must not present an
+   * UNREADABLE provenance as a calibrated one read this.
+   * `MockSessionFacade`/`PendingFacade` report `'unknown'` -- which is the
+   * honest answer for a facade that has calibrated nothing.
+   */
+  calibrationStatus: SessionCalibrationStatus;
 }
 
 /**

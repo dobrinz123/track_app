@@ -10,7 +10,13 @@ export type {
   SampleIngestResult,
 } from './pipelineCore';
 
-export { CUE_POSITION_TOLERANCE_M, SessionController, VOICE_LIFT_MAX_SEVERITY } from './sessionController';
+export {
+  CUE_POSITION_TOLERANCE_M,
+  SessionController,
+  TRACE_CHUNK_KEY_STRIDE,
+  VOICE_LIFT_MAX_SEVERITY,
+  decodeTraceChunkKey,
+} from './sessionController';
 export type {
   AppliedCueUpdate,
   CueUpdateContext,

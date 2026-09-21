@@ -86,11 +86,11 @@ async function readyState(language: 'ro' | 'en') {
 }
 
 describe('analysis export — the trackday record (D4)', () => {
-  it('is schemaVersion 5 and omits the trackday block entirely when nothing was suggested', async () => {
+  it('is schemaVersion 6 and omits the trackday block entirely when nothing was suggested', async () => {
     const state = await readyState('en');
-    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, matchingUnvalidated: false });
-    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(5);
-    expect(doc.schemaVersion).toBe(5);
+    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, calibrationStatus: 'validated' as const });
+    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(6);
+    expect(doc.schemaVersion).toBe(6);
     expect(doc.trackday).toBeUndefined();
     expect(doc.observationsOnly).toBe(true);
     expect(JSON.stringify(doc)).not.toMatch(/suggest/i);
@@ -100,7 +100,7 @@ describe('analysis export — the trackday record (D4)', () => {
     const state = await readyState('en');
     const doc = buildAnalysisExportDocument(state, {
       generatedAtUtc: GENERATED_AT,
-      matchingUnvalidated: false,
+      calibrationStatus: 'validated',
       trackday: { enabled: true, cueUpdates: [CUE_UPDATE], pitSuggestions: [SUGGESTION] },
     });
     expect(doc.observationsOnly).toBe(false);
@@ -138,7 +138,7 @@ describe('analysis export — the trackday record (D4)', () => {
     const state = await readyState('en');
     const doc = buildAnalysisExportDocument(state, {
       generatedAtUtc: GENERATED_AT,
-      matchingUnvalidated: false,
+      calibrationStatus: 'validated',
       trackday: { enabled: true, cueUpdates: [CUE_UPDATE], pitSuggestions: [SUGGESTION] },
     });
     for (const update of doc.trackday?.cueUpdates ?? []) {
@@ -158,7 +158,7 @@ describe('analysis export — the trackday record (D4)', () => {
     const state = await readyState('ro');
     const doc = buildAnalysisExportDocument(state, {
       generatedAtUtc: GENERATED_AT,
-      matchingUnvalidated: false,
+      calibrationStatus: 'validated',
       trackday: { enabled: true, cueUpdates: [CUE_UPDATE], pitSuggestions: [SUGGESTION] },
     });
     const markdown = buildAnalysisSummaryMarkdown(doc);
@@ -170,7 +170,7 @@ describe('analysis export — the trackday record (D4)', () => {
   it('leaves the summary untouched when nothing was suggested', async () => {
     const state = await readyState('en');
     const withoutTrackday = buildAnalysisSummaryMarkdown(
-      buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, matchingUnvalidated: false }),
+      buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, calibrationStatus: 'validated' as const }),
     );
     expect(withoutTrackday).not.toMatch(/suggest/i);
   });
@@ -186,7 +186,7 @@ describe('analysis export — the setting decides, at export time (E9)', () => {
     const state = await readyState('en');
     const doc = buildAnalysisExportDocument(state, {
       generatedAtUtc: GENERATED_AT,
-      matchingUnvalidated: false,
+      calibrationStatus: 'validated',
       trackday: { enabled: false, cueUpdates: [CUE_UPDATE], pitSuggestions: [SUGGESTION] },
     });
     expect(doc.trackday).toBeUndefined();
@@ -201,12 +201,12 @@ describe('analysis export — the setting decides, at export time (E9)', () => {
       const state = await readyState(language);
       const withSuggestions = buildAnalysisExportDocument(state, {
         generatedAtUtc: GENERATED_AT,
-        matchingUnvalidated: false,
+        calibrationStatus: 'validated',
         trackday: { enabled: true, cueUpdates: [CUE_UPDATE], pitSuggestions: [SUGGESTION] },
       });
       const observationsOnly = buildAnalysisExportDocument(state, {
         generatedAtUtc: GENERATED_AT,
-        matchingUnvalidated: false,
+        calibrationStatus: 'validated',
       });
       const expected = ANALYSIS_SCREEN_STRINGS[language].observationsWithSuggestions;
       expect(withSuggestions.report.observationsOnlyNote).toBe(expected);

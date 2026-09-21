@@ -60,6 +60,71 @@ describe('SqlSessionRepository - SQL-specific guarantees', () => {
     expect(rows[0]?.c).toBe(1);
   });
 
+  /**
+   * Ticket P10A H3/H6: the on-device database the owner already has was
+   * created under schema v2, whose `sessions` table has none of the new
+   * columns. `CREATE TABLE IF NOT EXISTS` cannot add them, so the upgrade
+   * rests on `SQL_ALTERS_V3` -- and a failed upgrade would not be a missing
+   * feature, it would be every read of `sessions` throwing on a phone with
+   * a track day's data on it.
+   */
+  it('upgrades a pre-P10A (v2-shaped) sessions table in place, keeping its rows and reading them as unknown provenance', async () => {
+    const rawDb = await createRawSqlJsDatabase();
+    const db = wrapSqlJsDatabase(rawDb);
+
+    // Exactly the v2 DDL for this table: no calibrationStatus, no trace columns.
+    await db.execAsync(`
+      CREATE TABLE schema_migrations (version INTEGER NOT NULL);
+      CREATE TABLE sessions (
+        sessionId TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        circuitId TEXT NOT NULL,
+        layoutId TEXT NOT NULL,
+        layoutVersion INTEGER NOT NULL,
+        startedAtUtc TEXT NOT NULL
+      );
+    `);
+    await db.runAsync('INSERT INTO schema_migrations (version) VALUES (?)', [2]);
+    await db.runAsync(
+      'INSERT INTO sessions (sessionId, userId, circuitId, layoutId, layoutVersion, startedAtUtc) VALUES (?, ?, ?, ?, ?, ?)',
+      ['legacy-1', 'driver-1', 'tmr', 'main', 1, '2026-09-01T09:00:00.000Z'],
+    );
+
+    const repo = await SqlSessionRepository.create(db);
+
+    const listed = await repo.listSessions('driver-1', 'tmr');
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.sessionId).toBe('legacy-1');
+    // Ticket P10A H6 (binding): a row that predates the column says UNKNOWN.
+    // Reading it as `'validated'` would be the app vouching for a session
+    // nobody ever vouched for.
+    expect(listed[0]?.calibrationStatus).toBe('unknown');
+    expect(listed[0]?.trace).toBeUndefined();
+
+    // The upgraded table takes the new facts from here on.
+    await repo.saveSession(
+      makeSessionSummary({
+        sessionId: 'new-1',
+        userId: 'driver-1',
+        circuitId: 'tmr',
+        layoutId: 'main',
+        layoutVersion: 1,
+        laps: [],
+        calibrationStatus: 'unvalidated',
+        trace: { unwrittenSampleCount: 3, failedWriteCount: 2 },
+      }),
+    );
+    const after = await repo.listSessions('driver-1', 'tmr');
+    const stored = after.find((session) => session.sessionId === 'new-1');
+    expect(stored?.calibrationStatus).toBe('unvalidated');
+    expect(stored?.trace).toEqual({ unwrittenSampleCount: 3, failedWriteCount: 2 });
+
+    // And re-opening (the very next app launch) re-runs the ALTERs harmlessly.
+    await expect(SqlSessionRepository.create(wrapSqlJsDatabase(rawDb))).resolves.toBeInstanceOf(
+      SqlSessionRepository,
+    );
+  });
+
   it('putReferenceLap is transactionally atomic: a failure injected between the DELETE and the INSERT leaves the previous PB intact', async () => {
     const rawDb = await createRawSqlJsDatabase();
     const cleanDb = wrapSqlJsDatabase(rawDb);

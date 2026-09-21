@@ -1,4 +1,11 @@
-import type { LapRecord, LocationSample, SqlDatabase, TelemetryChannelId } from '@circuit/core';
+import {
+  decodeTraceChunkKey,
+  type LapRecord,
+  type LocationSample,
+  type SessionCalibrationStatus,
+  type SqlDatabase,
+  type TelemetryChannelId,
+} from '@circuit/core';
 
 import type { StoredSession } from './mockHistory';
 
@@ -56,7 +63,20 @@ import type { StoredSession } from './mockHistory';
  * contract — "a lap's rows, and nothing that belongs to no lap" — intact.
  */
 
-export const RAW_SESSION_EXPORT_SCHEMA_VERSION = 1;
+/**
+ * v2 (ticket P10A) -- three corrections, all of them about the document
+ * telling the truth about what it contains:
+ *
+ *  - H4: chunk samples a half-completed reclaim left owned by BOTH a lap row
+ *    and a chunk row are reconciled away, so one fix is exported once.
+ *  - MEDIUM (ordering): the unclaimed trace is ordered by RUN, then by
+ *    position within the run, instead of by `tMono` -- which is
+ *    process-relative and therefore meaningless between two launches of the
+ *    same session. `gnss.runs` names the runs.
+ *  - H6: `session.calibrationStatus` is three-valued. `matchingUnvalidated`
+ *    is retained, unchanged in meaning, for readers of v1 documents.
+ */
+export const RAW_SESSION_EXPORT_SCHEMA_VERSION = 2;
 export const RAW_SESSION_EXPORT_KIND = 'trace-raw-session';
 
 // ---------------------------------------------------------------------------
@@ -77,6 +97,28 @@ export interface RawSessionLapTrace {
   lapNumber: number;
   sampleCount: number;
   samples: LocationSample[];
+  /**
+   * Ticket P10A (MEDIUM, lap 0): `true` when this row exists in storage but
+   * the session has no lap RECORD for it -- a learned-circuit out-lap trace
+   * stored at lap 0, or a lap row whose session summary was lost. Before
+   * this, the export only asked for the lap numbers the session summary
+   * listed, so such a row was never read at all.
+   */
+  orphan?: boolean;
+}
+
+/**
+ * Ticket P10A: one stored unclaimed chunk row, with the RUN identity its key
+ * carries. See `@circuit/core`'s `decodeTraceChunkKey`.
+ */
+export interface RawSessionTraceChunk {
+  /** The stored `telemetry.lapNumber` key -- always negative. */
+  key: number;
+  /** Which app run wrote it. Runs sort ascending in real time. */
+  runBase: number;
+  /** Position within that run; ascending is chronological WITHIN the run. */
+  sequence: number;
+  samples: LocationSample[];
 }
 
 export interface RawSessionExportDocument {
@@ -96,8 +138,23 @@ export interface RawSessionExportDocument {
      * wrong or absent. `false` for an ordinary session; the raw GNSS and
      * telemetry below are unaffected either way — they are measurements, not
      * matched results.
+     *
+     * Ticket P10A H6: kept EXACTLY equal to
+     * `calibrationStatus === 'unvalidated'` so a v1 reader is never misled.
+     * It cannot express "unknown", which is why `calibrationStatus` exists
+     * beside it and is the field to read.
      */
     matchingUnvalidated: boolean;
+    /** Ticket P10A H6: the durable three-valued provenance. `'unknown'` is never to be read as calibrated. */
+    calibrationStatus: SessionCalibrationStatus;
+    /**
+     * Ticket P10A H3: GNSS fixes the recorder captured and could NOT write.
+     * `0` (or absent, for a session recorded before this was tracked) means
+     * the trace below is everything that was captured.
+     */
+    unwrittenSampleCount: number | null;
+    /** Ticket P10A H3: `true` when `unwrittenSampleCount` is known to be greater than zero — this document is SHORT. */
+    traceIncomplete: boolean;
   };
   /**
    * The GNSS trace, split by who owns it. `unclaimed` is the P7M chunk trace:
@@ -109,6 +166,21 @@ export interface RawSessionExportDocument {
     unclaimedSampleCount: number;
     laps: RawSessionLapTrace[];
     unclaimed: LocationSample[];
+    /**
+     * Ticket P10A (MEDIUM, ordering): the app runs `unclaimed` is assembled
+     * from, oldest run first, each one's samples contiguous and in capture
+     * order. More than one entry means this session was resumed after a
+     * process death — and that its `tMono` values restart at each boundary.
+     */
+    runs: { runBase: number; chunkCount: number; sampleCount: number }[];
+    /**
+     * Ticket P10A H4: fixes that were stored in BOTH a lap row and a chunk
+     * row (a lap write that committed while its reclaim did not) and were
+     * counted once here rather than twice. Non-zero means this device holds
+     * a session written before the lap write and its reclaim became one
+     * transaction, or one interrupted part-way.
+     */
+    reconciledDuplicateCount: number;
   };
   telemetry: {
     sampleCount: number;
@@ -127,10 +199,107 @@ export interface RawSessionExportDocument {
 export interface RawSessionExportInput {
   generatedAtUtc: string;
   session: StoredSession;
-  matchingUnvalidated: boolean;
+  /** Ticket P10A H6. */
+  calibrationStatus: SessionCalibrationStatus;
+  /** Ticket P10A H3: what the recorder reported it could not store, or `null` when the session predates that bookkeeping. */
+  unwrittenSampleCount: number | null;
   lapTraces: readonly RawSessionLapTrace[];
-  unclaimedTrace: readonly LocationSample[];
+  /** Ticket P10A: the chunk rows WITH their run identity, not a flattened bag of samples. */
+  unclaimedChunks: readonly RawSessionTraceChunk[];
   telemetry: readonly RawSessionTelemetryRow[];
+}
+
+/**
+ * Ticket P10A H4 — THE DURABLE IDENTITY OF ONE RECORDED FIX.
+ *
+ * Every field the device stored, in a fixed order. Deliberately NOT `tMono`
+ * alone: `tMono` is process-relative and restarts at every launch, so two
+ * samples from different runs of the same session can legitimately share one,
+ * and deduplicating on it would silently delete a real fix from a resumed
+ * drive. A full-field match is the same MEASUREMENT — the same instant, the
+ * same position, the same accuracy, speed, heading, altitude and source —
+ * which is what a lap row and an unreclaimed chunk row hold two copies of.
+ */
+function sampleIdentity(sample: LocationSample): string {
+  return [
+    sample.tMono,
+    sample.lat,
+    sample.lon,
+    sample.accuracyM ?? '',
+    sample.speedMps ?? '',
+    sample.headingDeg ?? '',
+    sample.altitudeM ?? '',
+    sample.tUtc ?? '',
+    sample.source,
+  ].join('|');
+}
+
+/**
+ * Ticket P10A H4: drops from the unclaimed trace exactly those fixes a lap
+ * row ALSO holds.
+ *
+ * Two guards keep this from ever deleting a genuine fix:
+ *
+ *  1. a candidate must fall inside a range a lap row actually CLAIMS (a lap
+ *     record's `tStart..tEnd`, or -- for a stored row the session summary
+ *     does not list -- that row's own span), so a chunk sample from a
+ *     different phase of the drive is never even considered; and
+ *  2. it must match an UNCONSUMED lap-row sample by {@link sampleIdentity}.
+ *     Matches are consumed one for one, so if a lap row holds one copy and
+ *     the chunks hold two genuinely distinct captures, exactly one is
+ *     removed.
+ */
+function reconcileUnclaimed(
+  lapTraces: readonly RawSessionLapTrace[],
+  laps: readonly LapRecord[],
+  unclaimed: readonly LocationSample[],
+): { kept: LocationSample[]; removed: number } {
+  const available = new Map<string, number>();
+  for (const trace of lapTraces) {
+    for (const sample of trace.samples) {
+      const id = sampleIdentity(sample);
+      available.set(id, (available.get(id) ?? 0) + 1);
+    }
+  }
+  if (available.size === 0) return { kept: [...unclaimed], removed: 0 };
+
+  const claimedRanges: { from: number; to: number }[] = laps.map((lap) => ({
+    from: Math.min(lap.tStart, lap.tEnd),
+    to: Math.max(lap.tStart, lap.tEnd),
+  }));
+  const recordedLapNumbers = new Set(laps.map((lap) => lap.lapNumber));
+  for (const trace of lapTraces) {
+    if (recordedLapNumbers.has(trace.lapNumber) || trace.samples.length === 0) continue;
+    // An orphan row (lap 0's learn trace, say) has no lap record to give a
+    // range, so it claims exactly the span of what it stores.
+    let from = trace.samples[0]!.tMono;
+    let to = from;
+    for (const sample of trace.samples) {
+      if (sample.tMono < from) from = sample.tMono;
+      if (sample.tMono > to) to = sample.tMono;
+    }
+    claimedRanges.push({ from, to });
+  }
+  if (claimedRanges.length === 0) return { kept: [...unclaimed], removed: 0 };
+
+  const kept: LocationSample[] = [];
+  let removed = 0;
+  for (const sample of unclaimed) {
+    const inClaimedRange = claimedRanges.some(
+      (range) => sample.tMono >= range.from && sample.tMono <= range.to,
+    );
+    if (inClaimedRange) {
+      const id = sampleIdentity(sample);
+      const remaining = available.get(id) ?? 0;
+      if (remaining > 0) {
+        available.set(id, remaining - 1);
+        removed += 1;
+        continue;
+      }
+    }
+    kept.push(sample);
+  }
+  return { kept, removed };
 }
 
 /**
@@ -148,15 +317,45 @@ export function buildRawSessionExportDocument(
       lapNumber: trace.lapNumber,
       sampleCount: trace.samples.length,
       samples: [...trace.samples],
+      ...(trace.orphan === true ? { orphan: true as const } : {}),
     }))
     .sort((a, b) => a.lapNumber - b.lapNumber);
-  // Chronological, because the chunk rows are written in key order and a
-  // reader of a raw trace wants a drive, not a filing order.
-  const unclaimed = [...input.unclaimedTrace].sort((a, b) => a.tMono - b.tMono);
-  const telemetry = [...input.telemetry].sort((a, b) => a.tMonoMs - b.tMonoMs);
+
+  // Ticket P10A (MEDIUM, ordering): run by run, then chunk by chunk, then in
+  // stored order. NEVER a global sort on `tMono` -- see
+  // `decodeTraceChunkKey`'s doc comment for why that scrambles a resumed
+  // session's drive instead of ordering it.
+  const orderedChunks = [...input.unclaimedChunks].sort(
+    (a, b) => a.runBase - b.runBase || a.sequence - b.sequence || a.key - b.key,
+  );
+  const rawUnclaimed: LocationSample[] = [];
+  const runTotals = new Map<number, { chunkCount: number; sampleCount: number }>();
+  for (const chunk of orderedChunks) {
+    rawUnclaimed.push(...chunk.samples);
+    const totals = runTotals.get(chunk.runBase) ?? { chunkCount: 0, sampleCount: 0 };
+    totals.chunkCount += 1;
+    totals.sampleCount += chunk.samples.length;
+    runTotals.set(chunk.runBase, totals);
+  }
+  const runs = [...runTotals.entries()]
+    .map(([runBase, totals]) => ({ runBase, ...totals }))
+    .sort((a, b) => a.runBase - b.runBase);
+
+  // Ticket P10A H4: one fix, exported once.
+  const reconciled = reconcileUnclaimed(laps, input.session.laps, rawUnclaimed);
+  const unclaimed = reconciled.kept;
+
+  // Ticket P10A (MEDIUM, ordering): sensor rows arrive in storage (rowid)
+  // order, which IS capture order across launches. Re-sorting them on
+  // `t_mono_ms` -- as this did -- put a resumed run's first seconds before
+  // the pre-crash drive, for exactly the reason the GNSS chunks do not sort
+  // that way either.
+  const telemetry = [...input.telemetry];
   const lapSampleCount = laps.reduce((total, lap) => total + lap.sampleCount, 0);
   const channels = [...new Set(telemetry.map((row) => row.channel))].sort();
   const unlappedSampleCount = telemetry.filter((row) => row.lapNumber === null).length;
+  const orphanLapNumbers = laps.filter((lap) => lap.orphan === true).map((lap) => lap.lapNumber);
+  const traceIncomplete = (input.unwrittenSampleCount ?? 0) > 0;
 
   const notes: string[] = [
     'Raw recorded data, exactly as stored on the device. No analysis, no smoothing, no derived metrics.',
@@ -167,9 +366,33 @@ export function buildRawSessionExportDocument(
       'This session completed no lap. The timing engine never detected a start/finish crossing, so there are no lap times — the trace below is the drive itself.',
     );
   }
-  if (input.matchingUnvalidated) {
+  if (input.calibrationStatus === 'unvalidated') {
     notes.push(
       'This session was started past a REJECTED calibration. Any lap or sector times in it may be wrong or missing. The GNSS and telemetry samples are unaffected: they are measurements, not matched results.',
+    );
+  } else if (input.calibrationStatus === 'unknown') {
+    notes.push(
+      'Calibration status UNKNOWN for this session: the device holds no record of whether its matching was ever validated. Treat any lap or sector times as unverified. The GNSS and telemetry samples are unaffected: they are measurements, not matched results.',
+    );
+  }
+  if (traceIncomplete) {
+    notes.push(
+      `INCOMPLETE RECORDING: ${String(input.unwrittenSampleCount)} captured GNSS fix(es) could not be written to storage and are NOT in this file. The trace below is shorter than the drive.`,
+    );
+  }
+  if (runs.length > 1) {
+    notes.push(
+      `This session was recorded across ${String(runs.length)} app runs (a resume after the app stopped). gnss.unclaimed is ordered run by run; tMono restarts at each run boundary and is not comparable between runs.`,
+    );
+  }
+  if (reconciled.removed > 0) {
+    notes.push(
+      `${String(reconciled.removed)} GNSS fix(es) were stored in both a lap row and an unclaimed chunk (an interrupted reclaim) and are counted once here, not twice.`,
+    );
+  }
+  if (orphanLapNumbers.length > 0) {
+    notes.push(
+      `Stored GNSS rows with no matching lap record were included: lap ${orphanLapNumbers.join(', ')}. Lap 0 is a learned-circuit out-lap trace.`,
     );
   }
   if (telemetry.length === 0) {
@@ -186,7 +409,10 @@ export function buildRawSessionExportDocument(
       layoutId: input.session.layoutId,
       dateUtc: input.session.displayDateUtc,
       lapCount: input.session.laps.length,
-      matchingUnvalidated: input.matchingUnvalidated,
+      matchingUnvalidated: input.calibrationStatus === 'unvalidated',
+      calibrationStatus: input.calibrationStatus,
+      unwrittenSampleCount: input.unwrittenSampleCount,
+      traceIncomplete,
     },
     gnss: {
       totalSampleCount: lapSampleCount + unclaimed.length,
@@ -194,6 +420,8 @@ export function buildRawSessionExportDocument(
       unclaimedSampleCount: unclaimed.length,
       laps,
       unclaimed,
+      runs,
+      reconciledDuplicateCount: reconciled.removed,
     },
     telemetry: {
       sampleCount: telemetry.length,
@@ -279,8 +507,21 @@ export function buildRawSessionSummaryMarkdown(doc: RawSessionExportDocument): s
       doc.telemetry.channels.length === 0 ? '' : ` across ${doc.telemetry.channels.join(', ')}`
     }`,
   ];
-  if (doc.session.matchingUnvalidated) {
-    lines.push('- Calibration: **not validated** — timing in this session may be unreliable');
+  // Ticket P10A H6/H7: the calibration line is UNCONDITIONAL. A summary that
+  // simply omits it when the status is not "rejected" reads, to the person
+  // forwarding the file, as a session that was calibrated -- which is the
+  // exact claim an unknown provenance is not entitled to make.
+  lines.push(
+    doc.session.calibrationStatus === 'unvalidated'
+      ? '- Calibration: **not validated** — timing in this session may be unreliable'
+      : doc.session.calibrationStatus === 'unknown'
+        ? '- Calibration: **unknown** — the device holds no record of whether matching was validated'
+        : '- Calibration: validated',
+  );
+  if (doc.session.traceIncomplete) {
+    lines.push(
+      `- Recording: **INCOMPLETE** — ${String(doc.session.unwrittenSampleCount)} captured GNSS fix(es) were never written to storage`,
+    );
   }
   lines.push('', '## Notes');
   for (const note of doc.notes) lines.push(`- ${note}`);
@@ -298,36 +539,47 @@ interface TelemetryPayloadRow {
 }
 
 /**
- * Ticket P7R E1: every UNCLAIMED GNSS chunk row of a session, concatenated.
+ * Ticket P7R E1 / P10A: every UNCLAIMED GNSS chunk row of a session, WITH the
+ * run identity its key carries.
  *
  * These are the rows `SessionController.flushRawTrace()` writes at negative
  * `lapNumber` (`TRACE_CHUNK_KEY_STRIDE`). Nothing else in the app reads
  * telemetry except by a specific known lap number, which is precisely why
- * they were invisible until now.
+ * they were invisible until P7R E1.
  *
- * `ORDER BY lapNumber DESC` is chronological, not merely deterministic: a key
- * is `-(runBase * STRIDE + sequence)`, so a LATER chunk is a MORE negative
- * key. Descending therefore walks the run forwards. The document builder
- * re-sorts by `tMono` anyway (a session id resumed after a crash contributes
- * a second key band), so this ordering is a sensible starting point rather
- * than the guarantee.
+ * `ORDER BY lapNumber DESC` walks a single run forwards (a key is
+ * `-(runBase * STRIDE + sequence)`, so a LATER chunk is a MORE negative key)
+ * and also orders the runs themselves oldest-first, since `runBase` is the
+ * high half. The caller re-sorts on the decoded `(runBase, sequence)` anyway
+ * rather than trusting the arithmetic of the key ordering.
+ *
+ * Ticket P10A (MEDIUM, ordering): the run identity is the whole point of
+ * returning chunks instead of a flat sample list. The previous reader threw
+ * the keys away and the builder then sorted the samples by `tMono`, which is
+ * process-relative -- so a resumed session's first seconds sorted BEFORE the
+ * drive that preceded the crash.
  *
  * A row whose payload will not parse is SKIPPED, not fatal: one corrupt chunk
  * out of a thousand must not cost the other nine hundred and ninety-nine.
  */
-export async function readUnclaimedGnssTrace(
+export async function readUnclaimedGnssChunks(
   db: SqlDatabase,
   sessionId: string,
-): Promise<LocationSample[]> {
+): Promise<RawSessionTraceChunk[]> {
   const rows = await db.getAllAsync<TelemetryPayloadRow>(
     'SELECT lapNumber, payload FROM telemetry WHERE sessionId = ? AND lapNumber < 0 ORDER BY lapNumber DESC',
     [sessionId],
   );
-  const samples: LocationSample[] = [];
+  const chunks: RawSessionTraceChunk[] = [];
   for (const row of rows) {
+    const decoded = decodeTraceChunkKey(row.lapNumber);
+    if (decoded === null) continue;
     try {
       const parsed: unknown = JSON.parse(row.payload);
-      if (Array.isArray(parsed)) samples.push(...(parsed as LocationSample[]));
+      if (!Array.isArray(parsed)) continue;
+      const samples = parsed as LocationSample[];
+      if (samples.length === 0) continue;
+      chunks.push({ key: row.lapNumber, ...decoded, samples });
     } catch (error) {
       console.warn(
         `[rawSessionExport] unreadable trace chunk ${row.lapNumber} of session ${sessionId}`,
@@ -335,7 +587,42 @@ export async function readUnclaimedGnssTrace(
       );
     }
   }
-  return samples;
+  chunks.sort((a, b) => a.runBase - b.runBase || a.sequence - b.sequence || a.key - b.key);
+  return chunks;
+}
+
+/** The same rows flattened into capture order (run by run). Kept for callers that only want the samples. */
+export async function readUnclaimedGnssTrace(
+  db: SqlDatabase,
+  sessionId: string,
+): Promise<LocationSample[]> {
+  const chunks = await readUnclaimedGnssChunks(db, sessionId);
+  return chunks.flatMap((chunk) => chunk.samples);
+}
+
+/**
+ * Ticket P10A (MEDIUM, lap 0) -- WHICH GNSS LAP ROWS THIS SESSION ACTUALLY
+ * HAS ON DISK.
+ *
+ * The export used to derive its lap-row reads purely from the session
+ * summary's lap RECORDS. A learned-circuit session stores its out-lap
+ * learning trace at `lapNumber = 0` with no completed-lap record and, on a
+ * run that never crossed the line, no negative chunks either -- so the export
+ * asked for nothing and produced an empty document for a session whose drive
+ * was sitting in row 0 the whole time.
+ *
+ * Never throws: an unreadable index degrades to "no extra rows", which is the
+ * pre-P10A behaviour, not a failed export.
+ */
+export async function readStoredGnssLapNumbers(
+  db: SqlDatabase,
+  sessionId: string,
+): Promise<number[]> {
+  const rows = await db.getAllAsync<{ lapNumber: number }>(
+    'SELECT lapNumber FROM telemetry WHERE sessionId = ? AND lapNumber >= 0 ORDER BY lapNumber ASC',
+    [sessionId],
+  );
+  return rows.map((row) => row.lapNumber);
 }
 
 interface TelemetrySampleDbRow {
@@ -359,8 +646,12 @@ export async function readAllSessionTelemetry(
   db: SqlDatabase,
   sessionId: string,
 ): Promise<RawSessionTelemetryRow[]> {
+  // Ticket P10A (MEDIUM, ordering): `rowid`, not `t_mono_ms`. The recorder
+  // appends, so rowid order IS capture order -- including across a resume,
+  // where `t_mono_ms` restarts from the new process's origin and would sort
+  // the resumed run's samples in among (or before) the pre-crash ones.
   const rows = await db.getAllAsync<TelemetrySampleDbRow>(
-    'SELECT lap_number, t_mono_ms, channel, value FROM telemetry_samples WHERE session_id = ? ORDER BY t_mono_ms',
+    'SELECT lap_number, t_mono_ms, channel, value FROM telemetry_samples WHERE session_id = ? ORDER BY rowid',
     [sessionId],
   );
   return rows.map((row) => ({
@@ -379,12 +670,21 @@ export interface RawSessionExportDeps {
   getSession: (sessionId: string) => StoredSession | null;
   /** A completed lap's stored GNSS trace (`LocalSessionRepository.loadTelemetry`). */
   loadLapGnss: (sessionId: string, lapNumber: number) => Promise<LocationSample[]>;
-  /** The unclaimed chunk trace. */
-  loadUnclaimedGnss: (sessionId: string) => Promise<LocationSample[]>;
+  /** Ticket P10A (MEDIUM, ordering): the unclaimed chunk rows, run identity intact. */
+  loadUnclaimedGnss: (sessionId: string) => Promise<readonly RawSessionTraceChunk[]>;
+  /**
+   * Ticket P10A (MEDIUM, lap 0): every GNSS lap row this session actually has
+   * stored, regardless of whether a lap RECORD names it. Optional so a caller
+   * with no way to enumerate rows (the web preview's in-memory repository)
+   * still exports what the lap records name.
+   */
+  listStoredGnssLapNumbers?: (sessionId: string) => Promise<readonly number[]>;
   /** Every telemetry sample of the session, lapped and unlapped. */
   loadTelemetry: (sessionId: string) => Promise<RawSessionTelemetryRow[]>;
-  /** Ticket P7R E2: was this session run past a rejected calibration? */
-  isMatchingUnvalidated: (sessionId: string) => boolean;
+  /** Ticket P10A H6: the DURABLE three-valued provenance of this session's matching. */
+  calibrationStatus: (sessionId: string) => SessionCalibrationStatus;
+  /** Ticket P10A H3: GNSS fixes the recorder could not write, or `null` when the session predates that bookkeeping. */
+  unwrittenSampleCount?: (sessionId: string) => number | null;
   /** Where a partial read failure is reported. Defaults to `console.warn`. */
   onReadError?: (error: unknown) => void;
 }
@@ -412,20 +712,47 @@ export async function loadRawSessionExportDocument(
   const session = deps.getSession(sessionId);
   if (session === null) return 'session-not-found';
 
-  const lapTraces: RawSessionLapTrace[] = [];
-  for (const lap of [...session.laps].sort((a, b) => a.lapNumber - b.lapNumber)) {
-    let samples: LocationSample[] = [];
+  // Ticket P10A (MEDIUM, lap 0): the union of the lap numbers the session
+  // RECORDS name and the lap numbers actually PRESENT in storage. Rows in the
+  // second set but not the first are flagged `orphan` so the document says
+  // where they came from rather than quietly presenting them as laps.
+  const recordedLapNumbers = [...session.laps].map((lap) => lap.lapNumber);
+  let storedLapNumbers: readonly number[] = [];
+  if (deps.listStoredGnssLapNumbers !== undefined) {
     try {
-      samples = await deps.loadLapGnss(sessionId, lap.lapNumber);
+      storedLapNumbers = await deps.listStoredGnssLapNumbers(sessionId);
     } catch (error) {
       onReadError(error);
     }
-    lapTraces.push({ lapNumber: lap.lapNumber, sampleCount: samples.length, samples });
+  }
+  const recorded = new Set(recordedLapNumbers);
+  const lapNumbers = [...new Set([...recordedLapNumbers, ...storedLapNumbers])].sort(
+    (a, b) => a - b,
+  );
+
+  const lapTraces: RawSessionLapTrace[] = [];
+  for (const lapNumber of lapNumbers) {
+    let samples: LocationSample[] = [];
+    try {
+      samples = await deps.loadLapGnss(sessionId, lapNumber);
+    } catch (error) {
+      onReadError(error);
+    }
+    const orphan = !recorded.has(lapNumber);
+    // An orphan row that turns out to be empty is not worth a line in the
+    // document -- it is an emptied/reclaimed row, not lost data.
+    if (orphan && samples.length === 0) continue;
+    lapTraces.push({
+      lapNumber,
+      sampleCount: samples.length,
+      samples,
+      ...(orphan ? { orphan: true } : {}),
+    });
   }
 
-  let unclaimedTrace: LocationSample[] = [];
+  let unclaimedChunks: readonly RawSessionTraceChunk[] = [];
   try {
-    unclaimedTrace = await deps.loadUnclaimedGnss(sessionId);
+    unclaimedChunks = await deps.loadUnclaimedGnss(sessionId);
   } catch (error) {
     onReadError(error);
   }
@@ -440,9 +767,10 @@ export async function loadRawSessionExportDocument(
   return buildRawSessionExportDocument({
     generatedAtUtc,
     session,
-    matchingUnvalidated: deps.isMatchingUnvalidated(sessionId),
+    calibrationStatus: deps.calibrationStatus(sessionId),
+    unwrittenSampleCount: deps.unwrittenSampleCount?.(sessionId) ?? null,
     lapTraces,
-    unclaimedTrace,
+    unclaimedChunks,
     telemetry,
   });
 }

@@ -151,6 +151,25 @@ export class ControllableRepository implements LocalSessionRepository {
     return this.delegate.saveTelemetry(sessionId, lapNumber, samples);
   }
 
+  /**
+   * Ticket P10A H4: a completed lap's row and its chunk reclaim are now ONE
+   * transactional write, so the gate/reject controls above have to cover it
+   * too -- otherwise the tests that pin `endSession()`'s ordering and
+   * error-propagation contract would simply stop exercising the lap write.
+   * Every entry is recorded in `saveTelemetryCalls`, same as before.
+   */
+  async saveTelemetryBatch(
+    sessionId: string,
+    entries: readonly { lapNumber: number; samples: LocationSample[] }[],
+  ): Promise<void> {
+    for (const entry of entries) {
+      this.saveTelemetryCalls.push({ sessionId, lapNumber: entry.lapNumber });
+    }
+    if (this.saveTelemetryGate !== null) await this.saveTelemetryGate;
+    if (this.saveTelemetryShouldReject) throw new Error('saveTelemetry failed (test double)');
+    return this.delegate.saveTelemetryBatch(sessionId, entries);
+  }
+
   loadTelemetry(sessionId: string, lapNumber: number): Promise<LocationSample[]> {
     return this.delegate.loadTelemetry(sessionId, lapNumber);
   }

@@ -361,7 +361,12 @@ describe('P7M M6 -- the driver can see, from the car, that the drive is being ke
     const { profile, controller, feed, readTrace, snapshot } = setup();
 
     await controller.start('calibration');
-    expect(snapshot().recording).toEqual({ persistedSampleCount: 0, failedWriteCount: 0 });
+    expect(snapshot().recording).toEqual({
+      persistedSampleCount: 0,
+      failedWriteCount: 0,
+      // Ticket P10A H3: nothing captured yet, so nothing unwritten.
+      unwrittenSampleCount: 0,
+    });
 
     const learn = cleanRecognitionLap(profile, 4_110);
     feed(learn);

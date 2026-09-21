@@ -143,6 +143,13 @@ class RecordingRepository implements LocalSessionRepository {
     return this.delegate.saveTelemetry(sessionId, lapNumber, samples);
   }
 
+  saveTelemetryBatch(
+    sessionId: string,
+    entries: readonly { lapNumber: number; samples: LocationSample[] }[],
+  ): Promise<void> {
+    return this.delegate.saveTelemetryBatch(sessionId, entries);
+  }
+
   loadTelemetry(sessionId: string, lapNumber: number): Promise<LocationSample[]> {
     return this.delegate.loadTelemetry(sessionId, lapNumber);
   }
@@ -398,9 +405,14 @@ describe.sequential('TMR v2 production track-day soak', () => {
     expect(expectedLaps).toBeGreaterThanOrEqual(20);
     expect(state.laps, JSON.stringify(state.laps)).toHaveLength(expectedLaps);
     expect(new Set(state.laps.map((lap) => lap.lapNumber)).size).toBe(expectedLaps);
-    expect(sql.recording.checkpointLapCounts).toEqual(
-      Array.from({ length: expectedLaps }, (_, index) => index + 1),
-    );
+    // Ticket P10A H2: the leading `0` is the INITIAL checkpoint, written at
+    // recording start so a session that dies before its first lap is still
+    // discoverable. Every subsequent entry is still one per completed lap,
+    // in order, exactly as before.
+    expect(sql.recording.checkpointLapCounts).toEqual([
+      0,
+      ...Array.from({ length: expectedLaps }, (_, index) => index + 1),
+    ]);
     const checkpoint = await sql.recording.loadCheckpoint(sessionId);
     expect(checkpoint?.laps).toHaveLength(expectedLaps);
 

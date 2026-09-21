@@ -134,8 +134,9 @@ function baseState(overrides: Partial<FacadeState> = {}): FacadeState {
     speedKph: null,
     coachCue: null,
     trackMatch: { state: 'matched', lateralM: 0, confidence: 1 },
-    recording: { persistedSampleCount: 0, failedWriteCount: 0 },
+    recording: { persistedSampleCount: 0, failedWriteCount: 0, unwrittenSampleCount: 0 },
     matchingUnvalidated: false,
+    calibrationStatus: 'validated' as const,
     lastError: null,
     ...overrides,
   };

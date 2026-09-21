@@ -10,6 +10,7 @@ import {
   buildRawSessionExport,
   facade,
   getMostRecentSessionId,
+  resolveResultsCalibrationStatus,
   settingsStore,
 } from '../../session/composition';
 import { shareRawSessionExport } from '../../session/rawSessionShare';
@@ -66,6 +67,37 @@ const RAW_EXPORT_COPY = {
     'No laps were timed, but the full GPS trace and sensor data were still recorded. Export the raw data to keep them.',
 } as const;
 
+/**
+ * Ticket P10A H7 (binding) -- THIS SCREEN USED TO LIE BY OMISSION.
+ *
+ * End a session that was driven past a REJECTED calibration and this screen
+ * showed lap times, sector bests and, quite possibly, "NEW PERSONAL BEST",
+ * with nothing anywhere saying the matching had never been vouched for. No
+ * crash, no lost data -- it simply presented unverified times as results.
+ * The dashboard carried the marker while driving and history carried it
+ * afterwards; the one screen the driver actually stands on when the session
+ * ends carried nothing.
+ *
+ * Three-valued, because two values cannot tell "we know it was accepted"
+ * from "we cannot say" -- and the second must never be drawn as the first.
+ * The notice is therefore shown for `'unknown'` too, quieter but present.
+ */
+const CALIBRATION_COPY = {
+  unvalidated: {
+    badge: 'CALIBRATION NOT VALIDATED',
+    hint: 'This session ran past a rejected calibration. Its lap and sector times may be wrong or missing. The raw GPS and sensor data below are unaffected.',
+  },
+  unknown: {
+    badge: 'CALIBRATION UNKNOWN',
+    hint: 'No record of whether this session\u2019s calibration was validated. Treat its lap and sector times as unverified.',
+  },
+} as const;
+
+/** Ticket P10A H3: the recording either got everything down or it did not, and the driver is told which while they are still standing next to the car. */
+function recordingNotice(unwritten: number): string {
+  return `INCOMPLETE RECORDING — ${String(unwritten)} captured GPS fix(es) could not be written to storage and are not in this session. Export the raw data now.`;
+}
+
 /** S8 — post-session results: lap list, sector bests, PB badge. */
 export function SessionResultsScreen({ navigation }: Props): React.JSX.Element {
   const state = useFacadeState(facade);
@@ -80,6 +112,19 @@ export function SessionResultsScreen({ navigation }: Props): React.JSX.Element {
   const settings = useSettings(settingsStore);
   const analysisStrings = resolveAnalysisScreenStrings(settings.language);
   const analysableSessionId = laps.length > 0 ? getMostRecentSessionId() : null;
+  // Ticket P10A H7: the DURABLE status of the session that just ended, not
+  // only the live one. `facade` still holds the just-finished session's
+  // state here, and the stored record is consulted as well so a resumed or
+  // rebuilt controller can never downgrade a stored `'unvalidated'` to
+  // `'unknown'` -- the more specific of the two wins, and `'validated'`
+  // requires BOTH to say so.
+  const calibrationStatus = resolveResultsCalibrationStatus(
+    state.calibrationStatus,
+    getMostRecentSessionId(),
+  );
+  const calibrationNotice =
+    calibrationStatus === 'validated' ? null : CALIBRATION_COPY[calibrationStatus];
+  const unwritten = state.recording.unwrittenSampleCount;
   // Ticket P7R E1: the raw export needs NO laps -- only a session id.
   const [exporting, setExporting] = React.useState(false);
   const [exportNote, setExportNote] = React.useState<string | null>(null);
@@ -117,6 +162,47 @@ export function SessionResultsScreen({ navigation }: Props): React.JSX.Element {
         <Text style={styles.title} maxFontSizeMultiplier={1.3}>
           Session Results
         </Text>
+
+        {/* Ticket P10A H7: ABOVE the PB badge and the times, because it
+            qualifies every number under it. */}
+        {calibrationNotice === null ? null : (
+          <View
+            style={[
+              styles.calibrationBlock,
+              calibrationStatus === 'unvalidated'
+                ? styles.calibrationBlockWarning
+                : styles.calibrationBlockUnknown,
+            ]}
+            accessibilityLabel={`${calibrationNotice.badge}. ${calibrationNotice.hint}`}
+          >
+            <Text
+              style={[
+                styles.calibrationBadge,
+                calibrationStatus === 'unvalidated'
+                  ? styles.calibrationBadgeWarning
+                  : styles.calibrationBadgeUnknown,
+              ]}
+              maxFontSizeMultiplier={1.3}
+            >
+              {calibrationNotice.badge}
+            </Text>
+            <Text style={styles.calibrationHint} maxFontSizeMultiplier={1.3}>
+              {calibrationNotice.hint}
+            </Text>
+          </View>
+        )}
+
+        {/* Ticket P10A H3: a partial trace is never silent. */}
+        {unwritten > 0 ? (
+          <View
+            style={[styles.calibrationBlock, styles.calibrationBlockWarning]}
+            accessibilityLabel={recordingNotice(unwritten)}
+          >
+            <Text style={[styles.calibrationBadge, styles.calibrationBadgeWarning]} maxFontSizeMultiplier={1.3}>
+              {recordingNotice(unwritten)}
+            </Text>
+          </View>
+        ) : null}
 
         {isNewPb ? (
           <View style={styles.pbBadge} accessibilityLabel="New personal best set this session">
@@ -264,6 +350,18 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.xs,
   },
   pbBadgeText: { ...typography.label, color: colors.success },
+  calibrationBlock: {
+    borderRadius: radii.md,
+    borderWidth: 1,
+    padding: spacing.md,
+    gap: spacing.xs,
+  },
+  calibrationBlockWarning: { backgroundColor: `${colors.warning}1A`, borderColor: colors.warning },
+  calibrationBlockUnknown: { backgroundColor: colors.surface, borderColor: colors.border },
+  calibrationBadge: { ...typography.label },
+  calibrationBadgeWarning: { color: colors.warning },
+  calibrationBadgeUnknown: { color: colors.textMuted },
+  calibrationHint: { ...typography.caption, color: colors.textSecondary },
   sectionLabel: { ...typography.label, color: colors.textMuted },
   sectorBestsCard: {
     backgroundColor: colors.surface,

@@ -12,6 +12,7 @@ import type {
   MonotonicClock,
   QualityLevel,
   ReferenceLap,
+  SessionCalibrationStatus,
   SessionMachineSnapshot,
   SessionState,
   SessionSummary,
@@ -125,8 +126,20 @@ export interface FacadeStateCore {
   recording: {
     /** GNSS samples durably written this session, confirmed write by confirmed write. */
     persistedSampleCount: number;
-    /** Writes that failed this session. Non-zero means the count above has stopped telling the truth. */
+    /** Write ATTEMPTS that failed this session, including ones a retry later rescued. Non-zero means storage has misbehaved at least once. */
     failedWriteCount: number;
+    /**
+     * Ticket P10A H3: captured fixes that are NOT on disk right now -- the
+     * unflushed tail plus every batch a failed write has retained for retry.
+     *
+     * The number that distinguishes "recording incomplete" from "persisted
+     * successfully". Before this existed, a single transient write failure
+     * dropped its batch silently and forever: ten fixes in, eight stored,
+     * nothing anywhere saying so. Normally a small non-zero value (the
+     * sub-second tail waiting for the next flush); persistently non-zero, or
+     * non-zero once the session has ended, means the trace is SHORT.
+     */
+    unwrittenSampleCount: number;
   };
   /**
    * Ticket P7R E2: is this session running on matching the calibration gate
@@ -148,6 +161,18 @@ export interface FacadeStateCore {
    * the outcome of overriding them.
    */
   matchingUnvalidated: boolean;
+  /**
+   * Ticket P10A H5/H6 -- the THREE-valued truth behind
+   * {@link FacadeStateCore.matchingUnvalidated}, which can only say "rejected"
+   * or "not rejected" and therefore reported a session whose provenance was
+   * merely UNREADABLE as an ordinary, calibrated one.
+   *
+   * `matchingUnvalidated` stays exactly `calibrationStatus === 'unvalidated'`
+   * so no existing reader changes meaning. Screens that must not overclaim
+   * read this instead: `'unknown'` is rendered as unknown, never as
+   * calibrated. See {@link SessionCalibrationStatus}.
+   */
+  calibrationStatus: SessionCalibrationStatus;
 }
 
 /**
@@ -251,6 +276,13 @@ export interface SessionControllerDiagnostics {
   rawTraceWriteFailures: number;
   /** Ticket P7M M6: GNSS samples this session has durably written, counted only as each write resolves. */
   persistedSampleCount: number;
+  /** Ticket P10A H3: batches a failed write retained for retry, and the samples in them. `retainedSampleCount > 0` after `endSession()` means the trace on disk is SHORT. */
+  rawTraceRetainedBatchCount: number;
+  rawTraceRetainedSampleCount: number;
+  /** Ticket P10A H3: everything captured but not on disk right now -- `rawTracePendingCount + rawTraceRetainedSampleCount`. */
+  rawTraceUnwrittenCount: number;
+  /** Ticket P10A H6: this session's durable calibration provenance, as the controller will write it. */
+  calibrationStatus: SessionCalibrationStatus;
   /** Number of times braking zones have been regenerated from a NEW personal-best reference lap landing mid-session (Phase 3 coaching addendum) -- 0 when coaching is disabled or no PB has been replaced yet this controller's lifetime. */
   coachZoneRefreshes: number;
 }
@@ -369,9 +401,62 @@ const TRACE_FLUSH_INTERVAL_MS = 1_000;
  * and the stride allows 10k chunks per run -- over an hour even at the fastest
  * flush cadence this writer can reach.
  */
-const TRACE_CHUNK_KEY_STRIDE = 10_000;
+export const TRACE_CHUNK_KEY_STRIDE = 10_000;
+
+/**
+ * Ticket P10A (both MEDIUMs): splits a chunk key back into the RUN that wrote
+ * it and that chunk's position within the run.
+ *
+ * Exported because the reader needs it. `tMono` is process-relative (see
+ * `platform/clock.ts`'s binding rule), so samples from two launches of the
+ * same session id cannot be ordered against each other by timestamp at all --
+ * a resumed run's `tMono=1000` sorts before an earlier run's `tMono=100000`.
+ * The key band is the only cross-launch ordering information that exists, and
+ * discarding it (as the first export reader did) is what produced a
+ * chronologically scrambled trace.
+ *
+ * Returns `null` for anything that is not a trace chunk key (>= 0).
+ */
+export function decodeTraceChunkKey(key: number): { runBase: number; sequence: number } | null {
+  if (!Number.isFinite(key) || key >= 0) return null;
+  const magnitude = -key;
+  return {
+    runBase: Math.floor(magnitude / TRACE_CHUNK_KEY_STRIDE),
+    sequence: magnitude % TRACE_CHUNK_KEY_STRIDE,
+  };
+}
 /** 2020-01-01T00:00:00Z. Only the ORIGIN of the key band; nothing reads a date back out of a key. */
 const TRACE_KEY_EPOCH_MS = Date.UTC(2020, 0, 1);
+
+/**
+ * Ticket P10A H3 -- A FAILED CHUNK WRITE IS RETAINED, NOT DISCARDED.
+ *
+ * The first cut of the continuous trace writer counted a failed
+ * `saveTelemetry` and dropped its batch. Reproduced by the P9 reviewer: make
+ * the FIRST write fail once and let storage work perfectly afterwards, and a
+ * ten-fix session ends with eight fixes stored, zero pending, and nothing on
+ * any screen saying two were lost. For calibration and no-lap samples there
+ * is no other durable copy anywhere -- the chunk row IS the drive.
+ *
+ * So a failed batch is kept, re-keyed to nothing (the SAME chunk key is
+ * retried, so a write that actually landed before reporting failure is
+ * overwritten with identical content rather than duplicated), and retried
+ * with exponential backoff off the ordinary flush cadence. The final flush
+ * (`endSession`) forces one last attempt on every retained batch regardless
+ * of backoff or attempt count, and whatever is still unwritten after that is
+ * reported -- live in `FacadeStateCore.recording.unwrittenSampleCount`, and
+ * durably in the session record's `trace` field.
+ */
+const TRACE_RETRY_BASE_DELAY_MS = 500;
+const TRACE_RETRY_MAX_DELAY_MS = 15_000;
+/**
+ * Automatic attempts before a retained batch stops being retried on the
+ * ordinary cadence. It is NOT dropped at that point -- it keeps its samples,
+ * keeps being counted as unwritten, and is tried once more by the final
+ * flush. The cap only stops a dead disk from being hammered once a second
+ * for the rest of a track day.
+ */
+const TRACE_RETRY_MAX_ATTEMPTS = 8;
 
 /**
  * Ticket P7M M2: how long the car must fail to match the circuit before the
@@ -546,8 +631,22 @@ export class SessionController {
     distanceM?: number;
   } | null = null;
   private calibrationResult: CalibrationResult | null = null;
-  /** Ticket P7R E2: see {@link FacadeStateCore.matchingUnvalidated}. Set ONLY by `proceedWithoutValidatedCalibration()`, and only on its rejected branch; cleared by every path that starts or restores a run. */
-  private matchingUnvalidated = false;
+  /**
+   * Ticket P7R E2 / P10A H5-H6: see {@link FacadeStateCore.calibrationStatus}.
+   *
+   * `'unvalidated'` is set ONLY by `proceedWithoutValidatedCalibration()`'s
+   * rejected branch. `'validated'` is set only by an ACCEPTED calibration.
+   * Everything else -- a run that has not concluded a calibration yet, a
+   * recovery resume whose prior provenance could not be read -- is
+   * `'unknown'`, which is never presented as calibrated.
+   *
+   * P10A H5 (binding): a restore no longer silently resets this. The old
+   * code cleared it to `false` (= calibrated) in BOTH `restoreFromCheckpoint`
+   * and `start('session')`, so the reviewer's reproduction -- reject, escape,
+   * checkpoint, restore, resume -- put a never-calibrated session back on the
+   * dashboard wearing no label at all.
+   */
+  private calibrationStatus: SessionCalibrationStatus = 'unknown';
   private lastLapMs: number | null = null;
   private pbMs: number | null = null;
   private currentReference: ReferenceLap | null = null;
@@ -568,8 +667,26 @@ export class SessionController {
    * while a reclaim is mid-flight must land after it.
    */
   private tracePersistenceTail: Promise<void> = Promise.resolve();
-  /** Raw-trace writes that failed this run. Counted, logged, never thrown -- see `noteTraceFailure`. */
+  /** Raw-trace write ATTEMPTS that failed this run. Counted, logged, never thrown -- see `noteTraceFailure`. */
   private traceWriteFailures = 0;
+  /**
+   * Ticket P10A H3: batches whose write failed and which are being retried,
+   * keyed by the SAME chunk key the failed attempt used (so a retry replaces
+   * rather than duplicates). See {@link TRACE_RETRY_BASE_DELAY_MS}.
+   */
+  private failedTraceWrites: Array<{
+    key: number;
+    samples: LocationSample[];
+    attempts: number;
+    readyAtMono: number;
+  }> = [];
+  /**
+   * Ticket P10A H2: serializes the DURABLE SESSION RECORD writes (the
+   * `saveSession` row this controller writes at recording start and again
+   * whenever the calibration provenance changes) so two of them can never
+   * land out of order and leave the older facts on disk.
+   */
+  private sessionRecordTail: Promise<void> = Promise.resolve();
   /**
    * Ticket P7M M6 -- see {@link FacadeStateCore.recording}. Advanced ONLY
    * from a resolved `saveTelemetry`, and only by samples that write actually
@@ -698,6 +815,10 @@ export class SessionController {
     // `pendingWork` would grow an array once a second for the whole session.
     // It also never rejects -- see `noteTraceFailure`.
     await this.tracePersistenceTail;
+    // Ticket P10A H2: and the durable session record, for the same reason --
+    // a caller that has flushed must be able to find this session in
+    // `listSessions`, whether or not it ever completed a lap.
+    await this.sessionRecordTail;
   }
 
   // -------------------------------------------------------------------
@@ -747,8 +868,10 @@ export class SessionController {
       recording: {
         persistedSampleCount: this.persistedSampleCount,
         failedWriteCount: this.traceWriteFailures,
+        unwrittenSampleCount: this.unwrittenTraceSampleCount(),
       },
-      matchingUnvalidated: this.matchingUnvalidated,
+      matchingUnvalidated: this.calibrationStatus === 'unvalidated',
+      calibrationStatus: this.calibrationStatus,
     };
   }
 
@@ -801,6 +924,10 @@ export class SessionController {
       rawTracePendingCount: this.pendingTrace.length,
       rawTraceWriteFailures: this.traceWriteFailures,
       persistedSampleCount: this.persistedSampleCount,
+      rawTraceRetainedBatchCount: this.failedTraceWrites.length,
+      rawTraceRetainedSampleCount: this.retainedTraceSampleCount(),
+      rawTraceUnwrittenCount: this.unwrittenTraceSampleCount(),
+      calibrationStatus: this.calibrationStatus,
       coachZoneRefreshes: this.coachZoneRefreshes,
     };
   }
@@ -862,6 +989,11 @@ export class SessionController {
     // pointer for a session nothing was driving. Each check below aborts
     // cleanly: no subscription, no session, no persistence.
     if (this.disposed) return;
+    // Ticket P10A H5: read BEFORE anything below can touch it -- a
+    // `start('session')` that follows `restoreFromCheckpoint` must resume
+    // under the restored run's provenance, not invent a fresh one.
+    const restoredCalibration: SessionCalibrationStatus | null =
+      this.sessionId !== null ? this.calibrationStatus : null;
     const assignedSessionIdHere = this.sessionId === null;
     if (assignedSessionIdHere) {
       this.sessionId = `${this.deps.userId}--${randomToken()}`;
@@ -965,8 +1097,11 @@ export class SessionController {
         ...this.deps.config?.calibration,
       });
       this.calibrationResult = null;
-      // Ticket P7R E2: a fresh Learn lap is a fresh claim about the matching.
-      this.matchingUnvalidated = false;
+      // Ticket P7R E2 / P10A H6: a fresh Learn lap is a fresh claim about the
+      // matching -- and until the engine returns a verdict, the honest value
+      // is UNKNOWN, not "validated". `acceptCalibration()` (and the escape
+      // hatch's accepted branch) is what promotes it.
+      this.calibrationStatus = 'unknown';
       this.calibrationSnapshot = { coverageFraction: 0, onTrack: true };
       this.core.dispatch({ type: 'CALIBRATION_STARTED' });
       this.mode = 'calibrating';
@@ -975,11 +1110,20 @@ export class SessionController {
       this.core.dispatch({ type: 'CALIBRATION_FINISHED', result: recoverySkippedCalibrationResult() });
       this.core.dispatch({ type: 'CALIBRATION_ACCEPTED' });
       this.calibrationResult = null;
-      this.matchingUnvalidated = false;
+      // Ticket P10A H5 (binding): a recovery resume performs NO calibration,
+      // so it makes no new claim about one -- it carries forward whatever
+      // provenance `restoreFromCheckpoint` restored (see that method's
+      // `calibrationStatus` option). The old code assigned `false` here,
+      // i.e. CALIBRATED, which is how a session driven past a rejected
+      // calibration came back from a crash wearing no label.
+      this.calibrationStatus = restoredCalibration ?? 'unknown';
       this.mode = 'idle';
     }
 
     this.startWatchdog();
+    // Ticket P10A H2 (binding) -- THE SESSION IS DISCOVERABLE FROM THE FIRST
+    // FIX, not from the first lap.
+    this.persistInitialSessionRecord();
     this.emit();
   }
 
@@ -995,6 +1139,11 @@ export class SessionController {
   acceptCalibration(): void {
     if (this.core.state.state !== 'calibrationReview') return;
     this.core.dispatch({ type: 'CALIBRATION_ACCEPTED' });
+    // Ticket P10A H6: the ONE place provenance becomes `'validated'` -- an
+    // engine verdict the driver accepted -- and it is written through to the
+    // durable session record immediately, not held only in memory.
+    this.calibrationStatus = 'validated';
+    this.persistSessionRecord('calibration-accepted');
     this.calibrationSnapshot = null;
     this.calibrationEngine = null;
     this.trackAsync(this.loadReferenceForSession().then(() => this.emit()));
@@ -1052,7 +1201,12 @@ export class SessionController {
       this.acceptCalibration();
       return 'armed-accepted';
     }
-    this.matchingUnvalidated = true;
+    this.calibrationStatus = 'unvalidated';
+    // Ticket P10A H6: recorded against the SESSION itself, in the same store
+    // as its laps and its trace, before the driver goes out. The app-side
+    // side log (`sqlSettingsStore`'s `unvalidated-matching-sessions`) remains
+    // only as a fallback for rows written before this field existed.
+    this.persistSessionRecord('calibration-escaped');
     this.core.dispatch({ type: 'CALIBRATION_ACCEPTED' });
     this.calibrationSnapshot = null;
     this.calibrationEngine = null;
@@ -1091,7 +1245,8 @@ export class SessionController {
     this.calibrationEngine = null;
     this.calibrationSnapshot = null;
     this.calibrationResult = null;
-    this.matchingUnvalidated = false;
+    // Back to `awaitingCalibration`: nothing has been vouched for.
+    this.calibrationStatus = 'unknown';
     this.mode = 'idle';
     this.emit();
   }
@@ -1143,19 +1298,16 @@ export class SessionController {
     // Ticket P7M M1: unconditional, and BEFORE the flush barrier -- a session
     // that completed no lap at all still leaves its whole drive on disk, and
     // a session that did completes with nothing of the cool-down lap pending.
-    await this.flushRawTrace();
+    // Ticket P10A H3: the FINAL flush, which also forces one last attempt at
+    // every batch a failed write retained, ignoring backoff and attempt caps.
+    await this.flushRawTraceInternal(true);
     await this.flush();
     const sessionId = this.sessionId;
     if (sessionId !== null) {
-      const summary: SessionSummary = {
-        sessionId,
-        circuitId: this.deps.circuitProfile.circuitId,
-        layoutId: this.deps.circuitProfile.layoutId,
-        layoutVersion: this.deps.circuitProfile.layoutVersion,
-        startedAtUtc: this.sessionStartedAtUtc ?? new Date().toISOString(),
-        laps: this.core.laps,
-        userId: this.deps.userId,
-      };
+      // Ticket P10A H2/H3/H6: the same record shape written at recording
+      // start, now with the session's laps, its final calibration provenance
+      // and -- the honest part -- whatever the trace writer could NOT store.
+      const summary: SessionSummary = this.buildSessionSummary(sessionId);
       await this.deps.repository.saveSession(summary);
       // Persist a terminal checkpoint too, so recovery never re-offers a
       // session that has already been fully saved.
@@ -1222,7 +1374,18 @@ export class SessionController {
    * "resume without recalibrating" UX) use `start('session')` instead, which
    * goes straight to `armed` off the last-known stored reference lap.
    */
-  restoreFromCheckpoint(sessionId: string, snapshot: SessionMachineSnapshot, laps: LapRecord[]): void {
+  restoreFromCheckpoint(
+    sessionId: string,
+    snapshot: SessionMachineSnapshot,
+    laps: LapRecord[],
+    options?: { calibrationStatus?: SessionCalibrationStatus },
+  ): void {
+    // Ticket P10A H5: the restored run's provenance, before `this.sessionId`
+    // is overwritten. Explicit wins (the host read it back from the durable
+    // session record); otherwise, restoring the SAME session id this
+    // controller is already running preserves what it already knows; and
+    // failing both, the answer is `'unknown'` -- never `'validated'`.
+    const carriedStatus = this.sessionId === sessionId ? this.calibrationStatus : null;
     this.sessionId = sessionId;
 
     const priorState = snapshot.context.priorState;
@@ -1251,10 +1414,7 @@ export class SessionController {
     this.calibrationEngine = null;
     this.calibrationSnapshot = null;
     this.calibrationResult = null;
-    // Ticket P7R E2: a restored run makes no claim about the calibration of
-    // the run before it -- the host owns the DURABLE record of which stored
-    // sessions were run on unvalidated matching.
-    this.matchingUnvalidated = false;
+    this.calibrationStatus = options?.calibrationStatus ?? carriedStatus ?? 'unknown';
     this.paused = false;
     this.resetTrackMatch();
     // Ticket P7M M1: a restore is a new run of the trace writer. Its own
@@ -1501,7 +1661,120 @@ export class SessionController {
     this.traceWriteFailures = 0;
     this.persistedSampleCount = 0;
     this.lastTraceFlushMono = null;
+    // Ticket P10A H3: a retained batch belongs to the run that captured it.
+    // By the time a new run begins, `endSession()`'s final flush has already
+    // forced a last attempt at every one of them; anything still here is a
+    // batch this process genuinely could not store, and saying so out loud
+    // is the last thing that can be done for it.
+    if (this.failedTraceWrites.length > 0) {
+      this.noteTraceFailure(
+        'abandon',
+        new Error(
+          `${this.retainedTraceSampleCount()} sample(s) in ${this.failedTraceWrites.length} batch(es) were never written before a new recording run began`,
+        ),
+      );
+      this.failedTraceWrites = [];
+    }
     this.traceRunBase = Math.max(Date.now() - TRACE_KEY_EPOCH_MS, this.traceRunBase + 1);
+  }
+
+  /** Ticket P10A H3: samples held in batches awaiting retry. */
+  private retainedTraceSampleCount(): number {
+    let total = 0;
+    for (const entry of this.failedTraceWrites) total += entry.samples.length;
+    return total;
+  }
+
+  /** Ticket P10A H3: everything captured that is NOT on disk -- the unflushed tail plus every retained batch. */
+  private unwrittenTraceSampleCount(): number {
+    return this.pendingTrace.length + this.retainedTraceSampleCount();
+  }
+
+  /**
+   * Ticket P10A H2 (binding) -- A CRASHED ZERO-LAP SESSION MUST STILL BE
+   * FINDABLE.
+   *
+   * Continuous flushing (P7M M1) put the drive on disk but created neither a
+   * session row nor a checkpoint, both of which were written for the first
+   * time by a COMPLETED LAP. Reproduced by the P9 reviewer: ten fixes
+   * persisted during calibration, `loadCheckpoint` `null`, `listSessions`
+   * empty. A foreground process death there left bootstrap with a pointer to
+   * a session it could not find, so it cleared the pointer -- and the trace
+   * became unreachable by recovery, by history, and by the raw export alike.
+   * That is precisely the Monday scenario the trace work exists for.
+   *
+   * So the session announces itself the moment recording starts: a session
+   * row (with zero laps and this run's calibration provenance) and an initial
+   * checkpoint. Both are cheap, both are overwritten by every later write,
+   * and together they make the session discoverable from the first fix.
+   *
+   * Never throws and never blocks the start: a driver must not be refused a
+   * session by a bookkeeping write. It is tracked by `flush()` so tests and
+   * callers can await it, and chained on `lapPersistenceTail` so a checkpoint
+   * from a lap completed while it was still in flight is never overwritten by
+   * this, the older, emptier one.
+   */
+  private persistInitialSessionRecord(): void {
+    const sessionId = this.sessionId;
+    if (sessionId === null) return;
+    const summary = this.buildSessionSummary(sessionId);
+    const snapshot = this.core.state;
+    const laps = [...this.core.laps];
+    const work = this.lapPersistenceTail.then(async () => {
+      await this.deps.repository.saveSession(summary);
+      await this.deps.repository.saveCheckpoint(sessionId, snapshot, laps);
+    });
+    this.lapPersistenceTail = work.catch(() => undefined);
+    this.trackAsync(
+      work.catch((error: unknown) => {
+        this.noteRecordFailure('recording-start', error);
+      }),
+    );
+  }
+
+  /** The durable session record as it stands right now (ticket P10A H2/H3/H6). */
+  private buildSessionSummary(sessionId: string): SessionSummary {
+    return {
+      sessionId,
+      circuitId: this.deps.circuitProfile.circuitId,
+      layoutId: this.deps.circuitProfile.layoutId,
+      layoutVersion: this.deps.circuitProfile.layoutVersion,
+      startedAtUtc: this.sessionStartedAtUtc ?? new Date().toISOString(),
+      laps: [...this.core.laps],
+      userId: this.deps.userId,
+      calibrationStatus: this.calibrationStatus,
+      trace: {
+        unwrittenSampleCount: this.unwrittenTraceSampleCount(),
+        failedWriteCount: this.traceWriteFailures,
+      },
+    };
+  }
+
+  /**
+   * Ticket P10A H6: re-writes the session record so the provenance on disk
+   * matches the provenance in memory from the instant it changes -- not at
+   * `endSession()`, which a crash can precede. Serialized on its own chain,
+   * never throws, awaited by `flush()`.
+   */
+  private persistSessionRecord(reason: string): Promise<void> {
+    const sessionId = this.sessionId;
+    if (sessionId === null) return this.sessionRecordTail;
+    const summary = this.buildSessionSummary(sessionId);
+    const work = this.sessionRecordTail
+      .then(() => this.deps.repository.saveSession(summary))
+      .catch((error: unknown) => {
+        this.noteRecordFailure(reason, error);
+      });
+    this.sessionRecordTail = work;
+    return work;
+  }
+
+  /** A failed session-record write is reported, never thrown -- same trade as `noteTraceFailure`. */
+  private noteRecordFailure(reason: string, error: unknown): void {
+    const detail = error instanceof Error ? error.message : String(error);
+    const message = `[sessionController] session record write (${reason}) failed: ${detail}`;
+    if (this.deps.logger === undefined) console.warn(message);
+    else this.deps.logger(message);
   }
 
   private recordRawTrace(sample: LocationSample): void {
@@ -1527,8 +1800,35 @@ export class SessionController {
    * for exactly that reason). A no-op with nothing pending.
    */
   flushRawTrace(): Promise<void> {
+    return this.flushRawTraceInternal(false);
+  }
+
+  /**
+   * Ticket P10A H3. `final` forces every retained batch to be retried NOW,
+   * ignoring both its backoff window and its attempt cap -- the last chance
+   * a session gets, taken by `endSession()`.
+   */
+  private flushRawTraceInternal(final: boolean): Promise<void> {
     const sessionId = this.sessionId;
-    if (sessionId === null || this.pendingTrace.length === 0) return this.tracePersistenceTail;
+    if (sessionId === null) return this.tracePersistenceTail;
+    if (this.pendingTrace.length === 0) {
+      // A `final` flush ALWAYS chains, even with the queue currently empty:
+      // the queue is filled from inside the write chain (a `catch` that has
+      // not run yet), so a synchronous "nothing retained" check made the
+      // instant `endSession()` is called can be reading a state that is
+      // about to change. Chaining puts the decision after every write that
+      // is already in flight, which is the only place it is knowable.
+      if (!final && this.failedTraceWrites.length === 0) return this.tracePersistenceTail;
+      // Nothing new to write, but batches are waiting: drive the retry pass
+      // on its own rather than letting it wait for the next captured fix --
+      // a session that has stopped receiving fixes is exactly when a
+      // retained batch most needs to land.
+      const drain = this.tracePersistenceTail.then(() =>
+        this.drainFailedTraceWrites(sessionId, final),
+      );
+      this.tracePersistenceTail = drain;
+      return drain;
+    }
     const batch = this.pendingTrace;
     this.pendingTrace = [];
     this.lastTraceFlushMono = this.deps.clock.now();
@@ -1545,8 +1845,8 @@ export class SessionController {
     // reclaim from it.
     this.traceChunks.push({ key, tMin, tMax, count: batch.length });
     this.traceSampleCount += batch.length;
-    const write = this.tracePersistenceTail
-      .then(async () => {
+    const write = this.tracePersistenceTail.then(async () => {
+      try {
         await this.deps.repository.saveTelemetry(sessionId, key, batch);
         // P7M M6: counted HERE, after the write resolved -- a failing write
         // must freeze the driver's indicator, never advance it.
@@ -1559,10 +1859,77 @@ export class SessionController {
         // state notifications to every subscriber for a value that changes
         // nothing else on screen.
         this.persistedSampleCount += batch.length;
-      })
-      .catch((error: unknown) => this.noteTraceFailure('flush', error));
+      } catch (error) {
+        // Ticket P10A H3: RETAINED, not discarded. The retry reuses the SAME
+        // key, so a write that actually landed before reporting failure is
+        // overwritten with identical content rather than duplicated.
+        this.noteTraceFailure('flush', error);
+        this.failedTraceWrites.push({
+          key,
+          samples: batch,
+          attempts: 1,
+          readyAtMono: this.deps.clock.now() + TRACE_RETRY_BASE_DELAY_MS,
+        });
+      }
+      await this.drainFailedTraceWrites(sessionId, final);
+    });
     this.tracePersistenceTail = write;
     return write;
+  }
+
+  /** Exponential, capped. Attempt 1 -> 500 ms, attempt 2 -> 1 s, ... never beyond {@link TRACE_RETRY_MAX_DELAY_MS}. */
+  private traceRetryDelayMs(attempts: number): number {
+    const exponent = Math.min(attempts - 1, 20);
+    return Math.min(TRACE_RETRY_BASE_DELAY_MS * 2 ** exponent, TRACE_RETRY_MAX_DELAY_MS);
+  }
+
+  /**
+   * Ticket P10A H3: one pass over the retained batches. Runs inside the
+   * `tracePersistenceTail` chain (its only callers put it there), so a retry
+   * can never interleave with an append or a reclaim touching the same rows.
+   * Never throws.
+   */
+  private async drainFailedTraceWrites(sessionId: string, force: boolean): Promise<void> {
+    if (this.failedTraceWrites.length === 0) return;
+    const remaining: typeof this.failedTraceWrites = [];
+    for (const entry of this.failedTraceWrites) {
+      // Emptied by a lap claiming its range (`releaseRetainedRange`): the lap
+      // row owns those fixes now and this batch has nothing left to say.
+      if (entry.samples.length === 0) continue;
+      const waiting = this.deps.clock.now() < entry.readyAtMono;
+      const exhausted = entry.attempts >= TRACE_RETRY_MAX_ATTEMPTS;
+      if (!force && (waiting || exhausted)) {
+        remaining.push(entry);
+        continue;
+      }
+      try {
+        await this.deps.repository.saveTelemetry(sessionId, entry.key, entry.samples);
+        this.persistedSampleCount += entry.samples.length;
+      } catch (error) {
+        entry.attempts += 1;
+        entry.readyAtMono = this.deps.clock.now() + this.traceRetryDelayMs(entry.attempts);
+        this.noteTraceFailure('retry', error);
+        remaining.push(entry);
+      }
+    }
+    this.failedTraceWrites = remaining;
+  }
+
+  /**
+   * Ticket P10A H3 + H4: a completed lap's row now owns `tStart..tEnd`, so a
+   * retained batch must never write those fixes back afterwards -- that would
+   * re-create exactly the double ownership H4 is about, from the other side.
+   */
+  private releaseRetainedRange(tStart: number, tEnd: number): void {
+    if (this.failedTraceWrites.length === 0) return;
+    const remaining: typeof this.failedTraceWrites = [];
+    for (const entry of this.failedTraceWrites) {
+      entry.samples = entry.samples.filter(
+        (sample) => sample.tMono < tStart || sample.tMono > tEnd,
+      );
+      if (entry.samples.length > 0) remaining.push(entry);
+    }
+    this.failedTraceWrites = remaining;
   }
 
   /**
@@ -1571,7 +1938,7 @@ export class SessionController {
    * `endSession()` would let it take down the session summary and PB write it
    * exists to back up, which is precisely the wrong trade.
    */
-  private noteTraceFailure(stage: 'flush' | 'reclaim', error: unknown): void {
+  private noteTraceFailure(stage: 'flush' | 'retry' | 'reclaim' | 'abandon', error: unknown): void {
     this.traceWriteFailures += 1;
     const detail = error instanceof Error ? error.message : String(error);
     const message = `[sessionController] raw-trace ${stage} failed: ${detail}`;
@@ -1580,32 +1947,74 @@ export class SessionController {
   }
 
   /**
-   * Removes `tStart..tEnd` from the unclaimed chunks after the lap row for
-   * that range has been written -- the "tag the rows that already exist"
-   * half of M1, as close as a one-payload-per-lap schema gets to it. Ordered
-   * strictly AFTER the lap row's own write by its caller, so there is never
-   * an instant at which those samples are in neither place.
+   * Ticket P10A H4 (binding) -- ONE LAP'S TELEMETRY IS ONE ATOMIC WRITE.
+   *
+   * Writes the lap's own row AND rewrites every unclaimed chunk row that
+   * holds the same `tStart..tEnd` fixes, in a single
+   * `saveTelemetryBatch` transaction.
+   *
+   * Before this they were separate operations -- lap row first, reclaim
+   * after -- and the export reconciled nothing between them. The P9 reviewer
+   * reproduced the consequence exactly: the lap row succeeds, the reclaim
+   * fails, the checkpoint that follows succeeds, and one unique fix is then
+   * read out of BOTH rows and exported twice. An interrupted reclaim (a
+   * force-quit part-way through the chunk loop) produces the same overlap.
+   *
+   * All-or-nothing removes the window rather than narrowing it. It also
+   * fails in the SAFE direction: if the transaction does not commit, the
+   * fixes are still in the chunk rows exactly as they were, so the drive is
+   * never lost -- only the (recomputable) per-lap row is missing, and the
+   * caller's rejection reaches `flush()` as before.
+   *
+   * The chunk reads happen BEFORE the transaction opens; only the writes are
+   * inside it. In-memory chunk bookkeeping is advanced only AFTER the commit
+   * resolves, so a failed commit leaves the controller's view of what is on
+   * disk still correct.
    */
-  private reclaimTraceRange(sessionId: string, tStart: number, tEnd: number): Promise<void> {
+  private commitLapTelemetry(
+    sessionId: string,
+    lap: LapRecord,
+    telemetry: LocationSample[],
+    firstStoredByLapRow: number,
+  ): Promise<void> {
     const work = this.tracePersistenceTail.then(async () => {
+      const entries: { lapNumber: number; samples: LocationSample[] }[] = [
+        { lapNumber: lap.lapNumber, samples: telemetry },
+      ];
+      const claimed: { chunk: { key: number; tMin: number; tMax: number; count: number }; kept: LocationSample[] }[] = [];
       const affected = this.traceChunks.filter(
-        (chunk) => chunk.count > 0 && chunk.tMax >= tStart && chunk.tMin <= tEnd,
+        (chunk) => chunk.count > 0 && chunk.tMax >= lap.tStart && chunk.tMin <= lap.tEnd,
       );
       for (const chunk of affected) {
-        if (chunk.tMin >= tStart && chunk.tMax <= tEnd) {
+        if (chunk.tMin >= lap.tStart && chunk.tMax <= lap.tEnd) {
           // Wholly inside the lap: the lap row now owns every sample in it.
           // Emptied rather than deleted -- the repository contract has no
           // telemetry delete, and an empty payload reads back as `[]`, which
           // is what "no unclaimed samples here" means to every reader.
-          await this.deps.repository.saveTelemetry(sessionId, chunk.key, []);
-          this.traceSampleCount -= chunk.count;
-          chunk.count = 0;
+          entries.push({ lapNumber: chunk.key, samples: [] });
+          claimed.push({ chunk, kept: [] });
           continue;
         }
         const stored = await this.deps.repository.loadTelemetry(sessionId, chunk.key);
-        const kept = stored.filter((sample) => sample.tMono < tStart || sample.tMono > tEnd);
+        const kept = stored.filter((sample) => sample.tMono < lap.tStart || sample.tMono > lap.tEnd);
         if (kept.length === stored.length) continue;
-        await this.deps.repository.saveTelemetry(sessionId, chunk.key, kept);
+        entries.push({ lapNumber: chunk.key, samples: kept });
+        claimed.push({ chunk, kept });
+      }
+
+      try {
+        await this.deps.repository.saveTelemetryBatch(sessionId, entries);
+      } catch (error) {
+        // Surfaced on the driving screen through `recording.failedWriteCount`
+        // (the trace is what did not move), and rethrown so the lap's own
+        // persistence chain -- and therefore `flush()`/`endSession()` -- still
+        // learns the lap row did not land.
+        this.noteTraceFailure('reclaim', error);
+        throw error;
+      }
+
+      this.persistedSampleCount += firstStoredByLapRow;
+      for (const { chunk, kept } of claimed) {
         this.traceSampleCount -= chunk.count - kept.length;
         chunk.count = kept.length;
         if (kept.length > 0) {
@@ -1614,9 +2023,13 @@ export class SessionController {
         }
       }
       this.traceChunks = this.traceChunks.filter((chunk) => chunk.count > 0);
-    })
-      .catch((error: unknown) => this.noteTraceFailure('reclaim', error));
-    this.tracePersistenceTail = work;
+      // Ticket P10A H3: a batch still awaiting retry must not write these
+      // fixes back after the lap row has claimed them.
+      this.releaseRetainedRange(lap.tStart, lap.tEnd);
+    });
+    // The trace chain itself must never stay rejected (every later append
+    // chains off it); the rejection reaches the caller through `work`.
+    this.tracePersistenceTail = work.catch(() => undefined);
     return work;
   }
 
@@ -1656,11 +2069,10 @@ export class SessionController {
     const checkpointSnapshot = this.core.state;
     const checkpointLaps = [...this.core.laps];
     const persistence = this.lapPersistenceTail.then(async () => {
-      await this.deps.repository.saveTelemetry(sessionId, lap.lapNumber, telemetry);
-      this.persistedSampleCount += firstStoredByLapRow;
-      // Ticket P7M M1: only now that the lap row is durable are the same
-      // samples dropped from the unclaimed chunks.
-      await this.reclaimTraceRange(sessionId, lap.tStart, lap.tEnd);
+      // Ticket P7M M1 + P10A H4: the lap row and the reclaim of the same
+      // fixes out of the unclaimed chunks are ONE transaction -- there is no
+      // longer an instant at which both rows own them.
+      await this.commitLapTelemetry(sessionId, lap, telemetry, firstStoredByLapRow);
       await this.deps.repository.saveCheckpoint(
         sessionId,
         checkpointSnapshot,

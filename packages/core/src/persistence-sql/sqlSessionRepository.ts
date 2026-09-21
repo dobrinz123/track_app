@@ -3,12 +3,13 @@ import type {
   LocalSessionRepository,
   LocationSample,
   ReferenceLap,
+  SessionCalibrationStatus,
   SessionMachineSnapshot,
   SessionSummary,
 } from '../contracts';
 import { CheckpointCodec, assertJsonSerializable, validateReferenceLap } from '../persistence';
 import type { SqlDatabase } from './sqlDatabase';
-import { SQL_DDL, SQL_DDL_V2, SQL_SCHEMA_VERSION } from './schema';
+import { SQL_ALTERS_V3, SQL_DDL, SQL_DDL_V2, SQL_SCHEMA_VERSION } from './schema';
 
 interface SessionRow {
   sessionId: string;
@@ -17,6 +18,18 @@ interface SessionRow {
   layoutId: string;
   layoutVersion: number;
   startedAtUtc: string;
+  calibrationStatus: string | null;
+  traceUnwritten: number | null;
+  traceFailedWrites: number | null;
+}
+
+/**
+ * Ticket P10A H6 (binding): an unreadable/absent/unrecognised stored value is
+ * `'unknown'`. Never `'validated'` -- a session nobody vouched for must not be
+ * able to present itself afterwards as one that was.
+ */
+function decodeCalibrationStatus(raw: string | null): SessionCalibrationStatus {
+  return raw === 'validated' || raw === 'unvalidated' ? raw : 'unknown';
 }
 
 interface PayloadRow {
@@ -66,6 +79,19 @@ export class SqlSessionRepository implements LocalSessionRepository {
     // this safe to run unconditionally, but the version bump below only
     // fires on databases that actually need it (see the branches beneath).
     await this.db.execAsync(SQL_DDL_V2);
+    // v3 (ticket P10A): the durable calibration-provenance and trace-completeness
+    // columns on `sessions`. Each ALTER is attempted on its own and its
+    // "duplicate column name" failure ignored, which is what makes running
+    // this on EVERY open (not only on a version bump) both safe and the
+    // stronger guarantee -- see `SQL_ALTERS_V3`'s own doc comment.
+    for (const statement of SQL_ALTERS_V3) {
+      try {
+        await this.db.execAsync(statement);
+      } catch {
+        // Column already present. The only other way this can fail is a
+        // database so broken that every statement below would fail too.
+      }
+    }
 
     const versionRows = await this.db.getAllAsync<{ version: number }>(
       'SELECT version FROM schema_migrations LIMIT 1',
@@ -110,9 +136,23 @@ export class SqlSessionRepository implements LocalSessionRepository {
     await this.db.withTransactionAsync(async () => {
       await this.db.runAsync(
         `INSERT OR REPLACE INTO sessions
-           (sessionId, userId, circuitId, layoutId, layoutVersion, startedAtUtc)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [s.sessionId, s.userId, s.circuitId, s.layoutId, s.layoutVersion, s.startedAtUtc],
+           (sessionId, userId, circuitId, layoutId, layoutVersion, startedAtUtc,
+            calibrationStatus, traceUnwritten, traceFailedWrites)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          s.sessionId,
+          s.userId,
+          s.circuitId,
+          s.layoutId,
+          s.layoutVersion,
+          s.startedAtUtc,
+          // Ticket P10A H6: an absent status is stored AS `'unknown'` rather
+          // than as NULL, so the row states the fact rather than leaving the
+          // reader to infer it.
+          s.calibrationStatus ?? 'unknown',
+          s.trace?.unwrittenSampleCount ?? null,
+          s.trace?.failedWriteCount ?? null,
+        ],
       );
       // Full replace of this session's laps: matches saveSession's
       // "last write wins for this sessionId" semantics.
@@ -129,7 +169,8 @@ export class SqlSessionRepository implements LocalSessionRepository {
 
   async listSessions(userId: string, circuitId: string): Promise<SessionSummary[]> {
     const sessionRows = await this.db.getAllAsync<SessionRow>(
-      `SELECT sessionId, userId, circuitId, layoutId, layoutVersion, startedAtUtc
+      `SELECT sessionId, userId, circuitId, layoutId, layoutVersion, startedAtUtc,
+              calibrationStatus, traceUnwritten, traceFailedWrites
        FROM sessions
        WHERE userId = ? AND circuitId = ?
        ORDER BY startedAtUtc DESC`,
@@ -150,6 +191,15 @@ export class SqlSessionRepository implements LocalSessionRepository {
         layoutVersion: row.layoutVersion,
         startedAtUtc: row.startedAtUtc,
         laps: lapRows.map((r) => JSON.parse(r.payload) as LapRecord),
+        calibrationStatus: decodeCalibrationStatus(row.calibrationStatus ?? null),
+        ...(row.traceUnwritten === null && row.traceFailedWrites === null
+          ? {}
+          : {
+              trace: {
+                unwrittenSampleCount: row.traceUnwritten ?? 0,
+                failedWriteCount: row.traceFailedWrites ?? 0,
+              },
+            }),
       });
     }
     return results;
@@ -164,6 +214,29 @@ export class SqlSessionRepository implements LocalSessionRepository {
       lapNumber,
       JSON.stringify(samples),
     ]);
+  }
+
+  /**
+   * Ticket P10A H4: every entry in ONE `withTransactionAsync` -- the lap row
+   * and the reclaimed chunk rewrites commit together or not at all, so the
+   * same fixes can never be left owned by two rows at once.
+   */
+  async saveTelemetryBatch(
+    sessionId: string,
+    entries: readonly { lapNumber: number; samples: LocationSample[] }[],
+  ): Promise<void> {
+    for (const entry of entries) {
+      assertJsonSerializable(entry.samples, `telemetry(${sessionId}, lap ${entry.lapNumber})`);
+    }
+    if (entries.length === 0) return;
+    await this.db.withTransactionAsync(async () => {
+      for (const entry of entries) {
+        await this.db.runAsync(
+          'INSERT OR REPLACE INTO telemetry (sessionId, lapNumber, payload) VALUES (?, ?, ?)',
+          [sessionId, entry.lapNumber, JSON.stringify(entry.samples)],
+        );
+      }
+    });
   }
 
   async loadTelemetry(sessionId: string, lapNumber: number): Promise<LocationSample[]> {
