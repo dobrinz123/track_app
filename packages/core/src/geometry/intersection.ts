@@ -131,3 +131,98 @@ export function interpolateCrossingTime(tPrev: number, tCurr: number, t: number)
   }
   return result;
 }
+
+/**
+ * iOS reports `CLLocation.speed` as -1 when it has no valid Doppler solution,
+ * and the provider copies that value through verbatim
+ * (`apps/mobile/src/platform/gnssLocationProvider.ts`), so NEGATIVE and ZERO
+ * speeds reach this module. A stationary car cannot produce a crossing either,
+ * so anything that is not finite and strictly positive counts as ABSENT.
+ */
+function usableSpeed(value: number | undefined): number | null {
+  if (value === undefined) return null;
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return value;
+}
+
+/**
+ * Ticket P8.1. Converts a DISTANCE fraction along the path between two fixes
+ * into the TIME fraction at which the car reached it, under a
+ * constant-acceleration model built from the Doppler speed at each fix.
+ * Returns `distanceFraction` UNCHANGED whenever the model cannot be applied,
+ * so the caller's fallback is exactly today's linear interpolation.
+ *
+ * ## Derivation
+ *
+ * Let `dt = tCurr - tPrev`, and let the along-path speed be linear in time
+ * (constant acceleration `a`) across the interval:
+ *
+ *     v(tau) = v0 + a*tau           with a = (v1 - v0) / dt
+ *     d(tau) = v0*tau + a*tau^2/2   (distance travelled by time tau)
+ *     D      = d(dt) = (v0 + v1)/2 * dt      (whole interval)
+ *
+ * `t` is the fraction of the PATH between the two fixes at which the gate
+ * sits, so the crossing is the instant `tau` where `d(tau) = t*D`. Rather than
+ * solve that quadratic directly, use the energy form `v^2 = v0^2 + 2*a*d`,
+ * which is exact for constant acceleration and makes the distance condition
+ * linear in `v^2`:
+ *
+ *     vt^2 = v0^2 + 2*a*(t*D)
+ *          = v0^2 + 2*((v1 - v0)/dt)*t*((v0 + v1)/2)*dt
+ *          = v0^2 + t*(v1^2 - v0^2)
+ *     vt   = sqrt((1 - t)*v0^2 + t*v1^2)                       (non-negative)
+ *
+ * Speed is linear in time, so the time fraction follows straight from `vt`:
+ *
+ *     tau/dt = (vt - v0) / (v1 - v0)
+ *
+ * That form cancels catastrophically as `v1 -> v0`. Multiplying above and
+ * below by `(vt + v0)` removes the cancellation entirely:
+ *
+ *     tau/dt = (vt^2 - v0^2) / ((v1 - v0)*(vt + v0))
+ *            = t*(v1^2 - v0^2) / ((v1 - v0)*(vt + v0))
+ *            = t*(v0 + v1) / (v0 + vt)
+ *
+ * which is well conditioned for every `v0, v1 > 0` and evaluates to exactly
+ * `t` when `v0 === v1` (handled by an explicit early return so no rounding can
+ * perturb the constant-speed case).
+ *
+ * ## Sign check (done from the formula, not from the name)
+ *
+ * Braking: v0 = 50, v1 = 30, t = 0.5 -> vt = sqrt(1700) = 41.23,
+ * tau/dt = 0.5*80/91.23 = 0.438 < 0.5. Correct: a braking car covers the first
+ * half of the distance in LESS than half the time, so the crossing happened
+ * EARLIER than linear interpolation says. Accelerating (v1 > v0) gives the
+ * mirror image, tau/dt > t. At 1 Hz, 1 g and 42 m/s the correction is ~27 ms,
+ * the error the ticket quotes for linear interpolation.
+ *
+ * ## Modelling caveat
+ *
+ * `distanceFraction` from `segmentIntersection` is a fraction of the straight
+ * CHORD between two fixes, while `D` above is arc length along the driven
+ * path. The two agree to second order in the path curvature over one fix
+ * interval and the difference is far below the effects being corrected here.
+ */
+export function kinematicCrossingFraction(
+  distanceFraction: number,
+  entrySpeedMps: number | undefined,
+  exitSpeedMps: number | undefined,
+): number {
+  const t = distanceFraction;
+  // Endpoints, out-of-range and non-finite inputs are the caller's contract to
+  // police; hand them back untouched so behaviour is exactly today's.
+  if (!Number.isFinite(t) || t <= 0 || t >= 1) return t;
+
+  const v0 = usableSpeed(entrySpeedMps);
+  const v1 = usableSpeed(exitSpeedMps);
+  if (v0 === null || v1 === null) return t;
+  if (v0 === v1) return t;
+
+  const vt = Math.sqrt((1 - t) * v0 * v0 + t * v1 * v1);
+  if (!Number.isFinite(vt) || vt <= 0) return t;
+
+  const fraction = (t * (v0 + v1)) / (v0 + vt);
+  // A degenerate model must never move the crossing onto or past an endpoint.
+  if (!Number.isFinite(fraction) || fraction <= 0 || fraction >= 1) return t;
+  return fraction;
+}
