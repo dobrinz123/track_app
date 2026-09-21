@@ -181,6 +181,24 @@ describe('CrossingDetector', () => {
     });
   });
 
+  /**
+   * Ticket P9: the pit-lane flag must have been up for a while before timing
+   * gates are suppressed. Feeds `count` consecutive flagged fixes, parked well
+   * away from the gate so nothing crosses while the evidence accumulates.
+   */
+  function primePitEvidence(detector: CrossingDetector, count: number): void {
+    for (let index = 0; index < count; index += 1) {
+      const tTo = index * 1_000;
+      const tFrom = tTo - 1_000;
+      detector.update(
+        match(tFrom, 0, 'good', true),
+        match(tTo, 0, 'good', true),
+        sample(tFrom, -50),
+        sample(tTo, -50),
+      );
+    }
+  }
+
   it('excludes timing gates in pit while allowing pit entry and exit gates', () => {
     const gates = [
       projectedGate('sf', 'startFinish'),
@@ -189,26 +207,36 @@ describe('CrossingDetector', () => {
       projectedGate('exit', 'pitExit'),
     ];
     const detector = new CrossingDetector(gates, projection);
-    expect(cross(detector, 0, 10, 0, 10, -1, 1, 'good', 'good', true, true)).toEqual(
+    // Ticket P9: four flagged fixes spanning 3 s -- a car that really is in
+    // the pit lane, not one noisy fix.
+    primePitEvidence(detector, 4);
+    expect(cross(detector, 0, 10, 3_000, 4_000, -1, 1, 'good', 'good', true, true)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ gateId: 'entry' }),
         expect.objectContaining({ gateId: 'exit' }),
       ]),
     );
+
+    const second = new CrossingDetector(gates, projection);
+    primePitEvidence(second, 4);
     expect(
-      cross(
-        new CrossingDetector(gates, projection),
-        0,
-        10,
-        0,
-        10,
-        -1,
-        1,
-        'good',
-        'good',
-        true,
-        true,
-      ).map((event) => event.gateId),
+      cross(second, 0, 10, 3_000, 4_000, -1, 1, 'good', 'good', true, true).map(
+        (event) => event.gateId,
+      ),
     ).toEqual(['entry', 'exit']);
+    expect(second.pitSuppressionDiagnostics().suppressedCrossings).toBe(2);
+  });
+
+  it('a single flagged fix no longer deletes the lap (P9)', () => {
+    // The pre-P9 rule suppressed every timing gate on this step, so the lap
+    // it belonged to simply never appeared.
+    const gates = [projectedGate('sf', 'startFinish'), projectedGate('entry', 'pitEntry')];
+    const detector = new CrossingDetector(gates, projection);
+    expect(
+      cross(detector, 0, 10, 0, 1_000, -1, 1, 'good', 'good', false, true).map(
+        (event) => event.gateId,
+      ),
+    ).toEqual(['sf', 'entry']);
+    expect(detector.pitSuppressionDiagnostics().suppressedCrossings).toBe(0);
   });
 });

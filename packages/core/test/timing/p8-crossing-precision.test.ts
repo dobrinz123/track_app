@@ -35,18 +35,23 @@ import { describe, expect, it } from 'vitest';
 import type { CircuitProfile, CrossingEvent, LocalPoint, LocationSample } from '../../src/contracts';
 import { SeededPrng } from '../../src/fixtures';
 import { loadProfileFromJson, type RuntimeProfile } from '../../src/profile';
-import { TrackMatcher } from '../../src/matching';
+import { TrackMatcher, type TrackMatcherConfig } from '../../src/matching';
 import { CrossingDetector, type ProjectedGate } from '../../src/timing/crossing-detector';
 import type { CrossingDetectorConfig } from '../../src/timing/crossing-detector';
 
-function tmr(): { profile: CircuitProfile; runtime: RuntimeProfile } {
-  const json = readFileSync(
-    new URL('../../assets/circuits/transilvania-motor-ring.v2.json', import.meta.url),
-    'utf8',
-  );
+function load(file: string): { profile: CircuitProfile; runtime: RuntimeProfile } {
+  const json = readFileSync(new URL(`../../assets/circuits/${file}`, import.meta.url), 'utf8');
   const loaded = loadProfileFromJson(json);
   if (!loaded.ok) throw new Error(loaded.errors.join(', '));
   return { profile: loaded.profile, runtime: loaded.runtime };
+}
+
+function tmr(): { profile: CircuitProfile; runtime: RuntimeProfile } {
+  return load('transilvania-motor-ring.v2.json');
+}
+
+function motorpark(): { profile: CircuitProfile; runtime: RuntimeProfile } {
+  return load('motorpark-romania.v1.json');
 }
 
 // ---------------------------------------------------------------- geometry
@@ -323,8 +328,9 @@ function runStrategies(
   runtime: RuntimeProfile,
   samples: LocationSample[],
   configs: readonly CrossingDetectorConfig[],
+  matcherConfig: Partial<TrackMatcherConfig> = {},
 ): RunOutcome[] {
-  const matcher = new TrackMatcher(runtime, { corridorWidthM: 25 });
+  const matcher = new TrackMatcher(runtime, { corridorWidthM: 25, ...matcherConfig });
   const gates = projectedGates(runtime);
   const detectors = configs.map((config) => new CrossingDetector(gates, runtime.projection, config));
   const events: CrossingEvent[][] = configs.map(() => []);
@@ -516,5 +522,106 @@ describe('P8 crossing-time precision against known truth', () => {
         percentileAbs(linear, 95),
       );
     }
+  });
+});
+
+// ------------------------------------------------- P9: the missed-crossing rate
+
+/**
+ * Ticket P9. The table above measures WHEN a crossing is reported. This
+ * measures whether it is reported at all.
+ *
+ * The P8 work found 2-6 % of these simulated laps detecting no start/finish
+ * crossing whatsoever, every one of them with at least one bracketing fix
+ * flagged `onPitLane` -- the pre-existing single-sample pit rule deleting a
+ * lap because 3 m of noise put one fix nearer the pit polyline than the
+ * centerline. P9 replaced that rule; this is the before/after, on both
+ * circuits, over the same trials and the same noise.
+ */
+const P9_LEGACY_MATCHER: Partial<TrackMatcherConfig> = { pitPreferenceMarginM: 0 };
+const P9_LEGACY_CROSSINGS: CrossingDetectorConfig = {
+  pitSuppressionHoldMs: 0,
+  pitSuppressionMinSamples: 1,
+  pitLimiterSpeedMps: 0,
+};
+
+interface MissMeasurement {
+  trials: number;
+  misses: number;
+  pitFlaggedTrials: number;
+}
+
+function measureMisses(
+  runtime: RuntimeProfile,
+  matcherConfig: Partial<TrackMatcherConfig>,
+  detectorConfig: CrossingDetectorConfig,
+): MissMeasurement {
+  let trials = 0;
+  let misses = 0;
+  let pitFlaggedTrials = 0;
+  for (const scenario of SCENARIOS) {
+    for (let trial = 0; trial < TRIALS; trial += 1) {
+      const prng = new SeededPrng(1_000 + trial);
+      const phaseMs = (trial / TRIALS) * 1_000;
+      const { samples } = buildTrial(
+        runtime,
+        scenario,
+        prng,
+        phaseMs,
+        POSITION_SIGMA_M,
+        DOPPLER_SIGMA_MPS,
+      );
+      const outcome = runStrategies(runtime, samples, [detectorConfig], matcherConfig)[0];
+      trials += 1;
+      if (lastPitLaneMatches > 0) pitFlaggedTrials += 1;
+      if (outcome?.startFinishTCross == null) misses += 1;
+    }
+  }
+  return { trials, misses, pitFlaggedTrials };
+}
+
+describe('P9 missed start/finish crossings, before and after', () => {
+  const circuits = [
+    ['Transilvania Motor Ring', tmr().runtime],
+    ['MotorPark Romania', motorpark().runtime],
+  ] as const;
+
+  const rows: Array<[string, MissMeasurement, MissMeasurement]> = circuits.map(
+    ([name, runtime]) => [
+      name,
+      measureMisses(runtime, P9_LEGACY_MATCHER, P9_LEGACY_CROSSINGS),
+      measureMisses(runtime, {}, {}),
+    ],
+  );
+
+  it('reports the before/after missed-crossing rate on both circuits', () => {
+    const lines = [
+      `P9 missed start/finish crossings -- ${TRIALS} trials x ${SCENARIOS.length} scenarios per circuit, ` +
+        `1 Hz, position sigma ${POSITION_SIGMA_M} m/axis`,
+      '',
+      `| ${'circuit'.padEnd(24)} | ${'rule'.padEnd(18)} | trials | missed | rate   | trials with a pit flag |`,
+      `|${'-'.repeat(26)}|${'-'.repeat(20)}|${'-'.repeat(8)}|${'-'.repeat(8)}|${'-'.repeat(8)}|${'-'.repeat(24)}|`,
+    ];
+    for (const [name, before, after] of rows) {
+      const row = (label: string, m: MissMeasurement, circuit: string): string =>
+        `| ${circuit.padEnd(24)} | ${label.padEnd(18)} | ${String(m.trials).padStart(6)} | ` +
+        `${String(m.misses).padStart(6)} | ${((100 * m.misses) / m.trials).toFixed(2).padStart(5)}% | ` +
+        `${String(m.pitFlaggedTrials).padStart(22)} |`;
+      lines.push(row('pre-P9', before, name));
+      lines.push(row('P9', after, name));
+    }
+    console.log(`\n${lines.join('\n')}\n`);
+    expect(rows).toHaveLength(2);
+  });
+
+  it('the defect reproduces under the pre-P9 rule and is gone under P9', () => {
+    for (const [name, before, after] of rows) {
+      // The old rule loses laps on at least one of the two circuits; where it
+      // does, P9 must not merely reduce the loss.
+      expect(after.misses, `${name}: P9 still loses crossings`).toBe(0);
+      expect(after.misses, `${name}: P9 must never lose MORE`).toBeLessThanOrEqual(before.misses);
+    }
+    const totalBefore = rows.reduce((sum, [, before]) => sum + before.misses, 0);
+    expect(totalBefore, 'the pre-P9 defect no longer reproduces -- has the harness drifted?').toBeGreaterThan(0);
   });
 });

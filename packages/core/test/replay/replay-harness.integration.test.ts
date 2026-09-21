@@ -310,16 +310,28 @@ describe('ReplayHarness production pipeline integration', () => {
 
   it('17. noisyGpsLap: deterministic characterization under 8 m noise', () => {
     // Characterization pin, not a normative spec: under sigma-8m noise the
-    // pipeline's per-seed outcome is deterministic. Most seeds fail to
-    // complete a lap at all; seed 42 happens to complete one, and it is
-    // "good" because quality keys off REPORTED accuracy (8 m < the 12 m
-    // degraded threshold), not off actual noise. If a matcher/detector
+    // pipeline's per-seed outcome is deterministic. Seed 42 completes a lap,
+    // and it is "good" because quality keys off REPORTED accuracy (8 m < the
+    // 12 m degraded threshold), not off actual noise. If a matcher/detector
     // change shifts these outcomes, this test flags it for deliberate
     // review rather than letting the noise path drift silently.
+    //
+    // DELIBERATE REVIEW, ticket P9: seed 106 used to complete NO lap, and the
+    // review found out why -- one noisy fix beside the main straight landed
+    // nearer the pit polyline than the centerline, the matcher called it
+    // `onPitLane`, and the single-sample rule in `CrossingDetector` threw the
+    // start/finish crossing away. The lap was never invalid; it was deleted.
+    // P9 requires sustained pit evidence, so the lap is now reported. The pin
+    // moves from 0 laps to 1, which is the outcome this fixture should have
+    // had all along.
     const { profile, runtime } = tmr();
 
-    const noLap = runSessionPipeline(runtime, noisyGpsLap(profile, 106));
-    expect(noLap.laps).toHaveLength(0);
+    const recovered = runSessionPipeline(runtime, noisyGpsLap(profile, 106));
+    expect(recovered.laps).toHaveLength(1);
+    expect(recovered.laps[0]?.valid).toBe(true);
+    // A real TMR lap at the fixture's speed profile (~91 s), not a fragment.
+    expect(recovered.laps[0]?.durationMs).toBeGreaterThan(60_000);
+    expect(recovered.laps[0]?.durationMs).toBeLessThan(180_000);
 
     const oneLap = runSessionPipeline(runtime, noisyGpsLap(profile, 42));
     expect(oneLap.laps).toHaveLength(1);

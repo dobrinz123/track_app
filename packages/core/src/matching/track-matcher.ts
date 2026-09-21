@@ -14,6 +14,13 @@ import { TelemetryQualityEvaluator, type TelemetryQualityConfig } from './qualit
 export interface TrackMatcherConfig {
   corridorWidthM: number;
   pitCorridorWidthM: number;
+  /**
+   * Ticket P9. How much NEARER the pit polyline must be than the centerline
+   * before a fix is called "on the pit lane", metres. See
+   * {@link DEFAULT_PIT_PREFERENCE_MARGIN_M}. Zero restores the pre-P9
+   * `pitDistanceM < centerlineDistanceM` coin flip exactly.
+   */
+  pitPreferenceMarginM: number;
   windowM: number;
   confidenceThreshold: number;
   offCorridorLimit: number;
@@ -24,9 +31,42 @@ export interface TrackMatcherConfig {
   quality: Partial<TelemetryQualityConfig>;
 }
 
+/**
+ * Ticket P9. The pit-lane test used to be `pitDistanceM < centerlineDistanceM`
+ * -- whichever polyline happens to be nearer wins, by any amount. Where the
+ * two nearly coincide that is a coin flip decided by GNSS noise, and both
+ * shipped assets have exactly that geometry: the pit way and the centerline
+ * way are OSM ways that SHARE their junction nodes, so the measured
+ * pit-to-centerline separation reaches 0.0 m at the entry and exit joins
+ * (TMR: 3 of 15 pit vertices under 8 m; MotorPark: 7 of 17). At MotorPark the
+ * pit lane is only 12.4 m from the start/finish gate midpoint, inside the
+ * circuit's own 16 m corridor, so a racing line 6 m toward the pit plus 3 m of
+ * position noise lands nearer the pit polyline than the centerline and the fix
+ * is called "in the pits" -- which used to delete the lap (see
+ * `CrossingDetector`).
+ *
+ * So the pit lane must now win by a real margin. 4 m is chosen from the
+ * measured geometry of the two assets, from both sides:
+ *  - it is BELOW the smallest margin any fix of a genuine pit transit shows on
+ *    either circuit (TMR 4.9 m, MotorPark 5.1 m, measured over the
+ *    `pitLaneTransitLap` / `motorparkPitLaneTransitLap` fixtures), so no sample
+ *    of a real pit lap loses its flag -- except the single terminal fix at the
+ *    MotorPark exit join (2.8 m), where the car is already rejoining the track;
+ *  - it is above ~1 sigma of the ambiguity it exists to reject: with 3 m/axis
+ *    position noise the DIFFERENCE of the two lateral distances carries about
+ *    3 m of sigma, so a single noisy fix can no longer flip the decision on
+ *    its own.
+ * It deliberately does not try to reject the worst case alone (a 6 m racing
+ * line plus 3 m of noise can beat the centerline by ~5.6 m); rejecting that
+ * would need a margin larger than a real pit transit shows. The persistence
+ * requirement in `CrossingDetector` handles what a margin cannot.
+ */
+const DEFAULT_PIT_PREFERENCE_MARGIN_M = 4;
+
 const DEFAULT_CONFIG: Readonly<TrackMatcherConfig> = {
   corridorWidthM: 20,
   pitCorridorWidthM: 20,
+  pitPreferenceMarginM: DEFAULT_PIT_PREFERENCE_MARGIN_M,
   windowM: 150,
   confidenceThreshold: 0.45,
   offCorridorLimit: 5,
@@ -243,6 +283,14 @@ export class TrackMatcher implements TrackMatcherContract {
     if (!Number.isInteger(this.auditIntervalSamples) || this.auditIntervalSamples < 1) {
       throw new RangeError('auditIntervalSamples must be a positive integer');
     }
+    if (
+      !Number.isFinite(this.config.pitPreferenceMarginM) ||
+      this.config.pitPreferenceMarginM < 0
+    ) {
+      // A negative margin would make the pit flag MORE eager than the pre-P9
+      // behaviour it replaces, which is the one direction this must never go.
+      throw new RangeError('pitPreferenceMarginM must be a non-negative finite number');
+    }
     this.evaluator = new TelemetryQualityEvaluator(this.config.quality);
   }
 
@@ -405,7 +453,10 @@ export class TrackMatcher implements TrackMatcherContract {
       point.e - pitProjection.point.e,
       point.n - pitProjection.point.n,
     );
-    return pitDistanceM < centerlineDistanceM && pitDistanceM <= this.config.pitCorridorWidthM;
+    if (pitDistanceM > this.config.pitCorridorWidthM) return false;
+    // Ticket P9: a real margin, not "whichever is nearer". With a margin of 0
+    // this is bit-for-bit the pre-P9 `pitDistanceM < centerlineDistanceM`.
+    return centerlineDistanceM - pitDistanceM > this.config.pitPreferenceMarginM;
   }
 
   private sectorIndex(distanceM: number): number {
