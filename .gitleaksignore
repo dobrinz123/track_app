@@ -1,0 +1,9 @@
+# Fingerprints of confirmed false positives, one per line.
+# Format: <commit>:<file>:<rule-id>:<start-line>
+# See https://github.com/gitleaks/gitleaks#gitleaksignore
+
+# Fabricated "token=" value in a test fixture simulating an ENET connection-
+# error message, used to test signal-finder export diagnostics redaction.
+# Not a real secret -- verified 2026-09-21 against the commit's diff
+# (apps/mobile/test/session/signalFinderExport.test.ts).
+d3267b132ae1fd110ff8016f2443abded06da1cc:apps/mobile/test/session/signalFinderExport.test.ts:generic-api-key:810

@@ -1,0 +1,142 @@
+# Security scanning + the repo's own gates (typecheck/lint/test).
+#
+# This is deliberately separate from build-unsigned-ios.yml (which only builds
+# the unsigned .ipa on workflow_dispatch / `build-*` tags). Until this
+# workflow existed, the repo had NO CI at all for typecheck/lint/test, and no
+# security tooling whatsoever.
+#
+# Three accredited, open-source security tools (accredited 2026-09-21):
+#   1. gitleaks/gitleaks      (MIT)         -- secret scanning
+#   2. google/osv-scanner     (Apache-2.0)  -- dependency vulnerability scanning
+#   3. @onebeyond/license-checker (MIT, npm devDependency) -- license policy
+#
+# Note on gitleaks: we run the `gitleaks/gitleaks` CLI binary directly rather
+# than the `gitleaks/gitleaks-action` wrapper. gitleaks-action carries its own
+# EULA (license key required for organization-owned repos; NOASSERTION on
+# GitHub) and is a different, much smaller project (~650 stars) from the
+# accredited MIT-licensed, 29k-star `gitleaks/gitleaks` CLI. Using the CLI
+# directly keeps us on the tool that was actually vetted. The release binary
+# is downloaded and checksum-verified rather than "pinned to a SHA" because
+# gitleaks/gitleaks ships no action.yml -- it isn't invocable via `uses:`.
+#
+# Every third-party Action below is pinned to a full commit SHA (not a
+# floating tag) -- see the trailing comment on each `uses:` line for how it
+# was resolved (`git ls-remote --tags <repo> <tag>`, cross-checked against the
+# GitHub REST API's tags endpoint).
+
+name: Security and CI gates
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: security-and-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege by default; the one job that needs more (osv-scan, to
+# upload SARIF to the Security tab) grants it at the job level instead.
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: Gates (typecheck / lint / test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (resolved: git ls-remote --tags actions/checkout v7.0.1)
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 (resolved: git ls-remote --tags actions/setup-node v7.0.0)
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies (repo root)
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+  gitleaks:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (resolved: git ls-remote --tags actions/checkout v7.0.1)
+        with:
+          fetch-depth: 0
+
+      # gitleaks/gitleaks (MIT) ships no action.yml, so it can't be pinned
+      # via `uses:`. Instead we download the pinned release binary and verify
+      # it against the project's own published checksums file before running
+      # it -- the equivalent supply-chain guarantee for a non-Action tool.
+      - name: Install gitleaks v8.30.1 (checksum-verified)
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -sSLO "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSLO "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          grep "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz\$" "gitleaks_${GITLEAKS_VERSION}_checksums.txt" | sha256sum -c -
+          tar -xzf "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      # Full-history scan. Known false positives (test fixture data, not real
+      # secrets) are allowlisted by fingerprint in .gitleaksignore at the repo
+      # root -- gitleaks reads that file automatically (default
+      # --gitleaks-ignore-path is ".").
+      - name: Scan for secrets
+        run: gitleaks git --redact --verbose --report-format=json --report-path=gitleaks-report.json
+
+  osv-scan:
+    name: Dependency vulnerability scan (osv-scanner)
+    permissions:
+      # Matches google/osv-scanner-action's own reusable-workflow permissions
+      # block; the caller must grant at least this for the SARIF upload step
+      # inside it to work. Public repo, so Code Scanning is free (no GHAS
+      # needed).
+      actions: read
+      contents: read
+      security-events: write
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@a345acffa64b0eaede81a3d9aae6141214d9c8fc # v2.6.0 (resolved: git ls-remote --tags google/osv-scanner-action v2.6.0)
+    # Default scan-args (`-r ./`) recursively finds package-lock.json at the
+    # repo root, which is what we want for this single-lockfile workspace.
+
+  license-policy:
+    name: License policy (@onebeyond/license-checker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (resolved: git ls-remote --tags actions/checkout v7.0.1)
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 (resolved: git ls-remote --tags actions/setup-node v7.0.0)
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies (repo root)
+        run: npm ci
+
+      # Allowlist policy (deliberately not loosened to force a green run --
+      # see the delegation ticket / PR description for known violations):
+      # MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, 0BSD, CC0-1.0,
+      # Unlicense, Python-2.0, BlueOak-1.0.0. AGPL/GPL (and anything else
+      # outside this list) fail the job.
+      - name: Check dependency licenses against policy
+        run: npx @onebeyond/license-checker scan --allowOnly MIT Apache-2.0 BSD-2-Clause BSD-3-Clause ISC 0BSD CC0-1.0 Unlicense Python-2.0 BlueOak-1.0.0

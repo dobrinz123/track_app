@@ -1,0 +1,10 @@
+# Optional local hygiene: catch secrets before they're committed, not just
+# in CI. Requires https://pre-commit.com/#install and a local `gitleaks`
+# binary (https://github.com/gitleaks/gitleaks/releases) on PATH; opt-in via
+# `pre-commit install`. Mirrors the CI gitleaks job in
+# .github/workflows/security-and-ci.yml (same tool, same .gitleaksignore).
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
