@@ -304,4 +304,72 @@ describe('RealSessionFacade', () => {
     await flush();
     expect(events.length).toBe(emissionsBeforeDispose); // no further delivery -- dispose() unsubscribed from the controller.
   });
+
+  // -------------------------------------------------------------------
+  // Ticket P7R E2 (write-set fence lifted) -- `FacadeState.matchingUnvalidated`
+  // is a 1:1 map of `FacadeStateCore.matchingUnvalidated` (`mapState` in
+  // realFacade.ts). This is the state-level proof for C2: there is no RN
+  // render harness in this repo, so `ActiveDashboardScreen`'s chip is NOT
+  // covered by a render test -- this proves the fact reaches `FacadeState`
+  // (what the screen reads), end-to-end against the real controller, the
+  // same way `calibrationEscapeHatch.test.ts` proves it reaches
+  // `FacadeStateCore` in the first place.
+  // -------------------------------------------------------------------
+
+  it('maps matchingUnvalidated through the facade once the escape hatch is used, and it persists for the rest of the run', async () => {
+    const { repository, provider, clock, controller } = setup();
+    const facade = new RealSessionFacade(controller);
+    const events: FacadeState[] = [];
+    facade.subscribe((s) => events.push(s));
+
+    facade.beginCalibration();
+    await flush();
+    expect(events.at(-1)!.matchingUnvalidated).toBe(false);
+
+    // A Learn lap stalled below the acceptance bar (the same recipe
+    // `calibrationEscapeHatch.test.ts` uses): driven only 70% of the way
+    // round, so the engine never even reaches a result.
+    const lap = cleanRecognitionLap(TMR_CIRCUIT_PROFILE, 9_101);
+    feedSamples(clock, provider, lap.slice(0, Math.floor(lap.length * 0.7)));
+    expect(events.at(-1)!.sessionState).toBe('calibrating');
+    expect(events.at(-1)!.matchingUnvalidated).toBe(false);
+
+    expect(controller.proceedWithoutValidatedCalibration()).toBe('armed-unvalidated');
+    expect(events.at(-1)!.sessionState).toBe('armed');
+    // THE HONESTY HALF, at the facade boundary this time.
+    expect(events.at(-1)!.matchingUnvalidated).toBe(true);
+    const emissionsSinceEscapeHatch = events.length;
+
+    facade.arm();
+    feedSamples(clock, provider, pbImprovementSession(TMR_CIRCUIT_PROFILE, 9_102));
+    await controller.flush();
+
+    // Still true after laps were driven -- not a one-emission flash: EVERY
+    // emission from the moment the escape hatch fired onward carries it.
+    expect(events.length).toBeGreaterThan(emissionsSinceEscapeHatch);
+    expect(events.at(-1)!.laps.length).toBeGreaterThan(0);
+    expect(events.slice(emissionsSinceEscapeHatch - 1).every((s) => s.matchingUnvalidated)).toBe(true);
+
+    facade.endSession();
+    await flush();
+    const sessions = await repository.listSessions('driver-1', TMR_CIRCUIT_PROFILE.circuitId);
+    expect(sessions).toHaveLength(1);
+  });
+
+  it('an ordinary accepted calibration never carries the label through the facade', async () => {
+    const { provider, clock, controller } = setup();
+    const facade = new RealSessionFacade(controller);
+    const events: FacadeState[] = [];
+    facade.subscribe((s) => events.push(s));
+
+    facade.beginCalibration();
+    await flush();
+    feedSamples(clock, provider, cleanRecognitionLap(TMR_CIRCUIT_PROFILE, 9_201));
+    expect(events.at(-1)!.sessionState).toBe('calibrationReview');
+    facade.acceptCalibration();
+    await controller.flush();
+
+    expect(events.at(-1)!.sessionState).toBe('armed');
+    expect(events.at(-1)!.matchingUnvalidated).toBe(false);
+  });
 });

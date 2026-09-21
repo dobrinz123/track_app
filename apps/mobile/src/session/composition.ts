@@ -579,6 +579,8 @@ const PENDING_FACADE_STATE: FacadeState = {
   coachCue: null,
   trackMatch: { state: 'unknown', lateralM: null, confidence: null },
   recording: { persistedSampleCount: 0, failedWriteCount: 0 },
+  // Ticket P7R E2: nothing is running yet, so there is no session to label.
+  matchingUnvalidated: false,
   lastError: null,
 };
 

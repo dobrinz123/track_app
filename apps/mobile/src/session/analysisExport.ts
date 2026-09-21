@@ -58,6 +58,17 @@ import { resolveAnalysisScreenStrings } from '../ui/screens/analysisStrings';
  * measured values they stand on, and the coverage gate's per-lap verdict. The
  * prose stays exactly as it was — this is alongside it, not instead of it.
  *
+ * Schema 5 (ticket P7R E2, write-set fence lifted) adds `session.matchingUnvalidated`
+ * — REQUIRED, never optional/defaulted. A session run past a rejected
+ * calibration must never export a document indistinguishable from a properly
+ * calibrated one (the raw export and the history badge already carry this
+ * fact; this closes the last honest-artifact gap). The field is required on
+ * {@link AnalysisExportOptions} too, so a caller is forced to state it rather
+ * than silently getting `false` — a `false` here is an active claim that the
+ * session WAS calibrated, so it must never be a default. A document built
+ * before this change (schemaVersion < 5) simply has no such claim to make;
+ * the version bump is what makes that distinction legible to any reader.
+ *
  * Nothing in the summary is written by this module about the DRIVING -- every
  * observation line comes from the engine's own localised report, carried here
  * through the screen's view model. What this module owns is the frame: table
@@ -72,7 +83,7 @@ import { resolveAnalysisScreenStrings } from '../ui/screens/analysisStrings';
  */
 type LapLabel = LapInsight['labels'][number];
 
-export const ANALYSIS_EXPORT_SCHEMA_VERSION = 4;
+export const ANALYSIS_EXPORT_SCHEMA_VERSION = 5;
 export const ANALYSIS_EXPORT_KIND = 'trace-analysis-report';
 
 export interface AnalysisExportChannelCoverage {
@@ -323,6 +334,15 @@ export interface AnalysisExportDocument {
     cleanLapCount: number;
     referenceLapNumber: number | null;
     comparisonLapNumber: number | null;
+    /**
+     * Ticket P7R E2: `true` when this session was run past a REJECTED
+     * calibration (the same fact `rawSessionExport.ts`'s
+     * `session.matchingUnvalidated` and the history badge already carry).
+     * Its lap and sector times, where there are any, may be wrong or absent.
+     * REQUIRED -- never optional -- so this document can never omit the claim
+     * by accident (see {@link AnalysisExportOptions.matchingUnvalidated}).
+     */
+    matchingUnvalidated: boolean;
   };
   /** What the RECORDING itself could support -- the honesty half of the export. */
   recording: {
@@ -357,6 +377,8 @@ interface SummaryStrings {
   cueUpdates: string;
   observations: string;
   recordedOn: string;
+  /** Ticket P7R E2 — shown only when `session.matchingUnvalidated` is true. */
+  matchingUnvalidated: string;
   cornerTableHeader: string;
   cornerTableSeparator: string;
   limitations: string;
@@ -372,6 +394,7 @@ const EN: SummaryStrings = {
   cueUpdates: 'Cues that moved during the session',
   observations: 'Observations',
   recordedOn: 'Session',
+  matchingUnvalidated: 'Calibration: NOT VALIDATED — lap and sector times may be wrong or missing',
   cornerTableHeader: '| Corner | Time lost | Best through | Min speed | Exit |',
   cornerTableSeparator: '|---|---|---|---|---|',
   limitations: 'What this data cannot tell you',
@@ -387,6 +410,7 @@ const RO: SummaryStrings = {
   cueUpdates: 'Repere mutate în timpul sesiunii',
   observations: 'Observații',
   recordedOn: 'Sesiune',
+  matchingUnvalidated: 'Calibrare: NEVALIDATĂ — timpii pe tur și pe sector pot fi greșiți sau lipsă',
   cornerTableHeader: '| Viraj | Timp pierdut | Cel mai bun | Viteză minimă | Ieșire |',
   cornerTableSeparator: '|---|---|---|---|---|',
   limitations: 'Ce nu putem spune din aceste date',
@@ -463,6 +487,15 @@ export function analysisExportFileName(doc: AnalysisExportDocument, ext: 'json' 
 export interface AnalysisExportOptions {
   /** ISO-8601 UTC instant the export was produced (injected, never `Date.now()` inside). */
   generatedAtUtc: string;
+  /**
+   * Ticket P7R E2: was this session run on unvalidated (rejected-calibration)
+   * matching? REQUIRED, deliberately not optional-defaulting-to-`false` --
+   * `false` is an active claim that the session WAS calibrated, and a caller
+   * must state which is true rather than get that claim for free. Callers
+   * read this from `isSessionMatchingUnvalidated(sessionId)`
+   * (`session/composition.ts`).
+   */
+  matchingUnvalidated: boolean;
   /**
    * Ticket P5c-B D4: what the trackday stage actually did during this session —
    * the cue moves applied and the pit suggestions the driver was SHOWN. Omit
@@ -731,6 +764,7 @@ export function buildAnalysisExportDocument(
       cleanLapCount: insights.cleanLapCount,
       referenceLapNumber: insights.referenceLapNumber,
       comparisonLapNumber: insights.comparisonLapNumber,
+      matchingUnvalidated: options.matchingUnvalidated,
     },
     recording: {
       sampleCount: assembled.sampleCount,
@@ -857,6 +891,11 @@ export function buildAnalysisSummaryMarkdown(doc: AnalysisExportDocument): strin
   lines.push(`**${s.recordedOn}:** ${header}`);
   lines.push(`_${doc.report.subtitle}_`);
   lines.push(`**${doc.report.observationsOnlyNote}**`);
+  // Ticket P7R E2: the same honesty line `rawSessionExport.ts`'s markdown
+  // companion carries, in the document the driver actually forwards.
+  if (doc.session.matchingUnvalidated) {
+    lines.push(`**${s.matchingUnvalidated}**`);
+  }
   lines.push('');
 
   if (overview !== undefined && overview.lines.length > 0) {

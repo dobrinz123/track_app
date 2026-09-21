@@ -63,7 +63,7 @@ async function readyState(circuitIndex: number, language: 'ro' | 'en') {
 describe('P5b B4 -- the exported analysis report', () => {
   it('names both files trace-analysis-<circuit>-<date>', async () => {
     const state = await readyState(0, 'en');
-    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT });
+    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, matchingUnvalidated: false });
     expect(analysisExportFileName(doc, 'json')).toBe(
       `trace-analysis-${doc.session.circuitId}-2026-08-29.json`,
     );
@@ -74,13 +74,13 @@ describe('P5b B4 -- the exported analysis report', () => {
 
   it('is the current schema version of trace-analysis-report and carries the engine outputs', async () => {
     const state = await readyState(0, 'en');
-    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT });
+    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, matchingUnvalidated: false });
 
     expect(doc.kind).toBe(ANALYSIS_EXPORT_KIND);
     expect(ANALYSIS_EXPORT_KIND).toBe('trace-analysis-report');
     expect(doc.schemaVersion).toBe(ANALYSIS_EXPORT_SCHEMA_VERSION);
     // P5b-FIX1 C7: the standalone DTO (see `analysisExportV2.test.ts`).
-    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(4);
+    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(5);
     expect(doc.observationsOnly).toBe(true);
     expect(doc.generatedAtUtc).toBe(GENERATED_AT);
 
@@ -108,7 +108,7 @@ describe('P5b B4 -- the exported analysis report', () => {
   it('writes a <= 1-page summary carrying the same text the screen shows', async () => {
     for (const language of ['en', 'ro'] as const) {
       const state = await readyState(0, language);
-      const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT });
+      const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, matchingUnvalidated: false });
       const markdown = buildAnalysisSummaryMarkdown(doc);
       const lines = markdown.split('\n');
 
@@ -132,7 +132,7 @@ describe('P5b B4 -- the exported analysis report', () => {
   it('keeps the summary inside one page even with every corner of a long circuit', async () => {
     for (const [index] of allBundledCircuits().entries()) {
       const state = await readyState(index, 'ro');
-      const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT });
+      const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, matchingUnvalidated: false });
       const markdown = buildAnalysisSummaryMarkdown(doc);
       expect(markdown.split('\n').length).toBeLessThanOrEqual(ANALYSIS_SUMMARY_MAX_LINES);
       expect(markdown.length).toBeLessThanOrEqual(ANALYSIS_SUMMARY_MAX_CHARS);
@@ -151,7 +151,7 @@ describe('P5b B4 -- the exported analysis report', () => {
     shareAsync.mockClear();
     isAvailableAsync.mockResolvedValue(true);
     const state = await readyState(0, 'en');
-    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT });
+    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, matchingUnvalidated: false });
 
     const result = await shareAnalysisExport(doc);
     expect(result.ok).toBe(true);
@@ -168,7 +168,7 @@ describe('P5b B4 -- the exported analysis report', () => {
 
   it('degrades honestly where sharing is unavailable, and when it throws', async () => {
     const state = await readyState(0, 'en');
-    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT });
+    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, matchingUnvalidated: false });
 
     isAvailableAsync.mockResolvedValue(false);
     const unavailable = await shareAnalysisExport(doc);
@@ -183,5 +183,71 @@ describe('P5b B4 -- the exported analysis report', () => {
     expect(failed.shared).toBe(false);
     expect(failed.error).toContain('share sheet exploded');
     isAvailableAsync.mockResolvedValue(true);
+  });
+});
+
+/**
+ * Ticket P7R E2 (write-set fence lifted): the calibration escape hatch's
+ * label must reach this document too, exactly as it already reaches the raw
+ * export, the history badge and the durable log. An uncalibrated session's
+ * analysis document must be DISTINGUISHABLE from a properly calibrated one --
+ * not merely capable of carrying the fact, but actually carrying it whenever
+ * it is true, and the field must be impossible to omit by accident.
+ */
+describe('P7R E2 -- the escape-hatch label reaches the analysis export', () => {
+  it('is schema 5, and REQUIRES matchingUnvalidated (no optional/defaulted boolean)', async () => {
+    const state = await readyState(0, 'en');
+    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(5);
+    // @ts-expect-error -- matchingUnvalidated is required; omitting it must
+    // not compile. This is the "impossible to get wrong" requirement: a
+    // caller cannot silently ship a document that claims `false` for free.
+    buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT });
+  });
+
+  it('an uncalibrated session exports a document distinguishable from a calibrated one', async () => {
+    const state = await readyState(0, 'en');
+    const calibrated = buildAnalysisExportDocument(state, {
+      generatedAtUtc: GENERATED_AT,
+      matchingUnvalidated: false,
+    });
+    const uncalibrated = buildAnalysisExportDocument(state, {
+      generatedAtUtc: GENERATED_AT,
+      matchingUnvalidated: true,
+    });
+
+    expect(calibrated.session.matchingUnvalidated).toBe(false);
+    expect(uncalibrated.session.matchingUnvalidated).toBe(true);
+    // The two documents are byte-for-byte identical except for this one fact.
+    const calibratedJson = JSON.stringify({ ...calibrated, session: { ...calibrated.session, matchingUnvalidated: null } });
+    const uncalibratedJson = JSON.stringify({ ...uncalibrated, session: { ...uncalibrated.session, matchingUnvalidated: null } });
+    expect(uncalibratedJson).toBe(calibratedJson);
+
+    // The forwarded artifact (the .md summary) states it too -- this is the
+    // half a human actually reads.
+    const calibratedMd = buildAnalysisSummaryMarkdown(calibrated);
+    const uncalibratedMd = buildAnalysisSummaryMarkdown(uncalibrated);
+    expect(uncalibratedMd).toMatch(/not validated/i);
+    expect(calibratedMd).not.toMatch(/not validated/i);
+  });
+
+  it('states the honest line in RO too', async () => {
+    const state = await readyState(0, 'ro');
+    const doc = buildAnalysisExportDocument(state, {
+      generatedAtUtc: GENERATED_AT,
+      matchingUnvalidated: true,
+    });
+    expect(buildAnalysisSummaryMarkdown(doc)).toMatch(/nevalidat/i);
+  });
+
+  it('a pre-P7R-E2 document (schemaVersion 4, no matchingUnvalidated) is distinguishable by its version alone', () => {
+    // No reader in this app parses an exported document back in -- it is a
+    // one-way share artifact -- so "handled" here means what it can mean:
+    // an old document never claims `matchingUnvalidated` either way, and its
+    // own schemaVersion says so unambiguously to any tool or person that
+    // opens it. A document that DOES carry the field is, by construction,
+    // schema >= 5.
+    const oldDocument = { schemaVersion: 4 } as const;
+    expect(oldDocument.schemaVersion).toBeLessThan(ANALYSIS_EXPORT_SCHEMA_VERSION);
+    expect('matchingUnvalidated' in oldDocument).toBe(false);
   });
 });

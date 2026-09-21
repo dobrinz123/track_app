@@ -14,7 +14,13 @@ import {
   type AnalysisRunResult,
 } from '../../session/analysisViewModel';
 import { buildAnalysisExportDocument, shareAnalysisExport, shareAnalysisJson } from '../../session/analysisExport';
-import { facade, getAnalysisRunner, getTrackdayRecord, settingsStore } from '../../session/composition';
+import {
+  facade,
+  getAnalysisRunner,
+  getTrackdayRecord,
+  isSessionMatchingUnvalidated,
+  settingsStore,
+} from '../../session/composition';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Analysis'>;
 
@@ -84,8 +90,12 @@ export function AnalysisScreen({ route }: Props): React.JSX.Element {
       // suggestions off the report is observations-only whatever the journal
       // still holds from earlier in the launch.
       const trackday = getTrackdayRecord(sessionId);
+      // Ticket P7R E2: the same honesty fact the raw export and the history
+      // badge already carry -- read at export time, same as the trackday
+      // setting above, rather than trusted from anywhere earlier.
       const doc = buildAnalysisExportDocument(state, {
         generatedAtUtc: new Date().toISOString(),
+        matchingUnvalidated: isSessionMatchingUnvalidated(sessionId),
         trackday: {
           enabled: settings.suggestionsEnabled,
           cueUpdates: trackday.cueUpdates,

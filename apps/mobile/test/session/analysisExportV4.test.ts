@@ -58,10 +58,10 @@ async function readyState(language: 'ro' | 'en' = 'en') {
 describe('P5-FIX2 W3 -- export schema 4 pins the structured facts', () => {
   it('is schema 4 and pins the per-lap key shape', async () => {
     const state = await readyState();
-    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT });
+    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, matchingUnvalidated: false });
 
-    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(4);
-    expect(doc.schemaVersion).toBe(4);
+    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(5);
+    expect(doc.schemaVersion).toBe(5);
     expect(Object.keys(doc.analysis.laps[0]!).sort()).toEqual(
       [
         'absOscillationDetected',
@@ -114,7 +114,7 @@ describe('P5-FIX2 W3 -- export schema 4 pins the structured facts', () => {
     };
     const doc = buildAnalysisExportDocument(
       { ...state, insights: labelled },
-      { generatedAtUtc: GENERATED_AT },
+      { generatedAtUtc: GENERATED_AT, matchingUnvalidated: false },
     );
 
     const first = doc.analysis.laps[0]!;
@@ -136,7 +136,7 @@ describe('P5-FIX2 W3 -- export schema 4 pins the structured facts', () => {
 
   it('states per-lap channel coverage and exclusions, not only the prose', async () => {
     const state = await readyState();
-    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT });
+    const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, matchingUnvalidated: false });
 
     expect(doc.recording.perLapCoverage.map((entry) => entry.lapNumber)).toEqual(
       state.assembled.perLapCoverage.map((entry) => entry.lapNumber),
@@ -158,8 +158,8 @@ describe('P5-FIX2 W3 -- export schema 4 pins the structured facts', () => {
   it('stays observations-only and language-independent in its structured half', async () => {
     const ro = await readyState('ro');
     const en = await readyState('en');
-    const roDoc = buildAnalysisExportDocument(ro, { generatedAtUtc: GENERATED_AT });
-    const enDoc = buildAnalysisExportDocument(en, { generatedAtUtc: GENERATED_AT });
+    const roDoc = buildAnalysisExportDocument(ro, { generatedAtUtc: GENERATED_AT, matchingUnvalidated: false });
+    const enDoc = buildAnalysisExportDocument(en, { generatedAtUtc: GENERATED_AT, matchingUnvalidated: false });
 
     expect(roDoc.observationsOnly).toBe(true);
     expect(JSON.stringify(roDoc.analysis.laps.map((lap) => lap.labels))).toBe(

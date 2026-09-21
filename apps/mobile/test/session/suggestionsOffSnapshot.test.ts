@@ -104,6 +104,7 @@ async function offStateSummary() {
   const record = journal.read(SESSION_ID);
   const doc = buildAnalysisExportDocument(reportState, {
     generatedAtUtc: GENERATED_AT,
+    matchingUnvalidated: false,
     trackday: {
       enabled: DEFAULT_SETTINGS.suggestionsEnabled,
       cueUpdates: record.cueUpdates,

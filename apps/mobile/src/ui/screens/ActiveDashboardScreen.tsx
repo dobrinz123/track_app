@@ -73,6 +73,18 @@ export function ActiveDashboardScreen({ navigation }: Props): React.JSX.Element 
   // the counter beside this dot has stopped being the truth.
   const recordingFailed = state.recording.failedWriteCount > 0;
 
+  // Ticket P7R E2: the escape-hatch label reaches the one screen it never
+  // did -- the driver is told when they tap through it, and afterwards in
+  // history, but not while they are actually driving the session it
+  // produced. This is PERSISTENT for the whole life of the session (unlike
+  // `banner`/`offTrack` below, which are transient and clear on their own),
+  // so it lives in `topRow` beside the recording chip -- never in
+  // `bannerSlot`. That is a deliberate precedence choice: OFF TRACK is the
+  // more urgent, momentary signal and must never be masked or crowded by a
+  // standing fact about the whole session, so the two never share a slot and
+  // this marker's visibility never depends on `offTrack`/`banner` state.
+  const matchingUnvalidated = state.matchingUnvalidated;
+
   // C7 fix: a failed async command (e.g. endSession()'s persistence
   // rejecting) takes priority over the other, more routine banner states --
   // it's the one case that means the app did NOT do what the driver asked.
@@ -113,6 +125,21 @@ export function ActiveDashboardScreen({ navigation }: Props): React.JSX.Element 
               {state.recording.persistedSampleCount}
             </Text>
           </View>
+          {/* Ticket P7R E2 -- persistent, not an alert: stays up for the whole
+              session, in `topRow` alongside the other standing facts (GNSS
+              quality, recording count), never in `bannerSlot` where it could
+              compete with or delay the OFF TRACK banner. One short marker,
+              not a sentence -- the detail lives in history/the export. */}
+          {matchingUnvalidated ? (
+            <View
+              style={styles.uncalChip}
+              accessibilityLabel="Calibration not validated for this session. Lap and sector times may be wrong or missing."
+            >
+              <Text style={styles.uncalChipText} maxFontSizeMultiplier={1.2}>
+                UNCAL
+              </Text>
+            </View>
+          ) : null}
           <Text style={styles.lapCounter} maxFontSizeMultiplier={1.2} accessibilityLabel={`Lap ${state.lapNumber}`}>
             LAP {state.lapNumber}
           </Text>
@@ -244,6 +271,21 @@ const styles = StyleSheet.create({
   recDotFailed: { backgroundColor: colors.danger },
   recCount: { ...typography.subtitle, color: colors.textSecondary, letterSpacing: 0.5 },
   recCountFailed: { color: colors.danger },
+  // Ticket P7R E2: `warning`, deliberately not `danger` -- distinct from the
+  // OFF TRACK banner's urgency so the two are never confused at a glance,
+  // but still unmissable against the dark ground.
+  uncalChip: {
+    borderRadius: 8,
+    paddingVertical: 2,
+    paddingHorizontal: spacing.xs,
+    backgroundColor: colors.warning,
+  },
+  uncalChipText: {
+    ...typography.label,
+    color: colors.background,
+    fontFamily: fontFamily.displayBold,
+    letterSpacing: 1,
+  },
   bannerSlot: { minHeight: 0 },
   // P7M M2: deliberately louder than `StatusBanner` -- filled, not outlined,
   // and display-weight rather than body text, because this is the one banner

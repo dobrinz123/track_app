@@ -18,6 +18,7 @@ function mapState(core: FacadeStateCore, lastError: string | null): FacadeState 
     coachCue: core.coachCue,
     trackMatch: core.trackMatch,
     recording: core.recording,
+    matchingUnvalidated: core.matchingUnvalidated,
     lastError,
   };
 }

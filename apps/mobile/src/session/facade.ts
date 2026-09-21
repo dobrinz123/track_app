@@ -83,6 +83,17 @@ export interface FacadeState {
     persistedSampleCount: number;
     failedWriteCount: number;
   };
+  /**
+   * Ticket P7R E2: is this session running on matching the calibration gate
+   * REFUSED to vouch for, mirrored 1:1 from `FacadeStateCore.matchingUnvalidated`
+   * (`@circuit/core`) -- see that field for the exact semantics. `false` for
+   * every session that reached `armed` the ordinary way, and for
+   * `MockSessionFacade`/the bootstrap `PendingFacade` (neither ever runs the
+   * escape hatch). `ActiveDashboardScreen` shows this as a persistent marker
+   * for the life of the session -- never a banner, never suppressed by or
+   * competing with the OFF TRACK banner.
+   */
+  matchingUnvalidated: boolean;
 }
 
 /**

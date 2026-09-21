@@ -50,6 +50,10 @@ function initialState(): FacadeState {
     coachCue: null,
     trackMatch: { state: 'unknown', lateralM: null, confidence: null },
     recording: { persistedSampleCount: 0, failedWriteCount: 0 },
+    // Ticket P7R E2: the scripted demo never runs the calibration escape
+    // hatch, so this is always `false` here -- never fabricated, same as
+    // `laps` staying scripted rather than real.
+    matchingUnvalidated: false,
     lastError: null,
   };
 }
