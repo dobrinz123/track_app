@@ -14,10 +14,23 @@
  *   suppressed, and may NEVER remove a suppression that was correct.
  *
  * Half one is a subset property and is proved here by construction and by
- * replay: `pitEngaged` implies `onPitLane` at that fix, and releasing is still
- * immediate, so the set of steps P9 suppresses is a strict subset of the set
- * the old rule suppressed. Half two is proved on the only fixtures in the
- * repository where a car genuinely transits a pit lane.
+ * replay. Half two is proved on the only fixtures in the repository where a
+ * car genuinely transits a pit lane.
+ *
+ * TICKET P9-FIX1. Codex showed that half one does not imply half two, and it
+ * was right: a subset argument covers ENGAGEMENT and says nothing about
+ * RELEASE, and P9 released on the first unflagged fix. Three ambiguous fixes
+ * in the middle of a genuine 16.5 s pit transit therefore dropped a
+ * suppression that had been fully earned, the pit crossing fired, and one
+ * 233.777 s MotorPark lap became two INVENTED ones of 118.067 s and
+ * 115.710 s. That replay is now `describe('P9-FIX1 ...')` at the bottom of
+ * this file, and release has its own evidence requirement:
+ *
+ *   an occupancy that earned the full hold ends only on a forward `pitExit`
+ *   crossing -- the same event the pipeline dispatches `PIT_EXITED` on -- or
+ *   on the flag staying DOWN for 6 s across at least 3 fixes.
+ *
+ * Engagement is untouched, so nothing in half one moves.
  */
 import { readFileSync } from 'node:fs';
 
@@ -77,6 +90,15 @@ const LEGACY = {
   matcher: { pitPreferenceMarginM: 0 },
   crossings: { pitSuppressionHoldMs: 0, pitSuppressionMinSamples: 1, pitLimiterSpeedMps: 0 },
 } as const;
+
+/**
+ * Ticket P9-FIX1. P9 exactly as it shipped: sustained engagement, immediate
+ * release. Reachable by configuration alone, which is what makes the
+ * invented-lap replay at the bottom of this file an A/B of THIS fix and
+ * nothing else. A zero hold already keeps occupancy provisional, so
+ * {@link LEGACY} above needs no new key and the subset proof is unchanged.
+ */
+const P9_AS_SHIPPED = { crossings: { pitReleaseHoldMs: 0 } } as const;
 
 function identity(event: CrossingEvent): string {
   return [
@@ -366,10 +388,12 @@ describe('P9 pit-lane suppression needs sustained evidence', () => {
     expect(diagnostics.engaged).toBe(true);
   });
 
-  it('releasing is immediate, exactly as before: one clear fix re-arms the gates', () => {
+  it('an occupancy that never passed a pit entry gate still releases on one clear fix', () => {
     const detector = new CrossingDetector(gates, projection);
     // Flagged for the first six fixes, clear from the seventh; the line is
-    // crossed on the eighth.
+    // crossed on the eighth. No forward `pitEntry` crossing precedes the
+    // evidence here, so the occupancy never LATCHES (P9-FIX1) and release is
+    // immediate, exactly as P9 shipped.
     const events = run(detector, { count: 12, crossAt: 8, pit: (i) => i < 6 });
     expect(events.map((event) => event.gateId)).toContain('sf');
   });
@@ -384,6 +408,7 @@ describe('P9 pit-lane suppression needs sustained evidence', () => {
       lastSuppressedGateId: null,
       lastSuppressedTMono: null,
       engaged: false,
+      established: false,
     });
   });
 
@@ -484,5 +509,268 @@ describe('P9 matcher margin', () => {
     expect(
       () => new TrackMatcher(tmr.runtime, { pitPreferenceMarginM: -1 }),
     ).toThrow(RangeError);
+  });
+});
+
+// -------------------------------------------- P9-FIX1: release needs evidence
+
+/**
+ * Ticket P9-FIX1. A run with gates at DIFFERENT places along the straight, so
+ * a pit entry, a timing gate and a pit exit can be crossed at different fixes
+ * and the order between them matters -- which the single-position `run()`
+ * above cannot express.
+ */
+function gateAt(id: string, kind: Gate['kind'], north: number): ProjectedGate {
+  return {
+    gate: { id, kind, a: { lat: north, lon: 0 }, b: { lat: north, lon: 10 } },
+    aLocal: { e: 0, n: north },
+    bLocal: { e: 10, n: north },
+  };
+}
+
+/**
+ * Drives north at 10 m/s, 1 Hz, from n = -5. Fix `i` sits at `n = 10i - 5`, so
+ * a gate at `n = 10k` is crossed on the step that ends at fix `k`, halfway
+ * through it. Progress advances with position.
+ */
+function drive(
+  detector: CrossingDetector,
+  options: { count: number; pit: (index: number) => boolean; speedMps?: number },
+): CrossingEvent[] {
+  const events: CrossingEvent[] = [];
+  let prevMatch: TrackMatch | null = null;
+  let prevSample: LocationSample | null = null;
+  for (let index = 0; index < options.count; index += 1) {
+    const tMono = index * 1_000;
+    const currMatch = match(tMono, index * 10, options.pit(index));
+    const currSample = sample(tMono, index * 10 - 5, options.speedMps);
+    events.push(...detector.update(prevMatch, currMatch, prevSample, currSample));
+    prevMatch = currMatch;
+    prevSample = currSample;
+  }
+  return events;
+}
+
+describe('P9-FIX1 an established pit occupancy survives ambiguous fixes', () => {
+  // Pit entry crossed on the step into fix 1; the timing gate on the step into
+  // fix 12; the pit exit on the step into fix 20.
+  const gates = [
+    gateAt('entry', 'pitEntry', 0),
+    gateAt('sf', 'startFinish', 120),
+    gateAt('exit', 'pitExit', 200),
+  ];
+  /** Flagged from the entry on, EXCEPT three ambiguous fixes over the line. */
+  const noisyTransit = (index: number): boolean =>
+    index >= 1 && !(index === 10 || index === 11 || index === 12);
+
+  it('three clear fixes in the middle of a transit do not hand back the pit crossing', () => {
+    const detector = new CrossingDetector(gates, projection);
+    const events = drive(detector, { count: 24, pit: noisyTransit });
+    expect(events.map((event) => event.gateId)).not.toContain('sf');
+    const diagnostics = detector.pitSuppressionDiagnostics();
+    expect(diagnostics.suppressedCrossings).toBe(1);
+    expect(diagnostics.lastSuppressedGateId).toBe('sf');
+  });
+
+  it('and P9 as it shipped hands it back -- this is the A/B of the fix', () => {
+    const shipped = new CrossingDetector(gates, projection, { pitReleaseHoldMs: 0 });
+    expect(drive(shipped, { count: 24, pit: noisyTransit }).map((e) => e.gateId)).toContain('sf');
+  });
+
+  it('occupancy is reported as established while it is being held', () => {
+    const detector = new CrossingDetector(gates, projection);
+    drive(detector, { count: 12, pit: noisyTransit });
+    const diagnostics = detector.pitSuppressionDiagnostics();
+    expect(diagnostics.engaged).toBe(true);
+    expect(diagnostics.established).toBe(true);
+  });
+
+  it('the flag staying down long enough DOES release it, so nothing latches forever', () => {
+    // Flagged from the entry until fix 9, clear from fix 10 onwards. The
+    // release needs 6 s and 3 clear fixes, so the gate at fix 12 is still
+    // suppressed and the one at fix 20 is not.
+    const detector = new CrossingDetector(
+      [gateAt('entry', 'pitEntry', 0), gateAt('sf', 'startFinish', 120), gateAt('late', 'sector', 200)],
+      projection,
+    );
+    const events = drive(detector, { count: 24, pit: (index) => index >= 1 && index <= 9 });
+    const ids = events.map((event) => event.gateId);
+    expect(ids).not.toContain('sf');
+    expect(ids).toContain('late');
+    expect(detector.pitSuppressionDiagnostics().engaged).toBe(false);
+  });
+
+  it('a forward pit exit crossing releases it at once, without waiting out the hold', () => {
+    // The exit gate is crossed on the step into fix 12 and the timing gate on
+    // the step into fix 14, two seconds later -- far inside the 6 s hold. The
+    // car has demonstrably rejoined the track, so the timing gate must fire.
+    const detector = new CrossingDetector(
+      [gateAt('entry', 'pitEntry', 0), gateAt('exit', 'pitExit', 120), gateAt('sf', 'startFinish', 140)],
+      projection,
+    );
+    const events = drive(detector, { count: 24, pit: (index) => index >= 1 && index <= 12 });
+    const ids = events.map((event) => event.gateId);
+    expect(ids).toContain('exit');
+    expect(ids).toContain('sf');
+  });
+
+  it('the step that carries the pit exit is itself still suppressed', () => {
+    // Releasing on the exit must not un-suppress the very step the car left
+    // on; the pre-P9 rule suppressed that step and so does this.
+    const detector = new CrossingDetector(
+      [gateAt('entry', 'pitEntry', 0), gateAt('exit', 'pitExit', 120), gateAt('sf', 'startFinish', 122)],
+      projection,
+    );
+    const events = drive(detector, { count: 24, pit: (index) => index >= 1 && index <= 12 });
+    const ids = events.map((event) => event.gateId);
+    expect(ids).toContain('exit');
+    expect(ids).not.toContain('sf');
+  });
+
+  it('a pit entry that 200 m of progress never confirms cannot authorise a latch', () => {
+    // The pipeline drops a pending pit entry after 200 m; so does this. The
+    // car crosses the entry gate, carries on down the track for 250 m, and a
+    // later burst of flagged fixes may then suppress but may not latch.
+    const detector = new CrossingDetector(
+      [gateAt('entry', 'pitEntry', 0), gateAt('sf', 'startFinish', 400)],
+      projection,
+    );
+    const events = drive(detector, {
+      count: 60,
+      // Clear until well past the 200 m expiry, then a sustained burst that
+      // stops three fixes before the line.
+      pit: (index) => index >= 30 && index <= 36,
+    });
+    expect(events.map((event) => event.gateId)).toContain('sf');
+    expect(detector.pitSuppressionDiagnostics().established).toBe(false);
+  });
+
+  it('a provisional occupancy from the speed shortcut still releases on one clear fix', () => {
+    // One slow flagged fix beside the line is exactly the evidence P9 exists
+    // to distrust; it may suppress its own step and nothing after it.
+    const detector = new CrossingDetector(
+      [gateAt('entry', 'pitEntry', 0), gateAt('sf', 'startFinish', 120)],
+      projection,
+    );
+    const events = drive(detector, { count: 24, pit: (index) => index === 5, speedMps: 12 });
+    expect(events.map((event) => event.gateId)).toContain('sf');
+    expect(detector.pitSuppressionDiagnostics().established).toBe(false);
+  });
+
+  it('reset() clears the release window and the pending pit entry too', () => {
+    const detector = new CrossingDetector(gates, projection);
+    drive(detector, { count: 12, pit: noisyTransit });
+    expect(detector.pitSuppressionDiagnostics().established).toBe(true);
+    detector.reset();
+    expect(detector.pitSuppressionDiagnostics()).toEqual({
+      suppressedCrossings: 0,
+      lastSuppressedGateId: null,
+      lastSuppressedTMono: null,
+      engaged: false,
+      established: false,
+    });
+    // ...and a reused detector then behaves exactly like a fresh one, which is
+    // what proves the release window and the pending entry went with it.
+    const reused = drive(detector, { count: 24, pit: noisyTransit });
+    const fresh = drive(new CrossingDetector(gates, projection), { count: 24, pit: noisyTransit });
+    expect(reused.map(identity)).toEqual(fresh.map(identity));
+    expect(detector.pitSuppressionDiagnostics().suppressedCrossings).toBe(1);
+  });
+});
+
+// ------------------------------------------- P9-FIX1: the invented-lap replay
+
+/**
+ * Ticket P9-FIX1. Codex's reproduction, replayed exactly as it was reported:
+ * `motorparkPitLaneTransitLap` with the speed channel omitted and fixes
+ * 156-158 moved 5 m toward the centerline, which unflags them. Before the fix
+ * the three ambiguous fixes released a suppression that 16.5 s of evidence had
+ * earned, the start/finish line inside the pit lane fired, and one lap became
+ * two. PIT_TRANSIT marks do not undo an invented lap boundary, and on a first
+ * track day with no reference times a fabricated 118 s lap is
+ * indistinguishable from a real one.
+ */
+function withoutSpeed(samples: readonly LocationSample[]): LocationSample[] {
+  return samples.map((sampleIn) => {
+    const stripped: LocationSample = { ...sampleIn };
+    delete stripped.speedMps;
+    return stripped;
+  });
+}
+
+/** Moves the named fixes `metres` toward their projection on the centerline. */
+function nudgeTowardCenterline(
+  runtime: RuntimeProfile,
+  samples: readonly LocationSample[],
+  indices: readonly number[],
+  metres: number,
+): LocationSample[] {
+  const chosen = new Set(indices);
+  return samples.map((sampleIn, index) => {
+    if (!chosen.has(index)) return sampleIn;
+    const point = runtime.projection.toLocal({ lat: sampleIn.lat, lon: sampleIn.lon });
+    const onCenterline = projectOntoPolyline(
+      point,
+      runtime.centerline,
+      runtime.cumulativeDistancesM,
+      true,
+    ).point;
+    const deltaE = onCenterline.e - point.e;
+    const deltaN = onCenterline.n - point.n;
+    const separationM = Math.hypot(deltaE, deltaN);
+    if (separationM === 0) return sampleIn;
+    return {
+      ...sampleIn,
+      ...runtime.projection.toLatLon({
+        e: point.e + (deltaE / separationM) * metres,
+        n: point.n + (deltaN / separationM) * metres,
+      }),
+    };
+  });
+}
+
+describe('P9-FIX1 the noisy pit transit does not invent a lap', () => {
+  const NOISY_FIXES = [156, 157, 158];
+
+  const clean = (): LocationSample[] => withoutSpeed(motorparkPitLaneTransitLap(motorpark.profile));
+  const noisy = (): LocationSample[] =>
+    nudgeTowardCenterline(motorpark.runtime, clean(), NOISY_FIXES, 5);
+
+  it('the perturbation really does unflag exactly those fixes', () => {
+    // If the matcher ever stops flagging them for some other reason this test
+    // would pass vacuously, so the premise is asserted rather than assumed.
+    const flagged = (samples: readonly LocationSample[]): boolean[] => {
+      const matcher = new TrackMatcher(motorpark.runtime, {
+        corridorWidthM: motorpark.profile.corridorWidthM,
+      });
+      return samples.map((s) => matcher.match(s)?.onPitLane === true);
+    };
+    const before = flagged(clean());
+    const after = flagged(noisy());
+    for (const index of NOISY_FIXES) {
+      expect(before[index], `fix ${index} was not a pit fix to begin with`).toBe(true);
+      expect(after[index], `fix ${index} is still flagged, so nothing is being tested`).toBe(false);
+    }
+  });
+
+  it('P9 as it shipped invents two laps out of one', () => {
+    const shipped = runSessionPipeline(motorpark.runtime, noisy(), P9_AS_SHIPPED);
+    expect(shipped.laps.map((lap) => Number((lap.durationMs / 1_000).toFixed(3)))).toEqual([
+      118.067, 115.71,
+    ]);
+  });
+
+  it('and P9-FIX1 gives back the single real lap, unchanged by the noise', () => {
+    const fixed = runSessionPipeline(motorpark.runtime, noisy());
+    expect(fixed.laps.map((lap) => Number((lap.durationMs / 1_000).toFixed(3)))).toEqual([233.777]);
+    // The same sequence of crossings as the unperturbed transit: the noise
+    // moved the instants by millimetres and the STRUCTURE not at all, which is
+    // the property the ticket actually wanted. (Only the two start/finish
+    // crossings outside the pit lane survive; the one inside it stays
+    // suppressed, as it did before the perturbation.)
+    const unperturbed = runSessionPipeline(motorpark.runtime, clean());
+    const shape = (event: CrossingEvent): string => `${event.kind}|${event.direction}`;
+    expect(fixed.crossings.map(shape)).toEqual(unperturbed.crossings.map(shape));
+    expect(fixed.crossings.filter((event) => event.kind === 'startFinish')).toHaveLength(2);
   });
 });

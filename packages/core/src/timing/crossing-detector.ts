@@ -70,6 +70,20 @@ export interface CrossingDetectorConfig {
    * channel is absent or invalid.
    */
   pitLimiterSpeedMps?: number;
+  /**
+   * Ticket P9-FIX1. How long the `onPitLane` flag must stay continuously DOWN
+   * before an ESTABLISHED pit occupancy is released, milliseconds. See
+   * {@link DEFAULT_PIT_RELEASE_HOLD_MS}. Zero restores the pre-FIX1 immediate
+   * release. Ignored while occupancy is only provisional (see
+   * {@link CrossingDetectorConfig.pitLimiterSpeedMps}), and short-circuited
+   * entirely by a forward `pitExit` crossing.
+   */
+  pitReleaseHoldMs?: number;
+  /**
+   * Ticket P9-FIX1. How many consecutive UNflagged fixes the release hold above
+   * must contain. See {@link DEFAULT_PIT_RELEASE_MIN_SAMPLES}.
+   */
+  pitReleaseMinSamples?: number;
 }
 
 const DEFAULT_MIN_REARM_DISTANCE_M = 50;
@@ -160,6 +174,70 @@ const DEFAULT_PIT_SUPPRESSION_MIN_SAMPLES = 2;
  * genuine pit lane to go unsuppressed, only to be suppressed sooner.
  */
 const DEFAULT_PIT_LIMITER_SPEED_MPS = 20;
+/**
+ * Ticket P9-FIX1. P9 asked for sustained evidence to ENGAGE suppression and
+ * left RELEASE immediate, and argued from that that the newly suppressed set
+ * is a subset of the old one. The subset is real and the argument is wrong:
+ * a subset property covers engagement and says nothing about release. Codex
+ * reproduced the hole on `motorparkPitLaneTransitLap` -- omit the speed
+ * channel, move three fixes of a genuine pit transit 5 m toward the
+ * centerline, and those three ambiguous fixes released a suppression that
+ * 16.5 s of evidence had earned. The pit crossing then fired and one 233.777 s
+ * lap became two invented ones of 118.067 s and 115.710 s. Marking them
+ * PIT_TRANSIT does not undo the fabricated lap boundary, and on a first track
+ * day with no reference times a fabricated 118 s lap is indistinguishable
+ * from a real one.
+ *
+ * So release now needs evidence too, and the two authorities it uses are the
+ * SAME two the pipeline's own `inPit` state machine uses, rather than a third
+ * private notion of being in the pits:
+ *
+ *  - the authoritative one is a forward `pitExit` crossing. That is the
+ *    geometric definition of rejoining the track, it is what
+ *    `SessionPipelineCore` dispatches `PIT_EXITED` on, and this detector
+ *    already computes it. It releases immediately and no amount of noise can
+ *    fake it, because it is a gate crossing and not a corridor test;
+ *  - the backstop, for when that gate is never crossed, is the flag being
+ *    continuously DOWN for this long. 6000 ms is 3x the engagement hold and
+ *    ~6x the ~1 s correlation time of a multipath excursion, so no plausible
+ *    burst of ambiguous fixes spans it (Codex's three spanned 1500 ms).
+ *
+ * The cost of holding too long is bounded and was measured, not guessed: from
+ * the pit exit gate to the next timing gate is 881.5 m at TMR (exit 358.8 m,
+ * sector 1 at 1240.3 m) and 1209.2 m at MotorPark (exit 177.1 m, sector 1 at
+ * 1386.3 m). Even at an implausible 45 m/s merge that is 19.6 s at the tighter
+ * of the two, so a 6 s backstop cannot cost a timing gate even if the
+ * `pitExit` crossing is missed entirely.
+ *
+ * The hysteresis applies ONLY to an ESTABLISHED occupancy -- one that earned
+ * the full sustained hold. An occupancy engaged by the low-speed shortcut
+ * alone is provisional and still releases on the first clear fix, exactly as
+ * P9 shipped, so a single slow flagged fix beside the line can never latch.
+ */
+const DEFAULT_PIT_RELEASE_HOLD_MS = 6_000;
+/**
+ * Ticket P9-FIX1. ...and, as with engagement, no number of milliseconds may be
+ * satisfied by one fix. Three, so that at the 1 Hz floor the release rests on
+ * three independent observations rather than on one long gap between two.
+ */
+const DEFAULT_PIT_RELEASE_MIN_SAMPLES = 3;
+/**
+ * Ticket P9-FIX1. How far along-track a forward `pitEntry` crossing may keep
+ * authorising a latch before it is treated as unconfirmed, metres. Not a new
+ * number: it is `SessionPipelineCore`'s own pending-pit-entry range, copied so
+ * the detector and the pipeline expire the same evidence at the same point.
+ */
+const PIT_ENTRY_PENDING_RANGE_M = 200;
+/**
+ * Ticket P9-FIX1 (Codex MEDIUM). A Doppler speed the device actually solved
+ * for: finite and non-negative. iOS reports -1 when it has no solution and
+ * Android may omit the channel; both mean "no Doppler", and both must take
+ * the crossing instant back to plain linear interpolation.
+ */
+function usableDopplerMps(value: number | undefined): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null;
+  return value;
+}
 
 function nonNegativeFinite(value: number, name: string): number {
   if (!Number.isFinite(value) || value < 0) {
@@ -219,24 +297,52 @@ export class CrossingDetector implements CrossingDetectorContract {
   private readonly pitSuppressionHoldMs: number;
   private readonly pitSuppressionMinSamples: number;
   private readonly pitLimiterSpeedMps: number;
+  private readonly pitReleaseHoldMs: number;
+  private readonly pitReleaseMinSamples: number;
   /**
-   * Ticket P9. The sustained-evidence state, folded once per fix. `engaged`
-   * is the suppression latch AFTER the current fix, `engagedBefore` the same
-   * thing after the previous one; a step is suppressed when either endpoint
-   * was engaged.
+   * Ticket P9 / P9-FIX1. The pit-occupancy state, folded once per fix.
+   * `engaged` is the suppression latch AFTER the current fix, `engagedBefore`
+   * the same thing after the previous one; a step is suppressed when either
+   * endpoint was engaged.
    *
-   * The latch is asymmetric by design and that asymmetry is the guarantee:
-   * engaging needs sustained evidence, but RELEASING is immediate on the first
-   * unflagged fix, exactly as before P9. Engagement also requires the flag
-   * itself, so `engaged` implies `onPitLane` at that fix. Together those two
-   * make the set of steps this suppresses a strict SUBSET of the set the
-   * pre-P9 rule suppressed: this change can only ever hand back a crossing
-   * that was being thrown away, never take one away.
+   * There are two grades of occupancy, and they release differently:
+   *
+   *  - PROVISIONAL: engaged by the low-speed shortcut alone, on as little as
+   *    one flagged fix. It releases on the first unflagged fix, exactly as P9
+   *    shipped, so a single slow noisy fix beside the line can never latch;
+   *  - ESTABLISHED: the flag stayed up for the full sustained hold. Codex
+   *    showed that releasing THIS on the first ambiguous fix invents laps --
+   *    three noisy fixes in the middle of a 16.5 s pit transit released it and
+   *    a 233.777 s lap became two of 118.067 s and 115.710 s. So an
+   *    established occupancy survives brief ambiguity: it ends on a forward
+   *    `pitExit` crossing (the same event the pipeline dispatches `PIT_EXITED`
+   *    on) or on the flag staying down for {@link DEFAULT_PIT_RELEASE_HOLD_MS}.
+   *
+   * Engagement is UNCHANGED from P9 and still requires the flag itself, so
+   * `engaged` at a fix still implies `onPitLane` at that fix or at a fix
+   * within the release window behind it. What P9's subset argument covered --
+   * that no noise spike can newly engage suppression -- therefore still holds
+   * exactly; what it did not cover, release, is what this state adds.
    */
   private pitEngaged = false;
   private pitEngagedBefore = false;
+  private pitEstablished = false;
   private pitEvidenceStartTMono: number | null = null;
   private pitEvidenceSamples = 0;
+  /** Ticket P9-FIX1. Consecutive UNflagged fixes, and when that run started. */
+  private pitClearStartTMono: number | null = null;
+  private pitClearSamples = 0;
+  /**
+   * Ticket P9-FIX1. Along-track progress at the last forward `pitEntry`
+   * crossing, or null when none is pending. This is the pipeline's own
+   * precondition for believing it is in the pits -- `SessionPipelineCore` will
+   * not dispatch `PIT_ENTERED` without a forward `pitEntry` crossing first,
+   * and drops the pending entry once progress runs 200 m past it unconfirmed
+   * (`pipelineCore.ts`). The detector now requires the same thing before an
+   * occupancy may LATCH, so the two agree on what "the car went into the pits"
+   * means instead of each deciding privately.
+   */
+  private pitEntryPendingProgressM: number | null = null;
   /**
    * Ticket P9. Timing-gate crossings this detector suppressed because the car
    * was held to be in the pit lane. Silence is what made the original defect
@@ -290,6 +396,19 @@ export class CrossingDetector implements CrossingDetectorContract {
       config.pitLimiterSpeedMps ?? DEFAULT_PIT_LIMITER_SPEED_MPS,
       'pitLimiterSpeedMps',
     );
+    this.pitReleaseHoldMs = nonNegativeFinite(
+      config.pitReleaseHoldMs ?? DEFAULT_PIT_RELEASE_HOLD_MS,
+      'pitReleaseHoldMs',
+    );
+    this.pitReleaseMinSamples = Math.max(
+      1,
+      Math.floor(
+        nonNegativeFinite(
+          config.pitReleaseMinSamples ?? DEFAULT_PIT_RELEASE_MIN_SAMPLES,
+          'pitReleaseMinSamples',
+        ),
+      ),
+    );
     this.alongTrack = new AlongTrackFilter(config.alongTrackFilter);
   }
 
@@ -303,12 +422,15 @@ export class CrossingDetector implements CrossingDetectorContract {
     lastSuppressedGateId: string | null;
     lastSuppressedTMono: number | null;
     engaged: boolean;
+    /** Ticket P9-FIX1: occupancy that earned the full hold, and so releases slowly. */
+    established: boolean;
   } {
     return {
       suppressedCrossings: this.pitSuppressedCrossings,
       lastSuppressedGateId: this.lastPitSuppressedGateId,
       lastSuppressedTMono: this.lastPitSuppressedTMono,
       engaged: this.pitEngaged,
+      established: this.pitEstablished,
     };
   }
 
@@ -358,29 +480,91 @@ export class CrossingDetector implements CrossingDetectorContract {
     this.fusedCrossings = 0;
     this.pitEngaged = false;
     this.pitEngagedBefore = false;
+    this.pitEstablished = false;
     this.pitEvidenceStartTMono = null;
     this.pitEvidenceSamples = 0;
+    this.pitClearStartTMono = null;
+    this.pitClearSamples = 0;
+    this.pitEntryPendingProgressM = null;
     this.pitSuppressedCrossings = 0;
     this.lastPitSuppressedGateId = null;
     this.lastPitSuppressedTMono = null;
   }
 
   /**
-   * Ticket P9. Folds one fix into the pit-lane evidence latch. Called at the
-   * top of `update()`, before any guard can return, so the evidence is
-   * continuous over exactly the fixes the detector sees.
+   * Ticket P9-FIX1. Drops pit occupancy entirely. Both the latch and both
+   * evidence windows go, so re-engaging has to earn the hold again from
+   * scratch -- a car that has just rejoined the track is not half-in the pits.
+   */
+  private releasePitOccupancy(): void {
+    this.pitEngaged = false;
+    this.pitEstablished = false;
+    this.pitEvidenceStartTMono = null;
+    this.pitEvidenceSamples = 0;
+    this.pitClearStartTMono = null;
+    this.pitClearSamples = 0;
+    this.pitEntryPendingProgressM = null;
+  }
+
+  /**
+   * Ticket P9 / P9-FIX1. Folds one fix into the pit-lane occupancy state.
+   * Called at the top of `update()`, before any guard can return, so the
+   * evidence is continuous over exactly the fixes the detector sees.
    */
   private observePitLane(curr: TrackMatch, currSample: LocationSample): void {
     this.pitEngagedBefore = this.pitEngaged;
+    const tMono = currSample.tMono;
+
+    // The pipeline's own expiry, mirrored: a pit entry that 200 m of progress
+    // has not confirmed was not a pit entry, so it may no longer authorise a
+    // latch. Once occupancy is established the pending entry has done its job.
+    if (
+      this.pitEntryPendingProgressM !== null &&
+      !this.pitEstablished &&
+      Number.isFinite(curr.unwrappedProgressM) &&
+      curr.unwrappedProgressM - this.pitEntryPendingProgressM > PIT_ENTRY_PENDING_RANGE_M
+    ) {
+      this.pitEntryPendingProgressM = null;
+    }
+
     if (!curr.onPitLane) {
-      // Immediate release -- the pre-P9 behaviour, deliberately unchanged.
       this.pitEvidenceStartTMono = null;
       this.pitEvidenceSamples = 0;
-      this.pitEngaged = false;
+      if (!this.pitEngaged) {
+        this.pitClearStartTMono = null;
+        this.pitClearSamples = 0;
+        return;
+      }
+      // Provisional occupancy, or the hysteresis configured off: release on
+      // the first clear fix, bit-for-bit the pre-FIX1 behaviour.
+      if (!this.pitEstablished || this.pitReleaseHoldMs <= 0) {
+        this.releasePitOccupancy();
+        return;
+      }
+      // Established occupancy: a handful of ambiguous fixes is not evidence
+      // that the car rejoined the track, so make the absence last too.
+      if (this.pitClearStartTMono === null || !Number.isFinite(tMono)) {
+        this.pitClearStartTMono = Number.isFinite(tMono) ? tMono : null;
+        this.pitClearSamples = 1;
+      } else {
+        this.pitClearSamples += 1;
+      }
+      const clearStart = this.pitClearStartTMono;
+      // Out-of-order fixes clamp to zero rather than counting backwards: the
+      // conservative direction here is staying suppressed.
+      const clearMs = clearStart === null ? 0 : Math.max(0, tMono - clearStart);
+      if (
+        this.pitClearSamples >= this.pitReleaseMinSamples &&
+        Number.isFinite(clearMs) &&
+        clearMs >= this.pitReleaseHoldMs
+      ) {
+        this.releasePitOccupancy();
+      }
       return;
     }
 
-    const tMono = currSample.tMono;
+    this.pitClearStartTMono = null;
+    this.pitClearSamples = 0;
     if (this.pitEvidenceStartTMono === null || !Number.isFinite(tMono)) {
       this.pitEvidenceStartTMono = Number.isFinite(tMono) ? tMono : null;
       this.pitEvidenceSamples = 1;
@@ -388,24 +572,36 @@ export class CrossingDetector implements CrossingDetectorContract {
       this.pitEvidenceSamples += 1;
     }
 
-    if (this.pitEngaged) return;
-
     // Speed is a shortcut, never a requirement: iOS reports -1 when it has no
-    // valid speed solution, and Android may omit the channel entirely.
+    // valid speed solution, and Android may omit the channel entirely. It can
+    // only ENGAGE, and only provisionally -- it never establishes occupancy
+    // and never releases it, so correctness still never depends on it.
     const speedMps = currSample.speedMps;
     const speedIsValid = typeof speedMps === 'number' && Number.isFinite(speedMps) && speedMps >= 0;
     if (this.pitLimiterSpeedMps > 0 && speedIsValid && speedMps <= this.pitLimiterSpeedMps) {
       this.pitEngaged = true;
-      return;
     }
 
     const start = this.pitEvidenceStartTMono;
     const elapsedMs = start === null ? 0 : tMono - start;
     if (
+      this.pitSuppressionHoldMs > 0 &&
+      this.pitEntryPendingProgressM !== null &&
       this.pitEvidenceSamples >= this.pitSuppressionMinSamples &&
       Number.isFinite(elapsedMs) &&
       elapsedMs >= this.pitSuppressionHoldMs
     ) {
+      this.pitEngaged = true;
+      this.pitEstablished = true;
+    } else if (
+      this.pitEvidenceSamples >= this.pitSuppressionMinSamples &&
+      Number.isFinite(elapsedMs) &&
+      elapsedMs >= this.pitSuppressionHoldMs
+    ) {
+      // Sustained, but not authorised to LATCH: either no forward `pitEntry`
+      // crossing stands behind it, or the hold is configured to zero (the
+      // pre-P9 single-sample rule restored). Suppression for this step is
+      // exactly what P9 did; only release stays immediate.
       this.pitEngaged = true;
     }
   }
@@ -457,6 +653,23 @@ export class CrossingDetector implements CrossingDetectorContract {
     chordT: number,
     gateProgressM: number,
   ): number {
+    /**
+     * Ticket P9-FIX1 (Codex MEDIUM). The stated contract is that without
+     * valid Doppler at BOTH bracketing fixes the instant is bit-identical to
+     * the pre-P8 linear interpolation. It was not: the along-track filter is
+     * position-only-capable, so at 10 Hz with no speed channel at all it still
+     * converged and fed its own inferred velocities into the kinematic model
+     * (linear 9938.461538461539 ms vs 9946.915566660227 ms, with both counters
+     * incremented). Neither refinement may run on inferred speed, so the gate
+     * is here, above both of them, and reads the RAW bracketing samples.
+     */
+    if (
+      usableDopplerMps(prevSample.speedMps) === null ||
+      usableDopplerMps(currSample.speedMps) === null
+    ) {
+      return interpolateCrossingTime(prevSample.tMono, currSample.tMono, chordT);
+    }
+
     let fraction = chordT;
     let entrySpeedMps = prevSample.speedMps;
     let exitSpeedMps = currSample.speedMps;
@@ -541,6 +754,15 @@ export class CrossingDetector implements CrossingDetectorContract {
     const pitSuppressed = this.pitEngagedBefore || this.pitEngaged;
 
     const events: CrossingEvent[] = [];
+    /**
+     * Ticket P9-FIX1. A forward `pitExit` crossing is the authoritative end of
+     * a pit transit -- it is the same event `SessionPipelineCore` dispatches
+     * `PIT_EXITED` on, so the detector's occupancy and the pipeline's `inPit`
+     * state end on one signal rather than on two unrelated rules. It is acted
+     * on AFTER the loop, so the step that carries the exit is still suppressed
+     * (exactly as the pre-P9 rule suppressed it) and only later steps are free.
+     */
+    let pitExitCrossed = false;
     for (const projected of this.projectedGates) {
       const intersection = segmentIntersection(from, to, projected.aLocal, projected.bLocal);
       if (intersection === null) continue;
@@ -573,6 +795,11 @@ export class CrossingDetector implements CrossingDetectorContract {
         this.lastForwardProgressByGate.set(projected.gate.id, crossingProgressM);
       }
 
+      if (projected.gate.kind === 'pitExit' && direction === 'forward') pitExitCrossed = true;
+      if (projected.gate.kind === 'pitEntry' && direction === 'forward') {
+        this.pitEntryPendingProgressM = crossingProgressM;
+      }
+
       const unreliable = prev.quality.level === 'unreliable' || curr.quality.level === 'unreliable';
       const matchConfidence = Math.min(prev.confidence, curr.confidence);
       events.push({
@@ -591,6 +818,7 @@ export class CrossingDetector implements CrossingDetectorContract {
         lapDistanceM: crossingProgressM,
       });
     }
+    if (pitExitCrossed) this.releasePitOccupancy();
     return events;
   }
 }
