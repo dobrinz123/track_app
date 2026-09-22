@@ -2,7 +2,6 @@ export { CrossingDetector } from './crossing-detector';
 export type {
   CrossingDetectorConfig,
   PitAssessment,
-  PitOccupancy,
   ProjectedGate,
 } from './crossing-detector';
 export { LapTimingEngine, PIT_AMBIGUOUS_REASON } from './lap-timing-engine';

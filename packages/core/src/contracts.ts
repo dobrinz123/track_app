@@ -311,6 +311,22 @@ export interface LocalSessionRepository {
    * number (the fixes are still in their unclaimed chunk rows), whereas the
    * reverse leaves a committed lap row that the next run's lap numbering
    * overwrites. The reviewer measured that overwrite at 93 lost fixes.
+   *
+   * Ticket P11C — THE CHECKPOINT HALF IS MONOTONIC, AND ATOMICALLY SO.
+   * An implementer MUST replace the stored checkpoint only when `checkpoint`
+   * supersedes it — `checkpoint.laps.length` strictly greater than the
+   * stored checkpoint's (a missing or undecodable stored checkpoint is
+   * always superseded) — and MUST make that comparison inside the same
+   * transaction as the write, never as a read followed by a separate write.
+   * The `entries` are written unconditionally regardless.
+   *
+   * This exists because `SessionController` RETRIES a failed lap commit with
+   * the checkpoint it captured at the time: without the rule, a lap-1 retry
+   * landing after lap 2 committed rolls the stored checkpoint back to
+   * `[1]`, and the next launch re-makes the completed lap 2 as a
+   * zero-duration `RECOVERY` lap. `checkpointSupersedes` in
+   * `persistence/checkpointCodec` is the shared predicate; both first-party
+   * repositories use it.
    */
   saveLapCommit?(
     sessionId: string,

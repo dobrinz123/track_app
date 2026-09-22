@@ -182,9 +182,10 @@ describe('CrossingDetector', () => {
   });
 
   /**
-   * Ticket P9: the pit-lane flag must have been up for a while before timing
-   * gates are suppressed. Feeds `count` consecutive flagged fixes, parked well
-   * away from the gate so nothing crosses while the evidence accumulates.
+   * Ticket P11C: feeds `count` consecutive flagged fixes, parked well away
+   * from the gate, so that standing pit evidence is in place before anything
+   * crosses. Nothing about the count matters any more -- one flagged fix is
+   * evidence too -- it is kept so the scenario below is the same one P9 wrote.
    */
   function primePitEvidence(detector: CrossingDetector, count: number): void {
     for (let index = 0; index < count; index += 1) {
@@ -199,7 +200,14 @@ describe('CrossingDetector', () => {
     }
   }
 
-  it('excludes timing gates in pit while allowing pit entry and exit gates', () => {
+  /**
+   * Ticket P11C CONTRACT CHANGE, pinned rather than quietly re-recorded. This
+   * test used to be called "excludes timing gates in pit" and asserted that
+   * `sf` and `sector` were NOT emitted on a flagged step. Deleting a boundary
+   * is what three rounds of review kept defeating, so nothing is excluded any
+   * more: all four gates fire, and the two timing gates say they are unsure.
+   */
+  it('marks timing gates in pit instead of excluding them, and leaves pit gates alone', () => {
     const gates = [
       projectedGate('sf', 'startFinish'),
       projectedGate('sector', 'sector'),
@@ -207,36 +215,31 @@ describe('CrossingDetector', () => {
       projectedGate('exit', 'pitExit'),
     ];
     const detector = new CrossingDetector(gates, projection);
-    // Ticket P9: four flagged fixes spanning 3 s -- a car that really is in
-    // the pit lane, not one noisy fix.
     primePitEvidence(detector, 4);
-    expect(cross(detector, 0, 10, 3_000, 4_000, -1, 1, 'good', 'good', true, true)).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ gateId: 'entry' }),
-        expect.objectContaining({ gateId: 'exit' }),
-      ]),
-    );
-
-    const second = new CrossingDetector(gates, projection);
-    primePitEvidence(second, 4);
-    expect(
-      cross(second, 0, 10, 3_000, 4_000, -1, 1, 'good', 'good', true, true).map(
-        (event) => event.gateId,
-      ),
-    ).toEqual(['entry', 'exit']);
-    expect(second.pitSuppressionDiagnostics().suppressedCrossings).toBe(2);
+    const events = cross(detector, 0, 10, 3_000, 4_000, -1, 1, 'good', 'good', true, true);
+    expect(events.map((event) => event.gateId)).toEqual(['sf', 'sector', 'entry', 'exit']);
+    // The timing gates carry the mark; the pit gates never do.
+    expect(events.map((event) => event.pitAmbiguous)).toEqual([
+      true,
+      true,
+      undefined,
+      undefined,
+    ]);
+    const diagnostics = detector.pitEvidenceDiagnostics();
+    expect(diagnostics.ambiguousCrossings).toBe(2);
+    expect(diagnostics.lastAmbiguousGateId).toBe('sector');
   });
 
-  it('a single flagged fix no longer deletes the lap (P9)', () => {
-    // The pre-P9 rule suppressed every timing gate on this step, so the lap
-    // it belonged to simply never appeared.
+  it('a single flagged fix neither deletes the lap nor passes it off as clean', () => {
+    // The pre-P9 rule suppressed every timing gate on this step, so the lap it
+    // belonged to simply never appeared. P9 emitted it unmarked when no latch
+    // had formed, which is how an invented lap came out valid. Ticket P11C:
+    // emitted, and marked on the strength of the flag alone.
     const gates = [projectedGate('sf', 'startFinish'), projectedGate('entry', 'pitEntry')];
     const detector = new CrossingDetector(gates, projection);
-    expect(
-      cross(detector, 0, 10, 0, 1_000, -1, 1, 'good', 'good', false, true).map(
-        (event) => event.gateId,
-      ),
-    ).toEqual(['sf', 'entry']);
-    expect(detector.pitSuppressionDiagnostics().suppressedCrossings).toBe(0);
+    const events = cross(detector, 0, 10, 0, 1_000, -1, 1, 'good', 'good', false, true);
+    expect(events.map((event) => event.gateId)).toEqual(['sf', 'entry']);
+    expect(events[0]?.pitAmbiguous).toBe(true);
+    expect(detector.pitEvidenceDiagnostics().ambiguousCrossings).toBe(1);
   });
 });

@@ -6,6 +6,7 @@ import type {
   SessionMachineSnapshot,
   SessionSummary,
 } from '../contracts';
+import { checkpointSupersedes } from './checkpointCodec';
 import { assertJsonSerializable } from './jsonSerializable';
 import { validateReferenceLap } from './referenceLap';
 
@@ -105,6 +106,14 @@ export class InMemorySessionRepository implements LocalSessionRepository {
    * validate and deep-copy everything first, then apply the copies in one
    * synchronous loop with no `await` in it, so no interleaving observer can
    * ever see the lap rows without the checkpoint that names them.
+   *
+   * Ticket P11C: the checkpoint half is a monotonic compare-and-set -- the
+   * stored checkpoint is replaced only by one that SUPERSEDES it (see
+   * `checkpointSupersedes`), so a retried older lap commit persists its
+   * telemetry without dragging the checkpoint backwards. The comparison sits
+   * in the same synchronous, un-awaited block as the write, which is this
+   * store's equivalent of "inside the transaction": nothing can run between
+   * the read and the write.
    */
   async saveLapCommit(
     sessionId: string,
@@ -119,7 +128,10 @@ export class InMemorySessionRepository implements LocalSessionRepository {
     }));
     const stagedCheckpoint = structuredClone({ snapshot: checkpoint.snapshot, laps: checkpoint.laps });
     for (const entry of staged) this.telemetry.set(entry.key, entry.samples);
-    this.checkpoints.set(sessionId, stagedCheckpoint);
+    const stored = this.checkpoints.get(sessionId);
+    if (checkpointSupersedes(stagedCheckpoint.laps, stored === undefined ? null : stored.laps)) {
+      this.checkpoints.set(sessionId, stagedCheckpoint);
+    }
   }
 
   async loadTelemetry(sessionId: string, lapNumber: number): Promise<LocationSample[]> {

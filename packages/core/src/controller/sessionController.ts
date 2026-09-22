@@ -29,6 +29,7 @@ import {
   type CueUpdate,
   type CueUpdateEvidence,
 } from '../coaching/suggestions';
+import { checkpointGeneration } from '../persistence/checkpointCodec';
 import type { RuntimeProfile } from '../profile';
 import { buildReferenceLap, shouldReplacePb } from '../reference';
 import { SessionPipelineCore, type PipelineCoreConfig } from './pipelineCore';
@@ -747,6 +748,35 @@ export class SessionController {
     readyAtMono: number;
   }> = [];
   /**
+   * Ticket P11C -- THE HIGHEST CHECKPOINT GENERATION THIS CONTROLLER KNOWS
+   * HAS REACHED STORAGE.
+   *
+   * "Generation" is `checkpointGeneration`: the number of laps a checkpoint
+   * names, the one quantity a stale retry cannot inflate (see that
+   * function's comment for why). `-1` means "nothing yet", which every real
+   * checkpoint supersedes.
+   *
+   * This is the FALLBACK path's half of the fix. A repository offering
+   * `saveLapCommit` enforces monotonicity itself, inside its transaction,
+   * where it is genuinely atomic against other writers. One that does not
+   * gets the same rule enforced here instead, and here it is atomic for a
+   * different reason: the check and the claim below are one synchronous
+   * block with no `await` between them, and every lap-commit write is
+   * already serialized on `tracePersistenceTail`, so two lap commits can
+   * never be in flight at once.
+   *
+   * Advanced by EVERY checkpoint write this controller makes, not just the
+   * lap-commit ones -- `checkpointNow()`, the terminal `endSession()`
+   * checkpoint and the recording-start record all write the LIVE
+   * `core.laps`, which is by construction at least as new as anything a
+   * retry carries, so the watermark must learn about them or a later retry
+   * would be let through behind their backs.
+   *
+   * Seeded on `restoreFromCheckpoint` from the checkpoint being restored, so
+   * the rule survives a relaunch as well as a retry.
+   */
+  private committedCheckpointGeneration = -1;
+  /**
    * Ticket P10A H2: serializes the DURABLE SESSION RECORD writes (the
    * `saveSession` row this controller writes at recording start and again
    * whenever the calibration provenance changes) so two of them can never
@@ -1379,7 +1409,12 @@ export class SessionController {
       await this.deps.repository.saveSession(summary);
       // Persist a terminal checkpoint too, so recovery never re-offers a
       // session that has already been fully saved.
+      const terminalGeneration = checkpointGeneration(this.core.laps);
       await this.deps.repository.saveCheckpoint(sessionId, this.core.state, this.core.laps);
+      // Ticket P11C: the live lap list is by construction at least as new as
+      // anything still queued for retry, so the watermark must learn about
+      // this write or the fallback path would let an older retry follow it.
+      this.noteCheckpointGeneration(terminalGeneration);
     }
     this.mode = 'idle';
     this.latestDelta = null;
@@ -1496,6 +1531,13 @@ export class SessionController {
     // new information, only its absence.
     const carriedStatus = this.sessionId === sessionId ? this.calibrationStatus : null;
     this.sessionId = sessionId;
+    // Ticket P11C: the restored checkpoint is what storage already holds, so
+    // the monotonic rule starts from ITS generation rather than from zero --
+    // otherwise the first fallback-path write after a relaunch could be an
+    // older one and would be let through. Raised, never lowered: a
+    // controller restoring a checkpoint it has itself already surpassed
+    // (same session id, mid-run re-restore) keeps the higher mark.
+    this.noteCheckpointGeneration(checkpointGeneration(laps));
 
     const priorState = snapshot.context.priorState;
     const midSession =
@@ -1861,6 +1903,7 @@ export class SessionController {
     const work = this.lapPersistenceTail.then(async () => {
       await this.deps.repository.saveSession(summary);
       await this.deps.repository.saveCheckpoint(sessionId, snapshot, laps);
+      this.noteCheckpointGeneration(checkpointGeneration(laps)); // ticket P11C
     });
     this.lapPersistenceTail = work.catch(() => undefined);
     this.trackAsync(
@@ -2338,6 +2381,30 @@ export class SessionController {
    * NUMBER is reserved, so the next run cannot reuse it, and every fix is
    * still sitting in the unclaimed chunk rows that were never reclaimed.
    * Nothing is lost either way; only the (recomputable) per-lap row is.
+   *
+   * Ticket P11C -- AND A RETRY OF AN OLDER COMMIT NEVER DRAGS THE
+   * CHECKPOINT BACKWARDS.
+   *
+   * The P11 reviewer failed lap 1's commit only. Lap 2 committed and left
+   * the checkpoint at laps [1,2]; 2 s later the retained lap-1 commit
+   * retried, succeeded, and wrote back the checkpoint it had captured when
+   * it FIRST failed -- laps [1]. The fixes were all still on disk (927 of
+   * lap 2's among them), but the next launch read a checkpoint that had
+   * never heard of lap 2 and re-made that completed lap as a zero-duration
+   * RECOVERY lap. No loss; a real lap misrepresented, which on a track day
+   * is the same thing to the driver reading it.
+   *
+   * Both paths below now move the checkpoint FORWARD ONLY:
+   *   - `saveLapCommit` compares and writes inside its own transaction (the
+   *     contract requires it; both first-party repositories do it);
+   *   - the fallback compares against
+   *     {@link committedCheckpointGeneration} here, synchronously, and
+   *     CLAIMS the generation before issuing the write so a second caller
+   *     cannot pass the same check. A failed write releases the claim (back
+   *     to the value it displaced) so the retry of THIS commit can write the
+   *     checkpoint it still owes.
+   * The telemetry is written either way: a stale retry still has fixes to
+   * persist, and persisting them is why it was kept.
    */
   private async writeLapCommit(
     sessionId: string,
@@ -2345,12 +2412,37 @@ export class SessionController {
     checkpoint: { snapshot: SessionMachineSnapshot; laps: LapRecord[] },
   ): Promise<void> {
     const repository = this.deps.repository;
+    const generation = checkpointGeneration(checkpoint.laps);
     if (repository.saveLapCommit !== undefined) {
       await repository.saveLapCommit(sessionId, entries, checkpoint);
+      // The repository decided whether to take the checkpoint; either way
+      // storage now holds a checkpoint of at least this generation, so the
+      // watermark may only rise to it, never be set back to it.
+      this.noteCheckpointGeneration(generation);
       return;
     }
-    await repository.saveCheckpoint(sessionId, checkpoint.snapshot, checkpoint.laps);
+    if (generation > this.committedCheckpointGeneration) {
+      const displaced = this.committedCheckpointGeneration;
+      this.committedCheckpointGeneration = generation;
+      try {
+        await repository.saveCheckpoint(sessionId, checkpoint.snapshot, checkpoint.laps);
+      } catch (error) {
+        // Release the claim, but never below whatever has been committed
+        // since -- `===` is the "still ours" test.
+        if (this.committedCheckpointGeneration === generation) {
+          this.committedCheckpointGeneration = displaced;
+        }
+        throw error;
+      }
+    }
     await repository.saveTelemetryBatch(sessionId, entries);
+  }
+
+  /** Ticket P11C: raise the checkpoint watermark (never lower it) -- see {@link committedCheckpointGeneration}. */
+  private noteCheckpointGeneration(generation: number): void {
+    if (generation > this.committedCheckpointGeneration) {
+      this.committedCheckpointGeneration = generation;
+    }
   }
 
   /**
@@ -2812,7 +2904,9 @@ export class SessionController {
     // flush goes out with the checkpoint rather than waiting for a tick that
     // may never come.
     await this.flushRawTrace();
+    const generation = checkpointGeneration(this.core.laps);
     await this.deps.repository.saveCheckpoint(sessionId, this.core.state, this.core.laps);
+    this.noteCheckpointGeneration(generation); // ticket P11C -- see the field's comment
   }
 
   // -------------------------------------------------------------------

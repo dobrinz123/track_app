@@ -315,10 +315,24 @@ interface RunOutcome {
   fingerprint: string;
   /** tCross of the forward start/finish crossing, or null when none was detected. */
   startFinishTCross: number | null;
+  /** Ticket P11C: the forward start/finish crossing carried `pitAmbiguous`. */
+  startFinishMarked: boolean;
 }
 
-/** Fixes the matcher placed on the pit lane (which suppresses timing gates). */
+/** Fixes the matcher placed on the pit lane. */
 let lastPitLaneMatches = 0;
+/**
+ * Ticket P11C. Whether the step that carried the forward start/finish crossing
+ * had `onPitLane` up at either bracketing fix -- i.e. exactly the predicate
+ * `prev.onPitLane || curr.onPitLane` that the pre-P9 detector SUPPRESSED on.
+ *
+ * The detector no longer has a suppression path to configure, so the "before"
+ * column of the table below can no longer be produced by running it in a
+ * legacy mode. It is reconstructed here instead, from the same match stream
+ * the run saw: a trial counts as a pre-P9 miss when the crossing existed but
+ * its bracketing step was flagged.
+ */
+let lastStartFinishPitBracketed = false;
 
 /**
  * Runs every strategy over ONE shared matcher pass, so the TrackMatch stream is
@@ -338,6 +352,7 @@ function runStrategies(
   let prevMatch = null as ReturnType<TrackMatcher['match']>;
   let prevSample: LocationSample | null = null;
   lastPitLaneMatches = 0;
+  lastStartFinishPitBracketed = false;
   for (const sample of samples) {
     const match = matcher.match(sample);
     if (match === null) continue;
@@ -345,18 +360,28 @@ function runStrategies(
     detectors.forEach((detector, index) => {
       const produced = detector.update(prevMatch, match, prevSample, sample);
       for (const event of produced) events[index]?.push(event);
+      if (
+        index === 0 &&
+        produced.some((event) => event.kind === 'startFinish' && event.direction === 'forward') &&
+        (prevMatch?.onPitLane === true || match.onPitLane === true)
+      ) {
+        lastStartFinishPitBracketed = true;
+      }
     });
     prevMatch = match;
     prevSample = sample;
   }
 
-  return events.map((list) => ({
-    fingerprint: list
-      .map((e) => `${e.gateId}|${e.direction}|${e.lapDistanceM.toFixed(6)}|${e.confidence.toFixed(6)}`)
-      .join(';'),
-    startFinishTCross:
-      list.find((e) => e.kind === 'startFinish' && e.direction === 'forward')?.tCross ?? null,
-  }));
+  return events.map((list) => {
+    const startFinish = list.find((e) => e.kind === 'startFinish' && e.direction === 'forward');
+    return {
+      fingerprint: list
+        .map((e) => `${e.gateId}|${e.direction}|${e.lapDistanceM.toFixed(6)}|${e.confidence.toFixed(6)}`)
+        .join(';'),
+      startFinishTCross: startFinish?.tCross ?? null,
+      startFinishMarked: startFinish?.pitAmbiguous === true,
+    };
+  });
 }
 
 // ---------------------------------------------------------------- statistics
@@ -539,26 +564,33 @@ describe('P8 crossing-time precision against known truth', () => {
  * circuits, over the same trials and the same noise.
  */
 const P9_LEGACY_MATCHER: Partial<TrackMatcherConfig> = { pitPreferenceMarginM: 0 };
-const P9_LEGACY_CROSSINGS: CrossingDetectorConfig = {
-  pitSuppressionHoldMs: 0,
-  pitSuppressionMinSamples: 1,
-  pitLimiterSpeedMps: 0,
-};
 
 interface MissMeasurement {
   trials: number;
   misses: number;
   pitFlaggedTrials: number;
+  /** Ticket P11C: crossings emitted carrying `pitAmbiguous`. */
+  marked: number;
 }
 
+/**
+ * Ticket P11C. `rule` selects which predicate counts as a miss:
+ *  - `'pre-P9'` reconstructs the suppression the detector no longer contains
+ *    (`prev.onPitLane || curr.onPitLane` on the crossing step) from the same
+ *    match stream, because there is no longer a configuration that restores
+ *    it;
+ *  - `'current'` counts only crossings that were genuinely not detected, which
+ *    is the number this file exists to hold at zero.
+ */
 function measureMisses(
   runtime: RuntimeProfile,
   matcherConfig: Partial<TrackMatcherConfig>,
-  detectorConfig: CrossingDetectorConfig,
+  rule: 'pre-P9' | 'current',
 ): MissMeasurement {
   let trials = 0;
   let misses = 0;
   let pitFlaggedTrials = 0;
+  let marked = 0;
   for (const scenario of SCENARIOS) {
     for (let trial = 0; trial < TRIALS; trial += 1) {
       const prng = new SeededPrng(1_000 + trial);
@@ -571,13 +603,15 @@ function measureMisses(
         POSITION_SIGMA_M,
         DOPPLER_SIGMA_MPS,
       );
-      const outcome = runStrategies(runtime, samples, [detectorConfig], matcherConfig)[0];
+      const outcome = runStrategies(runtime, samples, [{}], matcherConfig)[0];
       trials += 1;
       if (lastPitLaneMatches > 0) pitFlaggedTrials += 1;
-      if (outcome?.startFinishTCross == null) misses += 1;
+      if (outcome?.startFinishMarked === true) marked += 1;
+      const undetected = outcome?.startFinishTCross == null;
+      if (undetected || (rule === 'pre-P9' && lastStartFinishPitBracketed)) misses += 1;
     }
   }
-  return { trials, misses, pitFlaggedTrials };
+  return { trials, misses, pitFlaggedTrials, marked };
 }
 
 describe('P9 missed start/finish crossings, before and after', () => {
@@ -589,8 +623,8 @@ describe('P9 missed start/finish crossings, before and after', () => {
   const rows: Array<[string, MissMeasurement, MissMeasurement]> = circuits.map(
     ([name, runtime]) => [
       name,
-      measureMisses(runtime, P9_LEGACY_MATCHER, P9_LEGACY_CROSSINGS),
-      measureMisses(runtime, {}, {}),
+      measureMisses(runtime, P9_LEGACY_MATCHER, 'pre-P9'),
+      measureMisses(runtime, {}, 'current'),
     ],
   );
 
@@ -599,27 +633,27 @@ describe('P9 missed start/finish crossings, before and after', () => {
       `P9 missed start/finish crossings -- ${TRIALS} trials x ${SCENARIOS.length} scenarios per circuit, ` +
         `1 Hz, position sigma ${POSITION_SIGMA_M} m/axis`,
       '',
-      `| ${'circuit'.padEnd(24)} | ${'rule'.padEnd(18)} | trials | missed | rate   | trials with a pit flag |`,
-      `|${'-'.repeat(26)}|${'-'.repeat(20)}|${'-'.repeat(8)}|${'-'.repeat(8)}|${'-'.repeat(8)}|${'-'.repeat(24)}|`,
+      `| ${'circuit'.padEnd(24)} | ${'rule'.padEnd(18)} | trials | missed | rate   | trials with a pit flag | marked |`,
+      `|${'-'.repeat(26)}|${'-'.repeat(20)}|${'-'.repeat(8)}|${'-'.repeat(8)}|${'-'.repeat(8)}|${'-'.repeat(24)}|${'-'.repeat(8)}|`,
     ];
     for (const [name, before, after] of rows) {
       const row = (label: string, m: MissMeasurement, circuit: string): string =>
         `| ${circuit.padEnd(24)} | ${label.padEnd(18)} | ${String(m.trials).padStart(6)} | ` +
         `${String(m.misses).padStart(6)} | ${((100 * m.misses) / m.trials).toFixed(2).padStart(5)}% | ` +
-        `${String(m.pitFlaggedTrials).padStart(22)} |`;
+        `${String(m.pitFlaggedTrials).padStart(22)} | ${String(m.marked).padStart(6)} |`;
       lines.push(row('pre-P9', before, name));
-      lines.push(row('P9', after, name));
+      lines.push(row('P11C', after, name));
     }
     console.log(`\n${lines.join('\n')}\n`);
     expect(rows).toHaveLength(2);
   });
 
-  it('the defect reproduces under the pre-P9 rule and is gone under P9', () => {
+  it('the defect reproduces under the pre-P9 rule and is gone under P11C', () => {
     for (const [name, before, after] of rows) {
       // The old rule loses laps on at least one of the two circuits; where it
-      // does, P9 must not merely reduce the loss.
-      expect(after.misses, `${name}: P9 still loses crossings`).toBe(0);
-      expect(after.misses, `${name}: P9 must never lose MORE`).toBeLessThanOrEqual(before.misses);
+      // does, the current rule must not merely reduce the loss.
+      expect(after.misses, `${name}: crossings are still being lost`).toBe(0);
+      expect(after.misses, `${name}: never lose MORE`).toBeLessThanOrEqual(before.misses);
     }
     const totalBefore = rows.reduce((sum, [, before]) => sum + before.misses, 0);
     expect(totalBefore, 'the pre-P9 defect no longer reproduces -- has the harness drifted?').toBeGreaterThan(0);

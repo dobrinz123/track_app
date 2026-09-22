@@ -7,9 +7,14 @@ import type {
   SessionMachineSnapshot,
   SessionSummary,
 } from '../contracts';
-import { CheckpointCodec, assertJsonSerializable, validateReferenceLap } from '../persistence';
+import {
+  CheckpointCodec,
+  assertJsonSerializable,
+  checkpointGeneration,
+  validateReferenceLap,
+} from '../persistence';
 import type { SqlDatabase } from './sqlDatabase';
-import { SQL_ALTERS_V3, SQL_DDL, SQL_DDL_V2, SQL_SCHEMA_VERSION } from './schema';
+import { SQL_ALTERS_V3, SQL_ALTERS_V4, SQL_DDL, SQL_DDL_V2, SQL_SCHEMA_VERSION } from './schema';
 
 interface SessionRow {
   sessionId: string;
@@ -92,6 +97,14 @@ export class SqlSessionRepository implements LocalSessionRepository {
         // database so broken that every statement below would fail too.
       }
     }
+    // v4 (ticket P11C): `checkpoints.lapCount`, on the same terms.
+    for (const statement of SQL_ALTERS_V4) {
+      try {
+        await this.db.execAsync(statement);
+      } catch {
+        // Column already present -- see SQL_ALTERS_V3's loop above.
+      }
+    }
 
     const versionRows = await this.db.getAllAsync<{ version: number }>(
       'SELECT version FROM schema_migrations LIMIT 1',
@@ -109,13 +122,26 @@ export class SqlSessionRepository implements LocalSessionRepository {
     }
   }
 
+  /**
+   * The AUTHORITATIVE checkpoint write: it always replaces. Its callers
+   * (`SessionController.checkpointNow()`, the terminal `endSession()`
+   * checkpoint, the recording-start record, the host's own adoption write)
+   * all pass the session's LIVE lap list, which is by construction at least
+   * as new as anything a retry could be carrying, and a test or a recovery
+   * tool must be able to put a checkpoint back deliberately.
+   *
+   * Ticket P11C: it keeps `lapCount` -- the checkpoint's generation -- in
+   * step with the payload, because that column is what
+   * {@link saveLapCommit}'s conditional write compares against.
+   */
   async saveCheckpoint(sessionId: string, snapshot: SessionMachineSnapshot, laps: LapRecord[]): Promise<void> {
     // CheckpointCodec.serialize() runs assertJsonSerializable internally and
     // throws before any DB IO on a non-serializable snapshot/laps value.
     const payload = CheckpointCodec.serialize({ snapshot, laps });
-    await this.db.runAsync('INSERT OR REPLACE INTO checkpoints (sessionId, payload) VALUES (?, ?)', [
+    await this.db.runAsync('INSERT OR REPLACE INTO checkpoints (sessionId, payload, lapCount) VALUES (?, ?, ?)', [
       sessionId,
       payload,
+      checkpointGeneration(laps),
     ]);
   }
 
@@ -135,6 +161,34 @@ export class SqlSessionRepository implements LocalSessionRepository {
    * Committing the checkpoint in the same transaction makes that state
    * unreachable: either the lap exists in both places, or in neither (in
    * which case the fixes are still in their chunk rows, untouched).
+   *
+   * Ticket P11C -- AND THE CHECKPOINT ONLY EVER MOVES FORWARD.
+   *
+   * P10B's own retry machinery then produced the opposite failure. The P11
+   * reviewer failed lap 1's commit only; lap 2 committed, leaving the
+   * checkpoint at laps [1,2]; the retained lap-1 commit retried 2 s later
+   * and REPLACED it with the snapshot it had captured when it first failed,
+   * laps [1]. A restart then re-made the already-completed lap 2 as a
+   * zero-duration RECOVERY lap, with its 927 fixes still on disk and
+   * nothing pointing at them.
+   *
+   * So the checkpoint half of this transaction is a compare-and-set, and it
+   * is ONE STATEMENT: a conditional UPSERT whose `WHERE` clause SQLite
+   * evaluates against the stored row as part of the same write. Not a
+   * `SELECT` followed by an `INSERT` -- not even two statements sharing this
+   * transaction. Two statements would put a second await point inside the
+   * BEGIN..COMMIT span, and any write that interleaves there (on a
+   * connection without the app's write gate) lands between the read and the
+   * write that trusted it. One statement has no such gap.
+   *
+   * The comparison is on `checkpoints.lapCount`, the generation column
+   * (schema v4); `COALESCE(..., -1)` is the legacy row written before that
+   * column existed -- generation unknown, so superseded, which is also what
+   * lets a database damaged by the pre-P10B interruption be repaired.
+   *
+   * The telemetry entries are written unconditionally either way: a stale
+   * retry still has fixes to persist, and persisting them is the whole
+   * point of retrying it.
    */
   async saveLapCommit(
     sessionId: string,
@@ -155,12 +209,15 @@ export class SqlSessionRepository implements LocalSessionRepository {
           [sessionId, entry.lapNumber, JSON.stringify(entry.samples)],
         );
       }
-      await tx.runAsync('INSERT OR REPLACE INTO checkpoints (sessionId, payload) VALUES (?, ?)', [
-        sessionId,
-        payload,
-      ]);
+      await tx.runAsync(
+        `INSERT INTO checkpoints (sessionId, payload, lapCount) VALUES (?, ?, ?)
+           ON CONFLICT(sessionId) DO UPDATE SET payload = excluded.payload, lapCount = excluded.lapCount
+           WHERE excluded.lapCount > COALESCE(checkpoints.lapCount, -1)`,
+        [sessionId, payload, checkpointGeneration(checkpoint.laps)],
+      );
     });
   }
+
 
   async loadCheckpoint(sessionId: string): Promise<{ snapshot: SessionMachineSnapshot; laps: LapRecord[] } | null> {
     const rows = await this.db.getAllAsync<PayloadRow>('SELECT payload FROM checkpoints WHERE sessionId = ?', [

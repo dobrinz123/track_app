@@ -104,15 +104,34 @@ describe('MotorPark acceptance scenario: hard/cool laps + up-to-an-hour pit paus
     // --- Pit was recognized as pit. ---
     expect(statesAfter.some((s) => s.sessionState === 'inPit')).toBe(true);
 
-    // --- Lap ledger: 5 valid + 1 pit-invalid, numbering continuous. ---
+    /*
+     * Lap ledger: 4 valid, 3 invalid, numbering continuous.
+     *
+     * TICKET P11C CONTRACT CHANGE, and the one behaviour this repository gives
+     * up for "a real boundary can never be deleted". This used to read 4 valid
+     * + 2 invalid: the pit visit was ONE invalid lap because the detector
+     * DELETED the start/finish crossing inside the MotorPark pit lane (the pit
+     * lane runs 12.4 m from the line). Three rounds of review showed that the
+     * same deletion also removed REAL boundaries -- laps the driver drove --
+     * and that no threshold separates the two cases.
+     *
+     * So the crossing inside the pit lane is emitted and marked, and the pit
+     * visit is two invalid laps instead of one. Both carry `PIT_TRANSIT` and
+     * `PIT_AMBIGUOUS`; neither can set a personal best; the valid laps, their
+     * count and their times are untouched. What the driver sees change is one
+     * extra invalid row on the pit stop.
+     */
     const laps = last(rig.states).laps;
     const valid = laps.filter((lap) => lap.valid);
     const invalid = laps.filter((lap) => !lap.valid);
     expect(valid).toHaveLength(4);
-    expect(invalid).toHaveLength(2);
-    expect(invalid[1]?.invalidReasons).toContain('PAUSE_GAP');
+    expect(invalid).toHaveLength(3);
     expect(invalid[0]?.invalidReasons).toContain('PIT_TRANSIT');
-    expect(laps.map((lap) => lap.lapNumber)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(invalid[0]?.invalidReasons).toContain('PIT_AMBIGUOUS');
+    expect(invalid[1]?.invalidReasons).toContain('PIT_TRANSIT');
+    expect(invalid[1]?.invalidReasons).toContain('PIT_AMBIGUOUS');
+    expect(invalid[2]?.invalidReasons).toContain('PAUSE_GAP');
+    expect(laps.map((lap) => lap.lapNumber)).toEqual([1, 2, 3, 4, 5, 6, 7]);
 
     // --- Timing sanity: hard ~ hard, cool distinctly slower; nothing absurd
     // leaked from the hour-long gap into any duration. ---

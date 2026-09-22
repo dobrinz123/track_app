@@ -20,7 +20,20 @@
 // REJECTED calibration to present itself afterwards as an ordinary one.
 // Nullable throughout, so a row written by an older build reads back as
 // "unknown" rather than as "validated".
-export const SQL_SCHEMA_VERSION = 3;
+// v4 (ticket P11C): the `checkpoints` table gains a nullable `lapCount`
+// column -- the checkpoint's GENERATION (see `checkpointGeneration`),
+// denormalised out of the JSON payload so SQLite itself can compare it.
+// `SessionController` retries a lap commit that failed, carrying the
+// checkpoint it captured at the time, and a retry landing after a newer lap
+// committed must NOT drag the stored checkpoint back to its own older laps.
+// The comparison has to be atomic with the write, and with the count in a
+// column it is ONE statement (`saveLapCommit`'s conditional UPSERT) rather
+// than a SELECT and an INSERT sharing a transaction -- no second round trip
+// inside the transaction, and nothing to interleave with.
+// Nullable, so a row written by an older build reads back as "generation
+// unknown" (treated as -1, i.e. superseded by anything) instead of blocking
+// every future write; the first write through this code fills it in.
+export const SQL_SCHEMA_VERSION = 4;
 
 // Multi-statement DDL, applied via `SqlDatabase.execAsync`. Every statement is
 // `IF NOT EXISTS` so re-running it against an already-migrated database is a
@@ -56,7 +69,8 @@ CREATE TABLE IF NOT EXISTS laps (
 
 CREATE TABLE IF NOT EXISTS checkpoints (
   sessionId TEXT PRIMARY KEY,
-  payload TEXT NOT NULL
+  payload TEXT NOT NULL,
+  lapCount INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS telemetry (
@@ -104,3 +118,12 @@ export const SQL_ALTERS_V3: readonly string[] = [
   'ALTER TABLE sessions ADD COLUMN traceUnwritten INTEGER',
   'ALTER TABLE sessions ADD COLUMN traceFailedWrites INTEGER',
 ];
+
+/**
+ * v4 addition for a `checkpoints` table that already exists (ticket P11C) --
+ * same mechanism and same idempotence as {@link SQL_ALTERS_V3}: applied on
+ * every open, each failure ("duplicate column name") expected and ignored,
+ * so a database whose `schema_migrations` row was bumped by a build that
+ * then crashed before the ALTER still ends up with the column.
+ */
+export const SQL_ALTERS_V4: readonly string[] = ['ALTER TABLE checkpoints ADD COLUMN lapCount INTEGER'];
