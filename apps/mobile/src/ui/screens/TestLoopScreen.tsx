@@ -5,6 +5,7 @@ import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
 import {
+  resetTestLoop,
   retryTestLoopAdoption,
   saveLearnedCircuit,
   settingsStore,
@@ -39,6 +40,25 @@ export function TestLoopScreen({ navigation }: Props): React.JSX.Element {
   const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => subscribeTestLoop(setSnapshot), []);
+
+  /**
+   * Ticket D3 (second one-liner): `resetTestLoop()` had no callers anywhere in
+   * the repo, so `TestLoopController`'s terminal snapshot outlived the screen
+   * -- re-entering Test Loop after a learn phase that gave up showed the
+   * failure card from the PREVIOUS attempt, as though this visit had already
+   * failed before the driver pressed anything.
+   *
+   * Cleared on mount, and ONLY for `'failed'`: `'error'` is an adoption that
+   * failed with geometry still in hand and a Retry that must survive
+   * (`retryTestLoopAdoption`), `'learning'`/`'adopting'` are live, and
+   * `'learned'` is a running session this screen is still the face of.
+   */
+  useEffect(() => {
+    if (testLoopSnapshot().phase !== 'failed') return;
+    void resetTestLoop().catch((error: unknown) => {
+      console.warn('[TestLoopScreen] clearing the previous learn phase failed', error);
+    });
+  }, []);
 
   const onStart = (): void => {
     setNotice(null);

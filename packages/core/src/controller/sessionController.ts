@@ -891,6 +891,10 @@ export class SessionController {
    * land out of order and leave the older facts on disk.
    */
   private sessionRecordTail: Promise<void> = Promise.resolve();
+  /** Ticket D2: the session the lap-count watermark below belongs to -- a different id resets it (a second session on the same controller starts from nothing published). */
+  private sessionRowLapSessionId: string | null = null;
+  /** Ticket D2: how many laps the durable `sessions` row has already been told about, so a stale retry never publishes fewer than a newer commit did. See {@link persistCommittedLaps}. */
+  private sessionRowLapCount = 0;
   /**
    * Ticket P7M M6 -- see {@link FacadeStateCore.recording}. Advanced ONLY
    * from a resolved `saveTelemetry`, and only by samples that write actually
@@ -1578,6 +1582,13 @@ export class SessionController {
       // and -- the honest part -- whatever the trace writer could NOT store.
       const summary: SessionSummary = this.buildSessionSummary(sessionId);
       await this.deps.repository.saveSession(summary);
+      // Ticket D2: the final row is the highest-water mark there is -- a lap
+      // commit still retrying must never publish an older, shorter list over
+      // the top of it.
+      const published =
+        this.sessionRowLapSessionId === sessionId ? this.sessionRowLapCount : 0;
+      this.sessionRowLapSessionId = sessionId;
+      this.sessionRowLapCount = Math.max(published, summary.laps.length);
       // Persist a terminal checkpoint too, so recovery never re-offers a
       // session that has already been fully saved.
       const terminalGeneration = checkpointGeneration(this.core.laps);
@@ -2095,15 +2106,23 @@ export class SessionController {
     );
   }
 
-  /** The durable session record as it stands right now (ticket P10A H2/H3/H6). */
-  private buildSessionSummary(sessionId: string): SessionSummary {
+  /**
+   * The durable session record as it stands right now (ticket P10A H2/H3/H6).
+   *
+   * Ticket D2: `laps` may be overridden with the EXACT lap list a write has
+   * just committed (see `persistCommittedLaps`), rather than whatever
+   * `core.laps` happens to hold when the queued write finally runs -- the
+   * session row must never claim a lap the durable checkpoint does not
+   * already agree happened.
+   */
+  private buildSessionSummary(sessionId: string, laps: readonly LapRecord[] = this.core.laps): SessionSummary {
     return {
       sessionId,
       circuitId: this.deps.circuitProfile.circuitId,
       layoutId: this.deps.circuitProfile.layoutId,
       layoutVersion: this.deps.circuitProfile.layoutVersion,
       startedAtUtc: this.sessionStartedAtUtc ?? new Date().toISOString(),
-      laps: [...this.core.laps],
+      laps: [...laps],
       userId: this.deps.userId,
       calibrationStatus: this.calibrationStatus,
       trace: {
@@ -2131,6 +2150,55 @@ export class SessionController {
       .then(() => this.deps.repository.saveSession(summary))
       .catch((error: unknown) => {
         this.noteRecordFailure(reason, error);
+      });
+    this.sessionRecordTail = work;
+    return work;
+  }
+
+  /**
+   * Ticket D2 (binding) -- A COMPLETED LAP IS ON THE SESSION ROW, NOT ONLY
+   * IN THE CHECKPOINT.
+   *
+   * The `sessions` row used to be written exactly twice: once at recording
+   * start with `laps: []` (`persistInitialSessionRecord`) and once at
+   * `endSession()`. Between those two points every completed lap lived ONLY
+   * in the recovery checkpoint -- so a crash, followed by "Discard" on the
+   * recovery banner (which overwrites that checkpoint) or simply by starting
+   * the next session (which replaces the active-session pointer the
+   * checkpoint hangs off), destroyed every lap of that session. History then
+   * showed "0 laps" for a drive that had four.
+   *
+   * So the row learns about a lap at the same moment storage does: called
+   * from `attemptLapCommit` only AFTER `writeLapCommit` resolved, with the
+   * very lap list that commit's checkpoint carried. Nothing here can publish
+   * a lap the checkpoint does not already agree happened, which is the
+   * invariant `attemptLapCommit`'s failure branch documents and
+   * `sessionController.test.ts`'s C4 regression pins.
+   *
+   * Monotonic per session: a retry of an older commit (ticket P11C's stale
+   * retry) can never drag the row back to fewer laps than a newer commit
+   * already published.
+   *
+   * AWAITED by its caller, which runs inside `tracePersistenceTail`: a
+   * repository whose transactions are not re-entrant (the soak suite's
+   * single-connection sql.js handle is exactly that) must never see this
+   * write begin while the lap commit's or the PB replacement's own
+   * transaction is open. Chained on `sessionRecordTail` as well, so
+   * `flush()` still covers it, and never rejecting, so a bookkeeping failure
+   * cannot fail the lap.
+   */
+  private persistCommittedLaps(sessionId: string, laps: readonly LapRecord[]): Promise<void> {
+    if (this.sessionRowLapSessionId !== sessionId) {
+      this.sessionRowLapSessionId = sessionId;
+      this.sessionRowLapCount = 0;
+    }
+    if (laps.length <= this.sessionRowLapCount) return this.sessionRecordTail;
+    this.sessionRowLapCount = laps.length;
+    const summary = this.buildSessionSummary(sessionId, laps);
+    const work = this.sessionRecordTail
+      .then(() => this.deps.repository.saveSession(summary))
+      .catch((error: unknown) => {
+        this.noteRecordFailure('lap-committed', error);
       });
     this.sessionRecordTail = work;
     return work;
@@ -2772,6 +2840,11 @@ export class SessionController {
     // it releases is now ON DISK, inside the row this commit just wrote, so
     // it counts as persisted rather than silently leaving both figures.
     this.persistedSampleCount += this.releaseRetainedRange(lap.tStart, lap.tEnd);
+    // Ticket D2: the commit landed, so the durable session row may now say so
+    // too -- with THIS commit's checkpoint laps, never `core.laps`. Awaited
+    // (see `persistCommittedLaps`) so it is sequenced against this chain's
+    // own transactions; it never rejects, so it cannot fail the lap.
+    await this.persistCommittedLaps(sessionId, checkpoint.laps);
     return { ok: true };
   }
 

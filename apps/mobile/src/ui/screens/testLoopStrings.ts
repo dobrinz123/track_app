@@ -54,7 +54,10 @@ export interface TestLoopStrings {
   /** P5d-FIX2 N6: the learn phase hit its own fix cap. */
   capDetail: (fixes: number) => string;
   tryAgain: string;
-  /** Saving the loop as a reusable circuit (T6). */
+  /**
+   * Ticket T6 as amended by ticket D3: the loop is ALREADY a listed circuit
+   * under an automatic name by the time this card is drawn, so these name it.
+   */
   saveTitle: string;
   saveHint: string;
   namePlaceholder: string;
@@ -67,11 +70,18 @@ export interface TestLoopStrings {
   learnedLabel: string;
   /** The note under a learned circuit's geometry. */
   adHocNote: string;
-  /** Deleting a learned circuit. */
+  /** Deleting a learned circuit (ticket D3: this now has a screen -- `CircuitDetailScreen`). */
   deleteTitle: string;
+  deleteHint: string;
   delete: string;
   deleteA11y: (name: string) => string;
+  deleteConfirm: string;
+  deleteConfirmA11y: (name: string) => string;
+  deleteCancel: string;
   deleteRefused: (sessions: number) => string;
+  /** The delete was refused because a session is being driven on this circuit right now. */
+  deleteActiveSession: string;
+  deleteFailed: string;
   deleted: string;
   /** The row label in session history. */
   historyLabel: string;
@@ -130,23 +140,30 @@ const EN: TestLoopStrings = {
   capDetail: (fixes) =>
     `Learning stopped after ${fixes} position fixes without a closed loop, and the recording was released.`,
   tryAgain: 'Try again',
-  saveTitle: 'Save this as a circuit',
+  saveTitle: 'Give it a name',
   saveHint:
-    'Saved circuits appear in the circuit list and can be used again — sessions, history and analysis all work on them.',
+    'This track is already in your circuit list with a date for a name, and it stays there whatever you do next — sessions, history and analysis all work on it. Rename it here whenever you like.',
   namePlaceholder: 'Name this circuit',
-  save: 'Save circuit',
-  saveA11y: 'Save this learned track as a circuit',
-  saved: (name) => `Saved as “${name}”.`,
+  save: 'Save name',
+  saveA11y: 'Rename this learned circuit',
+  saved: (name) => `Now called “${name}”.`,
   saveEmptyName: 'Give the circuit a name first.',
-  saveFailed: 'The circuit could not be saved.',
+  saveFailed: 'The name could not be saved.',
   learnedLabel: 'learned (ad-hoc geometry)',
   adHocNote:
     'Learned from one lap on this phone. Not surveyed and not validated on track, so no advice is given for it.',
   deleteTitle: 'Delete circuit',
+  deleteHint:
+    'Removes this learned track from your circuit list. Only possible once it has no recorded sessions left.',
   delete: 'Delete',
   deleteA11y: (name) => `Delete the learned circuit ${name}`,
+  deleteConfirm: 'Delete permanently',
+  deleteConfirmA11y: (name) => `Confirm, permanently delete the learned circuit ${name}`,
+  deleteCancel: 'Keep it',
   deleteRefused: (sessions) =>
     `This circuit still has ${sessions} recorded ${sessions === 1 ? 'session' : 'sessions'}. Delete those first — without the geometry they could no longer be analysed.`,
+  deleteActiveSession: 'A session is being driven on this circuit right now. Finish it first.',
+  deleteFailed: 'The circuit could not be deleted.',
   deleted: 'Circuit deleted.',
   historyLabel: 'Learned circuit',
   timingStarted: 'Recording and timing continue without interruption — the learning lap is stored as the out lap.',
@@ -203,23 +220,30 @@ const RO: TestLoopStrings = {
   capDetail: (fixes) =>
     `Învățarea s-a oprit după ${fixes} poziții GPS fără o buclă închisă, iar înregistrarea a fost eliberată.`,
   tryAgain: 'Încearcă din nou',
-  saveTitle: 'Salvează ca circuit',
+  saveTitle: 'Dă-i un nume',
   saveHint:
-    'Circuitele salvate apar în lista de circuite și pot fi folosite din nou — sesiunile, istoricul și analiza funcționează pe ele.',
+    'Traseul este deja în lista ta de circuite, cu o dată pe post de nume, și rămâne acolo orice ai face mai departe — sesiunile, istoricul și analiza funcționează pe el. Îl poți redenumi oricând de aici.',
   namePlaceholder: 'Denumește circuitul',
-  save: 'Salvează circuitul',
-  saveA11y: 'Salvează traseul învățat ca circuit',
-  saved: (name) => `Salvat ca „${name}”.`,
+  save: 'Salvează numele',
+  saveA11y: 'Redenumește circuitul învățat',
+  saved: (name) => `Se numește acum „${name}”.`,
   saveEmptyName: 'Dă-i mai întâi un nume circuitului.',
-  saveFailed: 'Circuitul nu a putut fi salvat.',
+  saveFailed: 'Numele nu a putut fi salvat.',
   learnedLabel: 'învățat (geometrie ad-hoc)',
   adHocNote:
     'Învățat dintr-un singur tur pe acest telefon. Nemăsurat și nevalidat pe circuit, deci nu se dau sfaturi pentru el.',
   deleteTitle: 'Șterge circuitul',
+  deleteHint:
+    'Scoate traseul învățat din lista de circuite. Posibil doar după ce nu mai are nicio sesiune înregistrată.',
   delete: 'Șterge',
   deleteA11y: (name) => `Șterge circuitul învățat ${name}`,
+  deleteConfirm: 'Șterge definitiv',
+  deleteConfirmA11y: (name) => `Confirmă, șterge definitiv circuitul învățat ${name}`,
+  deleteCancel: 'Păstrează-l',
   deleteRefused: (sessions) =>
     `Circuitul are încă ${sessions} ${sessions === 1 ? 'sesiune înregistrată' : 'sesiuni înregistrate'}. Șterge-le mai întâi — fără geometrie nu ar mai putea fi analizate.`,
+  deleteActiveSession: 'Se conduce chiar acum o sesiune pe acest circuit. Termin-o mai întâi.',
+  deleteFailed: 'Circuitul nu a putut fi șters.',
   deleted: 'Circuit șters.',
   historyLabel: 'Circuit învățat',
   timingStarted: 'Înregistrarea și cronometrarea continuă fără întrerupere — turul de învățare este salvat ca tur de ieșire.',

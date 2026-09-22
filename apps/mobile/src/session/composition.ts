@@ -7,6 +7,7 @@ import type {
   LapVerdictAnswer,
   LapVerdictDecision,
   LocationProvider,
+  LapRecord,
   LocationSample,
   RuntimeProfile,
   SessionCalibrationStatus,
@@ -2197,6 +2198,129 @@ export function selectCircuit(circuitId: string): Promise<SelectCircuitResult> {
 }
 
 // ---------------------------------------------------------------------------
+// Ticket D1 (flow review F1) -- NO STATE THE DRIVER CAN REACH MAY BE A STATE
+// THE DRIVER CANNOT LEAVE.
+//
+// Cancelling the Learn lap parks the controller in `awaitingCalibration`
+// (`SessionController.rejectCalibration`). That state is legitimate WHILE the
+// driver is inside the calibration flow -- "Start Calibration" on
+// `CalibrationInstructionsScreen` is its one legal exit. It stops being
+// legitimate the moment the driver backs out of that flow: nothing else in
+// the app transitions out of it, it is not in `SELECTABLE_STATES`, so every
+// circuit row goes inert and Detail/Preflight/History/Settings become
+// unreachable. Force-quitting was the only way out, and it left the
+// active-session pointer set, so the next launch offered a recovery banner
+// for a session that never drove a lap.
+//
+// WHY `endSession()` AND NOT `idle`. By the time the state machine is in
+// `awaitingCalibration` a session genuinely exists: `beginCalibration()`
+// minted a session id, `onSessionStarted` wrote the active-session pointer
+// and started the telemetry recorder, and the controller wrote an initial
+// `sessions` row and a checkpoint. `idle` is not even a legal transition
+// (`statemachine/reducer.ts` offers `CALIBRATION_STARTED`, `FATAL` and
+// `END_SESSION` and nothing else), and forcing it would orphan all of that.
+// `END_SESSION` is legal from every non-idle state and does the honest
+// teardown: it stops the provider, writes the session row with the zero laps
+// it actually drove, writes a TERMINAL checkpoint (so recovery never offers
+// it again) and -- through `onSessionEnded` -- clears both active-session
+// keys. The controller lands in `sessionComplete`, which IS in
+// `SELECTABLE_STATES`, and the preflight gate rebuilds it for the next
+// session exactly as it does after any completed outing.
+// ---------------------------------------------------------------------------
+
+/**
+ * States in which a session exists but NO screen the driver can reach offers
+ * a way out of it. Deliberately just these two: `calibrating` is owned by
+ * `ActiveCalibrationScreen` (which has Cancel and the escape hatch),
+ * `armed`/`outLap`/`timing`/`inPit`/`paused` are owned by
+ * `ActiveDashboardScreen` (which has End Session), and `preflight` is never
+ * reached controller-side at all (`RealSessionFacade.startPreflight()` is a
+ * deliberate no-op). Abandoning any of those would tear a session down under
+ * a driver who still has a control for it.
+ */
+const ABANDONABLE_SETUP_STATES = new Set<SessionState>(['awaitingCalibration', 'calibrationReview']);
+
+/** Why a circuit selection (or any other between-sessions operation) is currently refused -- see {@link pendingSessionStage}. */
+export type PendingSessionStage =
+  /** Nothing in the way: the controller is idle or terminal. */
+  | 'none'
+  /** A session was set up and then abandoned mid-calibration. No laps exist; `abandonPendingSession()` clears it. */
+  | 'setup'
+  /** A Learn lap is running right now. Its screen (`ActiveCalibration`) owns it -- Cancel and the escape hatch both live there. */
+  | 'calibrating'
+  /** A session the driver is genuinely in the middle of. Only the dashboard's End Session may finish it. */
+  | 'driving';
+
+/**
+ * What, if anything, is currently holding the app between sessions -- so a
+ * refusal can be EXPLAINED and given the RIGHT way out instead of being
+ * logged and dropped (the flow review's through-line). Read by
+ * `CircuitSelectionScreen` after `selectCircuit()` refuses; the stage decides
+ * which screen owns the session that is in the way, and therefore where the
+ * driver is sent.
+ */
+export function pendingSessionStage(): PendingSessionStage {
+  const ctrl = activeController;
+  if (ctrl === null) return 'none';
+  const state = currentControllerState(ctrl);
+  if (SELECTABLE_STATES.has(state)) return 'none';
+  if (ABANDONABLE_SETUP_STATES.has(state)) return 'setup';
+  return state === 'calibrating' ? 'calibrating' : 'driving';
+}
+
+export type AbandonPendingSessionResult =
+  /** The stranded setup session was ended; the controller is selectable again. */
+  | { ok: true; abandoned: boolean }
+  /**
+   * Something is under way that has its OWN screen and its own control for
+   * ending it -- a running Learn lap (`ActiveCalibrationScreen`'s Cancel) or a
+   * drive (`ActiveDashboardScreen`'s End Session). Nothing was touched.
+   */
+  | { ok: false; reason: 'driving' };
+
+/**
+ * Ends a session that was set up and then abandoned before any lap -- the
+ * cancelled Learn lap. Safe to call when there is nothing to abandon
+ * (`{ ok: true, abandoned: false }`), and REFUSED, never forced, while a
+ * drive is genuinely under way.
+ *
+ * `facade.endSession()` is fire-and-forget by design (it queues a
+ * `lifecycleLock` section that is held until the controller's own async end
+ * has settled), so this takes an empty section of the same FIFO lock
+ * afterwards to know that end has finished before reporting success.
+ */
+export async function abandonPendingSession(): Promise<AbandonPendingSessionResult> {
+  await ready();
+  const stage = pendingSessionStage();
+  if (stage === 'none') return { ok: true, abandoned: false };
+  // ONLY the stranded setup states. Anything else -- a running Learn lap, a
+  // drive -- is owned by a screen that has its own control for ending it, and
+  // tearing it down from here would take a session away from a driver who
+  // never asked for that.
+  if (stage !== 'setup') return { ok: false, reason: 'driving' };
+  facade.endSession();
+  // FIFO: this section cannot start until the `endSession` section queued
+  // immediately above has released the lock.
+  await lifecycleLock.run(async () => {
+    // The controller is now terminal (`sessionComplete`), which is selectable
+    // -- but it is also a one-shot controller: `beginCalibration()` does NOT
+    // go through the preflight gate, so a screen still in the stack behind
+    // the one that abandoned (the duplicate `CalibrationInstructions` a
+    // long-press Cancel leaves there) would otherwise offer "Start
+    // Calibration" on a controller that ignores it. Rebuilding here restores
+    // exactly the state the app was in before the session was ever set up:
+    // an IDLE controller built for the selected circuit. Same rule the
+    // preflight gate applies, applied one step earlier.
+    if (controller === null || activeController !== controller) return;
+    const state = currentControllerState(controller);
+    if (state === 'sessionComplete' || state === 'error') {
+      await unlockedRebuildProductionController();
+    }
+  });
+  return { ok: true, abandoned: true };
+}
+
+// ---------------------------------------------------------------------------
 // Test Loop mode (ticket P5d, contracts.md "Test Loop mode (Phase 5d)";
 // hardened by ticket P5d-FIX1 after Codex P5d-REV1).
 //
@@ -2667,7 +2791,9 @@ async function adoptLearnedCircuit(circuit: TestLoopCircuit): Promise<void> {
           ),
           {
             circuit: { profile, runtime: circuit.runtime, corners: circuit.corners },
-            listed: false,
+            // Ticket D3: listed from the moment it is adopted, exactly like
+            // the stored path below.
+            listed: true,
           },
         ];
         ledger.storedProfile = profile;
@@ -2763,6 +2889,23 @@ async function adoptLearnedCircuit(circuit: TestLoopCircuit): Promise<void> {
  * unlikely) collision, instead of an INSERT OR REPLACE that would silently
  * overwrite an existing learned circuit -- along with the sessions recorded
  * on it.
+ *
+ * Ticket D3 (flow review F4) -- A CIRCUIT THE DRIVER HAS ACTUALLY DRIVEN
+ * MUST NOT BE ABLE TO VANISH. This used to store `saved: false`, which
+ * `publishLearnedCircuits` maps to `listed: false` and `circuitCatalog.list()`
+ * filters out. The only control that could ever flip it was the name field
+ * on `TestLoopScreen`, rendered only while the in-memory learn phase is still
+ * `'learned'` -- so a driver who tapped "Open dashboard" (the primary action,
+ * ABOVE that field), drove, and later selected another circuit lost the
+ * circuit, and with it every session, personal best, analysis and export
+ * recorded against it. The data stayed on disk and became unreachable.
+ *
+ * It is therefore stored as a listed circuit immediately, under the automatic
+ * name `TestLoopController.makeDisplayName` already gives it
+ * (`defaultLearnedCircuitName`, RO/EN, dated). Naming it is now a RENAME of a
+ * circuit that is already in the list (`saveLearnedCircuit`), which is a
+ * convenience rather than the only thing standing between the driver and
+ * losing their laps.
  */
 async function putLearnedCircuitWithFreshId(
   circuit: TestLoopCircuit,
@@ -2771,7 +2914,7 @@ async function putLearnedCircuitWithFreshId(
   if (store === null) throw new Error('no learned-circuit store');
   let profile = circuit.profile;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const result = await store.insert({ profile, corners: circuit.corners, saved: false });
+    const result = await store.insert({ profile, corners: circuit.corners, saved: true });
     if (result.ok) return { profile };
     console.warn(
       `[composition] learned circuit id "${profile.circuitId}" was already taken -- regenerating`,
@@ -2808,9 +2951,13 @@ export function listLearnedCircuits(): LearnedCircuitRecord[] {
 }
 
 /**
- * Ticket T6's "Save circuit": names a learned loop and promotes it to a
- * first-class entry in the circuit list. Never available without a database --
- * a circuit that cannot outlive the process was never saved.
+ * Ticket T6's "Save circuit", as amended by ticket D3: a learned loop is
+ * already a first-class, listed entry the moment it is adopted (see
+ * `putLearnedCircuitWithFreshId`), so this now RENAMES it from the automatic
+ * date-stamped name to one the driver chose. It stays listed either way --
+ * nothing here can make a circuit disappear. Never available without a
+ * database: a circuit that cannot outlive the process has no stored name to
+ * change.
  */
 export async function saveLearnedCircuit(
   circuitId: string,
@@ -3357,7 +3504,34 @@ export async function resumeRecovery(): Promise<boolean> {
   );
 }
 
-/** Discards a recoverable checkpoint without resuming (ADR-0003 §3): marks it terminal so it is never offered again -- `LocalSessionRepository` has no delete method, so this overwrites the checkpoint's snapshot to `sessionComplete` instead. */
+/**
+ * Discards a recoverable checkpoint without resuming (ADR-0003 §3): marks it
+ * terminal so it is never offered again -- `LocalSessionRepository` has no
+ * delete method, so this overwrites the checkpoint's snapshot to
+ * `sessionComplete` instead.
+ *
+ * Ticket D2 (flow review F2) -- DISCARD MUST NOT DESTROY THE LAPS THE BANNER
+ * JUST COUNTED. The banner says "(4 laps)" and offers Discard beside Resume;
+ * a driver who is done for the day taps Discard to dismiss it. This used to
+ * overwrite the checkpoint with `[]` -- and until this ticket the checkpoint
+ * was the ONLY place those laps lived, so History afterwards showed "0 laps"
+ * for a session that had four, with no warning of any kind.
+ *
+ * Two changes, belt and braces:
+ *  1. `SessionController` now writes each completed lap onto the durable
+ *     `sessions` row as it commits it (ticket D2, core side), so the laps no
+ *     longer depend on this checkpoint at all -- which is also what stops
+ *     `onSessionStarted`'s pointer replacement (flow review F3) from
+ *     orphaning them.
+ *  2. This still copies whatever the checkpoint holds onto the session row
+ *     before marking it terminal, for a checkpoint written by an OLDER build
+ *     (or by a lap whose row write failed), and it KEEPS those laps in the
+ *     terminal checkpoint rather than blanking them. Nothing reads a terminal
+ *     checkpoint's laps, so blanking them only ever destroyed evidence.
+ *
+ * Discard is therefore no longer destructive, and `CircuitDetailScreen`'s
+ * banner says so rather than offering an unconfirmed data loss.
+ */
 export async function discardRecovery(): Promise<void> {
   // Same section discipline as `resumeRecovery()` above: the checkpoint
   // overwrite and the two-key clear are one `lifecycleLock` critical section,
@@ -3368,16 +3542,54 @@ export async function discardRecovery(): Promise<void> {
       if (info === null) return;
       setRecoveryNotice(null);
       const { db: database, repository: repo } = await ready();
+      // Ticket D2 item 2: what the banner was counting, read back before
+      // anything is overwritten. A read failure is never fatal -- the discard
+      // itself must still work.
+      let recoveredLaps: readonly LapRecord[] = [];
+      try {
+        recoveredLaps = (await repo.loadCheckpoint(info.sessionId))?.laps ?? [];
+      } catch (error) {
+        console.warn('[composition] discardRecovery: could not read the checkpoint being discarded', error);
+      }
+      if (recoveredLaps.length > 0) {
+        await preserveRecoveredLaps(repo, info, recoveredLaps);
+      }
       await repo.saveCheckpoint(
         info.sessionId,
         { state: 'sessionComplete', lapNumber: 0, context: {} },
-        [],
+        [...recoveredLaps],
       );
       setPendingRecovery(null);
       // M4 fix: clears BOTH keys together (setActiveSession(database, null)).
       if (database !== null) await setActiveSession(database, null);
+      // The session row may have just gained its laps -- History reads the
+      // cache, so it has to be told.
+      await historyStore?.refresh();
     }),
   );
+}
+
+/**
+ * Ticket D2: copies a discarded checkpoint's laps onto its `sessions` row
+ * when the row does not already carry at least as many. Only reachable for a
+ * checkpoint whose row was written by a build before the controller learned
+ * to publish laps at commit time, or one whose row write failed -- so it
+ * never shortens a row and never invents a session that has none.
+ */
+async function preserveRecoveredLaps(
+  repo: LocalSessionRepository,
+  info: PendingRecovery,
+  laps: readonly LapRecord[],
+): Promise<void> {
+  try {
+    const stored = (await repo.listSessions(LOCAL_USER_ID, info.circuitId)).find(
+      (session) => session.sessionId === info.sessionId,
+    );
+    if (stored === undefined || stored.laps.length >= laps.length) return;
+    await repo.saveSession({ ...stored, laps: [...laps] });
+  } catch (error) {
+    console.warn('[composition] discardRecovery: could not preserve the recovered laps', error);
+  }
 }
 
 // ---------------------------------------------------------------------------

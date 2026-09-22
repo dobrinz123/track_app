@@ -7,18 +7,22 @@ import { colors, fontFamily, radii, spacing, typography } from '../theme';
 import { ADVISORY_NOTICE, circuitDisplayData, layoutLabel, statusLabel } from '../data/circuit';
 import { StatusBanner } from '../components/StatusBanner';
 import { CornersList } from '../components/CornersList';
-import { circuitCatalog } from '../../session/circuitCatalog';
+import { circuitCatalog, isLearnedCircuitId } from '../../session/circuitCatalog';
 import { TMR_CIRCUIT_PROFILE } from '../../session/tmrProfile';
 import {
+  deleteLearnedCircuit,
   discardRecovery,
   resumeRecovery,
   retryBootstrap,
+  settingsStore,
   subscribeBootstrapState,
   subscribeRecovery,
   subscribeRecoveryNotice,
   type BootstrapState,
   type PendingRecovery,
 } from '../../session/composition';
+import { useSettings } from '../hooks/useSettings';
+import { resolveTestLoopStrings } from './testLoopStrings';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'CircuitDetail'>;
 
@@ -57,6 +61,17 @@ export function CircuitDetailScreen({ navigation, route }: Props): React.JSX.Ele
   // resume attempt) -- distinct from the `recovery` banner above, which only
   // ever reflects a checkpoint bootstrap can currently see.
   const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
+  // Ticket D3 (second one-liner): `deleteLearnedCircuit()` was implemented and
+  // tested but no screen called it, so a driver could create learned circuits
+  // and never remove one. This is its entry point -- only for a learned
+  // circuit, two-step, and every refusal the composition layer can return is
+  // shown in words rather than dropped.
+  const settings = useSettings(settingsStore);
+  const testLoopStrings = resolveTestLoopStrings(settings.language);
+  const learned = isLearnedCircuitId(entry.profile.circuitId);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteNotice, setDeleteNotice] = useState<string | null>(null);
 
   useEffect(() => subscribeRecovery(setRecovery), []);
   useEffect(() => subscribeBootstrapState(setBootstrapState), []);
@@ -102,6 +117,33 @@ export function CircuitDetailScreen({ navigation, route }: Props): React.JSX.Ele
       await discardRecovery();
     } finally {
       setRecoveryBusy(false);
+    }
+  };
+
+  const handleDelete = async (): Promise<void> => {
+    setDeleteBusy(true);
+    setDeleteNotice(null);
+    try {
+      const result = await deleteLearnedCircuit(entry.profile.circuitId);
+      if (result.ok) {
+        setConfirmingDelete(false);
+        setDeleteNotice(testLoopStrings.deleted);
+        navigation.navigate('CircuitSelection');
+        return;
+      }
+      // Every refusal reaches the driver, in its own words.
+      setDeleteNotice(
+        result.reason === 'has-sessions'
+          ? testLoopStrings.deleteRefused(result.sessionCount)
+          : result.reason === 'active-session'
+            ? testLoopStrings.deleteActiveSession
+            : testLoopStrings.deleteFailed,
+      );
+    } catch (error) {
+      console.warn('[CircuitDetailScreen] deleting the learned circuit failed', error);
+      setDeleteNotice(testLoopStrings.deleteFailed);
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -156,9 +198,18 @@ export function CircuitDetailScreen({ navigation, route }: Props): React.JSX.Ele
                   interrupted session actually ran on -- it is global (it shows on
                   every circuit's detail screen), and Resume always continues on that
                   circuit, not on whatever is selected right now. */}
+              {/* Ticket D2 (flow review F2): Discard used to destroy exactly the
+                  laps this sentence had just counted -- they lived only in the
+                  checkpoint it overwrote. They are now on the session row as
+                  each one completes, and `discardRecovery()` copies anything an
+                  older checkpoint still holds across before marking it
+                  terminal, so Discard is no longer destructive. The banner says
+                  what actually happens instead of quantifying a loss it did not
+                  name. */}
               Recovered an interrupted session on {recoveryCircuitName} ({recovery.lapCount} lap
               {recovery.lapCount === 1 ? '' : 's'}). Resume continues it on {recoveryCircuitName}; lap{' '}
-              {recovery.lapCount} was invalidated. Or discard it.
+              {recovery.lapCount} was invalidated. Discard stops offering it — the{' '}
+              {recovery.lapCount === 1 ? 'lap stays' : 'laps stay'} in your session history either way.
             </Text>
             <View style={styles.recoveryActions}>
               <Pressable
@@ -252,6 +303,66 @@ export function CircuitDetailScreen({ navigation, route }: Props): React.JSX.Ele
             Settings
           </Text>
         </Pressable>
+
+        {/* Ticket D3: the learned circuit's own delete, two-step, with every
+            refusal stated. Absent for bundled circuits, which cannot be
+            deleted at all. */}
+        {learned ? (
+          <View style={styles.metaCard}>
+            <Text style={styles.deleteTitle} maxFontSizeMultiplier={1.3}>
+              {testLoopStrings.deleteTitle}
+            </Text>
+            <Text style={styles.deleteHint} maxFontSizeMultiplier={1.3}>
+              {testLoopStrings.deleteHint}
+            </Text>
+            {deleteNotice !== null ? <StatusBanner variant="error" message={deleteNotice} /> : null}
+            {confirmingDelete ? (
+              <View style={styles.recoveryActions}>
+                <Pressable
+                  style={[styles.button, styles.secondaryButton, styles.recoveryButton]}
+                  onPress={() => {
+                    setConfirmingDelete(false);
+                    setDeleteNotice(null);
+                  }}
+                  disabled={deleteBusy}
+                  accessibilityRole="button"
+                  accessibilityLabel={testLoopStrings.deleteCancel}
+                >
+                  <Text style={styles.secondaryButtonText} maxFontSizeMultiplier={1.3}>
+                    {testLoopStrings.deleteCancel}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.button, styles.dangerButton, styles.recoveryButton]}
+                  onPress={() => void handleDelete()}
+                  disabled={deleteBusy}
+                  accessibilityRole="button"
+                  accessibilityLabel={testLoopStrings.deleteConfirmA11y(circuit.displayName)}
+                  accessibilityState={{ disabled: deleteBusy, busy: deleteBusy }}
+                >
+                  {deleteBusy ? (
+                    <ActivityIndicator color={colors.onAccent} />
+                  ) : (
+                    <Text style={styles.dangerButtonText} maxFontSizeMultiplier={1.3}>
+                      {testLoopStrings.deleteConfirm}
+                    </Text>
+                  )}
+                </Pressable>
+              </View>
+            ) : (
+              <Pressable
+                style={[styles.button, styles.secondaryButton]}
+                onPress={() => setConfirmingDelete(true)}
+                accessibilityRole="button"
+                accessibilityLabel={testLoopStrings.deleteA11y(circuit.displayName)}
+              >
+                <Text style={styles.secondaryButtonText} maxFontSizeMultiplier={1.3}>
+                  {testLoopStrings.delete}
+                </Text>
+              </Pressable>
+            )}
+          </View>
+        ) : null}
 
         {/* Provenance (ticket CN-W3): built from the profile's own `source` +
             first `confidenceNotes` sentence -- never claims "official". */}
@@ -354,6 +465,24 @@ const styles = StyleSheet.create({
   secondaryButtonText: {
     ...typography.subtitle,
     color: colors.textPrimary,
+  },
+  // Ticket D3: the learned-circuit delete card.
+  dangerButton: {
+    backgroundColor: colors.danger,
+  },
+  dangerButtonText: {
+    ...typography.subtitle,
+    color: colors.onAccent,
+  },
+  deleteTitle: {
+    ...typography.subtitle,
+    color: colors.textPrimary,
+  },
+  deleteHint: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    marginTop: spacing.xs,
+    marginBottom: spacing.xs,
   },
   footerText: {
     ...typography.caption,

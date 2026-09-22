@@ -6,13 +6,71 @@ import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
 import { TraceLogo } from '../components/TraceLogo';
 import { TraceWordmark } from '../components/TraceWordmark';
+import { StatusBanner } from '../components/StatusBanner';
 import { circuitCatalog, type CircuitSummary } from '../../session/circuitCatalog';
-import { selectCircuit, settingsStore } from '../../session/composition';
+import {
+  abandonPendingSession,
+  pendingSessionStage,
+  selectCircuit,
+  settingsStore,
+} from '../../session/composition';
 import { layoutLabel } from '../data/circuit';
 import { useSettings } from '../hooks/useSettings';
 import { resolveTestLoopStrings, type TestLoopStrings } from './testLoopStrings';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'CircuitSelection'>;
+
+/**
+ * Ticket D1 (flow review, §0) -- EVERY REFUSAL A DRIVER CAN CAUSE REACHES THE
+ * DRIVER.
+ *
+ * `selectCircuit()` refuses with `{ ok:false, reason:'SESSION_ACTIVE' }` while
+ * the controller is not between sessions. This screen used to answer that with
+ * `console.warn` and a bare `return`: the row greyed out, the spinner ran for
+ * an instant, and nothing else happened -- no banner, no toast, no navigation.
+ * Since circuit selection is the initial route and the ONLY door to Detail,
+ * Preflight, History and Settings, a driver who reached a refusing state (by
+ * cancelling the Learn lap and backing out, which the owner's test protocol
+ * asks him to do deliberately) was left tapping inert rows with no way out but
+ * a force-quit.
+ *
+ * So the refusal is now stated, and it comes with the specific way out:
+ * a session that was only ever being SET UP can be ended from right here,
+ * and one that is genuinely being DRIVEN sends the driver back to the screen
+ * that owns it.
+ */
+interface SelectionBlock {
+  message: string;
+  action: 'abandon' | 'toDashboard' | 'toCalibration' | 'retry';
+  actionLabel: string;
+}
+
+const BLOCK_SETUP: SelectionBlock = {
+  message:
+    'A session is still open from a Learn lap that was cancelled. Nothing was recorded on it. Close it to pick a circuit.',
+  action: 'abandon',
+  actionLabel: 'Close it',
+};
+
+const BLOCK_DRIVING: SelectionBlock = {
+  message:
+    'A session is running, so the circuit cannot be changed. Finish it on the timing screen first.',
+  action: 'toDashboard',
+  actionLabel: 'Back to the session',
+};
+
+const BLOCK_CALIBRATING: SelectionBlock = {
+  message:
+    'A Learn lap is running, so the circuit cannot be changed. Finish or cancel it first.',
+  action: 'toCalibration',
+  actionLabel: 'Back to the Learn lap',
+};
+
+const BLOCK_UNKNOWN: SelectionBlock = {
+  message: 'That circuit could not be selected just now.',
+  action: 'retry',
+  actionLabel: 'Try again',
+};
 
 /**
  * S1 -- multi-circuit-ready selection list, driven by `AppCircuitCatalog`.
@@ -30,30 +88,85 @@ export function CircuitSelectionScreen({ navigation }: Props): React.JSX.Element
   // tapped row shows a spinner in place of its chevron, instead of allowing
   // a second tap to queue behind the first with no visible feedback.
   const [selectingId, setSelectingId] = useState<string | null>(null);
+  // Ticket D1: the refusal the driver can actually cause, in words, with the
+  // control that resolves it. `null` whenever nothing is in the way.
+  const [block, setBlock] = useState<SelectionBlock | null>(null);
+  const [blockBusy, setBlockBusy] = useState(false);
+  const [lastRefusedId, setLastRefusedId] = useState<string | null>(null);
+
+  const select = async (circuitId: string): Promise<void> => {
+    // Ticket CN-W3 (H1/H2 fixes, ticket CN-FIX2): persist the selection
+    // (and rebuild the per-circuit history store) BEFORE navigating, so
+    // CircuitDetail/History/PB already reflect the tapped circuit the
+    // instant they mount.
+    const result = await selectCircuit(circuitId);
+    if (!result.ok) {
+      // Ticket D1: stated, never logged and dropped. Which way out is offered
+      // depends on what is actually holding the app.
+      const stage = pendingSessionStage();
+      setLastRefusedId(circuitId);
+      setBlock(
+        stage === 'setup'
+          ? BLOCK_SETUP
+          : stage === 'calibrating'
+            ? BLOCK_CALIBRATING
+            : stage === 'driving'
+              ? BLOCK_DRIVING
+              : BLOCK_UNKNOWN,
+      );
+      return;
+    }
+    setBlock(null);
+    setLastRefusedId(null);
+    navigation.navigate('CircuitDetail', { circuitId });
+  };
 
   const handlePress = (circuitId: string): void => {
     if (selectingId !== null) return;
     setSelectingId(circuitId);
     void (async () => {
       try {
-        // Ticket CN-W3 (H1/H2 fixes, ticket CN-FIX2): persist the selection
-        // (and rebuild the per-circuit history store) BEFORE navigating, so
-        // CircuitDetail/History/PB already reflect the tapped circuit the
-        // instant they mount. `selectCircuit()` only ever refuses
-        // (`{ ok: false, reason: 'SESSION_ACTIVE' }`) while a session is
-        // genuinely live -- unreachable from this screen in normal use, but
-        // navigation is skipped (and a warning logged) rather than assumed
-        // to have succeeded.
-        const result = await selectCircuit(circuitId);
-        if (!result.ok) {
-          console.warn(`[CircuitSelectionScreen] selectCircuit refused: ${result.reason ?? 'unknown reason'}`);
-          return;
-        }
-        navigation.navigate('CircuitDetail', { circuitId });
+        await select(circuitId);
       } catch (error) {
         console.warn('[CircuitSelectionScreen] selectCircuit failed', error);
+        setLastRefusedId(circuitId);
+        setBlock(BLOCK_UNKNOWN);
       } finally {
         setSelectingId(null);
+      }
+    })();
+  };
+
+  const handleBlockAction = (): void => {
+    const current = block;
+    if (current === null || blockBusy) return;
+    if (current.action === 'toDashboard') {
+      navigation.navigate('ActiveDashboard');
+      return;
+    }
+    if (current.action === 'toCalibration') {
+      navigation.navigate('ActiveCalibration');
+      return;
+    }
+    setBlockBusy(true);
+    void (async () => {
+      try {
+        if (current.action === 'abandon') {
+          const outcome = await abandonPendingSession();
+          if (!outcome.ok) {
+            // It became a real drive between the refusal and this tap.
+            setBlock(BLOCK_DRIVING);
+            return;
+          }
+        }
+        setBlock(null);
+        // Carry the driver through to what they originally tapped.
+        if (lastRefusedId !== null) await select(lastRefusedId);
+      } catch (error) {
+        console.warn('[CircuitSelectionScreen] clearing the blocked selection failed', error);
+        setBlock(BLOCK_UNKNOWN);
+      } finally {
+        setBlockBusy(false);
       }
     })();
   };
@@ -70,6 +183,29 @@ export function CircuitSelectionScreen({ navigation }: Props): React.JSX.Element
             <TraceWordmark size={40} style={styles.wordmark} />
           </View>
         </View>
+
+        {/* Ticket D1: the refusal, and the control that resolves it. */}
+        {block !== null ? (
+          <View style={styles.blockCard} accessibilityLiveRegion="polite">
+            <StatusBanner variant="error" message={block.message} />
+            <Pressable
+              style={[styles.blockButton, blockBusy && styles.rowDisabled]}
+              onPress={handleBlockAction}
+              disabled={blockBusy}
+              accessibilityRole="button"
+              accessibilityLabel={block.actionLabel}
+              accessibilityState={{ disabled: blockBusy, busy: blockBusy }}
+            >
+              {blockBusy ? (
+                <ActivityIndicator color={colors.onAccent} />
+              ) : (
+                <Text style={styles.blockButtonText} maxFontSizeMultiplier={1.3}>
+                  {block.actionLabel}
+                </Text>
+              )}
+            </Pressable>
+          </View>
+        ) : null}
 
         <View style={styles.list}>
           {circuits.map((circuit, index) => (
@@ -213,6 +349,21 @@ const styles = StyleSheet.create({
     borderRadius: radii.md,
     overflow: 'hidden',
     backgroundColor: colors.surface,
+  },
+  // Ticket D1: the blocked-selection card.
+  blockCard: {
+    gap: spacing.sm,
+    marginBottom: spacing.md,
+  },
+  blockButton: {
+    borderRadius: radii.lg,
+    paddingVertical: spacing.md,
+    alignItems: 'center',
+    backgroundColor: colors.accent,
+  },
+  blockButtonText: {
+    ...typography.subtitle,
+    color: colors.onAccent,
   },
   row: {
     flexDirection: 'row',

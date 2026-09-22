@@ -1,10 +1,15 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
-import { facade, getLiveCalibrationAttempt, settingsStore } from '../../session/composition';
+import {
+  abandonPendingSession,
+  facade,
+  getLiveCalibrationAttempt,
+  settingsStore,
+} from '../../session/composition';
 import { buildCalibrationReport } from '../../session/calibrationReportViewModel';
 import { CalibrationReportCard } from '../components/CalibrationReportCard';
 import { useSettings } from '../hooks/useSettings';
@@ -31,6 +36,39 @@ export function CalibrationInstructionsScreen({ navigation }: Props): React.JSX.
   const reportStrings = resolveCalibrationReportStrings(settings.language);
   const attempt = getLiveCalibrationAttempt();
   const report = attempt === null ? null : buildCalibrationReport(attempt);
+
+  /**
+   * Ticket D1 (flow review F1) -- LEAVING THIS SCREEN LEAVES THE SESSION IT
+   * SET UP.
+   *
+   * This screen is the one place `awaitingCalibration` has an exit from:
+   * "Start Calibration", right below. A cancelled Learn lap parks the
+   * controller there, and every screen BELOW this one in the stack
+   * (Preflight, Circuit, the circuit list) is written for a controller that
+   * is between sessions -- `selectCircuit()` refuses outright while it is
+   * not, which is what stranded the app on an inert circuit list.
+   *
+   * So the pending session is abandoned when this screen is removed:
+   * `abandonPendingSession()` is a no-op unless the controller is in exactly
+   * the states nothing else can leave (`awaitingCalibration`/
+   * `calibrationReview`), and it REFUSES rather than tearing anything down
+   * while a drive is under way -- so the forward paths (push to
+   * ActiveCalibration, then replace to ActiveDashboard, then the results
+   * screen's own pop back through here) are all unaffected.
+   *
+   * Fire-and-forget on purpose: navigation must never wait on persistence,
+   * and the teardown is ordered on `lifecycleLock` behind anything already
+   * running.
+   */
+  useEffect(
+    () =>
+      navigation.addListener('beforeRemove', () => {
+        void abandonPendingSession().catch((error: unknown) => {
+          console.warn('[CalibrationInstructionsScreen] abandoning the pending session failed', error);
+        });
+      }),
+    [navigation],
+  );
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>

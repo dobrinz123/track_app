@@ -162,18 +162,48 @@ describe('composition -- Test Loop mode (P5d T2, T4, T6)', () => {
     expect(resolved.profile.geometryStatus).toBe('ad-hoc');
   });
 
-  it('keeps an unsaved test loop out of the circuit list, but alive across a restart', async () => {
+  /**
+   * Ticket D3 (flow review F4) -- CONTRACT CHANGED, DELIBERATELY.
+   *
+   * This test used to pin `saved: false` at adoption: the learned circuit was
+   * resolvable but NOT listed, and the only control that could ever list it
+   * was the name field on `TestLoopScreen`, rendered only while the in-memory
+   * learn phase was still `'learned'`. A driver who tapped "Open dashboard"
+   * (the primary action, above that field), drove, and later selected another
+   * circuit lost that circuit for good -- and with it every session, personal
+   * best, analysis and export recorded against it, all still on disk and
+   * unreachable from any screen.
+   *
+   * A circuit the driver has actually driven must not be able to vanish, so
+   * it is listed from adoption under the automatic name it is already given.
+   * Naming it is now a rename (the test below), not the thing standing
+   * between the driver and losing their laps.
+   */
+  it('lists a just-learned loop immediately, under its automatic name, and keeps it across a restart (D3)', async () => {
     const first = await boot(db);
     const circuitId = await learnALoop(first);
-    expect(first.listLearnedCircuits()[0]!.saved).toBe(false);
+    expect(first.listLearnedCircuits()[0]!.saved).toBe(true);
+
+    const { circuitCatalog } = await import('../../src/session/circuitCatalog');
+    const listedNow = circuitCatalog.list().find((circuit) => circuit.circuitId === circuitId);
+    expect(listedNow).toBeDefined();
+    expect(listedNow!.origin).toBe('learned');
+    expect(listedNow!.displayName.length).toBeGreaterThan(0);
 
     const restarted = await boot(db);
     const records = restarted.listLearnedCircuits();
     expect(records.map((record) => record.circuitId)).toEqual([circuitId]);
-    expect(records[0]!.saved).toBe(false);
+    expect(records[0]!.saved).toBe(true);
+    // The whole point: after a restart -- when the learn phase is `idle` and
+    // the name field no longer exists anywhere -- it is still in the picker,
+    // so its sessions, PB, analysis and export stay reachable.
+    const { circuitCatalog: catalogAfterRestart } = await import('../../src/session/circuitCatalog');
+    expect(
+      catalogAfterRestart.list().some((circuit) => circuit.circuitId === circuitId),
+    ).toBe(true);
   });
 
-  it('saves a learned loop as a named circuit that appears in the selection list and survives a restart', async () => {
+  it('renames a learned loop to a name the driver chose, and it stays listed either way (D3)', async () => {
     const first = await boot(db);
     const circuitId = await learnALoop(first);
 
