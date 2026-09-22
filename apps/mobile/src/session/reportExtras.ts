@@ -25,7 +25,18 @@ export type ToolOutcome =
   /** It was asked and genuinely had nothing for this session. */
   | { state: 'empty'; detail: string }
   /** It could not be asked at all on this device / in this build. */
-  | { state: 'unavailable'; detail: string };
+  | { state: 'unavailable'; detail: string }
+  /**
+   * Ticket P14 H6 (Codex P13 round): it WAS asked, it ran, and it FAILED.
+   *
+   * Previously only a thrown read could produce a `'failed'` row, so a tool
+   * that catches its own failure and knows perfectly well what happened had no
+   * way to say so -- the analysis runner, whose errored pass left `peek()`
+   * null exactly as a never-run session does, and whose export row therefore
+   * read "the analysis has not been run for this session". A tool's own
+   * knowledge of its failure is worth more than an exception, not less.
+   */
+  | { state: 'failed'; detail: string };
 
 export interface ToolExtraSpec {
   /** Stable machine name, e.g. `'signalFinder'`. Becomes the `extras:<source>` availability row. */

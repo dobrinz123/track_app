@@ -1,6 +1,6 @@
 import type { LapRecord, LapValidityVerdict, LapVerdictAnswer } from '@circuit/core';
 
-import type { RecordVerdictOutcome } from './lapVerdictStore';
+import type { RecordVerdictOutcome, UnsavedLapVerdict } from './lapVerdictStore';
 
 /**
  * Ticket P13B item 1 (binding) -- EVERY DECISION THE VERDICT CONTROL MAKES,
@@ -47,6 +47,18 @@ export interface LapVerdictRowModel {
    */
   stale: boolean;
   note?: string;
+  /**
+   * Ticket P14 H1 (Codex P13 round): an answer the owner gave for this lap
+   * that STORAGE DOES NOT HOLD -- its write is in flight, or it failed.
+   *
+   * It is deliberately NOT folded into `answer`/`answered`: those describe
+   * what is recorded, and the old store's habit of caching before the write
+   * resolved is precisely how a failed save came to read back as an answer.
+   * The row carries it separately so the screen can keep showing what he
+   * tapped, marked as not saved, for as long as it is not saved -- rather than
+   * on a note under the buttons that the next tap wipes away.
+   */
+  unsavedAnswer?: { answer: LapVerdictAnswer; state: 'pending' | 'failed'; detail?: string };
 }
 
 /**
@@ -61,8 +73,11 @@ export interface LapVerdictRowModel {
 export function buildLapVerdictRows(
   laps: readonly LapRecord[],
   verdicts: readonly LapValidityVerdict[],
+  /** Ticket P14 H1: answers not on disk, from `LapVerdictStore.unsaved()`. Omitted means none. */
+  unsaved: readonly UnsavedLapVerdict[] = [],
 ): LapVerdictRowModel[] {
   const byLap = new Map(verdicts.map((verdict) => [verdict.lapNumber, verdict]));
+  const unsavedByLap = new Map(unsaved.map((entry) => [entry.verdict.lapNumber, entry]));
   return [...laps]
     .sort((a, b) => a.lapNumber - b.lapNumber)
     .map((lap) => {
@@ -80,6 +95,17 @@ export function buildLapVerdictRows(
         answeredAtUtc: verdict?.answeredAtUtc ?? null,
         stale: answered && verdict !== undefined && verdict.appValid !== lap.valid,
         ...(verdict?.note === undefined ? {} : { note: verdict.note }),
+        ...(unsavedByLap.has(lap.lapNumber)
+          ? {
+              unsavedAnswer: {
+                answer: unsavedByLap.get(lap.lapNumber)!.verdict.answer,
+                state: unsavedByLap.get(lap.lapNumber)!.state,
+                ...(unsavedByLap.get(lap.lapNumber)!.detail === undefined
+                  ? {}
+                  : { detail: unsavedByLap.get(lap.lapNumber)!.detail }),
+              },
+            }
+          : {}),
       };
     });
 }
@@ -132,11 +158,11 @@ export function verdictTapFeedback(outcome: RecordVerdictOutcome): VerdictTapFee
 /**
  * Should the optimistic row update be applied?
  *
- * Only for `'stored'` and `'failed'`: both of those genuinely put the answer
- * in the store's cache (the store caches BEFORE it awaits storage, so the
- * owner's tap shows immediately). `'unsupported'` caches nothing, and a row
- * that flipped anyway would be the screen inventing an answer the device
- * cannot hold.
+ * Ticket P14 H1 RE-READ THIS. It is still `'stored'` and `'failed'`, but they
+ * now change DIFFERENT parts of the row: `'stored'` changes the answer,
+ * `'failed'` changes only `unsavedAnswer`. `'unsupported'` records nothing
+ * anywhere, and a row that flipped anyway would be the screen inventing an
+ * answer the device cannot hold.
  */
 export function verdictTapChangedRows(outcome: RecordVerdictOutcome): boolean {
   return outcome.state !== 'unsupported';

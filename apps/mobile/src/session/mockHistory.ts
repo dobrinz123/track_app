@@ -35,6 +35,17 @@ export interface StoredSession {
    * make. `undefined` for a session recorded before it was tracked.
    */
   failedWriteCount?: number;
+  /**
+   * Ticket P14 H3 (Codex P13 round): whether the RECORDING of this session was
+   * ever finalised -- `true` only when `endSession()` wrote the final row.
+   *
+   * `false` means the app stopped or crashed while the session was still
+   * recording, which is exactly when `unwrittenSampleCount: 0` stops being
+   * evidence of anything: fixes captured after that write were lost without
+   * being counted. `undefined` is UNKNOWN (a session recorded before this was
+   * tracked) and is never to be read as finalised.
+   */
+  recordingFinalized?: boolean;
 }
 
 export interface PersonalBestEntry {

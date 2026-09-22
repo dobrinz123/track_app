@@ -126,6 +126,28 @@ export interface SessionReportRecording {
   failedWriteCount: number | null;
   /** `true` only when `unwrittenSampleCount` is KNOWN to be greater than zero. Never inferred from a `null`. */
   traceIncomplete: boolean;
+  /**
+   * Ticket P14 H3 (Codex P13 round): did the recording of this session ever
+   * FINISH? `true` only after `endSession()` wrote the final row; `false` for
+   * a session the app was still recording when it stopped; `null` for one
+   * recorded before this was tracked.
+   */
+  recordingFinalized: boolean | null;
+  /**
+   * Ticket P14 H3 -- THE FIELD A READER SHOULD ACTUALLY READ.
+   *
+   *  - `'incomplete'` -- `unwrittenSampleCount` is KNOWN to be greater than
+   *                      zero. The trace is short and by how much is stated.
+   *  - `'complete'`   -- zero unwritten AND the recording was finalised. Both
+   *                      halves are required: a zero from a session that never
+   *                      finished is the last figure written before it was
+   *                      interrupted, not a verdict on the whole recording.
+   *  - `'unknown'`    -- anything else. Including the case the reviewer caught:
+   *                      zero unwritten on a session whose recording was never
+   *                      finalised, which the old code reported as "complete
+   *                      (no captured fix went unwritten)".
+   */
+  completeness: 'complete' | 'incomplete' | 'unknown';
 }
 
 /**
@@ -299,11 +321,36 @@ export function buildSessionReportDocument(input: SessionReportInput): SessionRe
       ...(extra.detail === undefined ? {} : { detail: extra.detail }),
     });
   }
+  // Ticket P14 H2/H4/H5/H7: a reported failure whose part is not one of the
+  // named sections above still gets a row -- the component reads of the raw
+  // record (`raw:telemetry`, `raw:gnss:unclaimed`, ...) above all. Rule 2 says
+  // nothing is silently omitted, and a failure with nowhere to land was
+  // exactly a silent omission: `raw` came back `present` and the reads that
+  // threw under it were mentioned nowhere in this document.
+  for (const [part, detail] of failureByPart) {
+    if (availability.some((row) => row.part === part)) continue;
+    availability.push({ part, state: 'failed', detail });
+  }
   availability.push({
     part: 'recording',
     state: input.recording.unwrittenSampleCount === null ? 'unavailable' : 'present',
     ...(input.recording.unwrittenSampleCount === null
       ? { detail: 'this session predates trace-completeness bookkeeping' }
+      : {}),
+  });
+  // Ticket P14 H3: the verdict on the recording is its OWN row, because the
+  // counters being present is a different fact from the recording being
+  // finished. `'unknown'` here is `'unavailable'`: the device cannot answer.
+  availability.push({
+    part: 'recording:completeness',
+    state: input.recording.completeness === 'unknown' ? 'unavailable' : 'present',
+    ...(input.recording.completeness === 'unknown'
+      ? {
+          detail:
+            input.recording.recordingFinalized === false
+              ? 'the recording of this session was never finalised, so the stored counters are a running figure and not a final account'
+              : 'this device holds no conclusive account of whether every captured fix reached storage',
+        }
       : {}),
   });
 
@@ -352,13 +399,22 @@ export function buildSessionReportDocument(input: SessionReportInput): SessionRe
       `The circuit geometry is "${input.circuit.geometryStatus}", not an officially surveyed layout. Lap boundaries and sector splits were computed against it and inherit its uncertainty.`,
     );
   }
-  if (input.recording.traceIncomplete) {
+  if (input.recording.completeness === 'incomplete') {
     notes.push(
       `INCOMPLETE RECORDING: ${String(input.recording.unwrittenSampleCount)} captured GNSS fix(es) were never written to storage and are NOT in this file.`,
     );
   } else if (input.recording.unwrittenSampleCount === null) {
     notes.push(
       'Trace completeness is UNKNOWN for this session: the device kept no count of fixes it failed to write. The trace may be short without saying so.',
+    );
+  } else if (input.recording.recordingFinalized === false) {
+    // Ticket P14 H3: the reviewer's case, stated rather than smoothed over.
+    notes.push(
+      'Trace completeness is UNKNOWN for this session: its recording was never finalised -- the app stopped or crashed while it was still running. The stored count of unwritten fixes is the last figure written before that, not a final account, and fixes captured after it were lost without being counted.',
+    );
+  } else if (input.recording.recordingFinalized === null) {
+    notes.push(
+      'Trace completeness is UNKNOWN for this session: the device holds no record of whether its recording was ever finalised, so the stored counters cannot be read as a final account.',
     );
   }
   if (orphanVerdictLaps.length > 0) {
@@ -469,12 +525,15 @@ export function buildSessionReportMarkdown(doc: SessionReportDocument): string {
   lines.push(
     `- Owner verdicts: ${String(doc.verdictSummary.agreed)} agreed, ${String(doc.verdictSummary.disagreed)} disagreed, ${String(doc.verdictSummary.unanswered)} unanswered`,
   );
+  // Ticket P14 H3: driven by `completeness`, never by "the count is zero".
   lines.push(
-    doc.recording.unwrittenSampleCount === null
-      ? '- Recording completeness: **unknown**'
-      : doc.recording.traceIncomplete
-        ? `- Recording: **INCOMPLETE** -- ${String(doc.recording.unwrittenSampleCount)} captured GNSS fix(es) never reached storage`
-        : '- Recording: complete (no captured fix went unwritten)',
+    doc.recording.completeness === 'incomplete'
+      ? `- Recording: **INCOMPLETE** -- ${String(doc.recording.unwrittenSampleCount)} captured GNSS fix(es) never reached storage`
+      : doc.recording.completeness === 'complete'
+        ? '- Recording: complete (no captured fix went unwritten)'
+        : doc.recording.recordingFinalized === false
+          ? '- Recording completeness: **unknown** -- this recording was never finalised, so the stored counters are not a final account'
+          : '- Recording completeness: **unknown**',
   );
   if (doc.raw !== null) {
     lines.push(
@@ -576,6 +635,21 @@ export interface SessionReportDeps {
   recording?: (sessionId: string) => Partial<SessionReportRecording>;
   /** Whatever other tools in the app produced for this session. */
   extras?: (sessionId: string) => Promise<readonly SessionReportExtra[]>;
+  /**
+   * Ticket P14 H4/H5/H7 (Codex P13 round) -- FAILURES THE READS ABOVE CANNOT
+   * THROW.
+   *
+   * Some parts of this document are wrong not because a call threw but
+   * because of something the caller knows and the call cannot express: rows
+   * that exist in storage and would not decode (H5), a record the live
+   * controller built and could not write (H4), a historical configuration
+   * this device no longer holds (H7). Each one makes a section of this
+   * document FAILED or UNAVAILABLE rather than empty, and this is where the
+   * host says so.
+   *
+   * Never throws; a rejection is itself reported as a failure of `readFailures`.
+   */
+  readFailures?: (sessionId: string) => Promise<readonly { part: string; detail: string }[]>;
   /** Where a partial read failure is reported. Defaults to `console.warn`. */
   onReadError?: (error: unknown) => void;
 }
@@ -615,6 +689,25 @@ export async function loadSessionReportDocument(
       failures.push({ part: 'raw', detail: `raw export unavailable: ${loaded}` });
     } else {
       raw = loaded;
+      // Ticket P14 H2: the raw document degrades COMPONENT BY COMPONENT -- a
+      // failed OBD read still exports the GNSS trace -- and it now says which
+      // components failed. Those failures are this document's too: without
+      // them a raw record whose every read threw arrived here as a perfectly
+      // well-formed document full of empty arrays, and `raw` was marked
+      // `present`. One row per failed component, plus one for `raw` itself, so
+      // neither the summary nor a machine reader can take the record at face
+      // value.
+      for (const failure of raw.readFailures) {
+        failures.push({ part: `raw:${failure.part}`, detail: failure.detail });
+      }
+      if (raw.readFailures.length > 0) {
+        failures.push({
+          part: 'raw',
+          detail: `${String(raw.readFailures.length)} component read(s) of the raw record failed (${raw.readFailures
+            .map((failure) => failure.part)
+            .join(', ')}); what they would have returned is NOT in this document`,
+        });
+      }
     }
   } catch (error) {
     fail('raw', error);
@@ -654,17 +747,41 @@ export async function loadSessionReportDocument(
     fail('circuit', error);
   }
 
+  // Ticket P14 H4/H5/H7: failures only the host can know about.
+  if (deps.readFailures !== undefined) {
+    try {
+      failures.push(...(await deps.readFailures(sessionId)).map((failure) => ({ ...failure })));
+    } catch (error) {
+      fail('readFailures', error);
+    }
+  }
+
   // The stored row is the floor; a live controller's figures (which alone know
   // `persistedSampleCount`) override it where they exist.
   const live = deps.recording?.(sessionId) ?? {};
   const unwritten = live.unwrittenSampleCount ?? session.unwrittenSampleCount ?? null;
+  // Ticket P14 H3: whether the recording was ever FINISHED. `undefined` from
+  // both sources stays `null` (= UNKNOWN); it is never defaulted to `true`,
+  // because the whole failure this fixes was a default that over-claimed.
+  const finalized = live.recordingFinalized ?? session.recordingFinalized ?? null;
+  const traceIncomplete = unwritten !== null && unwritten > 0;
   const recording: SessionReportRecording = {
     persistedSampleCount: live.persistedSampleCount ?? null,
     unwrittenSampleCount: unwritten,
     failedWriteCount: live.failedWriteCount ?? session.failedWriteCount ?? null,
     // `null` is UNKNOWN and must never read as complete; only a known positive
     // count makes this true.
-    traceIncomplete: unwritten !== null && unwritten > 0,
+    traceIncomplete,
+    recordingFinalized: finalized,
+    // Ticket P14 H3: BOTH halves are required to say "complete". A zero from a
+    // session whose recording never finished is the last figure written before
+    // it was interrupted -- reading it as a verdict is how a truncated drive
+    // came to be reported as "complete (no captured fix went unwritten)".
+    completeness: traceIncomplete
+      ? 'incomplete'
+      : unwritten !== null && finalized === true
+        ? 'complete'
+        : 'unknown',
   };
 
   return buildSessionReportDocument({

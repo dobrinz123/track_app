@@ -61,6 +61,11 @@ export class SqlSessionHistoryStore implements SessionHistoryStore {
           : {
               unwrittenSampleCount: s.trace.unwrittenSampleCount,
               failedWriteCount: s.trace.failedWriteCount,
+              // Ticket P14 H3: absent stays ABSENT (= unknown). A row written
+              // before the column existed must not read back as finalised.
+              ...(s.trace.recordingFinalized === undefined
+                ? {}
+                : { recordingFinalized: s.trace.recordingFinalized }),
             }),
       }));
 

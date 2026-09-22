@@ -13,6 +13,7 @@ import { TimeDisplay } from '../components/TimeDisplay';
 import { QualityPill } from '../components/QualityPill';
 import {
   getLapVerdicts,
+  getUnsavedLapVerdicts,
   getTelemetryReadDb,
   lapVerdictSupport,
   recordLapValidityVerdict,
@@ -25,6 +26,7 @@ import {
   verdictControlEnabled,
   verdictTapFeedback,
 } from '../../session/lapVerdictViewModel';
+import type { UnsavedLapVerdict } from '../../session/lapVerdictStore';
 import { LapVerdictControl } from '../components/LapVerdictControl';
 import { useSettings } from '../hooks/useSettings';
 import { resolveLapVerdictStrings } from './lapVerdictStrings';
@@ -180,6 +182,9 @@ export function LapDetailScreen({ route }: Props): React.JSX.Element {
   const settings = useSettings(settingsStore);
   const verdictStrings = resolveLapVerdictStrings(settings.language);
   const [verdicts, setVerdicts] = React.useState<LapValidityVerdict[]>([]);
+  // Ticket P14 H1: answers that did not reach storage, held beside the stored
+  // ones and never folded into them.
+  const [unsavedVerdicts, setUnsavedVerdicts] = React.useState<readonly UnsavedLapVerdict[]>([]);
   const [verdictBusy, setVerdictBusy] = React.useState(false);
   const [verdictNote, setVerdictNote] = React.useState<{ text: string; error: boolean } | null>(null);
   const verdictsEnabled = verdictControlEnabled(lapVerdictSupport());
@@ -187,7 +192,10 @@ export function LapDetailScreen({ route }: Props): React.JSX.Element {
   React.useEffect(() => {
     let cancelled = false;
     void refreshLapVerdicts(sessionId).then(() => {
-      if (!cancelled) setVerdicts(getLapVerdicts(sessionId));
+      if (!cancelled) {
+        setVerdicts(getLapVerdicts(sessionId));
+        setUnsavedVerdicts(getUnsavedLapVerdicts(sessionId));
+      }
     });
     return () => {
       cancelled = true;
@@ -202,6 +210,7 @@ export function LapDetailScreen({ route }: Props): React.JSX.Element {
       const outcome = await recordLapValidityVerdict({ sessionId, lapNumber: lap, decision });
       const feedback = verdictTapFeedback(outcome);
       setVerdicts(getLapVerdicts(sessionId));
+      setUnsavedVerdicts(getUnsavedLapVerdicts(sessionId));
       setVerdictNote({
         text:
           feedback.key === 'saved'
@@ -230,7 +239,7 @@ export function LapDetailScreen({ route }: Props): React.JSX.Element {
 
   // Built from the lap this screen is actually showing, so a verdict row can
   // never be drawn against a different lap's number.
-  const verdictRow = buildLapVerdictRows([lap], verdicts).find(
+  const verdictRow = buildLapVerdictRows([lap], verdicts, unsavedVerdicts).find(
     (row) => row.lapNumber === lap.lapNumber,
   );
 

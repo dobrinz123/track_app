@@ -70,6 +70,7 @@ import {
 import {
   createLapVerdictStore,
   type LapVerdictStore,
+  type UnsavedLapVerdict,
   type LapVerdictSupport,
   type RecordVerdictOutcome,
 } from './lapVerdictStore';
@@ -120,6 +121,11 @@ import type { DevReplayScenario } from './devReplayScenarios';
 import { startVoiceCoach } from './voiceCoach';
 import { createTelemetryProvider, type TelemetryProvider, type VehicleProfileBindingLike } from './telemetryProvider';
 import { createVehicleProfileBindingStore } from '../persistence/didSweepStore';
+import {
+  readSessionVehicleSnapshot,
+  writeSessionVehicleSnapshot,
+  type SessionVehicleSnapshot,
+} from '../persistence/sessionVehicleSnapshot';
 import { createRawUdsChannel } from './didSweepController';
 import { EnetTcpTransport } from './enetTcpTransport';
 import { enetAdapterReservation as sharedEnetAdapterReservation } from './enetAdapterReservation';
@@ -725,6 +731,56 @@ export async function refreshVehicleProfileBindingsCache(): Promise<void> {
 /** Test/diagnostic visibility into the cache above. */
 export function getVehicleProfileBindingsCache(): readonly VehicleProfileBindingLike[] {
   return vehicleProfileBindingsCache;
+}
+
+/**
+ * Ticket P14 H7 (binding) -- THE CAR THIS SESSION WAS RECORDED WITH, WRITTEN
+ * DOWN AT THE TIME.
+ *
+ * Called once per session start. Never throws and never blocks the start: a
+ * driver must not be refused a session by a bookkeeping write, exactly as
+ * `persistInitialSessionRecord` decided for the session row. A snapshot that
+ * does not land leaves the export reporting the historical configuration as
+ * UNAVAILABLE, which is true and is not the same as substituting today's.
+ */
+async function snapshotSessionVehicleProfile(sessionId: string): Promise<void> {
+  const database = db;
+  if (database === null) return;
+  try {
+    // Read the bindings FRESH rather than off the cache: the cache is
+    // refreshed asynchronously and a session started right after a profile
+    // switch could otherwise snapshot the previous profile's bindings under
+    // the new profile's id -- the very mismatch this exists to prevent.
+    const profileId = getActiveVehicleProfileId();
+    const store = createVehicleProfileBindingStore(getTelemetryReadDb());
+    const bindings = await store.listBindings(profileId);
+    await writeSessionVehicleSnapshot(database, sessionId, {
+      profileId,
+      bindings: bindings.map((binding) => ({ ...binding })) as SessionVehicleSnapshot['bindings'],
+      capturedAtUtc: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.warn('[composition] could not snapshot the session vehicle profile', error);
+  }
+}
+
+/**
+ * Ticket P14 H7: the snapshots this process has read, so the SYNCHRONOUS
+ * extras roll-call can use them. Populated by {@link loadSessionVehicleSnapshot},
+ * which `buildSessionReport` awaits before collecting the extras.
+ *
+ * A session absent from this map is UNAVAILABLE, never "today's profile".
+ */
+const sessionVehicleSnapshots = new Map<string, SessionVehicleSnapshot | null>();
+
+/** Ticket P14 H7: reads one session's snapshot into the map above. Never throws. */
+async function loadSessionVehicleSnapshot(sessionId: string): Promise<void> {
+  const database = db;
+  if (database === null) {
+    sessionVehicleSnapshots.set(sessionId, null);
+    return;
+  }
+  sessionVehicleSnapshots.set(sessionId, await readSessionVehicleSnapshot(database, sessionId));
 }
 
 /**
@@ -1693,6 +1749,12 @@ function initializeSessionStage(sessionId: string, startedAtUtc: string): void {
   // and so is everything the pit view reads -- a session starts from a clean
   // journal and an empty stint cache.
   suggestionJournal.clear(sessionId);
+  // Ticket P14 H6: and this process is now the one recording for it, so a
+  // later empty read of the journal is a fact about the session rather than a
+  // fact about the journal being in memory only.
+  suggestionJournal.markObserved(sessionId);
+  // Ticket P14 H7: the car this session is being driven with, captured NOW.
+  void snapshotSessionVehicleProfile(sessionId);
   stintRunner?.clear();
   stintTraceCache.clear();
   // P5c-FIX2 L16 wiring (LEAD): a batch queued by a PREVIOUS session must not
@@ -4329,6 +4391,19 @@ export function getLapVerdicts(sessionId: string): LapValidityVerdict[] {
   return lapVerdictStore.forSession(sessionId, laps);
 }
 
+/**
+ * Ticket P14 H1: the answers the owner gave that STORAGE DOES NOT HOLD --
+ * their write in flight, or failed.
+ *
+ * Kept apart from {@link getLapVerdicts} on purpose. That function answers
+ * "what is recorded", and the old store's habit of caching before the write
+ * resolved is exactly how a failed save came to be recorded. A screen shows
+ * both: the answer, and the fact that it did not stick.
+ */
+export function getUnsavedLapVerdicts(sessionId: string): readonly UnsavedLapVerdict[] {
+  return lapVerdictStore.unsaved(sessionId);
+}
+
 /** How many of this session's laps the owner agreed with, disagreed with, and never got to. */
 export function getLapVerdictSummary(sessionId: string): Record<LapVerdictAnswer, number> {
   const laps = historyStore?.getSession(sessionId)?.laps ?? [];
@@ -4436,6 +4511,19 @@ function sessionReportExtras(sessionId: string): SessionReportExtra[] {
       description:
         'What the trackday suggestion stage did in this session: cue moves applied and pit suggestions shown.',
       read: () => {
+        // Ticket P14 H6 (binding): the journal is IN MEMORY. After a restart it
+        // answers every session with empty arrays, and the old code read that
+        // as "the trackday stage applied no cue move and showed no pit
+        // suggestion in this session" -- a statement about the drive made by a
+        // process that was not there for it. It may only be made for a session
+        // this process actually recorded.
+        if (!suggestionJournal.observed(sessionId)) {
+          return {
+            state: 'unavailable',
+            detail:
+              'The trackday suggestion journal is held in memory for the life of the app run that recorded the session. This app run did not record this session, so what the trackday stage did in it is NOT readable here -- which is not the same as it having done nothing.',
+          };
+        }
         const record = getTrackdayRecord(sessionId);
         if (record.cueUpdates.length === 0 && record.shownPitSuggestions.length === 0) {
           return {
@@ -4455,15 +4543,37 @@ function sessionReportExtras(sessionId: string): SessionReportExtra[] {
         // `peek` NEVER starts work: an export must not kick off an engine pass
         // on a phone in a paddock. A session that was never analysed is
         // reported as such rather than analysed on the spot.
-        const cached = getAnalysisRunner().peek(sessionId);
-        if (cached === null) {
+        const runner = getAnalysisRunner();
+        const cached = runner.peek(sessionId);
+        if (cached !== null) return { state: 'present', data: cached };
+        // Ticket P14 H6 (binding): only READY results are memoised, so a
+        // `null` from `peek` used to produce "the analysis has not been run"
+        // for a session whose analysis ERRORED as well as for one nobody
+        // analysed. `outcome()` says which -- and both of the other answers
+        // are failures, not absences.
+        const outcome = runner.outcome(sessionId);
+        if (outcome.state === 'failed') {
           return {
-            state: 'empty',
-            detail:
-              'The analysis has not been run for this session on this device, so there is no result to carry.',
+            state: 'failed',
+            detail: `The analysis of this session was RUN and FAILED${
+              outcome.detail === undefined ? '' : `: ${outcome.detail}`
+            }. There is no result to carry, and that is a fault of this device, not a property of the drive.`,
           };
         }
-        return { state: 'present', data: cached };
+        if (outcome.state === 'unavailable') {
+          return {
+            state: 'unavailable',
+            detail: `The analysis could not be run for this session (${outcome.detail ?? 'reason not recorded'}), so there is no result to carry.`,
+          };
+        }
+        // Ticket P14 H6: the cache is per app run. "Not analysed" is only
+        // sayable about THIS run, and the row says so rather than implying
+        // the session was never analysed at all.
+        return {
+          state: 'empty',
+          detail:
+            'The analysis has not been run for this session in this app run (the result cache does not survive a restart), so there is no result to carry.',
+        };
       },
     },
     {
@@ -4490,15 +4600,37 @@ function sessionReportExtras(sessionId: string): SessionReportExtra[] {
       description:
         'The active vehicle profile and its confirmed channel bindings -- the durable output of the Signal Finder.',
       read: () => {
-        const profileId = getActiveVehicleProfileId();
-        const bindings = getVehicleProfileBindingsCache();
-        if (bindings.length === 0) {
+        // Ticket P14 H7 (binding) -- THE SNAPSHOT, NEVER TODAY'S PROFILE.
+        //
+        // The old code read the CURRENTLY active profile and its bindings.
+        // Record with profile A, switch to B, export A's session: the document
+        // carried B's bindings, and an empty B additionally claimed that no
+        // OBD channel had been decoded from a binding -- about a session that
+        // decoded plenty. A trace is only interpretable against the bindings
+        // that produced it, so a report that substitutes a different set is
+        // worse than one that admits it does not know.
+        const snapshot = sessionVehicleSnapshots.get(sessionId) ?? null;
+        if (snapshot === null) {
           return {
-            state: 'empty',
-            detail: `Vehicle profile "${profileId}" has no confirmed channel binding, so no OBD channel was decoded from one.`,
+            state: 'unavailable',
+            detail:
+              'No vehicle-profile snapshot was taken for this session (it predates per-session snapshots, or the snapshot did not land). The profile active on this device TODAY is deliberately NOT substituted: it may be a different car, and the bindings this session was decoded with are not recoverable from it.',
           };
         }
-        return { state: 'present', data: { profileId, bindings: [...bindings] } };
+        if (snapshot.bindings.length === 0) {
+          return {
+            state: 'empty',
+            detail: `Vehicle profile "${snapshot.profileId}" held no confirmed channel binding when this session started, so no OBD channel was decoded from one.`,
+          };
+        }
+        return {
+          state: 'present',
+          data: {
+            profileId: snapshot.profileId,
+            bindings: snapshot.bindings.map((binding) => ({ ...binding })),
+            capturedAtUtc: snapshot.capturedAtUtc,
+          },
+        };
       },
     },
     {
@@ -4537,6 +4669,10 @@ export async function buildSessionReport(
   const store = historyStore;
   if (store === null) return 'storage-unavailable';
   const repo = repository;
+  // Ticket P14 H7: the snapshot is read ONCE, before the extras roll-call
+  // (which is synchronous) asks for it. An unread session is UNAVAILABLE
+  // there, which is exactly what a device with no snapshot must report.
+  await loadSessionVehicleSnapshot(sessionId);
   return loadSessionReportDocument(
     {
       getSession: (id) => store.getSession(id),
@@ -4566,11 +4702,105 @@ export async function buildSessionReport(
         };
       },
       extras: (id) => Promise.resolve(sessionReportExtras(id)),
+      readFailures: (id) => collectSessionReportFailures(id),
       onReadError: (error) => console.warn('[composition] session report read failed', error),
     },
     sessionId,
     generatedAtUtc,
   );
+}
+
+/**
+ * Ticket P14 H4/H5/H7 (binding) -- THE FAILURES NO READ IN THE LOADER CAN
+ * THROW.
+ *
+ * Three of the reviewer's findings are of the same shape: the call succeeds
+ * and the answer is still wrong, because something the HOST knows and the call
+ * cannot express has gone missing.
+ *
+ *  - H5: rows that exist in storage and would not decode. The list read
+ *    returns the survivors (rightly -- one corrupt answer must not cost the
+ *    rest), so an entirely unreadable table came back as `[]` and the report
+ *    said `empty`: "we looked, there was nothing".
+ *  - H4: a calibration conclusion the live controller built and could not
+ *    write. Storage still holds the earlier PROVISIONAL row, and the report
+ *    presented it as the attempt's final account.
+ *  - H7: a session with no vehicle-profile snapshot. The configuration it was
+ *    recorded under is simply not on this device.
+ *
+ * Each becomes a `failed` availability row and a note. Never throws: a failure
+ * here would cost the whole document, which is the trade this file has refused
+ * everywhere else.
+ */
+async function collectSessionReportFailures(
+  sessionId: string,
+): Promise<readonly { part: string; detail: string }[]> {
+  const failures: { part: string; detail: string }[] = [];
+  const repo = repository;
+
+  // H5 -- unreadable stored rows, verdict side.
+  const verdictDiagnostics = repo?.listLapValidityVerdictsWithDiagnostics;
+  if (verdictDiagnostics !== undefined) {
+    try {
+      const read = await verdictDiagnostics.call(repo, sessionId);
+      if (read.unreadableCount > 0) {
+        failures.push({
+          part: 'lapVerdicts',
+          detail: `${String(read.unreadableCount)} stored verdict row(s) could not be decoded on this device. The laps they belong to are UNREADABLE, not unanswered.`,
+        });
+      }
+    } catch (error) {
+      failures.push({
+        part: 'lapVerdicts',
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  // H5 -- unreadable stored rows, calibration side.
+  const attemptDiagnostics = repo?.listCalibrationAttemptsWithDiagnostics;
+  if (attemptDiagnostics !== undefined) {
+    try {
+      const read = await attemptDiagnostics.call(repo, sessionId);
+      if (read.unreadableCount > 0) {
+        failures.push({
+          part: 'calibrationAttempts',
+          detail: `${String(read.unreadableCount)} stored calibration attempt row(s) could not be decoded on this device. They are UNREADABLE, not absent.`,
+        });
+      }
+    } catch (error) {
+      failures.push({
+        part: 'calibrationAttempts',
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  // H4 -- a conclusion the live controller could not write.
+  const controller = activeController;
+  if (controller !== null) {
+    const unpersisted = controller
+      .unpersistedCalibrationAttempts()
+      .filter((record) => record.sessionId === sessionId);
+    const failure = controller.calibrationRecordFailure();
+    if (unpersisted.length > 0) {
+      failures.push({
+        part: 'calibrationAttempts',
+        detail: `${String(unpersisted.length)} calibration record(s) for this session could NOT be written to storage${
+          failure === null ? '' : ` (${failure.detail})`
+        }. The stored rows for those attempts are earlier, PROVISIONAL ones and are not their final account; the concluded record exists only in memory. Outcome(s) held: ${unpersisted
+          .map((record) => record.outcome)
+          .join(', ')}.`,
+      });
+    }
+  }
+
+  // H7 is NOT reported here. A session with no snapshot is UNAVAILABLE, not
+  // FAILED -- nothing went wrong, the device simply never recorded which car
+  // that session was driven with -- and the `extras:vehicleProfile` row the
+  // roll-call already emits says exactly that, in full, with the reason. A
+  // second row here would contradict it.
+  return failures;
 }
 
 /** The session the pit view reads, or `null` when no session is running. */

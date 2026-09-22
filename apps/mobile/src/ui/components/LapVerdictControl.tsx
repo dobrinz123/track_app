@@ -56,9 +56,21 @@ export function LapVerdictControl({
         <Text style={styles.question} maxFontSizeMultiplier={1.3}>
           {strings.question}
         </Text>
-        {row.answered ? null : (
-          <Text style={styles.todoBadge} maxFontSizeMultiplier={1.3}>
-            {strings.unansweredBadge}
+        {row.unsavedAnswer === undefined ? (
+          row.answered ? null : (
+            <Text style={styles.todoBadge} maxFontSizeMultiplier={1.3}>
+              {strings.unansweredBadge}
+            </Text>
+          )
+        ) : (
+          // Ticket P14 H1: an answer that is not on disk gets its own badge,
+          // and it OUTRANKS "TO DO" -- the owner has done this lap; what has
+          // not happened is the saving of it.
+          <Text
+            style={row.unsavedAnswer.state === 'failed' ? styles.unsavedBadge : styles.todoBadge}
+            maxFontSizeMultiplier={1.3}
+          >
+            {row.unsavedAnswer.state === 'failed' ? strings.unsavedBadge : strings.pendingBadge}
           </Text>
         )}
       </View>
@@ -110,11 +122,36 @@ export function LapVerdictControl({
             }`
           : strings.unanswered}
       </Text>
+      {/*
+        Ticket P14 H1: PERSISTENT, per lap, for as long as the answer is not on
+        disk. The transient note under the list was the only warning before,
+        and the next tap on any lap wiped it -- so an answer that never reached
+        storage went on reading as one that had.
+      */}
+      {row.unsavedAnswer?.state === 'failed' ? (
+        <Text style={styles.unsavedNotice} maxFontSizeMultiplier={1.3}>
+          {strings.unsavedNotice}
+          {row.unsavedAnswer.detail === undefined ? '' : ` (${row.unsavedAnswer.detail})`}
+        </Text>
+      ) : null}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  // Ticket P14 H1: louder than the amber "TO DO" -- an answer that did not
+  // reach storage is a fault, not an outstanding task.
+  unsavedBadge: {
+    color: colors.slower,
+    fontFamily: fontFamily.bodyMedium,
+    fontSize: typography.caption.fontSize,
+    letterSpacing: 1,
+  },
+  unsavedNotice: {
+    color: colors.slower,
+    fontFamily: fontFamily.bodyRegular,
+    fontSize: typography.caption.fontSize,
+  },
   block: {
     borderRadius: radii.md,
     borderWidth: 1,

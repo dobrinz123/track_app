@@ -7,6 +7,7 @@ import type {
   ReferenceLap,
   SessionMachineSnapshot,
   SessionSummary,
+  StoredRecordRead,
 } from '../contracts';
 import { checkpointSupersedes } from './checkpointCodec';
 import { assertJsonSerializable } from './jsonSerializable';
@@ -162,6 +163,18 @@ export class InMemorySessionRepository implements LocalSessionRepository {
       .map((verdict) => structuredClone(verdict));
   }
 
+  /**
+   * Ticket P14 H5: parity with `SqlSessionRepository`. Nothing here can be
+   * unreadable -- the records are held as objects, never as text -- so the
+   * count is always `0`, and that ZERO is a real answer: this store knows it
+   * lost nothing. It is not the same as a store that cannot tell.
+   */
+  async listLapValidityVerdictsWithDiagnostics(
+    sessionId: string,
+  ): Promise<StoredRecordRead<LapValidityVerdict>> {
+    return { records: await this.listLapValidityVerdicts(sessionId), unreadableCount: 0 };
+  }
+
   /** Ticket P12 item B. Keyed by `attemptId`, so rewriting a provisional row replaces it rather than accumulating duplicates. */
   async saveCalibrationAttempt(record: CalibrationAttemptRecord): Promise<void> {
     assertJsonSerializable(record, `calibrationAttempt(${record.attemptId})`);
@@ -175,6 +188,13 @@ export class InMemorySessionRepository implements LocalSessionRepository {
         a.startedAtUtc < b.startedAtUtc ? -1 : a.startedAtUtc > b.startedAtUtc ? 1 : a.attemptId.localeCompare(b.attemptId),
       )
       .map((record) => structuredClone(record));
+  }
+
+  /** Ticket P14 H5: parity with `SqlSessionRepository` -- see the verdict read above. */
+  async listCalibrationAttemptsWithDiagnostics(
+    sessionId: string,
+  ): Promise<StoredRecordRead<CalibrationAttemptRecord>> {
+    return { records: await this.listCalibrationAttempts(sessionId), unreadableCount: 0 };
   }
 
   async getReferenceLap(

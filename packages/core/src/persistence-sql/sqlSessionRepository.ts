@@ -8,6 +8,7 @@ import type {
   SessionCalibrationStatus,
   SessionMachineSnapshot,
   SessionSummary,
+  StoredRecordRead,
 } from '../contracts';
 import {
   CheckpointCodec,
@@ -16,7 +17,15 @@ import {
   validateReferenceLap,
 } from '../persistence';
 import type { SqlDatabase } from './sqlDatabase';
-import { SQL_ALTERS_V3, SQL_ALTERS_V4, SQL_DDL, SQL_DDL_V2, SQL_DDL_V5, SQL_SCHEMA_VERSION } from './schema';
+import {
+  SQL_ALTERS_V3,
+  SQL_ALTERS_V4,
+  SQL_ALTERS_V6,
+  SQL_DDL,
+  SQL_DDL_V2,
+  SQL_DDL_V5,
+  SQL_SCHEMA_VERSION,
+} from './schema';
 
 interface SessionRow {
   sessionId: string;
@@ -28,6 +37,8 @@ interface SessionRow {
   calibrationStatus: string | null;
   traceUnwritten: number | null;
   traceFailedWrites: number | null;
+  /** Ticket P14 H3: `1` finalised, `0` still recording, NULL unknown (row predates the column). */
+  traceFinalized: number | null;
 }
 
 /**
@@ -49,19 +60,25 @@ interface PayloadRow {
  * session's worth of answers must not cost the others -- the same trade
  * `readUnclaimedGnssChunks` already makes for the trace, and the same reason:
  * these reads exist to get data OFF the device.
+ *
+ * Ticket P14 H5 (Codex P13 round) -- BUT IT SAYS SO NOW. The old version
+ * returned the survivors and told nobody, so a table of unreadable rows came
+ * back as `[]` and every reader above it classified an INACCESSIBLE record as
+ * "read, and there genuinely was nothing". The skip is still the right trade;
+ * the silence was not. `unreadableCount` is what turns the caller's report
+ * section from `empty` into `failed`.
  */
-function parsePayloads<T>(rows: readonly PayloadRow[]): T[] {
-  const parsed: T[] = [];
+function parsePayloads<T>(rows: readonly PayloadRow[]): StoredRecordRead<T> {
+  const records: T[] = [];
+  let unreadableCount = 0;
   for (const row of rows) {
     try {
-      parsed.push(JSON.parse(row.payload) as T);
+      records.push(JSON.parse(row.payload) as T);
     } catch {
-      // Unreadable row: omitted. A caller counting rows against what it
-      // expects (the report's per-lap merge) surfaces the shortfall as an
-      // unanswered lap rather than as a silently wrong total.
+      unreadableCount += 1;
     }
   }
-  return parsed;
+  return { records, unreadableCount };
 }
 
 /**
@@ -126,6 +143,14 @@ export class SqlSessionRepository implements LocalSessionRepository {
     }
     // v4 (ticket P11C): `checkpoints.lapCount`, on the same terms.
     for (const statement of SQL_ALTERS_V4) {
+      try {
+        await this.db.execAsync(statement);
+      } catch {
+        // Column already present -- see SQL_ALTERS_V3's loop above.
+      }
+    }
+    // v6 (ticket P14 H3): `sessions.traceFinalized`, on the same terms.
+    for (const statement of SQL_ALTERS_V6) {
       try {
         await this.db.execAsync(statement);
       } catch {
@@ -264,8 +289,8 @@ export class SqlSessionRepository implements LocalSessionRepository {
       await tx.runAsync(
         `INSERT OR REPLACE INTO sessions
            (sessionId, userId, circuitId, layoutId, layoutVersion, startedAtUtc,
-            calibrationStatus, traceUnwritten, traceFailedWrites)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            calibrationStatus, traceUnwritten, traceFailedWrites, traceFinalized)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           s.sessionId,
           s.userId,
@@ -279,6 +304,10 @@ export class SqlSessionRepository implements LocalSessionRepository {
           s.calibrationStatus ?? 'unknown',
           s.trace?.unwrittenSampleCount ?? null,
           s.trace?.failedWriteCount ?? null,
+          // Ticket P14 H3: an absent flag stays NULL (= UNKNOWN) rather than
+          // being written as 0/1 on the caller's behalf. Only a caller that
+          // actually knows the recording finished may claim it did.
+          s.trace?.recordingFinalized === undefined ? null : s.trace.recordingFinalized ? 1 : 0,
         ],
       );
       // Full replace of this session's laps: matches saveSession's
@@ -297,7 +326,7 @@ export class SqlSessionRepository implements LocalSessionRepository {
   async listSessions(userId: string, circuitId: string): Promise<SessionSummary[]> {
     const sessionRows = await this.db.getAllAsync<SessionRow>(
       `SELECT sessionId, userId, circuitId, layoutId, layoutVersion, startedAtUtc,
-              calibrationStatus, traceUnwritten, traceFailedWrites
+              calibrationStatus, traceUnwritten, traceFailedWrites, traceFinalized
        FROM sessions
        WHERE userId = ? AND circuitId = ?
        ORDER BY startedAtUtc DESC`,
@@ -319,12 +348,16 @@ export class SqlSessionRepository implements LocalSessionRepository {
         startedAtUtc: row.startedAtUtc,
         laps: lapRows.map((r) => JSON.parse(r.payload) as LapRecord),
         calibrationStatus: decodeCalibrationStatus(row.calibrationStatus ?? null),
-        ...(row.traceUnwritten === null && row.traceFailedWrites === null
+        ...(row.traceUnwritten === null && row.traceFailedWrites === null && row.traceFinalized === null
           ? {}
           : {
               trace: {
                 unwrittenSampleCount: row.traceUnwritten ?? 0,
                 failedWriteCount: row.traceFailedWrites ?? 0,
+                // Ticket P14 H3: NULL stays ABSENT, never `false`, so a row
+                // written before this column existed reads as UNKNOWN rather
+                // than as "we know it was interrupted".
+                ...(row.traceFinalized === null ? {} : { recordingFinalized: row.traceFinalized === 1 }),
               },
             }),
       });
@@ -395,6 +428,17 @@ export class SqlSessionRepository implements LocalSessionRepository {
    * the chunk reader makes for the trace.
    */
   async listLapValidityVerdicts(sessionId: string): Promise<LapValidityVerdict[]> {
+    return (await this.listLapValidityVerdictsWithDiagnostics(sessionId)).records;
+  }
+
+  /**
+   * Ticket P14 H5: the same rows, plus how many of them this device could not
+   * decode. A caller that sees `unreadableCount > 0` must report the section
+   * as FAILED -- an unreadable answer is not an unanswered lap.
+   */
+  async listLapValidityVerdictsWithDiagnostics(
+    sessionId: string,
+  ): Promise<StoredRecordRead<LapValidityVerdict>> {
     const rows = await this.db.getAllAsync<PayloadRow>(
       'SELECT payload FROM lap_verdicts WHERE sessionId = ? ORDER BY lapNumber ASC',
       [sessionId],
@@ -412,6 +456,13 @@ export class SqlSessionRepository implements LocalSessionRepository {
   }
 
   async listCalibrationAttempts(sessionId: string): Promise<CalibrationAttemptRecord[]> {
+    return (await this.listCalibrationAttemptsWithDiagnostics(sessionId)).records;
+  }
+
+  /** Ticket P14 H5: as above, plus the count of attempt rows that would not decode. */
+  async listCalibrationAttemptsWithDiagnostics(
+    sessionId: string,
+  ): Promise<StoredRecordRead<CalibrationAttemptRecord>> {
     const rows = await this.db.getAllAsync<PayloadRow>(
       'SELECT payload FROM calibration_attempts WHERE sessionId = ? ORDER BY startedAtUtc ASC, attemptId ASC',
       [sessionId],

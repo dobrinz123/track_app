@@ -717,6 +717,36 @@ export class SessionController {
   /** Ticket P12 item B: the last record this controller wrote, for a host that wants to show it without a read. */
   private lastCalibrationAttemptRecord: CalibrationAttemptRecord | null = null;
   /**
+   * Ticket P14 H4 (Codex P13 round) -- THE FINAL RECORDS THAT DID NOT LAND.
+   *
+   * Keyed by `attemptId`, so a later successful write for the same attempt
+   * clears it and a retry never resurrects a superseded record. An entry means
+   * "storage does not hold this attempt's account of itself, and the row it
+   * does hold is an older, provisional one".
+   *
+   * The old code caught the rejection, logged it, and dropped the record. The
+   * reviewer's reproduction: the provisional row saved, the CANCEL conclusion
+   * failed, and repeated `flush()` never retried -- so live state said
+   * `cancelled` while storage said `stalled, concluded: false` for ever, and
+   * the export presented that stale provisional row as the final account. The
+   * cancel record the owner explicitly asked for was the thing that vanished.
+   */
+  private unpersistedCalibrationRecords = new Map<string, CalibrationAttemptRecord>();
+  /** Ticket P14 H4: why the most recent calibration-record write failed, for a host and an export to state. */
+  private calibrationWriteFailure: { attemptId: string; outcome: string; detail: string } | null = null;
+  /**
+   * Ticket P14 H3 (Codex P13 round) -- HAS THE RECORDING OF THIS SESSION
+   * FINISHED?
+   *
+   * Set only by `endSession()`, on the final session write. Every write before
+   * it says `false`, which is what stops a stored `unwrittenSampleCount: 0`
+   * from a still-running session reading afterwards as "complete (no captured
+   * fix went unwritten)": while recording, that zero is a running figure and
+   * captured fixes sit in `pendingTrace` uncounted. A crash leaves the last
+   * `false` on disk, which is the truth -- nobody finished this recording.
+   */
+  private recordingFinalized = false;
+  /**
    * Ticket P12 item B: serializes calibration-attempt writes, so the concluded
    * row can never land before a provisional one that was issued earlier and
    * leave the stalled figures on disk as the final word.
@@ -993,6 +1023,11 @@ export class SessionController {
     // a caller that has flushed must be able to find this session in
     // `listSessions`, whether or not it ever completed a lap.
     await this.sessionRecordTail;
+    // Ticket P14 H4: one more attempt at every calibration record an earlier
+    // write could not store, queued BEFORE the tail is awaited so this flush
+    // covers it. The old code retried nothing, so a CANCEL conclusion that
+    // failed once was gone for the life of the process.
+    this.retryUnpersistedCalibrationRecords();
     // Ticket P12 item B: and the calibration attempt record. Same reason
     // again: a caller that has flushed must be able to read back why the
     // Learn lap ended the way it did. Never rejects -- see
@@ -1179,6 +1214,9 @@ export class SessionController {
     if (assignedSessionIdHere) {
       this.sessionId = `${this.deps.userId}--${randomToken()}`;
       this.sessionStartedAtUtc = new Date().toISOString();
+      // Ticket P14 H3: a NEW session has not finished recording, whatever the
+      // previous one on this controller did.
+      this.recordingFinalized = false;
       // Ticket P5c-B D2: "one change per corner per stint" is scoped to the
       // outing, so a brand-new session starts from the derived cues again --
       // never carrying another outing's moves into this one.
@@ -1530,6 +1568,11 @@ export class SessionController {
     await this.flush();
     const sessionId = this.sessionId;
     if (sessionId !== null) {
+      // Ticket P14 H3: the recording is over -- the final raw-trace flush
+      // above has run and every retry with it. Set BEFORE the summary is
+      // built, and ONLY here: every earlier write happened while fixes could
+      // still be captured, so only this one may claim the counters are final.
+      this.recordingFinalized = true;
       // Ticket P10A H2/H3/H6: the same record shape written at recording
       // start, now with the session's laps, its final calibration provenance
       // and -- the honest part -- whatever the trace writer could NOT store.
@@ -1659,6 +1702,10 @@ export class SessionController {
     // new information, only its absence.
     const carriedStatus = this.sessionId === sessionId ? this.calibrationStatus : null;
     this.sessionId = sessionId;
+    // Ticket P14 H3: a session being RESTORED is by definition one whose
+    // recording never finished -- that is why there is a checkpoint to
+    // restore. It is finalised only by the `endSession()` that follows.
+    this.recordingFinalized = false;
     // Ticket P11C: the restored checkpoint is what storage already holds, so
     // the monotonic rule starts from ITS generation rather than from zero --
     // otherwise the first fallback-path write after a relaunch could be an
@@ -2062,6 +2109,10 @@ export class SessionController {
       trace: {
         unwrittenSampleCount: this.unwrittenTraceSampleCount(),
         failedWriteCount: this.traceWriteFailures,
+        // Ticket P14 H3: `false` for every write made WHILE recording. Only
+        // `endSession()`'s final write sets it, and it is the only thing that
+        // entitles a reader to call this trace complete.
+        recordingFinalized: this.recordingFinalized,
       },
     };
   }
@@ -2211,12 +2262,90 @@ export class SessionController {
     this.lastCalibrationAttemptRecord = record;
     const save = this.deps.repository.saveCalibrationAttempt;
     if (save === undefined) return;
+    // Ticket P14 H4: the record is held from the moment it is QUEUED, not
+    // from the moment a write fails -- so there is no window in which the map
+    // says a write succeeded that has not yet been attempted.
+    this.unpersistedCalibrationRecords.set(record.attemptId, record);
     const work = this.calibrationRecordTail
       .then(() => save.call(this.deps.repository, record))
+      .then(() => {
+        // Only THIS record clears. A newer one queued meanwhile has already
+        // replaced the entry and must keep its place in the map.
+        if (this.unpersistedCalibrationRecords.get(record.attemptId) === record) {
+          this.unpersistedCalibrationRecords.delete(record.attemptId);
+        }
+        if (this.calibrationWriteFailure?.attemptId === record.attemptId) {
+          this.calibrationWriteFailure = null;
+        }
+      })
       .catch((error: unknown) => {
         this.noteRecordFailure(`calibration-attempt(${record.outcome})`, error);
+        // RETAINED, not dropped: `flush()` retries it, and until it lands
+        // `calibrationRecordFailure()` says so -- so no reader can present
+        // the older row storage still holds as this attempt's final account.
+        this.calibrationWriteFailure = {
+          attemptId: record.attemptId,
+          outcome: record.outcome,
+          detail: error instanceof Error ? error.message : String(error),
+        };
       });
     this.calibrationRecordTail = work;
+  }
+
+  /**
+   * Ticket P14 H4: re-attempts every calibration record whose write failed.
+   * Driven by `flush()`, so a caller that flushes once storage recovers gets
+   * the records onto disk with no new API to remember.
+   *
+   * Never throws: a still-failing retry leaves the record retained and the
+   * failure declared, which is precisely the state a reader is entitled to.
+   */
+  private retryUnpersistedCalibrationRecords(): void {
+    const save = this.deps.repository.saveCalibrationAttempt;
+    if (save === undefined || this.unpersistedCalibrationRecords.size === 0) return;
+    const pending = [...this.unpersistedCalibrationRecords.values()];
+    const work = this.calibrationRecordTail.then(async () => {
+      for (const record of pending) {
+        // A record superseded by a newer write for the same attempt while
+        // this retry was queued is no longer the one to store.
+        if (this.unpersistedCalibrationRecords.get(record.attemptId) !== record) continue;
+        try {
+          await save.call(this.deps.repository, record);
+          if (this.unpersistedCalibrationRecords.get(record.attemptId) === record) {
+            this.unpersistedCalibrationRecords.delete(record.attemptId);
+          }
+          if (this.calibrationWriteFailure?.attemptId === record.attemptId) {
+            this.calibrationWriteFailure = null;
+          }
+        } catch (error: unknown) {
+          this.noteRecordFailure(`calibration-attempt-retry(${record.outcome})`, error);
+          this.calibrationWriteFailure = {
+            attemptId: record.attemptId,
+            outcome: record.outcome,
+            detail: error instanceof Error ? error.message : String(error),
+          };
+        }
+      }
+    });
+    this.calibrationRecordTail = work;
+  }
+
+  /**
+   * Ticket P14 H4: the calibration records this controller built and could
+   * NOT get onto disk -- the newest state per attempt.
+   *
+   * A host exporting a session merges these over the stored rows by
+   * `attemptId` and reports the section as FAILED. The record is not lost (it
+   * is right here); what is wrong is that storage does not have it, and the
+   * row storage DOES have is an earlier, provisional one.
+   */
+  unpersistedCalibrationAttempts(): CalibrationAttemptRecord[] {
+    return [...this.unpersistedCalibrationRecords.values()].map((record) => structuredClone(record));
+  }
+
+  /** Ticket P14 H4: the standing calibration-record persistence failure, or `null` when storage holds every record. */
+  calibrationRecordFailure(): { attemptId: string; outcome: string; detail: string } | null {
+    return this.calibrationWriteFailure === null ? null : { ...this.calibrationWriteFailure };
   }
 
   /**

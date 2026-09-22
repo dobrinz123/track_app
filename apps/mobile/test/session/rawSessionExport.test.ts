@@ -407,6 +407,15 @@ describe('P7R E1 -- the export refuses to fail quietly', () => {
     expect(errors).toHaveLength(1);
     expect(doc.gnss.unclaimedSampleCount).toBeGreaterThan(0);
     expect(doc.telemetry.sampleCount).toBe(0);
-    expect(doc.notes.some((note) => note.includes('No OBD'))).toBe(true);
+    // Ticket P14 H2 (Codex P13 round) STRENGTHENED THIS ASSERTION. It used to
+    // require the note "No OBD or motion-sensor samples were recorded for this
+    // session" -- which is a claim about the CAR, made here on the strength of
+    // a read that threw. A failed read and a silent car are different facts
+    // and the document now keeps them apart.
+    expect(doc.notes.some((note) => note.includes('No OBD'))).toBe(false);
+    expect(doc.notes.some((note) => note.includes('read FAILED'))).toBe(true);
+    expect(doc.readFailures).toEqual([
+      { part: 'telemetry', detail: 'telemetry table is gone' },
+    ]);
   });
 });

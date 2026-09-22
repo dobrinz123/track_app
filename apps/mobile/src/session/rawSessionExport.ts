@@ -197,6 +197,21 @@ export interface RawSessionExportDocument {
   };
   /** The lap records as stored. Empty for a zero-lap session — which is the case this export exists for. */
   laps: LapRecord[];
+  /**
+   * Ticket P14 H2 (Codex P13 round) -- WHICH OF THIS DOCUMENT'S READS FAILED.
+   *
+   * Each of the reads below (`gnss:lap<N>`, `gnss:unclaimed`,
+   * `gnss:storedLapNumbers`, `telemetry`) degrades on its own so a partial
+   * failure still ships a document — that part was always right. What was
+   * wrong is that the failure went no further than a `console.warn`: the
+   * arrays came back empty and every reader above, the session report first
+   * among them, presented an UNREADABLE trace as a trace that was read and
+   * found to contain nothing.
+   *
+   * Empty means every read succeeded. A non-empty entry means this document is
+   * SHORT in a way that has nothing to do with what the car did.
+   */
+  readFailures: { part: string; detail: string }[];
   /** Plain statements about what this document does and does not contain. Never inferred conclusions. */
   notes: string[];
 }
@@ -212,6 +227,8 @@ export interface RawSessionExportInput {
   /** Ticket P10A: the chunk rows WITH their run identity, not a flattened bag of samples. */
   unclaimedChunks: readonly RawSessionTraceChunk[];
   telemetry: readonly RawSessionTelemetryRow[];
+  /** Ticket P14 H2: the component reads that threw, if any. Absent is the same as none. */
+  readFailures?: readonly { part: string; detail: string }[];
 }
 
 /**
@@ -441,8 +458,20 @@ export function buildRawSessionExportDocument(
       `Stored GNSS rows with no matching lap record were included: lap ${orphanLapNumbers.join(', ')}. Lap 0 is a learned-circuit out-lap trace.`,
     );
   }
+  const readFailures = [...(input.readFailures ?? [])];
   if (telemetry.length === 0) {
-    notes.push('No OBD or motion-sensor samples were recorded for this session.');
+    // Ticket P14 H2: "nothing was recorded" is a CLAIM, and it may only be
+    // made when the read that would have found something actually ran.
+    notes.push(
+      readFailures.some((failure) => failure.part === 'telemetry')
+        ? 'The OBD/motion-sample read FAILED for this session. This file carries no telemetry, which is NOT the same as the car having reported none -- see `readFailures`.'
+        : 'No OBD or motion-sensor samples were recorded for this session.',
+    );
+  }
+  for (const failure of readFailures) {
+    notes.push(
+      `Could not read "${failure.part}": ${failure.detail}. Whatever that read would have returned is MISSING from this file and its absence here is evidence of nothing.`,
+    );
   }
 
   return {
@@ -476,6 +505,7 @@ export function buildRawSessionExportDocument(
       samples: telemetry,
     },
     laps: input.session.laps.map((lap) => ({ ...lap })),
+    readFailures,
     notes,
   };
 }
@@ -569,6 +599,18 @@ export function buildRawSessionSummaryMarkdown(doc: RawSessionExportDocument): s
       `- Recording: **INCOMPLETE** — ${String(doc.session.unwrittenSampleCount)} captured GNSS fix(es) were never written to storage`,
     );
   }
+  // Ticket P14 H2: UNCONDITIONAL, for the same reason the calibration line
+  // above is. A reader deciding whether this file is worth anything has to be
+  // told, at the top, that part of it could not be read — an empty section in
+  // a file that says nothing about its own reads is indistinguishable from a
+  // section that was read and found empty.
+  lines.push(
+    doc.readFailures.length === 0
+      ? '- Reads: every part of this record was read successfully'
+      : `- Reads: **${String(doc.readFailures.length)} FAILED** — ${doc.readFailures
+          .map((failure) => failure.part)
+          .join(', ')}. Those parts are missing from this file and their absence proves nothing.`,
+  );
   lines.push('', '## Notes');
   for (const note of doc.notes) lines.push(`- ${note}`);
   lines.push('', `_${doc.kind} v${doc.schemaVersion} · generated ${doc.generatedAtUtc}_`);
@@ -758,6 +800,19 @@ export async function loadRawSessionExportDocument(
   const session = deps.getSession(sessionId);
   if (session === null) return 'session-not-found';
 
+  /**
+   * Ticket P14 H2: every component read that threw, carried INTO the document
+   * rather than only into a log. The degradation is unchanged -- a failed
+   * telemetry read still exports the GNSS trace -- but the resulting document
+   * now says which of its parts is empty because it was read and which is
+   * empty because it could not be.
+   */
+  const readFailures: { part: string; detail: string }[] = [];
+  function noteFailure(part: string, error: unknown): void {
+    onReadError(error);
+    readFailures.push({ part, detail: error instanceof Error ? error.message : String(error) });
+  }
+
   // Ticket P10A (MEDIUM, lap 0): the union of the lap numbers the session
   // RECORDS name and the lap numbers actually PRESENT in storage. Rows in the
   // second set but not the first are flagged `orphan` so the document says
@@ -768,7 +823,7 @@ export async function loadRawSessionExportDocument(
     try {
       storedLapNumbers = await deps.listStoredGnssLapNumbers(sessionId);
     } catch (error) {
-      onReadError(error);
+      noteFailure('gnss:storedLapNumbers', error);
     }
   }
   const recorded = new Set(recordedLapNumbers);
@@ -782,7 +837,7 @@ export async function loadRawSessionExportDocument(
     try {
       samples = await deps.loadLapGnss(sessionId, lapNumber);
     } catch (error) {
-      onReadError(error);
+      noteFailure(`gnss:lap${String(lapNumber)}`, error);
     }
     const orphan = !recorded.has(lapNumber);
     // An orphan row that turns out to be empty is not worth a line in the
@@ -800,14 +855,14 @@ export async function loadRawSessionExportDocument(
   try {
     unclaimedChunks = await deps.loadUnclaimedGnss(sessionId);
   } catch (error) {
-    onReadError(error);
+    noteFailure('gnss:unclaimed', error);
   }
 
   let telemetry: RawSessionTelemetryRow[] = [];
   try {
     telemetry = await deps.loadTelemetry(sessionId);
   } catch (error) {
-    onReadError(error);
+    noteFailure('telemetry', error);
   }
 
   return buildRawSessionExportDocument({
@@ -818,5 +873,6 @@ export async function loadRawSessionExportDocument(
     lapTraces,
     unclaimedChunks,
     telemetry,
+    readFailures,
   });
 }

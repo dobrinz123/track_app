@@ -45,7 +45,15 @@
 //     REPLACED by its concluded successor instead of accumulating.
 // Both tables are additive; nothing existing reads or writes them, so a
 // database that predates them upgrades by having them created.
-export const SQL_SCHEMA_VERSION = 5;
+//
+// v6 (ticket P14 H3): `sessions.traceFinalized` -- whether the recording of
+// that session was ever FINISHED, as opposed to left running by a crash. The
+// trace counters alone cannot say: `traceUnwritten = 0` on an interrupted
+// session is the last figure written before the interruption, not a verdict
+// on the whole recording, and reading it as one is how an export came to say
+// "complete (no captured fix went unwritten)" about a truncated drive.
+// Nullable, so an older row reads back as UNKNOWN rather than as finalised.
+export const SQL_SCHEMA_VERSION = 6;
 
 // Multi-statement DDL, applied via `SqlDatabase.execAsync`. Every statement is
 // `IF NOT EXISTS` so re-running it against an already-migrated database is a
@@ -67,7 +75,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   startedAtUtc TEXT NOT NULL,
   calibrationStatus TEXT,
   traceUnwritten INTEGER,
-  traceFailedWrites INTEGER
+  traceFailedWrites INTEGER,
+  traceFinalized INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_circuit ON sessions (userId, circuitId);
@@ -139,6 +148,17 @@ export const SQL_ALTERS_V3: readonly string[] = [
  * then crashed before the ALTER still ends up with the column.
  */
 export const SQL_ALTERS_V4: readonly string[] = ['ALTER TABLE checkpoints ADD COLUMN lapCount INTEGER'];
+
+/**
+ * v6 addition (ticket P14 H3) -- `sessions.traceFinalized`, on exactly the
+ * same mechanism and idempotence as {@link SQL_ALTERS_V3}.
+ *
+ * NULL for every row written before this existed, which reads back as UNKNOWN
+ * rather than as finalised: a session whose recording nobody can vouch for
+ * must not be able to present itself afterwards as one that finished cleanly.
+ * That is the same failure direction `calibrationStatus` chose in P10A H6.
+ */
+export const SQL_ALTERS_V6: readonly string[] = ['ALTER TABLE sessions ADD COLUMN traceFinalized INTEGER'];
 
 /**
  * v5 additions (ticket P12 items A/B). Whole TABLES, not columns, so plain

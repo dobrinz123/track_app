@@ -61,6 +61,15 @@ export interface LapVerdictStrings {
   saved: string;
   saveFailed: string;
   saveUnsupported: string;
+  /**
+   * Ticket P14 H1: the PERSISTENT marker on a lap whose answer is not on disk.
+   * The `saveFailed` note above is transient -- the next tap replaces it -- so
+   * it cannot be the only thing standing between the owner and believing he
+   * recorded an answer he did not.
+   */
+  unsavedBadge: string;
+  unsavedNotice: string;
+  pendingBadge: string;
   /** The store cannot hold answers at all -- said before he taps, not after. */
   unsupportedNotice: string;
   /** No lap in this session, so nothing to judge. */
@@ -95,6 +104,10 @@ const EN: LapVerdictStrings = {
   saved: 'Saved.',
   saveFailed: 'NOT SAVED — the answer is only in memory. Export the report now to keep it.',
   saveUnsupported: 'NOT SAVED — this device cannot store answers.',
+  unsavedBadge: 'NOT SAVED',
+  unsavedNotice:
+    'You answered this lap and the answer did NOT reach storage. It is held in memory only and will be lost when the app closes — tap again, or export the report now.',
+  pendingBadge: 'SAVING…',
   unsupportedNotice:
     'This device cannot store lap answers, so the buttons are off. The app’s own verdicts and reasons are still in the exported report.',
   noLaps: 'No lap was timed in this session, so there is nothing to judge.',
@@ -128,6 +141,10 @@ const RO: LapVerdictStrings = {
   saved: 'Salvat.',
   saveFailed: 'NU S-A SALVAT — răspunsul e doar în memorie. Exportează raportul acum ca să-l păstrezi.',
   saveUnsupported: 'NU S-A SALVAT — acest telefon nu poate stoca răspunsuri.',
+  unsavedBadge: 'NESALVAT',
+  unsavedNotice:
+    'Ai răspuns la acest tur, dar răspunsul NU a ajuns în memoria permanentă. Există doar în memoria aplicației și se pierde la închidere — apasă din nou sau exportă raportul acum.',
+  pendingBadge: 'SE SALVEAZĂ…',
   unsupportedNotice:
     'Acest telefon nu poate stoca răspunsuri, deci butoanele sunt oprite. Verdictele și motivele aplicației rămân în raportul exportat.',
   noLaps: 'Nu s-a cronometrat niciun tur în această sesiune, deci nu e nimic de judecat.',

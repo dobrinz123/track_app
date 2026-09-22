@@ -477,3 +477,118 @@ describe('P13B item 1 -- a verdict survives a restart', () => {
     expect(doc.verdictSummary.disagreed).toBe(1);
   });
 });
+
+/**
+ * Ticket P14 (Codex P13 round) -- THE FIFTH EVIDENCE DOCUMENT.
+ *
+ * The four above show what a healthy export says. This one shows what a BROKEN
+ * device says, which is the thing the P13 review found was wrong everywhere:
+ * a failure in any subsystem was rendered as a confident negative -- an empty
+ * array, a section marked `empty`, "complete", "has not been run". Every one of
+ * those is now a `failed` or `unavailable` row in `availability`, and the JSON
+ * written by this test is the evidence.
+ */
+describe('P14 -- a failure in each subsystem surfaces in `availability`, never as `empty`', () => {
+  it('reports FAILED for every broken read and UNKNOWN for an unfinalised recording', async () => {
+    const h = await harness();
+    const circuit = bundled(TMR_CIRCUIT_ID);
+    await h.controller.start('calibration');
+    feedSamples(h.clock, h.provider, cleanRecognitionLap(circuit.profile, 14_501));
+    h.controller.acceptCalibration();
+    await h.controller.flush();
+    h.controller.arm();
+    const id = h.sessionId();
+    feedSamples(h.clock, h.provider, driveLap(circuit.profile, { seed: 14_502, sampleRateHz: 5 }));
+    await h.controller.endSession();
+
+    const history = await historyFor(h);
+    // Every subsystem broken at once, each in the way the reviewer reproduced.
+    const doc = isDocument(
+      await loadSessionReportDocument(
+        reportDeps(h, history, {
+          // H2: the raw record's own component reads throw.
+          loadRaw: (sid, at) =>
+            loadRawSessionExportDocument(
+              {
+                getSession: (inner) => history.getSession(inner),
+                loadLapGnss: () => Promise.reject(new Error('lap trace rows are unreadable')),
+                loadUnclaimedGnss: () => Promise.reject(new Error('gnss chunk table is locked')),
+                loadTelemetry: () => Promise.reject(new Error('telemetry table is corrupt')),
+                calibrationStatus: (): SessionCalibrationStatus => 'validated',
+                onReadError: () => undefined,
+              },
+              sid,
+              at,
+            ),
+          // H5: the stored rows exist and will not decode.
+          readFailures: () =>
+            Promise.resolve([
+              {
+                part: 'lapVerdicts',
+                detail: '2 stored verdict row(s) could not be decoded on this device.',
+              },
+              {
+                part: 'calibrationAttempts',
+                detail:
+                  '1 calibration record for this session could NOT be written to storage; the stored row is an earlier, PROVISIONAL one.',
+              },
+            ]),
+          // H3: the session was still recording when the app stopped.
+          recording: () => ({ unwrittenSampleCount: 0, failedWriteCount: 0, recordingFinalized: false }),
+          // H6/H7: the tools that cannot answer for a historical session.
+          extras: () =>
+            Promise.resolve(
+              collectReportExtras([
+                {
+                  source: 'trackdayRecord',
+                  description: 'What the trackday suggestion stage did in this session.',
+                  read: () => ({
+                    state: 'unavailable',
+                    detail: 'this app run did not record this session, so the journal cannot answer for it',
+                  }),
+                },
+                {
+                  source: 'analysis',
+                  description: 'The post-session corner analysis for this session.',
+                  read: () => ({ state: 'failed', detail: 'the analysis was RUN and FAILED: trace store unreadable' }),
+                },
+                {
+                  source: 'vehicleProfile',
+                  description: 'The vehicle profile this session was recorded with.',
+                  read: () => ({
+                    state: 'unavailable',
+                    detail: 'no vehicle-profile snapshot exists for this session; today\u2019s profile is NOT substituted',
+                  }),
+                },
+              ]),
+            ),
+        }),
+        id,
+        '2026-09-22T12:00:00.000Z',
+      ),
+    );
+    saveEvidence('case5-every-subsystem-failed', doc);
+
+    // H2 -- the raw record and each of its failed components.
+    expect(stateOf(doc, 'raw')).toBe('failed');
+    expect(stateOf(doc, 'raw:gnss:unclaimed')).toBe('failed');
+    expect(stateOf(doc, 'raw:telemetry')).toBe('failed');
+    // H5 -- unreadable rows are FAILED, not `empty`.
+    expect(stateOf(doc, 'lapVerdicts')).toBe('failed');
+    // H4/H5 -- the calibration section too, despite rows being readable.
+    expect(stateOf(doc, 'calibrationAttempts')).toBe('failed');
+    // H3 -- an unfinalised recording is UNKNOWN, never "complete".
+    expect(doc.recording.completeness).toBe('unknown');
+    expect(stateOf(doc, 'recording:completeness')).toBe('unavailable');
+    // H6/H7 -- each tool's own row.
+    expect(stateOf(doc, 'extras:trackdayRecord')).toBe('unavailable');
+    expect(stateOf(doc, 'extras:analysis')).toBe('failed');
+    expect(stateOf(doc, 'extras:vehicleProfile')).toBe('unavailable');
+
+    // And NOT ONE of them reads as `empty` anywhere in the document.
+    const markdown = buildSessionReportMarkdown(doc);
+    expect(markdown).not.toContain('complete (no captured fix went unwritten)');
+    expect(markdown).toContain('lapVerdicts: failed');
+    expect(markdown).toContain('analysis: failed');
+  });
+});

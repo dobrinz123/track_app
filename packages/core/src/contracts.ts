@@ -447,7 +447,44 @@ export interface SessionSummary {
    * indistinguishable from a complete one, which is the failure mode this
    * whole area exists to remove.
    */
-  trace?: { unwrittenSampleCount: number; failedWriteCount: number };
+  trace?: {
+    unwrittenSampleCount: number;
+    failedWriteCount: number;
+    /**
+     * Ticket P14 H3 (Codex P13 round) -- WAS THIS RECORDING EVER FINISHED?
+     *
+     * `unwrittenSampleCount: 0` on its own says only "nothing had failed to
+     * write as of the last time this row was rewritten". While a session is
+     * still recording there are captured fixes in the pending buffer that
+     * have not been counted yet, so a zero there is a RUNNING figure. Read as
+     * a final account it produces the sentence the reviewer caught -- "complete
+     * (no captured fix went unwritten)" -- for a session a crash truncated.
+     *
+     * `true` ONLY after `endSession()` has drained the trace and written the
+     * final row. `false` while recording, and absent for a session written
+     * before this was tracked (which a reader must treat as UNKNOWN, never as
+     * finalised).
+     */
+    recordingFinalized?: boolean;
+  };
+}
+
+/**
+ * Ticket P14 H5 (Codex P13 round) -- WHAT A LIST READ COULD *NOT* READ.
+ *
+ * A stored payload that will not parse is skipped rather than made fatal (one
+ * corrupt answer must not cost the rest of a session's answers), but the
+ * skipping has to be VISIBLE. Returned by the `*WithDiagnostics` reads below
+ * so a caller can say "this section FAILED" instead of "this section is
+ * empty" -- the difference between "we could not look" and "we looked and
+ * there was nothing", which is the distinction every report in this app now
+ * turns on.
+ */
+export interface StoredRecordRead<T> {
+  /** Everything that parsed, in the same order the plain read returns. */
+  records: T[];
+  /** Rows that exist in storage and could not be decoded. `0` means the read is COMPLETE. */
+  unreadableCount: number;
 }
 export interface LocalSessionRepository {
   saveCheckpoint(sessionId: string, snapshot: SessionMachineSnapshot, laps: LapRecord[]): Promise<void>;
@@ -525,6 +562,13 @@ export interface LocalSessionRepository {
   /** Every stored verdict of one session, ascending by lap number. Laps with no row are simply absent -- see {@link mergeLapValidityVerdicts} for turning that into `'unanswered'`. */
   listLapValidityVerdicts?(sessionId: string): Promise<LapValidityVerdict[]>;
   /**
+   * Ticket P14 H5: the same read, plus how many stored rows could NOT be
+   * decoded. Optional on the same terms as the plain read; a caller that
+   * finds it absent knows only that it cannot tell an unreadable row from an
+   * absent one, which is itself a fact worth reporting.
+   */
+  listLapValidityVerdictsWithDiagnostics?(sessionId: string): Promise<StoredRecordRead<LapValidityVerdict>>;
+  /**
    * Ticket P12 item B -- one calibration attempt's record, stored by
    * `attemptId`; a second write for the same id REPLACES (that is how a
    * provisional row becomes a concluded one). Optional on exactly the same
@@ -533,6 +577,10 @@ export interface LocalSessionRepository {
   saveCalibrationAttempt?(record: CalibrationAttemptRecord): Promise<void>;
   /** Every calibration attempt recorded for one session, oldest first. */
   listCalibrationAttempts?(sessionId: string): Promise<CalibrationAttemptRecord[]>;
+  /** Ticket P14 H5: as above, plus the count of stored attempt rows that could not be decoded. */
+  listCalibrationAttemptsWithDiagnostics?(
+    sessionId: string,
+  ): Promise<StoredRecordRead<CalibrationAttemptRecord>>;
   getReferenceLap(userId: string, circuitId: string, layoutId: string, layoutVersion: number): Promise<ReferenceLap | null>;
   putReferenceLap(ref: ReferenceLap): Promise<void>;   // atomic replace; caller enforces PB rules
   deleteUserData(userId: string): Promise<void>;

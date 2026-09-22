@@ -160,6 +160,26 @@ export interface AnalysisRunner {
   /** The cached result for `sessionId`, or `null`. Never starts work. */
   peek: (sessionId: string) => AnalysisRunResult | null;
   /**
+   * Ticket P14 H6 (Codex P13 round) -- WHAT HAPPENED THE LAST TIME THIS
+   * SESSION WAS ANALYSED, whether or not a result was memoised.
+   *
+   * `peek()` answers only "is there a finished analysis to show", because only
+   * `'ready'` results are cached. That is right for the screen and wrong for
+   * the export, which read a `null` as "the analysis has not been run for this
+   * session" -- the same sentence for a session nobody analysed and one whose
+   * analysis ERRORED. This says which:
+   *
+   *  - `'never'`       -- no pass has finished for this session in this process.
+   *  - `'ready'`       -- a finished analysis, memoised, available from `peek`.
+   *  - `'failed'`      -- a pass ran and threw. `detail` is its message.
+   *  - `'unavailable'` -- a pass ran and found a NAMED dead end (no laps, no
+   *                       trace, layout incompatible). `detail` names it.
+   *
+   * Never starts work, and -- like `peek` -- is scoped to this process: the
+   * results it describes are not durable.
+   */
+  outcome: (sessionId: string) => { state: 'never' | 'ready' | 'failed' | 'unavailable'; detail?: string };
+  /**
    * Ticket P5-FIX2 W1: invalidates every run currently in flight. Superseded
    * work is dropped from the join table (so no later caller can rejoin it),
    * stops at its next chunk boundary, and can neither publish nor cache its
@@ -198,6 +218,16 @@ class AnalysisPassAborted extends Error {
  */
 export function createAnalysisRunner(deps: AnalysisRunnerDeps): AnalysisRunner {
   const cache = new Map<string, AnalysisRunResult>();
+  /**
+   * Ticket P14 H6: the last outcome of every pass that FINISHED, including the
+   * ones nothing is memoised for. Keyed by session id, not by cache key: an
+   * error is an error whichever smoothing setting produced it, and the export
+   * asks about the session rather than about a rendering of it.
+   *
+   * `'superseded'` is deliberately not recorded -- it is work that was thrown
+   * away and says nothing about the session (see `AnalysisRunResult`).
+   */
+  const outcomes = new Map<string, { state: 'ready' | 'failed' | 'unavailable'; detail?: string }>();
   const inFlight = new Map<string, Promise<AnalysisRunResult>>();
   const yieldToUi = deps.yieldToUi ?? defaultYield;
   /**
@@ -317,6 +347,14 @@ export function createAnalysisRunner(deps: AnalysisRunnerDeps): AnalysisRunner {
         // one of them -- a live session above all (C1) -- can stop being true
         // while the screen is open.
         if (result.status === 'ready') cache.set(key, result);
+        // Ticket P14 H6: recorded for EVERY finished pass, memoised or not, so
+        // an export can tell "never analysed" from "the analysis failed".
+        if (result.status === 'ready') outcomes.set(sessionId, { state: 'ready' });
+        else if (result.status === 'error') {
+          outcomes.set(sessionId, { state: 'failed', detail: result.error });
+        } else if (result.status === 'unavailable') {
+          outcomes.set(sessionId, { state: 'unavailable', detail: result.reason });
+        }
         return result;
       });
       inFlight.set(key, promise);
@@ -327,12 +365,19 @@ export function createAnalysisRunner(deps: AnalysisRunnerDeps): AnalysisRunner {
       // there is no TOCTOU window here (unlike `run()`, see H2 above).
       return cache.get(cacheKeyFor(sessionId, smoothingOn())) ?? null;
     },
+    outcome(sessionId) {
+      return outcomes.get(sessionId) ?? { state: 'never' };
+    },
     invalidate() {
       generation += 1;
       inFlight.clear();
     },
     clear() {
       cache.clear();
+      // Ticket P14 H6: the outcome log goes with the cache. What `clear()`
+      // means is "everything I knew about these sessions is stale", and an
+      // outcome left behind would answer for a result that no longer exists.
+      outcomes.clear();
       // A run started against the dropped cache must not repopulate it.
       generation += 1;
       inFlight.clear();

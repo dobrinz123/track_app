@@ -256,6 +256,20 @@ export interface SuggestionJournal {
    * driver's own evidence put it.
    */
   updatedCornerIds: (sessionId: string, stintIndex: number) => number[];
+  /**
+   * Ticket P14 H6 (Codex P13 round): declares that THIS PROCESS is recording
+   * for `sessionId`. Called when the session stage is initialised.
+   *
+   * The journal is in-memory: after a restart it answers every `read()` with
+   * empty arrays, and the export read that as "the trackday stage applied no
+   * cue move and showed no pit suggestion in this session" -- a statement
+   * about the drive, made on the strength of a process that was not there for
+   * it. {@link SuggestionJournal.observed} is what lets a caller say
+   * UNAVAILABLE instead.
+   */
+  markObserved: (sessionId: string) => void;
+  /** Ticket P14 H6: did this process record for `sessionId`? `false` means an empty `read()` proves nothing. */
+  observed: (sessionId: string) => boolean;
   clear: (sessionId?: string) => void;
 }
 
@@ -271,6 +285,13 @@ interface JournalEntry {
 
 export function createSuggestionJournal(): SuggestionJournal {
   const records = new Map<string, JournalEntry>();
+  /**
+   * Ticket P14 H6: the sessions this process has actually been recording for.
+   * Deliberately NOT the key set of `records` -- a session that produced
+   * nothing has no entry there, and "recorded nothing" is precisely the answer
+   * that has to be distinguishable from "was not here for it".
+   */
+  const observedSessions = new Set<string>();
 
   function entry(sessionId: string): JournalEntry {
     const existing = records.get(sessionId);
@@ -306,6 +327,12 @@ export function createSuggestionJournal(): SuggestionJournal {
             shownPitSuggestions: [...record.shownPitSuggestions],
           };
     },
+    markObserved(sessionId) {
+      observedSessions.add(sessionId);
+    },
+    observed(sessionId) {
+      return observedSessions.has(sessionId);
+    },
     updatedCornerIds(sessionId, stintIndex) {
       const held = records.get(sessionId)?.cueUpdates ?? [];
       return [
@@ -315,8 +342,15 @@ export function createSuggestionJournal(): SuggestionJournal {
       ].sort((a, b) => a - b);
     },
     clear(sessionId) {
-      if (sessionId === undefined) records.clear();
-      else records.delete(sessionId);
+      if (sessionId === undefined) {
+        records.clear();
+        // A full reset drops the claim to have observed anything too: what it
+        // means is "this journal knows nothing", and a leftover `observed`
+        // would let an empty read pass for a fact again.
+        observedSessions.clear();
+      } else {
+        records.delete(sessionId);
+      }
     },
   };
 }
