@@ -11,6 +11,7 @@ import {
   verifyCueEvidence,
   type ActiveCue,
   type LimitationCode,
+  type SessionAnalysisContext,
   type SessionInsights,
 } from '../../src/coaching';
 
@@ -156,14 +157,64 @@ describe('the per-corner honesty gates (E4)', () => {
     expect(result.pitSuggestions.every((s) => s.cornerId !== cornerId)).toBe(true);
   });
 
-  it('geometryValidated defaults to true for a caller passing a synthetic envelope', () => {
+  /**
+   * Ticket P16 C2 -- THE INVERSION OF THE TEST THAT USED TO STAND HERE.
+   *
+   * This case previously asserted `geometryValidated` DEFAULTS TO TRUE: omit
+   * the flag and the gate opened. That pinned a safety gate that failed OPEN.
+   * Both circuits that ship today are `community-derived`, so the default that
+   * applied to every real track was the wrong one, and the caller most likely
+   * to omit the flag is precisely the caller that does not know the circuit's
+   * provenance.
+   *
+   * The gate now opens only on an explicit `true`. This is a TIGHTENING: no
+   * input that produced silence before produces advice now, and one input that
+   * produced advice before (an omitted flag) produces silence -- announced
+   * through the same `'geometry-unvalidated'` gate value, so the caller can
+   * see why rather than wondering where its suggestions went.
+   */
+  it('omitting geometryValidated is NOT consent: the gate stays shut', () => {
     const insights = analyse(transilvania());
     const withoutFlag = computeSuggestions({
       enabled: true,
       envelope: insights.envelope,
       cues: earlyCues(insights),
     });
-    expect(withoutFlag.gate).toBe('open');
+    expect(withoutFlag.gate).toBe('geometry-unvalidated');
+    expect(withoutFlag.cueUpdates).toEqual([]);
+    expect(withoutFlag.pitSuggestions).toEqual([]);
+
+    // The same call, with the fact stated, is the one that gets advice.
+    const stated = computeSuggestions({
+      enabled: true,
+      envelope: insights.envelope,
+      cues: earlyCues(insights),
+      geometryValidated: true,
+    });
+    expect(stated.gate).toBe('open');
+  });
+
+  /**
+   * Ticket P16 C2 -- and the same at the analysis layer, where the default
+   * used to be applied as `context.geometryValidated ?? true`. It is now a
+   * REQUIRED field of `SessionAnalysisContext`, so there is no default left to
+   * inherit: the type below is the test. A caller cannot reach `analyzeSession`
+   * without saying what it knows about the circuit's geometry.
+   */
+  it('SessionAnalysisContext requires the geometry fact rather than assuming it', () => {
+    const withheld: Record<string, unknown> = {
+      totalLengthM: 1_000,
+      circuitId: 'c',
+    };
+    // @ts-expect-error -- geometryValidated is required; omitting it must not compile.
+    const context: SessionAnalysisContext = withheld;
+    expect(context).toBeDefined();
+
+    // And what the caller states is what the insights carry, unmodified.
+    expect(analyse(transilvania()).geometryValidated).toBe(true);
+    const unvalidated = analyse(motorpark());
+    expect(unvalidated.geometryValidated).toBe(false);
+    expect(unvalidated.limitations.some((l) => l.code === 'GEOMETRY_UNVALIDATED')).toBe(true);
   });
 });
 

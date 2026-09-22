@@ -72,7 +72,15 @@ export class InMemorySessionRepository implements LocalSessionRepository {
   }
 
   async saveSession(s: SessionSummary): Promise<void> {
-    this.sessions.set(s.sessionId, structuredClone(s));
+    const stored = structuredClone(s);
+    // Ticket P16 C1: `unreadableLapCount` is a READ diagnostic -- what the
+    // store could not decode -- so a writer may not set it and a store may not
+    // echo it back. (`SqlSessionRepository` drops it for free: there is no
+    // column for it. This keeps the two implementations identical, which the
+    // class comment there promises.) An in-memory Map has no corrupt rows, so
+    // this read always reports complete, i.e. absent.
+    delete stored.unreadableLapCount;
+    this.sessions.set(s.sessionId, stored);
     this.sessionOwners.set(s.sessionId, s.userId);
   }
 

@@ -165,9 +165,19 @@ export interface SuggestionInput {
    * opt-in. `false` (the circuit's geometry has never been validated on track,
    * MotorPark today) produces NOTHING at all: not a pit suggestion, not a cue
    * update. Corner reference points derived from unvalidated geometry cannot
-   * bound anything, so nothing may be said about them. Defaults to `true` only
-   * because a caller that knows nothing about geometry is passing a synthetic
-   * envelope; every real caller goes through {@link suggestionsFromInsights}.
+   * bound anything, so nothing may be said about them.
+   *
+   * Ticket P16 C2 — AND OMITTING IT IS NOT CONSENT. It used to default to
+   * `true`, so a caller that never passed it -- exactly the caller least
+   * likely to know the circuit's provenance -- was advised on as if the
+   * geometry had been surveyed. The default is now the SAFE one: only an
+   * explicit `true` opens this gate. `undefined` is treated as `false` and
+   * reported through the same `'geometry-unvalidated'` gate value, so a
+   * caller that forgot gets silence it can see rather than advice it cannot
+   * check. The property stays optional rather than required only so callers
+   * outside this package keep compiling; every one of them is now gated
+   * closed until it states the fact. Real callers go through
+   * {@link suggestionsFromInsights}, which passes it from the insights.
    */
   geometryValidated?: boolean;
   /**
@@ -294,7 +304,8 @@ export function computeSuggestions(input: SuggestionInput): SuggestionResult {
   // geometry means every corner reference point is a guess, so there is
   // nothing here that may be suggested on -- not even for a corner whose own
   // laps look immaculate.
-  if (input.geometryValidated === false) return empty('geometry-unvalidated', cleanLapCount);
+  // P16 C2: `!== true`, not `=== false`. An absent flag is not a licence.
+  if (input.geometryValidated !== true) return empty('geometry-unvalidated', cleanLapCount);
   if (cleanLapCount < MIN_CLEAN_LAPS_FOR_SUGGESTIONS) {
     return empty('insufficient-clean-laps', cleanLapCount);
   }

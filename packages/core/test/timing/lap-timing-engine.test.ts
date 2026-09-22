@@ -1,6 +1,11 @@
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
-import type { CrossingEvent, Gate, QualityLevel } from '../../src/contracts';
+import type {
+  CrossingEvent,
+  Gate,
+  LapTimingEngine as LapTimingEngineContract,
+  QualityLevel,
+} from '../../src/contracts';
 import {
   CrossingDetector,
   LapTimingEngine,
@@ -141,6 +146,35 @@ describe('LapTimingEngine', () => {
     feed(engine, 's1', 'sector', 30_000, 330);
     feed(engine, 's2', 'sector', 60_000, 660);
     expect(feed(engine, 'sf', 'startFinish', 90_000, 1_000)?.invalidReasons).toContain('PAUSE_GAP');
+  });
+
+  /**
+   * Ticket P16 C3 -- `markInvalid` IS PART OF THE PUBLISHED CONTRACT.
+   *
+   * `PAUSE_GAP`, `PIT_TRANSIT` and gap-derived `LOW_QUALITY` reach a lap ONLY
+   * through this method (`SessionPipelineCore.invalidateActiveLap`), yet it
+   * was missing from `contracts.ts`'s `LapTimingEngine`. A second engine
+   * written faithfully to that interface would have compiled and then never
+   * invalidated for any of the three. The binding here is the TYPE: this
+   * reference is the contract, not the class, so deleting the method from
+   * `contracts.ts` fails the build rather than quietly re-opening the hole.
+   */
+  it('exposes markInvalid through the contract type, and never duplicates a reason', () => {
+    const engine: LapTimingEngineContract = new LapTimingEngine(profile);
+
+    // No lap in progress: the reason is dropped, never carried onto the lap
+    // that starts next -- a lap must not be blamed for what preceded it.
+    engine.markInvalid('PAUSE_GAP');
+    feed(engine as LapTimingEngine, 'sf', 'startFinish', 0, 0);
+    engine.markInvalid('PIT_TRANSIT');
+    engine.markInvalid('PIT_TRANSIT');
+    feed(engine as LapTimingEngine, 's1', 'sector', 30_000, 330);
+    feed(engine as LapTimingEngine, 's2', 'sector', 60_000, 660);
+
+    const lap = feed(engine as LapTimingEngine, 'sf', 'startFinish', 90_000, 1_000);
+    expect(lap?.valid).toBe(false);
+    expect(lap?.invalidReasons.filter((reason) => reason === 'PIT_TRANSIT')).toEqual(['PIT_TRANSIT']);
+    expect(lap?.invalidReasons).not.toContain('PAUSE_GAP');
   });
 
   it('invalidates a progress drawdown greater than 30 m as REVERSE_TRAVEL', () => {

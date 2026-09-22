@@ -369,6 +369,28 @@ export interface LapTimingEngine {
   reset(): void;
   onCrossing(e: CrossingEvent, currentQuality: QualityLevel, inPit: boolean): LapRecord | null; // returns a lap when one completes
   currentLap(): { lapNumber: number; elapsedMs: (nowMono: number) => number; sectorIndex: number } | null;
+  /**
+   * Ticket P16 C3 -- ON THE CONTRACT, BECAUSE THE INVALIDATION DEPENDS ON IT.
+   *
+   * Adds `reason` to the IN-PROGRESS lap's `invalidReasons`, so the
+   * {@link LapRecord} eventually returned by `onCrossing` is marked invalid.
+   * A no-op when no lap is in progress: a reason with no lap to attach to is
+   * dropped, never carried forward onto the next lap, which would blame a lap
+   * for something that happened before it started.
+   *
+   * This was previously absent from this interface while being the ONLY route
+   * by which `PAUSE_GAP`, `PIT_TRANSIT` and gap-derived `LOW_QUALITY` ever
+   * reach a lap -- `SessionPipelineCore.invalidateActiveLap` calls it from the
+   * state machine's `pendingInvalidReasons`, and nothing else sets those
+   * three. A second engine written faithfully to the published interface
+   * would therefore have compiled, run, and silently produced VALID laps for
+   * a paused session, a pit transit and a GNSS dropout alike. The contract now
+   * says what an engine has to provide, so that silence is not reachable.
+   *
+   * Reasons are the free-form codes of {@link LapRecord.invalidReasons};
+   * marking the same reason twice on one lap must not duplicate it.
+   */
+  markInvalid(reason: string): void;
 }
 
 // ---------- Reference lap & live delta ----------
@@ -430,6 +452,24 @@ export interface SessionSummary {
   startedAtUtc: string;
   laps: LapRecord[];
   userId: string;
+  /**
+   * Ticket P16 C1 -- LAP ROWS THAT EXIST AND COULD NOT BE DECODED.
+   *
+   * A store reads laps row by row, and one unparseable payload must cost that
+   * row rather than the session or the whole list. But a session that quietly
+   * comes back with four laps instead of five has still told the reader
+   * something false, so the skip is COUNTED here, the same way
+   * {@link StoredRecordRead.unreadableCount} does for the list reads.
+   *
+   * ABSENT means every lap row of this session read cleanly (never written as
+   * `0`, so a healthy summary round-trips through save/list unchanged), and
+   * absent is also what a store that cannot tell reports -- which is why no
+   * reader may take absence as proof of completeness. Present with `n > 0`
+   * means `laps` is SHORT by `n`: a report showing this session must say the
+   * lap list FAILED, not that the driver did fewer laps. It is never set by a
+   * writer; `saveSession` ignores it.
+   */
+  unreadableLapCount?: number;
   /**
    * Ticket P10A H6. Optional so a row written by an older build still reads
    * back — and a missing value means {@link SessionCalibrationStatus}'s

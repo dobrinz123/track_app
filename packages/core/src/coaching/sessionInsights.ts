@@ -77,8 +77,18 @@ export interface SessionAnalysisContext {
    * False when the circuit geometry has not been validated in the field
    * (MotorPark today) -- corner positions are then approximate and the report
    * says so.
+   *
+   * Ticket P16 C2 -- REQUIRED, and deliberately so. This used to be optional
+   * with `?? true` applied at the end of `analyzeSession`, i.e. a safety gate
+   * that FAILED OPEN: a caller that forgot the flag, or a new caller that
+   * never knew about it, got a report asserting validated geometry about a
+   * circuit nobody has ever surveyed. Both circuits shipped today are
+   * `community-derived`, so the wrong default was the one that applied to
+   * every real track. There is no safe value to guess here, so nothing is
+   * guessed: the caller must state what it knows. The only producer in the
+   * app is `analysisAssembly`'s `profile.geometryStatus === 'official'`.
    */
-  geometryValidated?: boolean;
+  geometryValidated: boolean;
   cornerMetrics?: Omit<Partial<CornerMetricsOptions>, 'totalLengthM' | 'unsupportedChannels'>;
   cleanLap?: Omit<Partial<ClassifyLapOptions>, 'totalLengthM'>;
   /** Distance-grid step for the delta curve, metres. Default 1. */
@@ -770,7 +780,7 @@ export function analyzeSession(
   if (poorGnssLaps.length > 0) {
     limitations.push({ code: 'GNSS_QUALITY', lapNumbers: poorGnssLaps, count: poorGnssLaps.length });
   }
-  if (context.geometryValidated === false) {
+  if (!context.geometryValidated) {
     limitations.push({ code: 'GEOMETRY_UNVALIDATED' });
   }
   const uncovered = cornerInsights
@@ -786,7 +796,9 @@ export function analyzeSession(
     circuitName: context.circuitName ?? null,
     layoutId: context.layoutId ?? null,
     totalLengthM,
-    geometryValidated: context.geometryValidated ?? true,
+    // Ticket P16 C2: carried through exactly as the caller stated it. No
+    // `?? true` -- see `SessionAnalysisContext.geometryValidated`.
+    geometryValidated: context.geometryValidated,
     observationsOnly: true,
     lapCount: lapInsights.length,
     cleanLapCount: cleanLaps.length,

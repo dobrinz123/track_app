@@ -11,6 +11,10 @@ const CONTEXT: SessionAnalysisContext = {
   totalLengthM: SYNTHETIC_TOTAL_LENGTH_M,
   circuitId: 'synthetic-oval',
   circuitName: 'Synthetic Oval',
+  // Ticket P16 C2: the geometry gate no longer defaults to `true`, so this
+  // synthetic fixture has to STATE that its made-up oval counts as surveyed.
+  // Nothing about these cases changes; the assumption is now written down.
+  geometryValidated: true,
 };
 
 /** No sentence may ever render a missing number. */

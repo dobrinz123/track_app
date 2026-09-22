@@ -66,6 +66,14 @@ function input(
           enabled: options.enabled,
           envelope: insights.envelope,
           cues: [],
+          // P16 C2: the geometry gate fails CLOSED since omitting this flag
+          // stopped meaning "assume validated". These cases exercise the
+          // suggestion arithmetic over a synthetic envelope, so they state
+          // the assumption rather than inherit it. Production never reaches
+          // `computeSuggestions` directly -- it goes through
+          // `suggestionsFromInsights`, which passes the real
+          // `geometryStatus === 'official'` result.
+          geometryValidated: true,
           timeLossMsByCorner: Object.fromEntries(
             insights.corners.map((corner) => [corner.cornerId, corner.timeLoss?.deltaMs ?? null]),
           ),

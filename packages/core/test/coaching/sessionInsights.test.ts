@@ -12,6 +12,8 @@ const CONTEXT: SessionAnalysisContext = {
   totalLengthM: SYNTHETIC_TOTAL_LENGTH_M,
   circuitId: 'synthetic-oval',
   circuitName: 'Synthetic Oval',
+  // Ticket P16 C2: stated, not inherited from a fail-open default.
+  geometryValidated: true,
 };
 
 let clock = 0;

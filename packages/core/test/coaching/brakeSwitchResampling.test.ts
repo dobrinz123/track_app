@@ -198,6 +198,8 @@ describe('P4l-FIX4 N3: the report states the onset uncertainty', () => {
       totalLengthM: SYNTHETIC_TOTAL_LENGTH_M,
       circuitId: 'synthetic-oval',
       circuitName: 'Synthetic Oval',
+      // Ticket P16 C2: stated, not inherited from a fail-open default.
+      geometryValidated: true,
     });
     const row = insights.corners[0]?.perLap[0];
     expect(row?.brakeSource).toBe('brakeSwitch');

@@ -18,12 +18,12 @@ minimal ELM327-compatible subset so the shipped app works unmodified).
 | Ref | Part | LCSC | Why |
 |---|---|---|---|
 | U1 | ESP32-C3-MINI-1-N4 | C3013922 | WiFi+RISC-V, tiny, TWAI(CAN) controller built in, castellated (hand-solder fallback) |
-| U2 | TJA1051T/3 (3.3V IO) | C264757 | Automotive-qualified CAN transceiver (better than SN65HVD230 for 12V car env), 3.3V VIO variant |
+| U2 | TCAN330DR | C2652876 | TRUE 3.3V-VCC CAN transceiver with a silent-mode (S) pin, so hardware listen-only survives. **Replaced the rev-A1 TJA1051T/3, which needs 4.5-5.5V VCC and cannot run on this board's single 3.3V rail — see §8.4 for the full reasoning and the SN65HVD230DR fallback.** This row now matches `kicad/trace-dongle/production/bom.csv`, which is the ordering source of truth. |
 | U3 | TPS54202DDCR buck | C316922 | 4.5-28V in, 2A sync buck: survives 12-14.4V nominal + transients w/ input protection below |
 | D1 | SMBJ24A TVS | C114213 | Load-dump / transient clamp on 12V input (ISO 7637 reality on cars) |
 | D2 | SS34 Schottky | C8678 | Reverse-polarity series protection (simple + robust at 150mA load) |
 | F1 | 0603 PTC 350mA | C88724 | Resettable fuse on 12V input |
-| U4 | AMS1117-3.3 OMITTED — buck goes direct to 3.3V (single rail; ESP32-C3 + TJA1051 both 3.3V) |
+| U4 | AMS1117-3.3 OMITTED — buck goes direct to 3.3V (single rail; ESP32-C3 + TCAN330 both 3.3V) |
 | C-group | 22uF/35V x2 in, 22uF/10V x2 out, 100nF decoupling x4 | basic parts | buck app-note values |
 | L1 | 10uH 2A shielded 0630 | C167219 | buck inductor per TPS54202 datasheet 500kHz |
 | R-group | buck FB divider 100k/13k (3.3V), CAN term NOT fitted (node, not end), 10k EN pullups | basic | |
@@ -38,7 +38,8 @@ Notes:
 - OBD pin 16 = +12V batt, pins 4/5 = GND, pin 6 = CAN-H, pin 14 = CAN-L. All
   other J1962 pins unconnected rev A (K-line etc. out of scope).
 - ESP32-C3 TWAI uses two GPIO: IO4 = CAN TX -> U2.TXD, IO5 = CAN RX <- U2.RXD.
-- U2.S (silent mode, pin 8 on TJA1051T/3) tied to IO6 so firmware can force
+- U2.S (silent mode, pin 5 on TCAN330DR; it was pin 8 on the withdrawn
+  TJA1051T/3 — §8.4) tied to IO6 so firmware can force
   LISTEN-ONLY in hardware — read-only mandate enforceable below software.
 - Power budget: ESP32-C3 WiFi peak ~350mA @3.3V -> buck 2A has 5x headroom.
 
@@ -57,7 +58,8 @@ GND:       J1.4, J1.5 -> GND plane
 U1 ESP32-C3-MINI-1: EN -> 10k to 3V3 + 1uF to GND; IO9 -> 10k pullup + SW1 to GND;
     IO4 -> U2.TXD; IO5 <- U2.RXD; IO6 -> U2.S; IO8 -> LED2 via 1k;
     TXD0/RXD0 -> J2 UART; 3V3/GND -> J2
-U2 TJA1051T/3: CANH -> J1.6, CANL -> J1.14, VCC=3V3, GND, S=IO6, VIO=3V3 (T/3 variant)
+U2 TCAN330DR: CANH -> J1.6, CANL -> J1.14, VCC=3V3, GND, S=IO6, SHDN -> GND
+    (no VIO pin on this part; the rev-A1 TJA1051T/3's VIO=3V3 note is void — §8.4)
     R120 DNP between CANH-CANL
 ESD: PESD2CAN (C24911) across CANH/CANL to GND (D3) — automotive ESD on the bus pins
 
@@ -102,7 +104,10 @@ ESD: PESD2CAN (C24911) across CANH/CANL to GND (D3) — automotive ESD on the bu
   U2/D3 CAN cluster).
 - BINDING pin maps (LEAD-supplied from standard datasheets; report if any
   KiCad footprint numbering disagrees):
-  U2 TJA1051T/3 (SO8): 1=TXD, 2=GND, 3=VCC, 4=RXD, 5=VIO, 6=CANL, 7=CANH, 8=S
+  U2 — SUPERSEDED BY §8.4. This rev-A2 line read "TJA1051T/3 (SO8): 1=TXD,
+  2=GND, 3=VCC, 4=RXD, 5=VIO, 6=CANL, 7=CANH, 8=S" and is kept here only as
+  the record of what rev A2 believed. The part fitted is the TCAN330DR
+  (SOIC-8): 1=TXD, 2=GND, 3=VCC, 4=RXD, 5=S, 6=CANL, 7=CANH, 8=SHDN.
   U3 TPS54202 (SOT-23-6 DDC): 1=BOOT, 2=GND, 3=FB, 4=EN, 5=VIN, 6=SW
   D3 PESD2CAN (SOT-23): 1=CANL line, 2=CANH line, 3=GND (common cathode)
 - DRC fine-rule allowance near U1 castellated pads only: clearance may drop to

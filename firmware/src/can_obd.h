@@ -3,7 +3,10 @@
 
 #include "elm_server_core.h"
 
-/* IO4/IO5 TWAI, IO6 = TJA1051 S (silent) pin -- pins and CAN topology are
+/* IO4/IO5 TWAI, IO6 = TCAN330DR S (silent) pin, package pin 5 -- the earlier
+ * TJA1051T/3 was dropped in REV A3 because it needs 4.5-5.5 V and this board
+ * has a single 3.3 V rail; see hardware/DESIGN.md section 8. Pins and CAN
+ * topology are
  * binding per hardware/DESIGN.md section 1/3. Installs the TWAI driver at
  * 500 kbit/s and drives S LOW (normal mode) so the transceiver can actually
  * see the bus for OBD polling -- unless SNIFF_ONLY is defined at compile

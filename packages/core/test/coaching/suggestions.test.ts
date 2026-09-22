@@ -74,9 +74,27 @@ function cue(brakeStartM: number | null, liftPointM: number | null = null): Acti
   return [{ cornerId: 1, brakeStartM, liftPointM }];
 }
 
+/**
+ * Ticket P16 C2 -- THE GEOMETRY GATE NOW FAILS CLOSED, SO IT HAS TO BE SAID.
+ *
+ * `computeSuggestions` used to default `geometryValidated` to `true`, which
+ * meant a caller that omitted it was advised on a circuit nobody had ever
+ * surveyed. It now opens only on an explicit `true`.
+ *
+ * Every case in this file is about the suggestion ARITHMETIC over a synthetic
+ * envelope, not about the gate, so the fact is stated once here rather than
+ * twenty times below -- and stated it must be: pass no flag through this
+ * helper and the engine answers `'geometry-unvalidated'`. The gate's own
+ * behaviour, including what an omitted flag does, is pinned in
+ * `suggestionsHonesty.test.ts`.
+ */
+function suggestOnSurveyedGeometry(input: Parameters<typeof computeSuggestions>[0]) {
+  return computeSuggestions({ geometryValidated: true, ...input });
+}
+
 describe('computeSuggestions — the gate (D5)', () => {
   it('produces NOTHING at all when suggestions are disabled (default OFF)', () => {
-    const result = computeSuggestions({ enabled: false, envelope: ENVELOPE, cues: cue(220) });
+    const result = suggestOnSurveyedGeometry({ enabled: false, envelope: ENVELOPE, cues: cue(220) });
     expect(result.gate).toBe('disabled');
     expect(result.cueUpdates).toEqual([]);
     expect(result.pitSuggestions).toEqual([]);
@@ -86,7 +104,7 @@ describe('computeSuggestions — the gate (D5)', () => {
   it('produces NOTHING with fewer than two clean laps in the outing', () => {
     const thin = buildDemonstratedEnvelope([CLEAN_LAPS[0] as CleanLapMetrics]);
     expect(thin.cleanLapCount).toBeLessThan(MIN_CLEAN_LAPS_FOR_SUGGESTIONS);
-    const result = computeSuggestions({ enabled: true, envelope: thin, cues: cue(220) });
+    const result = suggestOnSurveyedGeometry({ enabled: true, envelope: thin, cues: cue(220) });
     expect(result.gate).toBe('insufficient-clean-laps');
     expect(result.cueUpdates).toEqual([]);
     expect(result.pitSuggestions).toEqual([]);
@@ -97,7 +115,7 @@ describe('computeSuggestions — the gate (D5)', () => {
       lap(1, [metric({ cornerId: 1, brakeStartM: null, liftPointM: null, minSpeedKph: null })]),
       lap(2, [metric({ cornerId: 1, brakeStartM: null, liftPointM: null, minSpeedKph: null })]),
     ]);
-    const result = computeSuggestions({ enabled: true, envelope: blind, cues: cue(220) });
+    const result = suggestOnSurveyedGeometry({ enabled: true, envelope: blind, cues: cue(220) });
     expect(result.gate).toBe('open');
     expect(result.cueUpdates).toEqual([]);
     expect(result.pitSuggestions).toEqual([]);
@@ -107,7 +125,7 @@ describe('computeSuggestions — the gate (D5)', () => {
 
 describe('computeSuggestions — cue updates (D1a)', () => {
   it('moves the brake cue later, but never past what a clean lap demonstrated', () => {
-    const result = computeSuggestions({ enabled: true, envelope: ENVELOPE, cues: cue(175) });
+    const result = suggestOnSurveyedGeometry({ enabled: true, envelope: ENVELOPE, cues: cue(175) });
     const update = result.cueUpdates[0];
     expect(update?.point).toBe('brake');
     expect(update?.fromM).toBe(175);
@@ -118,7 +136,7 @@ describe('computeSuggestions — cue updates (D1a)', () => {
   });
 
   it('clamps a bigger gap to MAX_BRAKE_LATER_M and stops short of the demonstrated value', () => {
-    const result = computeSuggestions({ enabled: true, envelope: ENVELOPE, cues: cue(260) });
+    const result = suggestOnSurveyedGeometry({ enabled: true, envelope: ENVELOPE, cues: cue(260) });
     const update = result.cueUpdates[0];
     expect(update?.toM).toBe(250);
     expect(update?.movedLaterM).toBe(MAX_BRAKE_LATER_M);
@@ -126,13 +144,13 @@ describe('computeSuggestions — cue updates (D1a)', () => {
   });
 
   it('never moves a cue the driver has not out-braked (demonstrated is not later)', () => {
-    const result = computeSuggestions({ enabled: true, envelope: ENVELOPE, cues: cue(160) });
+    const result = suggestOnSurveyedGeometry({ enabled: true, envelope: ENVELOPE, cues: cue(160) });
     expect(result.cueUpdates).toEqual([]);
     expect(result.skipped.map((entry) => entry.reason)).toContain('nothing-demonstrated-later');
   });
 
   it('makes at most ONE change per corner per stint — a corner already moved is skipped', () => {
-    const result = computeSuggestions({
+    const result = suggestOnSurveyedGeometry({
       enabled: true,
       envelope: ENVELOPE,
       cues: cue(260, 320),
@@ -143,13 +161,13 @@ describe('computeSuggestions — cue updates (D1a)', () => {
   });
 
   it('emits ONE update for a corner whose brake AND lift cue could both move', () => {
-    const result = computeSuggestions({ enabled: true, envelope: ENVELOPE, cues: cue(260, 320) });
+    const result = suggestOnSurveyedGeometry({ enabled: true, envelope: ENVELOPE, cues: cue(260, 320) });
     expect(result.cueUpdates).toHaveLength(1);
     expect(result.cueUpdates[0]?.point).toBe('brake');
   });
 
   it('moves the lift cue when there is no brake cue to move', () => {
-    const result = computeSuggestions({ enabled: true, envelope: ENVELOPE, cues: cue(null, 320) });
+    const result = suggestOnSurveyedGeometry({ enabled: true, envelope: ENVELOPE, cues: cue(null, 320) });
     const update = result.cueUpdates[0];
     expect(update?.point).toBe('lift');
     expect(update?.demonstratedM).toBe(250);
@@ -174,8 +192,8 @@ describe('computeSuggestions — cue updates (D1a)', () => {
       { cornerId: 3, brakeStartM: 240, liftPointM: null },
       { cornerId: 1, brakeStartM: 240, liftPointM: null },
     ];
-    const forward = computeSuggestions({ enabled: true, envelope: many, cues });
-    const reversed = computeSuggestions({ enabled: true, envelope: many, cues: [...cues].reverse() });
+    const forward = suggestOnSurveyedGeometry({ enabled: true, envelope: many, cues });
+    const reversed = suggestOnSurveyedGeometry({ enabled: true, envelope: many, cues: [...cues].reverse() });
     expect(reversed).toEqual(forward);
     expect(forward.cueUpdates.map((entry) => entry.cornerId)).toEqual([1, 2, 3]);
   });
@@ -183,7 +201,7 @@ describe('computeSuggestions — cue updates (D1a)', () => {
 
 describe('computeSuggestions — pit suggestions (D1b)', () => {
   it('caps a braking suggestion at the demonstrated latest brake point', () => {
-    const result = computeSuggestions({ enabled: true, envelope: ENVELOPE, cues: [] });
+    const result = suggestOnSurveyedGeometry({ enabled: true, envelope: ENVELOPE, cues: [] });
     const brake = result.pitSuggestions.find((entry) => entry.kind === 'brakeLater');
     expect(brake?.typicalValue).toBe(185);
     expect(brake?.demonstratedValue).toBe(170);
@@ -192,7 +210,7 @@ describe('computeSuggestions — pit suggestions (D1b)', () => {
   });
 
   it('caps a minimum-speed suggestion at MAX_MIN_SPEED_GAIN_KPH and at the demonstrated best', () => {
-    const result = computeSuggestions({ enabled: true, envelope: ENVELOPE, cues: [] });
+    const result = suggestOnSurveyedGeometry({ enabled: true, envelope: ENVELOPE, cues: [] });
     const speed = result.pitSuggestions.find((entry) => entry.kind === 'carryMoreMinSpeed');
     expect(speed?.typicalValue).toBe(73);
     expect(speed?.demonstratedValue).toBe(76);
@@ -201,7 +219,7 @@ describe('computeSuggestions — pit suggestions (D1b)', () => {
   });
 
   it('carries the time lost in that corner when the caller supplies it (ranking only)', () => {
-    const result = computeSuggestions({
+    const result = suggestOnSurveyedGeometry({
       enabled: true,
       envelope: ENVELOPE,
       cues: [],
@@ -211,7 +229,7 @@ describe('computeSuggestions — pit suggestions (D1b)', () => {
   });
 
   it('generates nothing beyond the demonstrated envelope', () => {
-    const result = computeSuggestions({ enabled: true, envelope: ENVELOPE, cues: [] });
+    const result = suggestOnSurveyedGeometry({ enabled: true, envelope: ENVELOPE, cues: [] });
     for (const suggestion of result.pitSuggestions) {
       if (suggestion.unit === 'm') {
         expect(suggestion.targetValue).toBeGreaterThanOrEqual(suggestion.demonstratedValue);
@@ -224,7 +242,7 @@ describe('computeSuggestions — pit suggestions (D1b)', () => {
 
 describe('suggestion text (D1b, RO/EN)', () => {
   it('renders a pit suggestion with its numbers and the lap that proves it', () => {
-    const result = computeSuggestions({ enabled: true, envelope: ENVELOPE, cues: [] });
+    const result = suggestOnSurveyedGeometry({ enabled: true, envelope: ENVELOPE, cues: [] });
     const brake = result.pitSuggestions.find((entry) => entry.kind === 'brakeLater');
     if (brake === undefined) throw new Error('expected a braking suggestion');
     const en = pitSuggestionLine(brake, 'en');
@@ -240,7 +258,7 @@ describe('suggestion text (D1b, RO/EN)', () => {
   });
 
   it('renders an applied cue update with before, after and the demonstrating lap', () => {
-    const result = computeSuggestions({ enabled: true, envelope: ENVELOPE, cues: cue(260) });
+    const result = suggestOnSurveyedGeometry({ enabled: true, envelope: ENVELOPE, cues: cue(260) });
     const update = result.cueUpdates[0];
     if (update === undefined) throw new Error('expected a cue update');
     const en = cueUpdateLine(update, 'en');
@@ -282,7 +300,7 @@ describe('computeSuggestions — properties', () => {
     fc.assert(
       fc.property(brakePoints, fc.integer({ min: 20, max: 500 }), (points, cueM) => {
         const envelope = envelopeFrom(points, points.map(() => 60));
-        const result = computeSuggestions({
+        const result = suggestOnSurveyedGeometry({
           enabled: true,
           envelope,
           cues: [{ cornerId: 1, brakeStartM: cueM, liftPointM: null }],
@@ -307,7 +325,7 @@ describe('computeSuggestions — properties', () => {
         fc.integer({ min: 20, max: 500 }),
         (points, brakeM, liftM) => {
           const envelope = envelopeFrom(points, points.map(() => 60));
-          const result = computeSuggestions({
+          const result = suggestOnSurveyedGeometry({
             enabled: true,
             envelope,
             cues: [{ cornerId: 1, brakeStartM: brakeM, liftPointM: liftM }],
@@ -330,7 +348,7 @@ describe('computeSuggestions — properties', () => {
         fc.array(fc.integer({ min: 30, max: 200 }), { minLength: 1, maxLength: 8 }),
         (points, speeds) => {
           const envelope = envelopeFrom(points, speeds);
-          const result = computeSuggestions({ enabled: true, envelope, cues: [] });
+          const result = suggestOnSurveyedGeometry({ enabled: true, envelope, cues: [] });
           for (const suggestion of result.pitSuggestions) {
             expect(suggestion.deltaValue).toBeGreaterThan(0);
             if (suggestion.unit === 'm') {
@@ -353,7 +371,7 @@ describe('computeSuggestions — properties', () => {
   it('disabled is always the empty result, whatever the outing looked like', () => {
     fc.assert(
       fc.property(brakePoints, fc.integer({ min: 20, max: 500 }), (points, cueM) => {
-        const result = computeSuggestions({
+        const result = suggestOnSurveyedGeometry({
           enabled: false,
           envelope: envelopeFrom(points, points.map(() => 60)),
           cues: [{ cornerId: 1, brakeStartM: cueM, liftPointM: cueM + 50 }],
@@ -369,7 +387,7 @@ describe('computeSuggestions — properties', () => {
   it('insufficient clean evidence always yields nothing', () => {
     fc.assert(
       fc.property(fc.integer({ min: 40, max: 400 }), fc.integer({ min: 20, max: 500 }), (point, cueM) => {
-        const result = computeSuggestions({
+        const result = suggestOnSurveyedGeometry({
           enabled: true,
           envelope: envelopeFrom([point], [60]),
           cues: [{ cornerId: 1, brakeStartM: cueM, liftPointM: cueM + 50 }],

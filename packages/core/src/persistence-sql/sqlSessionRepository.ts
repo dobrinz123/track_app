@@ -82,6 +82,48 @@ function parsePayloads<T>(rows: readonly PayloadRow[]): StoredRecordRead<T> {
 }
 
 /**
+ * Ticket P16 C1 -- A ROW THIS DEVICE CANNOT DECODE, SAID OUT LOUD.
+ *
+ * The counterpart to {@link parsePayloads} for the reads whose return type is
+ * ONE value rather than a list. `loadTelemetry` answers
+ * `Promise<LocationSample[]>` and `getReferenceLap` answers
+ * `Promise<ReferenceLap | null>`: neither signature has anywhere to put "the
+ * row is there and it will not parse", and the two values those signatures DO
+ * offer -- `[]` and `null` -- both mean THERE WAS NOTHING. Returning either
+ * for a corrupt row is the fabricated-empty bug this whole area exists to
+ * remove: a driven lap would export as a lap with no trace, and a stored
+ * personal best would read as "no personal best yet" and be overwritten by
+ * the next slower lap.
+ *
+ * So these reads FAIL, and they fail with a named error that says which row,
+ * instead of a bare `SyntaxError` from somewhere inside a `.map`. This is a
+ * deliberate difference from the list reads: there, skipping costs one row out
+ * of many and the count carries the loss; here, the row IS the answer.
+ */
+export class StoredPayloadUnreadableError extends Error {
+  /** Which stored row could not be decoded, e.g. `telemetry(s1, lap 3)`. */
+  readonly record: string;
+  /** The underlying parse failure, kept so the cause is not lost. */
+  readonly cause: unknown;
+
+  constructor(record: string, cause: unknown) {
+    super(`Stored payload could not be decoded: ${record}`);
+    this.name = 'StoredPayloadUnreadableError';
+    this.record = record;
+    this.cause = cause;
+  }
+}
+
+/** Parses one stored payload, or throws {@link StoredPayloadUnreadableError} naming it. */
+function parseOnePayload<T>(payload: string, record: string): T {
+  try {
+    return JSON.parse(payload) as T;
+  } catch (cause) {
+    throw new StoredPayloadUnreadableError(record, cause);
+  }
+}
+
+/**
  * SQL-backed `LocalSessionRepository`, written against the minimal
  * `SqlDatabase` interface so it runs unmodified over expo-sqlite in the app
  * and over sql.js in tests (see docs/architecture/contracts.md and
@@ -323,6 +365,22 @@ export class SqlSessionRepository implements LocalSessionRepository {
     });
   }
 
+  /**
+   * Ticket P16 C1 -- ONE CORRUPT LAP ROW COSTS THAT ROW, NOT THE LIST.
+   *
+   * This used to do `lapRows.map((r) => JSON.parse(r.payload))` unguarded,
+   * INSIDE the loop over every session. A single unparseable lap payload, in
+   * any one session, therefore threw out of the loop and rejected the WHOLE
+   * call: no history, so no session to open, so no export -- the "came home
+   * with nothing" failure, through a door nobody had checked.
+   *
+   * `parsePayloads` (P12/P14) already makes the right trade for the verdict
+   * and calibration tables; this is the same trade, with the same obligation
+   * attached. The survivors are returned, and {@link SessionSummary.unreadableLapCount}
+   * states how many rows this device could not decode -- because a session
+   * quietly returning four laps instead of five is the SAME lie in a smaller
+   * font.
+   */
   async listSessions(userId: string, circuitId: string): Promise<SessionSummary[]> {
     const sessionRows = await this.db.getAllAsync<SessionRow>(
       `SELECT sessionId, userId, circuitId, layoutId, layoutVersion, startedAtUtc,
@@ -339,6 +397,7 @@ export class SqlSessionRepository implements LocalSessionRepository {
         'SELECT payload FROM laps WHERE sessionId = ? ORDER BY lapNumber ASC',
         [row.sessionId],
       );
+      const laps = parsePayloads<LapRecord>(lapRows);
       results.push({
         sessionId: row.sessionId,
         userId: row.userId,
@@ -346,7 +405,10 @@ export class SqlSessionRepository implements LocalSessionRepository {
         layoutId: row.layoutId,
         layoutVersion: row.layoutVersion,
         startedAtUtc: row.startedAtUtc,
-        laps: lapRows.map((r) => JSON.parse(r.payload) as LapRecord),
+        laps: laps.records,
+        // Absent, never `0`, when everything read cleanly -- so a summary
+        // round-tripped through save/list is unchanged in the healthy case.
+        ...(laps.unreadableCount === 0 ? {} : { unreadableLapCount: laps.unreadableCount }),
         calibrationStatus: decodeCalibrationStatus(row.calibrationStatus ?? null),
         ...(row.traceUnwritten === null && row.traceFailedWrites === null && row.traceFinalized === null
           ? {}
@@ -405,7 +467,13 @@ export class SqlSessionRepository implements LocalSessionRepository {
       [sessionId, lapNumber],
     );
     const row = rows[0];
-    return row ? (JSON.parse(row.payload) as LocationSample[]) : [];
+    // Ticket P16 C1: a row that exists and will not parse REJECTS. `[]` would
+    // say "this lap has no trace", which is a claim about the drive rather
+    // than about the storage -- see {@link StoredPayloadUnreadableError}.
+    // `SessionController`'s reclaim already handles a `loadTelemetry`
+    // rejection explicitly (`noteReclaimFailure`) rather than treating the
+    // chunk as empty.
+    return row ? parseOnePayload<LocationSample[]>(row.payload, `telemetry(${sessionId}, lap ${lapNumber})`) : [];
   }
 
   /**
@@ -481,7 +549,16 @@ export class SqlSessionRepository implements LocalSessionRepository {
       [userId, circuitId, layoutId, layoutVersion],
     );
     const row = rows[0];
-    return row ? (JSON.parse(row.payload) as ReferenceLap) : null;
+    // Ticket P16 C1: `null` means "no personal best for this layout yet", and
+    // `SessionController` promotes a lap over a `null` reference. A corrupt PB
+    // row read as `null` would therefore let the next SLOWER lap replace a
+    // personal best that is still sitting on the device. It rejects instead.
+    return row
+      ? parseOnePayload<ReferenceLap>(
+          row.payload,
+          `referenceLap(${userId}/${circuitId}/${layoutId}/${layoutVersion})`,
+        )
+      : null;
   }
 
   async putReferenceLap(ref: ReferenceLap): Promise<void> {
