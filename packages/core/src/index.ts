@@ -48,6 +48,23 @@ export type { TelemetryQualityConfig, TrackMatcherConfig } from './matching';
 
 export { CalibrationEngine } from './calibration';
 export type { CalibrationConfig } from './calibration';
+// Ticket P12 item B: the named acceptance bars and the pure attempt-record
+// builder. Exported separately from `export * from './calibration'` because
+// that barrel's `CalibrationEngine` collides with the contracts interface of
+// the same name (see this file's header comment).
+export {
+  CALIBRATION_MAX_REJECTED_FRACTION,
+  CALIBRATION_MAX_UNCOVERED_GAP_M,
+  CALIBRATION_MIN_COVERAGE_FRACTION,
+  CALIBRATION_MIN_OBSERVED_RATE_HZ,
+  DEFAULT_CALIBRATION_COVERAGE_BIN_M,
+  buildCalibrationAttemptRecord,
+  calibrationThresholds,
+  explainCalibrationAttempt,
+  resolveCalibrationOutcome,
+  uncoveredGapOf,
+} from './calibration';
+export type { CalibrationAttemptInput } from './calibration';
 
 export { CrossingDetector, LapTimingEngine } from './timing';
 export type {

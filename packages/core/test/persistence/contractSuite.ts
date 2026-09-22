@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { LocalSessionRepository } from '../../src/contracts';
-import { makeLocationSample, makeReferenceLap, makeSessionSummary, makeSnapshot, makeLapRecord } from './fixtures';
+import {
+  makeCalibrationAttempt,
+  makeLapVerdict,
+  makeLocationSample,
+  makeReferenceLap,
+  makeSessionSummary,
+  makeSnapshot,
+  makeLapRecord,
+} from './fixtures';
 
 /**
  * Shared behavioral contract for every `LocalSessionRepository`
@@ -322,5 +330,126 @@ export function runRepositoryContractTests(name: string, makeRepo: () => Promise
     // test/persistence-sql/sqlSessionRepository.contract.test.ts, not here,
     // so this shared suite keeps passing unmodified against both
     // implementations.
+
+    // Ticket P12 items A/B: the owner's lap verdicts and the calibration
+    // attempts belong to the session, so a delete-all must take them with it.
+    it('deleteUserData also removes lap verdicts and calibration attempts', async () => {
+      await repo.saveSession(makeSessionSummary({ sessionId: 'u1-session', userId: 'user-1' }));
+      await repo.saveLapValidityVerdict!(makeLapVerdict({ sessionId: 'u1-session' }));
+      await repo.saveCalibrationAttempt!(makeCalibrationAttempt({ sessionId: 'u1-session' }));
+      expect(await repo.listLapValidityVerdicts!('u1-session')).toHaveLength(1);
+      expect(await repo.listCalibrationAttempts!('u1-session')).toHaveLength(1);
+
+      await repo.deleteUserData('user-1');
+
+      expect(await repo.listLapValidityVerdicts!('u1-session')).toEqual([]);
+      expect(await repo.listCalibrationAttempts!('u1-session')).toEqual([]);
+    });
+  });
+
+  /**
+   * Ticket P12 item A -- the owner's verdict on the app's lap verdict is
+   * first-class stored data: it round-trips, it is scoped to its session, and
+   * a re-answer replaces the row rather than accumulating.
+   */
+  describe(`${name} - lap validity verdicts (ticket P12 item A)`, () => {
+    let repo: LocalSessionRepository;
+    beforeEach(async () => {
+      repo = await makeRepo();
+    });
+
+    it('is implemented -- a first-party repository must be able to store a verdict', () => {
+      expect(typeof repo.saveLapValidityVerdict).toBe('function');
+      expect(typeof repo.listLapValidityVerdicts).toBe('function');
+    });
+
+    it('round-trips a verdict with its app-verdict snapshot intact', async () => {
+      const verdict = makeLapVerdict({
+        answer: 'disagreed',
+        appValid: false,
+        appInvalidReasons: ['PIT_TRANSIT'],
+        note: 'I never went through the pits',
+      });
+      await repo.saveLapValidityVerdict!(verdict);
+      expect(await repo.listLapValidityVerdicts!(verdict.sessionId)).toEqual([verdict]);
+    });
+
+    it('lists only the asked-for session, ascending by lap number', async () => {
+      await repo.saveLapValidityVerdict!(makeLapVerdict({ sessionId: 'a', lapNumber: 3 }));
+      await repo.saveLapValidityVerdict!(makeLapVerdict({ sessionId: 'a', lapNumber: 1 }));
+      await repo.saveLapValidityVerdict!(makeLapVerdict({ sessionId: 'b', lapNumber: 2 }));
+
+      expect((await repo.listLapValidityVerdicts!('a')).map((v) => v.lapNumber)).toEqual([1, 3]);
+      expect((await repo.listLapValidityVerdicts!('b')).map((v) => v.lapNumber)).toEqual([2]);
+    });
+
+    it('a re-answer REPLACES the row for that lap and carries the higher revision', async () => {
+      await repo.saveLapValidityVerdict!(makeLapVerdict({ answer: 'agreed', answerRevision: 1 }));
+      await repo.saveLapValidityVerdict!(
+        makeLapVerdict({ answer: 'disagreed', answerRevision: 2, answeredAtUtc: '2026-09-22T10:00:00.000Z' }),
+      );
+      const rows = await repo.listLapValidityVerdicts!('session-1');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.answer).toBe('disagreed');
+      expect(rows[0]!.answerRevision).toBe(2);
+    });
+
+    it('an unknown session reads back as no rows, never as an error', async () => {
+      expect(await repo.listLapValidityVerdicts!('never-driven')).toEqual([]);
+    });
+  });
+
+  /**
+   * Ticket P12 item B -- the calibration attempt record, whatever happened to
+   * the Learn lap.
+   */
+  describe(`${name} - calibration attempts (ticket P12 item B)`, () => {
+    let repo: LocalSessionRepository;
+    beforeEach(async () => {
+      repo = await makeRepo();
+    });
+
+    it('is implemented -- a first-party repository must be able to store an attempt', () => {
+      expect(typeof repo.saveCalibrationAttempt).toBe('function');
+      expect(typeof repo.listCalibrationAttempts).toBe('function');
+    });
+
+    it('round-trips an attempt record whole', async () => {
+      const record = makeCalibrationAttempt({ outcome: 'cancelled' });
+      await repo.saveCalibrationAttempt!(record);
+      expect(await repo.listCalibrationAttempts!(record.sessionId)).toEqual([record]);
+    });
+
+    it('a rewrite of the SAME attemptId replaces it -- a provisional row becomes its concluded self', async () => {
+      const provisional = makeCalibrationAttempt({ attemptId: 'attempt-1', concluded: false, outcome: 'stalled' });
+      await repo.saveCalibrationAttempt!(provisional);
+      await repo.saveCalibrationAttempt!({
+        ...provisional,
+        concluded: true,
+        outcome: 'rejected',
+        endedAtUtc: '2026-09-22T10:05:00.000Z',
+      });
+      const rows = await repo.listCalibrationAttempts!(provisional.sessionId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.outcome).toBe('rejected');
+      expect(rows[0]!.concluded).toBe(true);
+    });
+
+    it('two attempts on one session are both kept, oldest first', async () => {
+      await repo.saveCalibrationAttempt!(
+        makeCalibrationAttempt({ attemptId: 'b', startedAtUtc: '2026-09-22T10:10:00.000Z', outcome: 'accepted' }),
+      );
+      await repo.saveCalibrationAttempt!(
+        makeCalibrationAttempt({ attemptId: 'a', startedAtUtc: '2026-09-22T10:00:00.000Z', outcome: 'cancelled' }),
+      );
+      const rows = await repo.listCalibrationAttempts!('session-1');
+      expect(rows.map((row) => row.attemptId)).toEqual(['a', 'b']);
+    });
+
+    it('scopes by session, and an unknown session reads back as no rows', async () => {
+      await repo.saveCalibrationAttempt!(makeCalibrationAttempt({ attemptId: 'x', sessionId: 'other' }));
+      expect(await repo.listCalibrationAttempts!('session-1')).toEqual([]);
+      expect(await repo.listCalibrationAttempts!('other')).toHaveLength(1);
+    });
   });
 }

@@ -2,6 +2,9 @@ import Constants from 'expo-constants';
 import type {
   CircuitProfile,
   Corner,
+  LapValidityVerdict,
+  LapVerdictAnswer,
+  LapVerdictDecision,
   LocationProvider,
   LocationSample,
   RuntimeProfile,
@@ -59,6 +62,22 @@ import {
   type RawSessionExportDocument,
   type RawSessionExportUnavailable,
 } from './rawSessionExport';
+// Ticket P12 items A and C. Both modules are pure TypeScript over
+// `@circuit/core` types, for the reason `rawSessionExport.ts` records: this
+// file must stay importable by vitest, and any reach into `react-native`
+// breaks that for every suite that imports it.
+import {
+  createLapVerdictStore,
+  type LapVerdictStore,
+  type LapVerdictSupport,
+  type RecordVerdictOutcome,
+} from './lapVerdictStore';
+import {
+  loadSessionReportDocument,
+  type SessionReportCircuit,
+  type SessionReportDocument,
+  type SessionReportUnavailable,
+} from './sessionReport';
 import { ReplayTimeSource, ReplayTimestampedLocationProvider, ScaledReplayClock } from './liveTimestampedProvider';
 import { TMR_CIRCUIT_PROFILE, TMR_CORNERS, TMR_RUNTIME_PROFILE } from './tmrProfile';
 import {
@@ -4261,6 +4280,186 @@ export function getStintCoach(): StintCoach {
 /** What the trackday stage did in `sessionId`: moves applied, suggestions shown. */
 export function getTrackdayRecord(sessionId: string): SessionSuggestionRecord {
   return suggestionJournal.read(sessionId);
+}
+
+// ---------------------------------------------------------------------------
+// Ticket P12 item A -- the owner's verdict on the app's lap verdicts.
+// ---------------------------------------------------------------------------
+
+/**
+ * ONE store for the whole app, built eagerly and reading the repository on
+ * demand (`getSessionRepository()`), so it is correct both before and after
+ * bootstrap -- the same lifecycle every other accessor in this file has.
+ *
+ * NO SCREEN EXISTS YET. These four functions are the entire surface a screen
+ * needs: ask whether verdicts can be stored at all, load a session's answers,
+ * read them per lap, and record one. Building the screen is the next worker's.
+ */
+const lapVerdictStore: LapVerdictStore = createLapVerdictStore({
+  repository: () => repository,
+  onError: (message, error) => console.warn(`[composition] ${message}`, error),
+});
+
+/**
+ * Ticket P12 item A: can this device store the owner's verdicts at all?
+ *
+ * `'unsupported'` is NOT "none recorded". A screen must not offer a button
+ * whose answer goes nowhere, and an export must not present an unreadable
+ * store as a session nobody judged.
+ */
+export function lapVerdictSupport(): LapVerdictSupport {
+  return lapVerdictStore.support();
+}
+
+/** Loads one session's stored verdicts into the synchronous cache the screens read. `false` when the read failed or is unsupported. */
+export function refreshLapVerdicts(sessionId: string): Promise<boolean> {
+  return lapVerdictStore.refresh(sessionId);
+}
+
+/**
+ * ONE ENTRY PER LAP of this session: the owner's stored answer where he gave
+ * one, and an explicit `'unanswered'` everywhere else. Synchronous, so a
+ * screen can call it during render; call {@link refreshLapVerdicts} first.
+ */
+export function getLapVerdicts(sessionId: string): LapValidityVerdict[] {
+  const laps = historyStore?.getSession(sessionId)?.laps ?? [];
+  return lapVerdictStore.forSession(sessionId, laps);
+}
+
+/** How many of this session's laps the owner agreed with, disagreed with, and never got to. */
+export function getLapVerdictSummary(sessionId: string): Record<LapVerdictAnswer, number> {
+  const laps = historyStore?.getSession(sessionId)?.laps ?? [];
+  return lapVerdictStore.summary(sessionId, laps);
+}
+
+/**
+ * Ticket P12 item A (binding) -- THE ONE CALL A SCREEN MAKES.
+ *
+ * `decision` is the owner's answer to "was the app's valid/invalid verdict on
+ * this lap correct?", and the app's verdict is snapshotted into the row as it
+ * stands NOW, so the answer survives a later rules change with its meaning
+ * intact. The outcome distinguishes stored / failed / unsupported rather than
+ * returning a bare boolean: a screen that cannot tell those apart will
+ * eventually tell the owner his answer was kept when it was not.
+ */
+export function recordLapValidityVerdict(input: {
+  sessionId: string;
+  lapNumber: number;
+  decision: LapVerdictDecision;
+  note?: string;
+  /** Injected only by tests; defaults to now. */
+  answeredAtUtc?: string;
+}): Promise<RecordVerdictOutcome> {
+  const lap = historyStore
+    ?.getSession(input.sessionId)
+    ?.laps.find((entry) => entry.lapNumber === input.lapNumber);
+  if (lap === undefined) {
+    return Promise.resolve({
+      state: 'failed',
+      verdict: null,
+      detail: `session "${input.sessionId}" has no stored lap ${String(input.lapNumber)} to judge`,
+    });
+  }
+  return lapVerdictStore.recordVerdict({
+    sessionId: input.sessionId,
+    lap,
+    decision: input.decision,
+    ...(input.note === undefined ? {} : { note: input.note }),
+    ...(input.answeredAtUtc === undefined ? {} : { answeredAtUtc: input.answeredAtUtc }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Ticket P12 item C -- one complete report per session.
+// ---------------------------------------------------------------------------
+
+/**
+ * The circuit this stored session was driven on, as the device's catalog
+ * describes it -- or `null` when the catalog no longer holds it (a learned
+ * circuit the owner deleted, say), which the report states rather than
+ * silently omitting.
+ */
+function sessionReportCircuit(session: StoredSession): SessionReportCircuit | null {
+  const bundled = circuitCatalog.get(session.circuitId);
+  if (bundled === null) return null;
+  const profile = bundled.profile;
+  return {
+    circuitId: profile.circuitId,
+    displayName: profile.displayName,
+    layoutId: profile.layoutId,
+    layoutVersion: profile.layoutVersion,
+    geometryStatus: profile.geometryStatus,
+    sectorStatus: profile.sectorStatus,
+    direction: profile.direction,
+    totalLengthM: profile.totalLengthM,
+    corridorWidthM: profile.corridorWidthM,
+    profileSchemaVersion: profile.schemaVersion,
+  };
+}
+
+/**
+ * Ticket P12 item C (binding) -- THE DOCUMENT THE EXPORT BUTTON WILL SHARE.
+ *
+ * Wires `sessionReport.ts`'s pure loader to every store that holds a piece of
+ * this session: the raw export (GNSS trace, unclaimed chunks and all, plus
+ * every OBD/IMU channel), the repository's calibration attempts and lap
+ * verdicts, the circuit catalog, the durable calibration provenance, the live
+ * controller's recording counters, and the trackday suggestion journal.
+ *
+ * Resolves a NAMED reason rather than throwing, exactly as
+ * {@link buildRawSessionExport} does: `'session-not-found'` when the id is not
+ * on the device. Every OTHER failure ships inside the document, in
+ * `availability` and `notes` -- a report that refuses to be produced because
+ * one of six reads failed is worth less than one that ships and says so.
+ */
+export async function buildSessionReport(
+  sessionId: string,
+  generatedAtUtc: string = new Date().toISOString(),
+): Promise<SessionReportDocument | SessionReportUnavailable> {
+  const store = historyStore;
+  if (store === null) return 'storage-unavailable';
+  const repo = repository;
+  return loadSessionReportDocument(
+    {
+      getSession: (id) => store.getSession(id),
+      loadRaw: (id, at) => buildRawSessionExport(id, at),
+      calibrationStatus: (id) => resolveSessionCalibrationStatus(id),
+      circuit: (session) => sessionReportCircuit(session),
+      // Omitted ENTIRELY, not stubbed to `[]`, when the store cannot answer:
+      // the loader turns an absent dep into `'unavailable'`, which is a
+      // different fact from "none recorded" and the whole point of item C's
+      // honesty rule.
+      ...(repo?.listCalibrationAttempts === undefined
+        ? {}
+        : { listCalibrationAttempts: (id: string) => repo.listCalibrationAttempts!(id) }),
+      ...(repo?.listLapValidityVerdicts === undefined
+        ? {}
+        : { listLapVerdicts: (id: string) => repo.listLapValidityVerdicts!(id) }),
+      recording: (id) => {
+        // `persistedSampleCount` exists only on a LIVE controller; once the
+        // app has moved on, the stored row's figures are all there is.
+        if (id !== mostRecentSessionId) return {};
+        const snapshot = currentFacadeState();
+        if (snapshot === null) return {};
+        return {
+          persistedSampleCount: snapshot.recording.persistedSampleCount,
+          unwrittenSampleCount: snapshot.recording.unwrittenSampleCount,
+          failedWriteCount: snapshot.recording.failedWriteCount,
+        };
+      },
+      extras: async (id) => [
+        {
+          source: 'trackdayRecord',
+          description:
+            'What the trackday suggestion stage did in this session: cue moves applied and suggestions shown.',
+          data: getTrackdayRecord(id),
+        },
+      ],
+      onReadError: (error) => console.warn('[composition] session report read failed', error),
+    },
+    sessionId,
+    generatedAtUtc,
+  );
 }
 
 /** The session the pit view reads, or `null` when no session is running. */

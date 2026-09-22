@@ -1,5 +1,7 @@
 import type {
+  CalibrationAttemptRecord,
   LapRecord,
+  LapValidityVerdict,
   LocalSessionRepository,
   LocationSample,
   ReferenceLap,
@@ -14,7 +16,7 @@ import {
   validateReferenceLap,
 } from '../persistence';
 import type { SqlDatabase } from './sqlDatabase';
-import { SQL_ALTERS_V3, SQL_ALTERS_V4, SQL_DDL, SQL_DDL_V2, SQL_SCHEMA_VERSION } from './schema';
+import { SQL_ALTERS_V3, SQL_ALTERS_V4, SQL_DDL, SQL_DDL_V2, SQL_DDL_V5, SQL_SCHEMA_VERSION } from './schema';
 
 interface SessionRow {
   sessionId: string;
@@ -39,6 +41,27 @@ function decodeCalibrationStatus(raw: string | null): SessionCalibrationStatus {
 
 interface PayloadRow {
   payload: string;
+}
+
+/**
+ * Ticket P12 items A/B: parses a list of JSON payload rows, SKIPPING any that
+ * will not parse rather than failing the whole read. One corrupt row out of a
+ * session's worth of answers must not cost the others -- the same trade
+ * `readUnclaimedGnssChunks` already makes for the trace, and the same reason:
+ * these reads exist to get data OFF the device.
+ */
+function parsePayloads<T>(rows: readonly PayloadRow[]): T[] {
+  const parsed: T[] = [];
+  for (const row of rows) {
+    try {
+      parsed.push(JSON.parse(row.payload) as T);
+    } catch {
+      // Unreadable row: omitted. A caller counting rows against what it
+      // expects (the report's per-lap merge) surfaces the shortfall as an
+      // unanswered lap rather than as a silently wrong total.
+    }
+  }
+  return parsed;
 }
 
 /**
@@ -84,6 +107,10 @@ export class SqlSessionRepository implements LocalSessionRepository {
     // this safe to run unconditionally, but the version bump below only
     // fires on databases that actually need it (see the branches beneath).
     await this.db.execAsync(SQL_DDL_V2);
+    // v5 (ticket P12 items A/B): the lap-verdict and calibration-attempt
+    // tables. Both are `CREATE TABLE IF NOT EXISTS`, so like `SQL_DDL_V2`
+    // above this is safe to run on every open.
+    await this.db.execAsync(SQL_DDL_V5);
     // v3 (ticket P10A): the durable calibration-provenance and trace-completeness
     // columns on `sessions`. Each ALTER is attempted on its own and its
     // "duplicate column name" failure ignored, which is what makes running
@@ -348,6 +375,50 @@ export class SqlSessionRepository implements LocalSessionRepository {
     return row ? (JSON.parse(row.payload) as LocationSample[]) : [];
   }
 
+  /**
+   * Ticket P12 item A. `INSERT OR REPLACE` keyed `(sessionId, lapNumber)` --
+   * the same last-write-wins semantics `saveTelemetry` has, which is what a
+   * re-answer needs: the row carries its own `answerRevision`, so replacing it
+   * loses nothing the document is entitled to show.
+   */
+  async saveLapValidityVerdict(verdict: LapValidityVerdict): Promise<void> {
+    assertJsonSerializable(verdict, `lapVerdict(${verdict.sessionId}, lap ${verdict.lapNumber})`);
+    await this.db.runAsync(
+      'INSERT OR REPLACE INTO lap_verdicts (sessionId, lapNumber, payload) VALUES (?, ?, ?)',
+      [verdict.sessionId, verdict.lapNumber, JSON.stringify(verdict)],
+    );
+  }
+
+  /**
+   * A row whose payload will not parse is SKIPPED, not fatal -- one unreadable
+   * verdict must not cost the rest of the session's answers, the same trade
+   * the chunk reader makes for the trace.
+   */
+  async listLapValidityVerdicts(sessionId: string): Promise<LapValidityVerdict[]> {
+    const rows = await this.db.getAllAsync<PayloadRow>(
+      'SELECT payload FROM lap_verdicts WHERE sessionId = ? ORDER BY lapNumber ASC',
+      [sessionId],
+    );
+    return parsePayloads<LapValidityVerdict>(rows);
+  }
+
+  /** Ticket P12 item B. Keyed by `attemptId`, so the concluded row replaces the provisional one written while the Learn lap ran. */
+  async saveCalibrationAttempt(record: CalibrationAttemptRecord): Promise<void> {
+    assertJsonSerializable(record, `calibrationAttempt(${record.attemptId})`);
+    await this.db.runAsync(
+      'INSERT OR REPLACE INTO calibration_attempts (attemptId, sessionId, startedAtUtc, payload) VALUES (?, ?, ?, ?)',
+      [record.attemptId, record.sessionId, record.startedAtUtc, JSON.stringify(record)],
+    );
+  }
+
+  async listCalibrationAttempts(sessionId: string): Promise<CalibrationAttemptRecord[]> {
+    const rows = await this.db.getAllAsync<PayloadRow>(
+      'SELECT payload FROM calibration_attempts WHERE sessionId = ? ORDER BY startedAtUtc ASC, attemptId ASC',
+      [sessionId],
+    );
+    return parsePayloads<CalibrationAttemptRecord>(rows);
+  }
+
   async getReferenceLap(
     userId: string,
     circuitId: string,
@@ -408,6 +479,17 @@ export class SqlSessionRepository implements LocalSessionRepository {
         'DELETE FROM telemetry WHERE sessionId IN (SELECT sessionId FROM sessions WHERE userId = ?)',
         [userId],
       );
+      // Ticket P12 items A/B: the owner's lap verdicts and the calibration
+      // attempts of those sessions are this user's data too. A delete-all that
+      // left them behind would keep a record of a drive he asked to be erased.
+      await tx.runAsync(
+        'DELETE FROM lap_verdicts WHERE sessionId IN (SELECT sessionId FROM sessions WHERE userId = ?)',
+        [userId],
+      );
+      await tx.runAsync(
+        'DELETE FROM calibration_attempts WHERE sessionId IN (SELECT sessionId FROM sessions WHERE userId = ?)',
+        [userId],
+      );
       await tx.runAsync('DELETE FROM sessions WHERE userId = ?', [userId]);
       await tx.runAsync('DELETE FROM reference_laps WHERE userId = ?', [userId]);
 
@@ -419,6 +501,18 @@ export class SqlSessionRepository implements LocalSessionRepository {
         sessionIdPrefix,
       ]);
       await tx.runAsync('DELETE FROM telemetry WHERE substr(sessionId, 1, length(?)) = ?', [
+        sessionIdPrefix,
+        sessionIdPrefix,
+      ]);
+      // Ticket P12 items A/B: the same orphan sweep, for the same reason -- a
+      // session whose row never reached `sessions` (still active, or killed
+      // before the save) can still have a calibration attempt recorded
+      // against it, because the attempt is written before the first lap.
+      await tx.runAsync('DELETE FROM lap_verdicts WHERE substr(sessionId, 1, length(?)) = ?', [
+        sessionIdPrefix,
+        sessionIdPrefix,
+      ]);
+      await tx.runAsync('DELETE FROM calibration_attempts WHERE substr(sessionId, 1, length(?)) = ?', [
         sessionIdPrefix,
         sessionIdPrefix,
       ]);

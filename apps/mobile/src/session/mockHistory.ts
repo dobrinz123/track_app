@@ -26,6 +26,15 @@ export interface StoredSession {
   calibrationStatus?: SessionCalibrationStatus;
   /** Ticket P10A H3: GNSS fixes the recorder captured and could not write, or `undefined` for a session recorded before that was tracked. */
   unwrittenSampleCount?: number;
+  /**
+   * Ticket P12 item C: write ATTEMPTS that failed for this session, including
+   * ones a retry later rescued. Carried through from `SessionSummary.trace`
+   * beside `unwrittenSampleCount`, which was already here -- the session
+   * report states both, because "nothing was lost" and "storage never
+   * misbehaved" are different claims and only the second one this field can
+   * make. `undefined` for a session recorded before it was tracked.
+   */
+  failedWriteCount?: number;
 }
 
 export interface PersonalBestEntry {

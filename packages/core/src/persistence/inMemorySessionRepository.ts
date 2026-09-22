@@ -1,5 +1,7 @@
 import type {
+  CalibrationAttemptRecord,
   LapRecord,
+  LapValidityVerdict,
   LocalSessionRepository,
   LocationSample,
   ReferenceLap,
@@ -52,6 +54,10 @@ export class InMemorySessionRepository implements LocalSessionRepository {
   private readonly sessionOwners = new Map<string, string>();
   private readonly telemetry = new Map<string, LocationSample[]>();
   private readonly referenceLaps = new Map<string, ReferenceLap>();
+  /** Ticket P12 item A: keyed `sessionId::lapNumber`, exactly like `telemetry`. */
+  private readonly lapVerdicts = new Map<string, LapValidityVerdict>();
+  /** Ticket P12 item B: keyed by `attemptId`; a provisional row is REPLACED by its concluded successor. */
+  private readonly calibrationAttempts = new Map<string, CalibrationAttemptRecord>();
 
   async saveCheckpoint(sessionId: string, snapshot: SessionMachineSnapshot, laps: LapRecord[]): Promise<void> {
     assertJsonSerializable(snapshot, `checkpoint(${sessionId}).snapshot`);
@@ -139,6 +145,38 @@ export class InMemorySessionRepository implements LocalSessionRepository {
     return entry ? structuredClone(entry) : [];
   }
 
+  /**
+   * Ticket P12 item A. Validated BEFORE the store is touched, like every other
+   * write here: a verdict that cannot be serialized must never half-land, or
+   * the export would report an answer the owner's next launch cannot read.
+   */
+  async saveLapValidityVerdict(verdict: LapValidityVerdict): Promise<void> {
+    assertJsonSerializable(verdict, `lapVerdict(${verdict.sessionId}, lap ${verdict.lapNumber})`);
+    this.lapVerdicts.set(telemetryKey(verdict.sessionId, verdict.lapNumber), structuredClone(verdict));
+  }
+
+  async listLapValidityVerdicts(sessionId: string): Promise<LapValidityVerdict[]> {
+    return [...this.lapVerdicts.values()]
+      .filter((verdict) => verdict.sessionId === sessionId)
+      .sort((a, b) => a.lapNumber - b.lapNumber)
+      .map((verdict) => structuredClone(verdict));
+  }
+
+  /** Ticket P12 item B. Keyed by `attemptId`, so rewriting a provisional row replaces it rather than accumulating duplicates. */
+  async saveCalibrationAttempt(record: CalibrationAttemptRecord): Promise<void> {
+    assertJsonSerializable(record, `calibrationAttempt(${record.attemptId})`);
+    this.calibrationAttempts.set(record.attemptId, structuredClone(record));
+  }
+
+  async listCalibrationAttempts(sessionId: string): Promise<CalibrationAttemptRecord[]> {
+    return [...this.calibrationAttempts.values()]
+      .filter((record) => record.sessionId === sessionId)
+      .sort((a, b) =>
+        a.startedAtUtc < b.startedAtUtc ? -1 : a.startedAtUtc > b.startedAtUtc ? 1 : a.attemptId.localeCompare(b.attemptId),
+      )
+      .map((record) => structuredClone(record));
+  }
+
   async getReferenceLap(
     userId: string,
     circuitId: string,
@@ -171,6 +209,15 @@ export class InMemorySessionRepository implements LocalSessionRepository {
       const prefix = telemetryKeyPrefix(sessionId);
       for (const key of [...this.telemetry.keys()]) {
         if (key.startsWith(prefix)) this.telemetry.delete(key);
+      }
+      // Ticket P12 items A/B: the owner's verdicts and the calibration
+      // attempts are this session's data too -- a delete-all that left them
+      // behind would leave a record of a drive the user asked to be erased.
+      for (const key of [...this.lapVerdicts.keys()]) {
+        if (key.startsWith(prefix)) this.lapVerdicts.delete(key);
+      }
+      for (const [attemptId, record] of [...this.calibrationAttempts.entries()]) {
+        if (record.sessionId === sessionId) this.calibrationAttempts.delete(attemptId);
       }
     }
 

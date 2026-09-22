@@ -43,8 +43,16 @@ interface WideSample {
   localPoint: LocalPoint;
 }
 
+/**
+ * Ticket P12 item B: the default coverage bin width, metres -- exported
+ * because a calibration attempt's record states the bin width in force, and a
+ * caller that configured nothing is entitled to state THIS value rather than
+ * leave the field blank.
+ */
+export const DEFAULT_CALIBRATION_COVERAGE_BIN_M = 25;
+
 const DEFAULT_CONFIG: Omit<CalibrationConfig, 'direction'> = {
-  coverageBinM: 25,
+  coverageBinM: DEFAULT_CALIBRATION_COVERAGE_BIN_M,
   corridorWidthM: 20,
   quality: {},
   matcher: {},
@@ -63,6 +71,24 @@ const MAX_ACCEPTED_POINTS = 10_000;
  * positions. Tight-corridor semantics (`corridorWidthM`) are unchanged everywhere else.
  */
 const LEARN_WIDE_CORRIDOR_M = 40;
+
+/**
+ * Ticket P12 item B -- the acceptance bars `finish()` judges against, NAMED.
+ *
+ * Every value below is the literal that was already inline in `finish()`;
+ * nothing is changed, raised or lowered by extracting them. They are exported
+ * because a calibration attempt's durable record has to state the thresholds
+ * that were in force (`CalibrationThresholds`), and a record that restated
+ * them as its own copied constants could drift out of step with the engine
+ * that actually applied them.
+ */
+export const CALIBRATION_MIN_COVERAGE_FRACTION = 0.85;
+/** Longest uncovered stretch tolerated before `COVERAGE_GAP`, metres. */
+export const CALIBRATION_MAX_UNCOVERED_GAP_M = 250;
+/** Observed fix rate below which `RATE_TOO_LOW` fires, Hz. */
+export const CALIBRATION_MIN_OBSERVED_RATE_HZ = 0.5;
+/** Wide-corridor rejected fraction above which `POOR_GNSS` fires. */
+export const CALIBRATION_MAX_REJECTED_FRACTION = 0.5;
 
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
@@ -395,14 +421,18 @@ export class CalibrationEngine implements CalibrationEngineContract {
       observedRateHz,
       uncoveredGapStartM: gap.startM,
       uncoveredGapEndM: gap.endM,
+      // Ticket P12 item B: the TRUE length, which `endM - startM` under-reports
+      // for a gap that wraps the start/finish line -- and which is the figure
+      // `COVERAGE_GAP` below is actually judged against.
+      uncoveredGapLengthM: gap.lengthM,
     };
 
     const failureReasons: string[] = [];
-    if (coverageFraction < 0.85) failureReasons.push('INSUFFICIENT_COVERAGE');
+    if (coverageFraction < CALIBRATION_MIN_COVERAGE_FRACTION) failureReasons.push('INSUFFICIENT_COVERAGE');
     if (directionDetected !== this.expectedDirection) failureReasons.push('WRONG_DIRECTION');
-    if (wideRejectedFraction > 0.5) failureReasons.push('POOR_GNSS');
-    if (observedRateHz < 0.5) failureReasons.push('RATE_TOO_LOW');
-    if (gap.lengthM > 250) failureReasons.push('COVERAGE_GAP');
+    if (wideRejectedFraction > CALIBRATION_MAX_REJECTED_FRACTION) failureReasons.push('POOR_GNSS');
+    if (observedRateHz < CALIBRATION_MIN_OBSERVED_RATE_HZ) failureReasons.push('RATE_TOO_LOW');
+    if (gap.lengthM > CALIBRATION_MAX_UNCOVERED_GAP_M) failureReasons.push('COVERAGE_GAP');
     if (this.calibrationOverrun) failureReasons.push('CALIBRATION_OVERRUN');
 
     const qualityRatio = totalSamples === 0 ? 0 : this.samplesAccepted / totalSamples;

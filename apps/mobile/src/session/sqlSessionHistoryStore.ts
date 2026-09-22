@@ -53,7 +53,15 @@ export class SqlSessionHistoryStore implements SessionHistoryStore {
         // An absent value stays absent here -- the readers turn that into
         // `'unknown'`, never into `'validated'`.
         ...(s.calibrationStatus === undefined ? {} : { calibrationStatus: s.calibrationStatus }),
-        ...(s.trace === undefined ? {} : { unwrittenSampleCount: s.trace.unwrittenSampleCount }),
+        // Ticket P12 item C: BOTH trace figures, not just the first. The
+        // session report has to be able to say "storage misbehaved N times
+        // and nothing was lost" as well as "N fixes never landed".
+        ...(s.trace === undefined
+          ? {}
+          : {
+              unwrittenSampleCount: s.trace.unwrittenSampleCount,
+              failedWriteCount: s.trace.failedWriteCount,
+            }),
       }));
 
     const ref = await this.repository.getReferenceLap(this.userId, this.circuitId, this.layoutId, this.layoutVersion);

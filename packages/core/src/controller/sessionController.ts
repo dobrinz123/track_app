@@ -1,6 +1,8 @@
 import type {
   BrakingZone,
+  CalibrationAttemptRecord,
   CalibrationResult,
+  CalibrationThresholds,
   CircuitProfile,
   CoachCue,
   Corner,
@@ -18,7 +20,13 @@ import type {
   SessionSummary,
   TrackMatch,
 } from '../contracts';
-import { CalibrationEngine, type CalibrationConfig } from '../calibration';
+import {
+  CalibrationEngine,
+  DEFAULT_CALIBRATION_COVERAGE_BIN_M,
+  buildCalibrationAttemptRecord,
+  calibrationThresholds,
+  type CalibrationConfig,
+} from '../calibration';
 import { CoachEngine, deriveBrakingZones } from '../coach';
 import {
   MAX_BRAKE_LATER_M,
@@ -481,6 +489,19 @@ const TRACE_RETRY_MAX_ATTEMPTS = 8;
  */
 const OFF_TRACK_HOLD_MS = 3_000;
 
+/**
+ * Ticket P12 item B -- how often the PROVISIONAL calibration-attempt record is
+ * rewritten while a Learn lap is still running, as a step in coverage.
+ *
+ * The record exists so a Learn lap that stalls leaves something durable to
+ * read: the owner's lost day was a lap parked at ~83% coverage, and a record
+ * written only at the start would have said 0%. Rewriting it on every sample
+ * would be a storage write per fix; 5% of the lap is roughly twenty writes for
+ * a whole Learn lap, and pins the "stalled at X%" figure to within 5 points of
+ * wherever it actually stopped.
+ */
+const CALIBRATION_ATTEMPT_COVERAGE_STEP = 0.05;
+
 const PAUSABLE_STATES = new Set<SessionState>(['calibrating', 'armed', 'outLap', 'timing', 'inPit']);
 const MID_SESSION_STATES = new Set<SessionState>(['outLap', 'timing', 'inPit']);
 /**
@@ -672,6 +693,36 @@ export class SessionController {
   } | null = null;
   private calibrationResult: CalibrationResult | null = null;
   /**
+   * Ticket P12 item B -- the Learn lap currently being recorded, or `null`
+   * when no attempt is open.
+   *
+   * Live bookkeeping only; the durable record is rebuilt from it by
+   * `writeCalibrationAttempt()` and never held here in its final form, so the
+   * row on disk is always a function of these figures rather than a separately
+   * maintained copy that could drift from them.
+   */
+  private calibrationAttemptState: {
+    attemptId: string;
+    sessionId: string;
+    startedAtUtc: string;
+    startedAtMono: number;
+    thresholds: CalibrationThresholds;
+    /** Fixes fed to the engine this attempt, counted at the sample callback. */
+    samplesFed: number;
+    /** Live coverage as `progress()` last reported it. */
+    coverageFraction: number;
+    /** The coverage step the provisional row was last written at -- see {@link CALIBRATION_ATTEMPT_COVERAGE_STEP}. */
+    lastWrittenCoverageStep: number;
+  } | null = null;
+  /** Ticket P12 item B: the last record this controller wrote, for a host that wants to show it without a read. */
+  private lastCalibrationAttemptRecord: CalibrationAttemptRecord | null = null;
+  /**
+   * Ticket P12 item B: serializes calibration-attempt writes, so the concluded
+   * row can never land before a provisional one that was issued earlier and
+   * leave the stalled figures on disk as the final word.
+   */
+  private calibrationRecordTail: Promise<void> = Promise.resolve();
+  /**
    * Ticket P7R E2 / P10A H5-H6: see {@link FacadeStateCore.calibrationStatus}.
    *
    * `'unvalidated'` is set ONLY by `proceedWithoutValidatedCalibration()`'s
@@ -774,8 +825,35 @@ export class SessionController {
    *
    * Seeded on `restoreFromCheckpoint` from the checkpoint being restored, so
    * the rule survives a relaunch as well as a retry.
+   *
+   * Ticket P12 item D (HIGH, Codex round 4) -- AND IT IS SCOPED TO ONE
+   * SESSION.
+   *
+   * A generation only means anything relative to the session it counts the
+   * laps of, and the watermark was kept per CONTROLLER. The reviewer's
+   * reproduction: drive two laps in session A on a repository WITHOUT
+   * `saveLapCommit` (so every checkpoint goes through the fallback path
+   * below); end A, which leaves the watermark at 2; restore an empty session
+   * B on the same controller; arm and drive two laps. B's checkpoints are
+   * generation 1 and then 2 -- neither of them strictly greater than A's
+   * leftover 2 -- so both writes were skipped, B's stored checkpoint stayed
+   * `[]`, and a restart restored NO completed laps from a session that had
+   * driven two real 92.66 s laps with 927 telemetry samples each. The fixes
+   * survived, in their chunk rows; the laps did not.
+   *
+   * So the watermark carries the session id it belongs to
+   * ({@link committedCheckpointSessionId}) and is worth nothing to any other
+   * session: a generation is compared only against a watermark from the SAME
+   * session, and the first write of a new session always adopts it outright.
    */
   private committedCheckpointGeneration = -1;
+  /**
+   * Ticket P12 item D: which session {@link committedCheckpointGeneration}
+   * counts the laps of. `null` before any checkpoint generation has been
+   * noted. A generation from a different session is not a smaller number --
+   * it is a number about something else, and is never compared.
+   */
+  private committedCheckpointSessionId: string | null = null;
   /**
    * Ticket P10A H2: serializes the DURABLE SESSION RECORD writes (the
    * `saveSession` row this controller writes at recording start and again
@@ -915,6 +993,11 @@ export class SessionController {
     // a caller that has flushed must be able to find this session in
     // `listSessions`, whether or not it ever completed a lap.
     await this.sessionRecordTail;
+    // Ticket P12 item B: and the calibration attempt record. Same reason
+    // again: a caller that has flushed must be able to read back why the
+    // Learn lap ended the way it did. Never rejects -- see
+    // `noteRecordFailure`.
+    await this.calibrationRecordTail;
   }
 
   // -------------------------------------------------------------------
@@ -1203,6 +1286,10 @@ export class SessionController {
       this.calibrationSnapshot = { coverageFraction: 0, onTrack: true };
       this.core.dispatch({ type: 'CALIBRATION_STARTED' });
       this.mode = 'calibrating';
+      // Ticket P12 item B: the attempt is durable from here, not from its
+      // conclusion -- a Learn lap that never concludes is exactly the case
+      // the record exists for.
+      this.beginCalibrationAttempt();
     } else {
       this.core.dispatch({ type: 'CALIBRATION_STARTED' });
       this.core.dispatch({ type: 'CALIBRATION_FINISHED', result: recoverySkippedCalibrationResult() });
@@ -1225,10 +1312,23 @@ export class SessionController {
     this.emit();
   }
 
-  private finishCalibrationNow(): void {
+  /**
+   * Ticket P12 item B: `trigger` is recorded, not inferred. `'threshold'` is
+   * the Learn lap finishing on its own at
+   * {@link CALIBRATION_COMPLETE_COVERAGE_FRACTION}; `'forced'` is the driver's
+   * escape hatch ending it early. The difference is exactly what separates a
+   * `'rejected'` attempt from a `'stalled'` one, and it is knowable only here.
+   */
+  private finishCalibrationNow(trigger: 'threshold' | 'forced'): void {
     if (this.calibrationEngine === null) return;
     const result = this.calibrationEngine.finish();
     this.calibrationResult = result;
+    this.concludeCalibrationAttempt({
+      result,
+      reachedCompletionThreshold: trigger === 'threshold',
+      forceFinished: trigger === 'forced',
+      cancelled: false,
+    });
     this.core.dispatch({ type: 'CALIBRATION_FINISHED', result });
     this.mode = 'idle';
     this.emit();
@@ -1290,7 +1390,10 @@ export class SessionController {
       if (this.calibrationEngine === null) return 'refused';
       // The engine's own verdict on the partial lap -- the same call the
       // 0.98 completion trigger makes, at a moment the driver chose.
-      this.finishCalibrationNow();
+      // Ticket P12 item B: recorded as FORCE-FINISHED, which is what makes a
+      // refused partial lap a `'stalled'` attempt rather than a `'rejected'`
+      // one.
+      this.finishCalibrationNow('forced');
     }
     if (this.core.state.state !== 'calibrationReview') return 'refused';
     const result = this.calibrationResult;
@@ -1333,10 +1436,24 @@ export class SessionController {
       // real `calibrationReview -> awaitingCalibration` path applies, rather
       // than shortcutting around it.
       const cancelled = this.calibrationEngine?.finish() ?? cancelledCalibrationResult();
-      this.core.dispatch({
-        type: 'CALIBRATION_FINISHED',
-        result: { ...cancelled, accepted: false, failureReasons: [...new Set([...cancelled.failureReasons, 'CANCELLED'])] },
+      const cancelledResult: CalibrationResult = {
+        ...cancelled,
+        accepted: false,
+        failureReasons: [...new Set([...cancelled.failureReasons, 'CANCELLED'])],
+      };
+      // Ticket P12 item B (binding, owner's words): pressing Cancel IS a
+      // failed calibration and is recorded as one. Before this it produced
+      // nothing durable at all, so afterwards a cancelled attempt was
+      // indistinguishable from an attempt that was never made. The engine's
+      // own figures for the partial lap go into the row, so the record says
+      // how far it had got when he gave up on it.
+      this.concludeCalibrationAttempt({
+        result: cancelledResult,
+        reachedCompletionThreshold: false,
+        forceFinished: false,
+        cancelled: true,
       });
+      this.core.dispatch({ type: 'CALIBRATION_FINISHED', result: cancelledResult });
     }
     if (this.core.state.state !== 'calibrationReview') return;
     this.core.dispatch({ type: 'CALIBRATION_REJECTED' });
@@ -1388,6 +1505,17 @@ export class SessionController {
    */
   async endSession(): Promise<void> {
     this.stopWatchdog();
+    // Ticket P12 item B: a session ended while its Learn lap was still
+    // running closes that attempt as STALLED with no verdict -- which is the
+    // honest description of a lap that ended without the engine ever judging
+    // it. Done BEFORE the flush barrier below so the row is part of what
+    // `flush()` waits for.
+    this.concludeCalibrationAttempt({
+      result: null,
+      reachedCompletionThreshold: false,
+      forceFinished: false,
+      cancelled: false,
+    });
     if (this.providerRunning) {
       await this.deps.locationProvider.stop();
       this.providerRunning = false;
@@ -1414,7 +1542,7 @@ export class SessionController {
       // Ticket P11C: the live lap list is by construction at least as new as
       // anything still queued for retry, so the watermark must learn about
       // this write or the fallback path would let an older retry follow it.
-      this.noteCheckpointGeneration(terminalGeneration);
+      this.noteCheckpointGeneration(sessionId, terminalGeneration);
     }
     this.mode = 'idle';
     this.latestDelta = null;
@@ -1537,7 +1665,7 @@ export class SessionController {
     // older one and would be let through. Raised, never lowered: a
     // controller restoring a checkpoint it has itself already surpassed
     // (same session id, mid-run re-restore) keeps the higher mark.
-    this.noteCheckpointGeneration(checkpointGeneration(laps));
+    this.noteCheckpointGeneration(sessionId, checkpointGeneration(laps));
 
     const priorState = snapshot.context.priorState;
     const midSession =
@@ -1695,7 +1823,14 @@ export class SessionController {
         distanceM: progress.distanceM,
       };
       this.latestGnssQuality = progress.qualityOk ? 'good' : 'degraded';
-      if (progress.coverageFraction >= CALIBRATION_COMPLETE_COVERAGE_FRACTION) this.finishCalibrationNow();
+      // Ticket P12 item B: count the fix and, at every whole coverage step,
+      // rewrite the provisional attempt row -- before the completion check
+      // below, so a lap that finishes on this very sample has its final live
+      // coverage recorded either way.
+      this.noteCalibrationProgress(progress.coverageFraction);
+      if (progress.coverageFraction >= CALIBRATION_COMPLETE_COVERAGE_FRACTION) {
+        this.finishCalibrationNow('threshold');
+      }
       this.emit();
       return;
     }
@@ -1903,7 +2038,7 @@ export class SessionController {
     const work = this.lapPersistenceTail.then(async () => {
       await this.deps.repository.saveSession(summary);
       await this.deps.repository.saveCheckpoint(sessionId, snapshot, laps);
-      this.noteCheckpointGeneration(checkpointGeneration(laps)); // ticket P11C
+      this.noteCheckpointGeneration(sessionId, checkpointGeneration(laps)); // ticket P11C
     });
     this.lapPersistenceTail = work.catch(() => undefined);
     this.trackAsync(
@@ -1948,6 +2083,153 @@ export class SessionController {
       });
     this.sessionRecordTail = work;
     return work;
+  }
+
+  // -------------------------------------------------------------------
+  // Calibration attempt record (ticket P12 item B)
+  // -------------------------------------------------------------------
+
+  /**
+   * Ticket P12 item B (binding) -- A LEARN LAP ANNOUNCES ITSELF THE MOMENT IT
+   * STARTS.
+   *
+   * Written at the start, not at the end, for exactly the reason the session
+   * record is (P10A H2): the failure this exists for is an attempt that never
+   * reaches an end. A Learn lap that parks below the completion threshold and
+   * is then killed with the app leaves a row saying so -- outcome `'stalled'`,
+   * `concluded: false`, coverage as of the last step it reached -- where
+   * before it left nothing at all.
+   */
+  private beginCalibrationAttempt(): void {
+    const sessionId = this.sessionId;
+    if (sessionId === null) return;
+    // A previous attempt that somehow never concluded is closed out as
+    // STALLED with no verdict rather than silently replaced -- the row it
+    // already has on disk must end up saying what became of it.
+    this.concludeCalibrationAttempt({
+      result: null,
+      reachedCompletionThreshold: false,
+      forceFinished: false,
+      cancelled: false,
+    });
+    const calibration = this.deps.config?.calibration;
+    this.calibrationAttemptState = {
+      attemptId: `${sessionId}--cal-${randomToken()}`,
+      sessionId,
+      startedAtUtc: new Date().toISOString(),
+      startedAtMono: this.deps.clock.now(),
+      thresholds: calibrationThresholds({
+        // The SAME corridor the engine was constructed with just above in
+        // `start()` -- read from the same two sources in the same order, so
+        // the record can never state a corridor the engine did not apply.
+        corridorWidthM: calibration?.corridorWidthM ?? this.deps.circuitProfile.corridorWidthM,
+        coverageBinM: calibration?.coverageBinM ?? DEFAULT_CALIBRATION_COVERAGE_BIN_M,
+        completeCoverageFraction: CALIBRATION_COMPLETE_COVERAGE_FRACTION,
+      }),
+      samplesFed: 0,
+      coverageFraction: 0,
+      lastWrittenCoverageStep: 0,
+    };
+    this.writeCalibrationAttempt({ concluded: false });
+  }
+
+  /**
+   * One fed sample's worth of bookkeeping. Rewrites the provisional row only
+   * when coverage has climbed a whole {@link CALIBRATION_ATTEMPT_COVERAGE_STEP}
+   * -- see that constant for the trade.
+   */
+  private noteCalibrationProgress(coverageFraction: number): void {
+    const attempt = this.calibrationAttemptState;
+    if (attempt === null) return;
+    attempt.samplesFed += 1;
+    attempt.coverageFraction = coverageFraction;
+    const step = Math.floor(coverageFraction / CALIBRATION_ATTEMPT_COVERAGE_STEP);
+    if (step <= attempt.lastWrittenCoverageStep) return;
+    attempt.lastWrittenCoverageStep = step;
+    this.writeCalibrationAttempt({ concluded: false });
+  }
+
+  /**
+   * Closes the open attempt with its final outcome and clears it, so the next
+   * Learn lap on this session is a NEW attempt with its own id rather than an
+   * amendment to this one.
+   *
+   * A no-op when no attempt is open, which is what makes it safe to call from
+   * every path that could conclude one (`finishCalibrationNow`,
+   * `rejectCalibration`, `endSession`) without any of them having to know
+   * whether another already has.
+   */
+  private concludeCalibrationAttempt(outcome: {
+    result: CalibrationResult | null;
+    reachedCompletionThreshold: boolean;
+    forceFinished: boolean;
+    cancelled: boolean;
+  }): void {
+    if (this.calibrationAttemptState === null) return;
+    this.writeCalibrationAttempt({ concluded: true, ...outcome });
+    this.calibrationAttemptState = null;
+  }
+
+  /**
+   * Builds the record from the live state and puts it on the write chain.
+   * Never throws and never blocks: a driver must not be held at a calibration
+   * screen by a bookkeeping write, exactly as `persistInitialSessionRecord`
+   * decided for the session row.
+   *
+   * A repository that does not implement `saveCalibrationAttempt` is not an
+   * error -- the record is still built and kept in memory
+   * ({@link calibrationAttemptRecord}), and a reader that finds no rows must
+   * report the attempts as UNAVAILABLE rather than as "there were none".
+   */
+  private writeCalibrationAttempt(outcome: {
+    concluded: boolean;
+    result?: CalibrationResult | null;
+    reachedCompletionThreshold?: boolean;
+    forceFinished?: boolean;
+    cancelled?: boolean;
+  }): void {
+    const attempt = this.calibrationAttemptState;
+    if (attempt === null) return;
+    const record = buildCalibrationAttemptRecord({
+      attemptId: attempt.attemptId,
+      sessionId: attempt.sessionId,
+      circuitId: this.deps.circuitProfile.circuitId,
+      layoutId: this.deps.circuitProfile.layoutId,
+      layoutVersion: this.deps.circuitProfile.layoutVersion,
+      startedAtUtc: attempt.startedAtUtc,
+      atUtc: new Date().toISOString(),
+      durationMs: this.deps.clock.now() - attempt.startedAtMono,
+      concluded: outcome.concluded,
+      reachedCompletionThreshold: outcome.reachedCompletionThreshold ?? false,
+      forceFinished: outcome.forceFinished ?? false,
+      cancelled: outcome.cancelled ?? false,
+      result: outcome.result ?? null,
+      liveCoverageFraction: attempt.coverageFraction,
+      samplesFed: attempt.samplesFed,
+      thresholds: attempt.thresholds,
+    });
+    this.lastCalibrationAttemptRecord = record;
+    const save = this.deps.repository.saveCalibrationAttempt;
+    if (save === undefined) return;
+    const work = this.calibrationRecordTail
+      .then(() => save.call(this.deps.repository, record))
+      .catch((error: unknown) => {
+        this.noteRecordFailure(`calibration-attempt(${record.outcome})`, error);
+      });
+    this.calibrationRecordTail = work;
+  }
+
+  /**
+   * Ticket P12 item B: the record this controller most recently built for a
+   * calibration attempt, or `null` before any Learn lap has started on it.
+   *
+   * Read-on-demand, the same shape as `diagnostics()`. It is what a screen
+   * shows without a storage read; the durable row is the authority afterwards.
+   */
+  calibrationAttemptRecord(): CalibrationAttemptRecord | null {
+    return this.lastCalibrationAttemptRecord === null
+      ? null
+      : structuredClone(this.lastCalibrationAttemptRecord);
   }
 
   /** A failed session-record write is reported, never thrown -- same trade as `noteTraceFailure`. */
@@ -2418,18 +2700,31 @@ export class SessionController {
       // The repository decided whether to take the checkpoint; either way
       // storage now holds a checkpoint of at least this generation, so the
       // watermark may only rise to it, never be set back to it.
-      this.noteCheckpointGeneration(generation);
+      this.noteCheckpointGeneration(sessionId, generation);
       return;
     }
-    if (generation > this.committedCheckpointGeneration) {
+    // Ticket P12 item D: compared against THIS session's watermark. A
+    // watermark left behind by another session reads as `-1` here, so the
+    // first checkpoint of a new session is always a legitimate advance --
+    // which is the whole of the leak the reviewer reproduced.
+    if (generation > this.checkpointWatermarkFor(sessionId)) {
+      const displacedSessionId = this.committedCheckpointSessionId;
       const displaced = this.committedCheckpointGeneration;
+      this.committedCheckpointSessionId = sessionId;
       this.committedCheckpointGeneration = generation;
       try {
         await repository.saveCheckpoint(sessionId, checkpoint.snapshot, checkpoint.laps);
       } catch (error) {
         // Release the claim, but never below whatever has been committed
-        // since -- `===` is the "still ours" test.
-        if (this.committedCheckpointGeneration === generation) {
+        // since -- the pair `(sessionId, generation)` is the "still ours"
+        // test, so a claim made by a DIFFERENT session in the meantime is
+        // left exactly where it is rather than being rolled back onto this
+        // session's displaced value.
+        if (
+          this.committedCheckpointSessionId === sessionId &&
+          this.committedCheckpointGeneration === generation
+        ) {
+          this.committedCheckpointSessionId = displacedSessionId;
           this.committedCheckpointGeneration = displaced;
         }
         throw error;
@@ -2438,8 +2733,31 @@ export class SessionController {
     await repository.saveTelemetryBatch(sessionId, entries);
   }
 
-  /** Ticket P11C: raise the checkpoint watermark (never lower it) -- see {@link committedCheckpointGeneration}. */
-  private noteCheckpointGeneration(generation: number): void {
+  /**
+   * Ticket P12 item D: the watermark AS IT APPLIES TO `sessionId` -- the
+   * stored one when it belongs to this session, and `-1` ("nothing yet")
+   * otherwise. Never a number borrowed from another session.
+   */
+  private checkpointWatermarkFor(sessionId: string): number {
+    return this.committedCheckpointSessionId === sessionId ? this.committedCheckpointGeneration : -1;
+  }
+
+  /**
+   * Ticket P11C: raise the checkpoint watermark (never lower it) -- see
+   * {@link committedCheckpointGeneration}.
+   *
+   * Ticket P12 item D: within ONE session. A note for a different session id
+   * REPLACES the watermark outright (it is a fresh count of a different
+   * session's laps, not a bigger or smaller version of the old one), which is
+   * what lets a second session on the same controller write its checkpoints at
+   * all.
+   */
+  private noteCheckpointGeneration(sessionId: string, generation: number): void {
+    if (this.committedCheckpointSessionId !== sessionId) {
+      this.committedCheckpointSessionId = sessionId;
+      this.committedCheckpointGeneration = generation;
+      return;
+    }
     if (generation > this.committedCheckpointGeneration) {
       this.committedCheckpointGeneration = generation;
     }
@@ -2906,7 +3224,7 @@ export class SessionController {
     await this.flushRawTrace();
     const generation = checkpointGeneration(this.core.laps);
     await this.deps.repository.saveCheckpoint(sessionId, this.core.state, this.core.laps);
-    this.noteCheckpointGeneration(generation); // ticket P11C -- see the field's comment
+    this.noteCheckpointGeneration(sessionId, generation); // ticket P11C -- see the field's comment
   }
 
   // -------------------------------------------------------------------

@@ -33,7 +33,19 @@
 // Nullable, so a row written by an older build reads back as "generation
 // unknown" (treated as -1, i.e. superseded by anything) instead of blocking
 // every future write; the first write through this code fills it in.
-export const SQL_SCHEMA_VERSION = 4;
+// v5 (ticket P12 items A/B): two new tables, both of them data BUILD 12 EXISTS
+// TO COLLECT rather than data the app needs to run.
+//   - `lap_verdicts` -- the owner's answer to "was the app's valid/invalid
+//     verdict on this lap right?", keyed `(sessionId, lapNumber)`. It carries
+//     the app's own verdict as it stood when the question was asked, so the
+//     answer stays meaningful after a rules change.
+//   - `calibration_attempts` -- one row per Learn lap, whatever happened to
+//     it: accepted, rejected, stalled, or cancelled by the driver. Keyed by
+//     `attemptId` so the provisional row written while the lap is running is
+//     REPLACED by its concluded successor instead of accumulating.
+// Both tables are additive; nothing existing reads or writes them, so a
+// database that predates them upgrades by having them created.
+export const SQL_SCHEMA_VERSION = 5;
 
 // Multi-statement DDL, applied via `SqlDatabase.execAsync`. Every statement is
 // `IF NOT EXISTS` so re-running it against an already-migrated database is a
@@ -127,3 +139,34 @@ export const SQL_ALTERS_V3: readonly string[] = [
  * then crashed before the ALTER still ends up with the column.
  */
 export const SQL_ALTERS_V4: readonly string[] = ['ALTER TABLE checkpoints ADD COLUMN lapCount INTEGER'];
+
+/**
+ * v5 additions (ticket P12 items A/B). Whole TABLES, not columns, so plain
+ * `CREATE TABLE IF NOT EXISTS` is all the idempotence they need -- applied on
+ * every open exactly like `SQL_DDL`, for the same reason `SQL_ALTERS_V3` is:
+ * a database whose `schema_migrations` row was bumped by a build that then
+ * crashed must still end up with the tables.
+ *
+ * Both payloads are stored as one JSON TEXT column beside their key columns.
+ * The keys are duplicated out of the JSON (`sessionId`, `lapNumber`,
+ * `attemptId`, `startedAtUtc`) purely so SQLite can index and order on them;
+ * the JSON remains the authority on the record's contents, which keeps a
+ * future field addition from needing another migration.
+ */
+export const SQL_DDL_V5 = `
+CREATE TABLE IF NOT EXISTS lap_verdicts (
+  sessionId TEXT NOT NULL,
+  lapNumber INTEGER NOT NULL,
+  payload TEXT NOT NULL,
+  PRIMARY KEY (sessionId, lapNumber)
+);
+
+CREATE TABLE IF NOT EXISTS calibration_attempts (
+  attemptId TEXT PRIMARY KEY,
+  sessionId TEXT NOT NULL,
+  startedAtUtc TEXT NOT NULL,
+  payload TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_calibration_attempts_session ON calibration_attempts (sessionId, startedAtUtc);
+`;
