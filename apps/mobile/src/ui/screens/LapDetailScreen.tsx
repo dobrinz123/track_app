@@ -2,12 +2,32 @@ import React from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
-import type { TelemetryChannelId } from '@circuit/core';
+import type {
+  LapValidityVerdict,
+  LapVerdictDecision,
+  TelemetryChannelId,
+} from '@circuit/core';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, radii, spacing, typography } from '../theme';
 import { TimeDisplay } from '../components/TimeDisplay';
 import { QualityPill } from '../components/QualityPill';
-import { sessionHistoryStore, getTelemetryReadDb } from '../../session/composition';
+import {
+  getLapVerdicts,
+  getTelemetryReadDb,
+  lapVerdictSupport,
+  recordLapValidityVerdict,
+  refreshLapVerdicts,
+  sessionHistoryStore,
+  settingsStore,
+} from '../../session/composition';
+import {
+  buildLapVerdictRows,
+  verdictControlEnabled,
+  verdictTapFeedback,
+} from '../../session/lapVerdictViewModel';
+import { LapVerdictControl } from '../components/LapVerdictControl';
+import { useSettings } from '../hooks/useSettings';
+import { resolveLapVerdictStrings } from './lapVerdictStrings';
 import {
   loadLapTelemetry,
   bucketTelemetry,
@@ -153,6 +173,49 @@ export function LapDetailScreen({ route }: Props): React.JSX.Element {
     };
   }, [sessionId, lapNumber]);
 
+  // Ticket P13B item 1: the same true/false control as the results screen,
+  // reachable for a session from history -- so a lap he skipped between stints
+  // can still be answered later. Hooks stay above the not-found early return
+  // for the reason stated above.
+  const settings = useSettings(settingsStore);
+  const verdictStrings = resolveLapVerdictStrings(settings.language);
+  const [verdicts, setVerdicts] = React.useState<LapValidityVerdict[]>([]);
+  const [verdictBusy, setVerdictBusy] = React.useState(false);
+  const [verdictNote, setVerdictNote] = React.useState<{ text: string; error: boolean } | null>(null);
+  const verdictsEnabled = verdictControlEnabled(lapVerdictSupport());
+
+  React.useEffect(() => {
+    let cancelled = false;
+    void refreshLapVerdicts(sessionId).then(() => {
+      if (!cancelled) setVerdicts(getLapVerdicts(sessionId));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
+  const decide = React.useCallback(
+    async (lap: number, decision: LapVerdictDecision): Promise<void> => {
+      if (verdictBusy) return;
+      setVerdictBusy(true);
+      setVerdictNote(null);
+      const outcome = await recordLapValidityVerdict({ sessionId, lapNumber: lap, decision });
+      const feedback = verdictTapFeedback(outcome);
+      setVerdicts(getLapVerdicts(sessionId));
+      setVerdictNote({
+        text:
+          feedback.key === 'saved'
+            ? verdictStrings.saved
+            : feedback.key === 'saveUnsupported'
+              ? verdictStrings.saveUnsupported
+              : verdictStrings.saveFailed,
+        error: feedback.tone === 'error',
+      });
+      setVerdictBusy(false);
+    },
+    [sessionId, verdictBusy, verdictStrings],
+  );
+
   if (!session || !lap) {
     return (
       <SafeAreaView style={styles.safe}>
@@ -165,6 +228,12 @@ export function LapDetailScreen({ route }: Props): React.JSX.Element {
     );
   }
 
+  // Built from the lap this screen is actually showing, so a verdict row can
+  // never be drawn against a different lap's number.
+  const verdictRow = buildLapVerdictRows([lap], verdicts).find(
+    (row) => row.lapNumber === lap.lapNumber,
+  );
+
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
       <ScrollView contentContainerStyle={styles.container}>
@@ -176,18 +245,60 @@ export function LapDetailScreen({ route }: Props): React.JSX.Element {
           <QualityPill quality={lap.quality} />
         </View>
 
+        {/* Ticket P13B item 1: the app's own call on EVERY lap, valid ones
+            included -- the control below asks whether this call was right. */}
+        <Text
+          style={[styles.appVerdict, lap.valid ? styles.appVerdictValid : styles.appVerdictInvalid]}
+          maxFontSizeMultiplier={1.3}
+        >
+          {lap.valid ? verdictStrings.appVerdictValid : verdictStrings.appVerdictInvalid}
+        </Text>
         {!lap.valid ? (
           <View style={styles.invalidBlock} accessibilityLabel="This lap is invalid">
             <Text style={styles.invalidLabel} maxFontSizeMultiplier={1.3}>
-              INVALID
+              {verdictStrings.appReasonsHeading}
             </Text>
-            {lap.invalidReasons.map((r) => (
-              <Text key={r} style={styles.invalidReason} maxFontSizeMultiplier={1.3}>
-                {explainInvalidReason(r)}
+            {lap.invalidReasons.length === 0 ? (
+              <Text style={styles.invalidReason} maxFontSizeMultiplier={1.3}>
+                {verdictStrings.appReasonsNone}
               </Text>
-            ))}
+            ) : (
+              lap.invalidReasons.map((r) => (
+                <Text key={r} style={styles.invalidReason} maxFontSizeMultiplier={1.3}>
+                  {explainInvalidReason(r)}
+                </Text>
+              ))
+            )}
           </View>
         ) : null}
+
+        <Text style={styles.verdictHint} maxFontSizeMultiplier={1.3}>
+          {verdictStrings.questionHint}
+        </Text>
+        {verdictRow === undefined ? null : (
+          <LapVerdictControl
+            row={verdictRow}
+            strings={verdictStrings}
+            enabled={verdictsEnabled}
+            busy={verdictBusy}
+            onDecide={(n, decision) => {
+              void decide(n, decision);
+            }}
+          />
+        )}
+        {verdictsEnabled ? null : (
+          <Text style={styles.verdictError} maxFontSizeMultiplier={1.3}>
+            {verdictStrings.unsupportedNotice}
+          </Text>
+        )}
+        {verdictNote === null ? null : (
+          <Text
+            style={verdictNote.error ? styles.verdictError : styles.verdictOk}
+            maxFontSizeMultiplier={1.3}
+          >
+            {verdictNote.text}
+          </Text>
+        )}
 
         <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
           SECTOR BREAKDOWN
@@ -246,6 +357,12 @@ const styles = StyleSheet.create({
   },
   invalidLabel: { ...typography.label, color: colors.danger },
   invalidReason: { ...typography.caption, color: colors.textSecondary },
+  appVerdict: { ...typography.subtitle },
+  appVerdictValid: { color: colors.success },
+  appVerdictInvalid: { color: colors.danger },
+  verdictHint: { ...typography.caption, color: colors.textSecondary },
+  verdictOk: { ...typography.caption, color: colors.success },
+  verdictError: { ...typography.label, color: colors.danger },
   sectionLabel: { ...typography.label, color: colors.textMuted, marginTop: spacing.sm },
   sectorRow: {
     flexDirection: 'row',

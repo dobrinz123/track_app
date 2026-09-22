@@ -7,13 +7,17 @@ import { colors, radii, spacing, typography } from '../theme';
 import { TimeDisplay } from '../components/TimeDisplay';
 import { formatDateUtc } from '../format';
 import {
-  buildRawSessionExport,
+  buildSessionReport,
+  getLapVerdictSummary,
+  refreshLapVerdicts,
   resolveSessionCalibrationStatus,
   sessionHistoryStore,
   sessionUnwrittenSampleCount,
   settingsStore,
 } from '../../session/composition';
-import { shareRawSessionExport } from '../../session/rawSessionShare';
+import { shareSessionReport } from '../../session/sessionReportShare';
+import { resolveLapVerdictStrings } from './lapVerdictStrings';
+import { resolveSessionReportStrings } from './sessionReportStrings';
 import { resolveSelectedCircuit } from '../../session/circuitCatalog';
 import { layoutLabel } from '../data/circuit';
 import { useSettings } from '../hooks/useSettings';
@@ -25,23 +29,12 @@ import { resolveTestLoopStrings } from './testLoopStrings';
 type Props = NativeStackScreenProps<RootStackParamList, 'SessionHistory'>;
 
 /**
- * Ticket P7R E1 — the copy for the raw export control, in one place.
- *
- * It is a SECOND control, next to the analysis one, and the distinction has
- * to survive being read quickly in a paddock: analysis needs laps, this does
- * not. A session with no laps still has a full GPS trace and full telemetry
- * on disk (ticket P7M M1), and until this button existed there was no way to
- * get either off the phone.
+ * The per-row honesty labels. The EXPORT copy moved out to
+ * `sessionReportStrings.ts` in ticket P13B (it is RO/EN now, and shared with
+ * `SessionResultsScreen`); what stays here is the set of warnings this list is
+ * the only place to show.
  */
-const RAW_EXPORT_COPY = {
-  button: 'Export raw data',
-  buttonA11y: (date: string): string => `Export the raw recorded data of the session on ${date}`,
-  busy: 'Exporting…',
-  done: 'Raw data shared.',
-  written: 'Raw data written to the app cache (no share sheet on this platform).',
-  failed: 'Could not export the raw data.',
-  missing: 'That session is no longer on this device.',
-  unavailable: 'Storage is not ready yet — try again in a moment.',
+const ROW_COPY = {
   /** Ticket P7R E2: the honest label on a session run past a rejected calibration. */
   uncalibrated: 'UNCALIBRATED',
   uncalibratedHint: 'Started without a validated calibration — lap times may be unreliable.',
@@ -72,34 +65,53 @@ export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
   // P5d-FIX6: a learned circuit is shown by the NAME the driver gave it; the
   // generic label is only the fallback for one that was never named.
   const learnedRowLabel = selected.profile.displayName.trim() || testLoopStrings.historyLabel;
-  // Ticket P7R E1: one in-flight export at a time, and its outcome reported
-  // against the session it belonged to -- a driver who taps twice must not
-  // see the first result attributed to the second row.
+  const reportStrings = resolveSessionReportStrings(settings.language);
+  const verdictStrings = resolveLapVerdictStrings(settings.language);
+  // Ticket P7R E1, kept by P13B: one in-flight export at a time, and its
+  // outcome reported against the session it belonged to -- a driver who taps
+  // twice must not see the first result attributed to the second row.
   const [exportingSessionId, setExportingSessionId] = React.useState<string | null>(null);
   const [exportNote, setExportNote] = React.useState<{ sessionId: string; text: string } | null>(null);
 
-  const exportRaw = React.useCallback(async (sessionId: string): Promise<void> => {
+  // Ticket P13B item 1: how much of the verdict check is done, per session.
+  // `getLapVerdictSummary` reads a synchronous cache, so every listed session
+  // is refreshed once here -- without this the list would report every lap as
+  // unanswered, which is the one wrong answer that looks like a real one.
+  const sessionIds = sessions.map((session) => session.sessionId).join(',');
+  const [verdictsLoaded, setVerdictsLoaded] = React.useState(0);
+  React.useEffect(() => {
+    let cancelled = false;
+    const ids = sessionIds.length === 0 ? [] : sessionIds.split(',');
+    void Promise.all(ids.map((id) => refreshLapVerdicts(id))).then(() => {
+      if (!cancelled) setVerdictsLoaded((n) => n + 1);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionIds]);
+
+  const exportReport = React.useCallback(async (sessionId: string): Promise<void> => {
     if (exportingSessionId !== null) return;
     setExportingSessionId(sessionId);
     setExportNote(null);
-    const doc = await buildRawSessionExport(sessionId);
+    const doc = await buildSessionReport(sessionId);
     if (doc === 'session-not-found') {
-      setExportNote({ sessionId, text: RAW_EXPORT_COPY.missing });
+      setExportNote({ sessionId, text: reportStrings.missing });
     } else if (doc === 'storage-unavailable') {
-      setExportNote({ sessionId, text: RAW_EXPORT_COPY.unavailable });
+      setExportNote({ sessionId, text: reportStrings.storageUnavailable });
     } else {
-      const outcome = await shareRawSessionExport(doc);
+      const outcome = await shareSessionReport(doc);
       setExportNote({
         sessionId,
         text: !outcome.ok
-          ? RAW_EXPORT_COPY.failed
+          ? reportStrings.failed
           : outcome.shared
-            ? RAW_EXPORT_COPY.done
-            : RAW_EXPORT_COPY.written,
+            ? reportStrings.shared
+            : reportStrings.written,
       });
     }
     setExportingSessionId(null);
-  }, [exportingSessionId]);
+  }, [exportingSessionId, reportStrings]);
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
@@ -141,6 +153,11 @@ export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
             const calibrationStatus = resolveSessionCalibrationStatus(session.sessionId);
             const unwritten = sessionUnwrittenSampleCount(session.sessionId) ?? 0;
             const note = exportNote?.sessionId === session.sessionId ? exportNote.text : null;
+            // `verdictsLoaded` is read here purely to re-derive after the
+            // refresh above resolves; the counts themselves come from the
+            // store's cache, which is the only authority on them.
+            void verdictsLoaded;
+            const verdictCounts = getLapVerdictSummary(session.sessionId);
             return (
               <View key={session.sessionId} style={styles.sessionCard}>
                 <View style={styles.sessionHeader}>
@@ -155,24 +172,24 @@ export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
                 {/* Ticket P7R E2: a session run past a rejected calibration is
                     never presented as an ordinary one. */}
                 {calibrationStatus === 'unvalidated' ? (
-                  <View style={styles.uncalibratedBlock} accessibilityLabel={RAW_EXPORT_COPY.uncalibratedHint}>
+                  <View style={styles.uncalibratedBlock} accessibilityLabel={ROW_COPY.uncalibratedHint}>
                     <Text style={styles.uncalibratedBadge} maxFontSizeMultiplier={1.3}>
-                      {RAW_EXPORT_COPY.uncalibrated}
+                      {ROW_COPY.uncalibrated}
                     </Text>
                     <Text style={styles.uncalibratedHint} maxFontSizeMultiplier={1.3}>
-                      {RAW_EXPORT_COPY.uncalibratedHint}
+                      {ROW_COPY.uncalibratedHint}
                     </Text>
                   </View>
                 ) : calibrationStatus === 'unknown' ? (
                   <View
                     style={styles.uncalibratedBlock}
-                    accessibilityLabel={RAW_EXPORT_COPY.unknownCalibrationHint}
+                    accessibilityLabel={ROW_COPY.unknownCalibrationHint}
                   >
                     <Text style={styles.unknownCalibrationBadge} maxFontSizeMultiplier={1.3}>
-                      {RAW_EXPORT_COPY.unknownCalibration}
+                      {ROW_COPY.unknownCalibration}
                     </Text>
                     <Text style={styles.uncalibratedHint} maxFontSizeMultiplier={1.3}>
-                      {RAW_EXPORT_COPY.unknownCalibrationHint}
+                      {ROW_COPY.unknownCalibrationHint}
                     </Text>
                   </View>
                 ) : null}
@@ -182,11 +199,28 @@ export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
                   <Text
                     style={styles.incompleteTrace}
                     maxFontSizeMultiplier={1.3}
-                    accessibilityLabel={RAW_EXPORT_COPY.incompleteTrace(unwritten)}
+                    accessibilityLabel={ROW_COPY.incompleteTrace(unwritten)}
                   >
-                    {RAW_EXPORT_COPY.incompleteTrace(unwritten)}
+                    {ROW_COPY.incompleteTrace(unwritten)}
                   </Text>
                 ) : null}
+                {/* Ticket P13B item 1: the counts, on the row he taps to open
+                    a lap -- so he can see which session still owes answers
+                    without opening every one of them. */}
+                {session.laps.length === 0 ? null : (
+                  <Text
+                    style={[
+                      styles.verdictSummary,
+                      verdictCounts.unanswered === 0 && styles.verdictSummaryDone,
+                    ]}
+                    maxFontSizeMultiplier={1.3}
+                    accessibilityLabel={verdictStrings.summaryA11y(verdictCounts)}
+                  >
+                    {verdictStrings.sectionHeading} {verdictCounts.unanswered === 0
+                      ? verdictStrings.summaryComplete
+                      : verdictStrings.summary(verdictCounts)}
+                  </Text>
+                )}
                 <View style={styles.lapChipsRow}>
                   {session.laps.map((lap) => (
                     <Pressable
@@ -222,17 +256,17 @@ export function SessionHistoryScreen({ navigation }: Props): React.JSX.Element {
                   <Pressable
                     style={[styles.exportButton, exportingSessionId !== null && styles.exportButtonBusy]}
                     onPress={() => {
-                      void exportRaw(session.sessionId);
+                      void exportReport(session.sessionId);
                     }}
                     disabled={exportingSessionId !== null}
                     accessibilityRole="button"
                     accessibilityState={{ disabled: exportingSessionId !== null }}
-                    accessibilityLabel={RAW_EXPORT_COPY.buttonA11y(formatDateUtc(session.displayDateUtc))}
+                    accessibilityLabel={reportStrings.buttonA11y(formatDateUtc(session.displayDateUtc))}
                   >
                     <Text style={styles.exportButtonText} maxFontSizeMultiplier={1.3}>
                       {exportingSessionId === session.sessionId
-                        ? RAW_EXPORT_COPY.busy
-                        : RAW_EXPORT_COPY.button}
+                        ? reportStrings.busy
+                        : reportStrings.button}
                     </Text>
                   </Pressable>
                 </View>
@@ -314,6 +348,8 @@ const styles = StyleSheet.create({
   exportButtonBusy: { opacity: 0.6 },
   exportButtonText: { ...typography.caption, color: colors.textPrimary },
   exportNote: { ...typography.caption, color: colors.textSecondary },
+  verdictSummary: { ...typography.caption, color: colors.accent },
+  verdictSummaryDone: { color: colors.success },
   uncalibratedBlock: { gap: 2 },
   uncalibratedBadge: { ...typography.label, color: colors.warning },
   uncalibratedHint: { ...typography.caption, color: colors.textSecondary },

@@ -140,6 +140,24 @@ export interface SessionReportExtra {
   description: string;
   /** The payload, exactly as the tool produced it. */
   data: unknown;
+  /**
+   * Ticket P13B item 4 (binding, owner's words: "if a tool has no report, say
+   * so in the document instead of omitting it").
+   *
+   * The aggregate `extras` availability row says how many tools answered; it
+   * cannot say which tool had nothing and which one could not be asked. So
+   * every extra carries its OWN state, and
+   * {@link buildSessionReportDocument} emits one `extras:<source>` row per
+   * entry alongside the aggregate. A tool that produced nothing is listed
+   * with `data: null` and `state: 'empty'`, never dropped -- a missing row is
+   * exactly the ambiguity rule 2 exists to remove.
+   *
+   * Defaults to `'present'` when omitted, which is what every pre-P13B caller
+   * meant by passing an entry at all.
+   */
+  state?: SessionReportPartState;
+  /** Why, for `'empty'`, `'unavailable'` and `'failed'`. Plain language. */
+  detail?: string;
 }
 
 export interface SessionReportDocument {
@@ -271,6 +289,16 @@ export function buildSessionReportDocument(input: SessionReportInput): SessionRe
   note('laps', laps, 'unreachable: a session always carries its lap list');
   note('raw', input.raw === null ? null : [input.raw], 'the raw GNSS/telemetry record could not be assembled');
   note('extras', [...input.extras], 'unreachable: extras default to an empty list');
+  // Ticket P13B item 4: one row per tool, so "Signal Finder produced nothing"
+  // and "Signal Finder was never asked" are different statements in the file
+  // rather than two identical absences.
+  for (const extra of input.extras) {
+    availability.push({
+      part: `extras:${extra.source}`,
+      state: extra.state ?? 'present',
+      ...(extra.detail === undefined ? {} : { detail: extra.detail }),
+    });
+  }
   availability.push({
     part: 'recording',
     state: input.recording.unwrittenSampleCount === null ? 'unavailable' : 'present',
@@ -490,6 +518,21 @@ export function buildSessionReportMarkdown(doc: SessionReportDocument): string {
           : `owner: ${entry.verdict.answer}${entry.verdict.answerRevision > 1 ? ` (answer ${String(entry.verdict.answerRevision)})` : ''}`;
       lines.push(`- Lap ${String(entry.lap.lapNumber)} ${formatMs(entry.lap.durationMs)} -- ${appVerdict}; ${owner}`);
       if (entry.verdict.note !== undefined) lines.push(`  - note: ${entry.verdict.note}`);
+    }
+  }
+
+  // Ticket P13B item 4: the tool roll-call, named rather than counted, so the
+  // person forwarding the file can see at a glance which tools answered.
+  lines.push('', '## Other tools');
+  if (doc.extras.length === 0) {
+    lines.push('- No tool output was enumerated for this session.');
+  } else {
+    for (const extra of doc.extras) {
+      const state = extra.state ?? 'present';
+      lines.push(
+        `- ${extra.source}: ${state}${extra.detail === undefined ? '' : ` -- ${extra.detail}`}`,
+      );
+      lines.push(`  - ${extra.description}`);
     }
   }
 

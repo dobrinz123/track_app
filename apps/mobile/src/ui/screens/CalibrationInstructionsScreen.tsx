@@ -4,7 +4,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, fontFamily, radii, spacing, typography } from '../theme';
-import { facade } from '../../session/composition';
+import { facade, getLiveCalibrationAttempt, settingsStore } from '../../session/composition';
+import { buildCalibrationReport } from '../../session/calibrationReportViewModel';
+import { CalibrationReportCard } from '../components/CalibrationReportCard';
+import { useSettings } from '../hooks/useSettings';
+import { resolveCalibrationReportStrings } from './calibrationReportStrings';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'CalibrationInstructions'>;
 
@@ -17,12 +21,26 @@ const STEPS = [
 
 /** S4 — explains the Learn calibration lap; Start Calibration → S5. */
 export function CalibrationInstructionsScreen({ navigation }: Props): React.JSX.Element {
+  // Ticket P13B item 2 (binding): THIS is where a CANCEL lands. Cancelling a
+  // Learn lap replaces this screen (`ActiveCalibrationScreen`'s
+  // `confirmCancelExit`), and so does Retry from the result screen -- so the
+  // report for the attempt that just failed is shown HERE, unasked, rather
+  // than being lost the moment he leaves the calibration screen. A cancel is
+  // drawn as the failure the owner asked for it to be.
+  const settings = useSettings(settingsStore);
+  const reportStrings = resolveCalibrationReportStrings(settings.language);
+  const attempt = getLiveCalibrationAttempt();
+  const report = attempt === null ? null : buildCalibrationReport(attempt);
+
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
       <ScrollView contentContainerStyle={styles.container}>
         <Text style={styles.title} maxFontSizeMultiplier={1.3}>
           Learn Your Line
         </Text>
+        {report === null || !report.failure ? null : (
+          <CalibrationReportCard report={report} strings={reportStrings} />
+        )}
         <Text style={styles.intro} maxFontSizeMultiplier={1.3}>
           Before timing starts, drive one complete steady recognition lap so the app can calibrate to this circuit
           and your GNSS signal.

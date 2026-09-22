@@ -1,5 +1,6 @@
 import Constants from 'expo-constants';
 import type {
+  CalibrationAttemptRecord,
   CircuitProfile,
   Corner,
   LapValidityVerdict,
@@ -76,8 +77,10 @@ import {
   loadSessionReportDocument,
   type SessionReportCircuit,
   type SessionReportDocument,
+  type SessionReportExtra,
   type SessionReportUnavailable,
 } from './sessionReport';
+import { collectReportExtras, type ToolExtraSpec } from './reportExtras';
 import { ReplayTimeSource, ReplayTimestampedLocationProvider, ScaledReplayClock } from './liveTimestampedProvider';
 import { TMR_CIRCUIT_PROFILE, TMR_CORNERS, TMR_RUNTIME_PROFILE } from './tmrProfile';
 import {
@@ -4398,6 +4401,121 @@ function sessionReportCircuit(session: StoredSession): SessionReportCircuit | nu
 }
 
 /**
+ * Ticket P13B item 2 -- the record of the Learn lap this launch most recently
+ * ran, for the screens that show the calibration report WITHOUT being asked.
+ *
+ * Read off the live controller rather than out of storage on purpose: the
+ * moment it is needed is the moment calibration just failed, the driver is
+ * still on the calibration screen, and the durable write is on its own
+ * (never-awaited) chain. `null` before any Learn lap has started on this
+ * controller, which the screens present as "no report yet" and never as
+ * "calibration succeeded".
+ */
+export function getLiveCalibrationAttempt(): CalibrationAttemptRecord | null {
+  return activeController?.calibrationAttemptRecord() ?? null;
+}
+
+/**
+ * Ticket P13B item 4 (binding, owner's words: "in rest restul toolurilor care
+ * sunt in aplicatie trebuie sa faca un raport la export").
+ *
+ * THE COMPLETE ROLL-CALL of every tool in this app that could have something
+ * to say about a session. Enumerated, not guessed: each entry below is a store
+ * this module actually holds, and each one reports `present` / `empty` /
+ * `unavailable` for itself so the document can say "Signal Finder had nothing"
+ * as a FACT rather than as a missing row (`reportExtras.ts` explains why that
+ * distinction is the whole point).
+ *
+ * `collectReportExtras` runs every spec and turns a throw into a `'failed'`
+ * row, so one broken store never costs the other four their entries.
+ */
+function sessionReportExtras(sessionId: string): SessionReportExtra[] {
+  const specs: ToolExtraSpec[] = [
+    {
+      source: 'trackdayRecord',
+      description:
+        'What the trackday suggestion stage did in this session: cue moves applied and pit suggestions shown.',
+      read: () => {
+        const record = getTrackdayRecord(sessionId);
+        if (record.cueUpdates.length === 0 && record.shownPitSuggestions.length === 0) {
+          return {
+            state: 'empty',
+            detail:
+              'The trackday stage applied no cue move and showed no pit suggestion in this session.',
+          };
+        }
+        return { state: 'present', data: record };
+      },
+    },
+    {
+      source: 'analysis',
+      description:
+        'The post-session corner analysis for this session, as the engine computed it (language-independent).',
+      read: () => {
+        // `peek` NEVER starts work: an export must not kick off an engine pass
+        // on a phone in a paddock. A session that was never analysed is
+        // reported as such rather than analysed on the spot.
+        const cached = getAnalysisRunner().peek(sessionId);
+        if (cached === null) {
+          return {
+            state: 'empty',
+            detail:
+              'The analysis has not been run for this session on this device, so there is no result to carry.',
+          };
+        }
+        return { state: 'present', data: cached };
+      },
+    },
+    {
+      source: 'learnedCircuit',
+      description:
+        'The on-device learned geometry this session was driven on, when it was driven on one.',
+      read: () => {
+        const circuitId = historyStore?.getSession(sessionId)?.circuitId ?? null;
+        if (circuitId === null) {
+          return { state: 'unavailable', detail: 'the session row is not readable on this device' };
+        }
+        const learned = listLearnedCircuits().find((entry) => entry.circuitId === circuitId);
+        if (learned === undefined) {
+          return {
+            state: 'empty',
+            detail: `"${circuitId}" is not a learned circuit -- this session ran on catalog geometry.`,
+          };
+        }
+        return { state: 'present', data: learned };
+      },
+    },
+    {
+      source: 'vehicleProfile',
+      description:
+        'The active vehicle profile and its confirmed channel bindings -- the durable output of the Signal Finder.',
+      read: () => {
+        const profileId = getActiveVehicleProfileId();
+        const bindings = getVehicleProfileBindingsCache();
+        if (bindings.length === 0) {
+          return {
+            state: 'empty',
+            detail: `Vehicle profile "${profileId}" has no confirmed channel binding, so no OBD channel was decoded from one.`,
+          };
+        }
+        return { state: 'present', data: { profileId, bindings: [...bindings] } };
+      },
+    },
+    {
+      source: 'signalFinder',
+      description:
+        'The Signal Finder’s own sweep documents. Stated here so its absence is never read as "this app has no such tool".',
+      read: () => ({
+        state: 'unavailable',
+        detail:
+          'The Signal Finder is a VEHICLE tool, not a session tool: it keeps no per-session record. What it produced durably is the `vehicleProfile` row above; its sweeps are exported from its own screen.',
+      }),
+    },
+  ];
+  return collectReportExtras(specs);
+}
+
+/**
  * Ticket P12 item C (binding) -- THE DOCUMENT THE EXPORT BUTTON WILL SHARE.
  *
  * Wires `sessionReport.ts`'s pure loader to every store that holds a piece of
@@ -4447,14 +4565,7 @@ export async function buildSessionReport(
           failedWriteCount: snapshot.recording.failedWriteCount,
         };
       },
-      extras: async (id) => [
-        {
-          source: 'trackdayRecord',
-          description:
-            'What the trackday suggestion stage did in this session: cue moves applied and suggestions shown.',
-          data: getTrackdayRecord(id),
-        },
-      ],
+      extras: (id) => Promise.resolve(sessionReportExtras(id)),
       onReadError: (error) => console.warn('[composition] session report read failed', error),
     },
     sessionId,

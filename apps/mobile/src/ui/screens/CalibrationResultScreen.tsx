@@ -4,8 +4,17 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/types';
 import { colors, radii, spacing, typography } from '../theme';
-import { facade, proceedWithoutCalibration } from '../../session/composition';
+import {
+  facade,
+  getLiveCalibrationAttempt,
+  proceedWithoutCalibration,
+  settingsStore,
+} from '../../session/composition';
+import { buildCalibrationReport } from '../../session/calibrationReportViewModel';
+import { CalibrationReportCard } from '../components/CalibrationReportCard';
 import { useFacadeState } from '../hooks/useFacadeState';
+import { useSettings } from '../hooks/useSettings';
+import { resolveCalibrationReportStrings } from './calibrationReportStrings';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'CalibrationResult'>;
 
@@ -128,6 +137,14 @@ export function CalibrationResultScreen({ navigation }: Props): React.JSX.Elemen
   // 0.85 / 250 m thresholds moves -- this is about the wall, not the bar.
   const [confirmingEscape, setConfirmingEscape] = React.useState(false);
   const [escapeFailed, setEscapeFailed] = React.useState(false);
+  // Ticket P13B item 2 (binding, owner's words: "daca esueaza se face automat
+  // un raport"): the report is BUILT AND SHOWN here, not offered behind a
+  // button. Read straight off the live controller, because this screen is the
+  // moment the attempt concluded and the durable row is on its own chain.
+  const settings = useSettings(settingsStore);
+  const reportStrings = resolveCalibrationReportStrings(settings.language);
+  const attempt = getLiveCalibrationAttempt();
+  const report = attempt === null ? null : buildCalibrationReport(attempt);
 
   const startWithoutCalibration = React.useCallback(() => {
     // `'armed-accepted'` is possible and is not an error: the engine may
@@ -208,6 +225,14 @@ export function CalibrationResultScreen({ navigation }: Props): React.JSX.Elemen
                 ))
               )}
             </View>
+
+            {/* Ticket P13B item 2: the automatic report. Above the "What
+                happened" block, which it supersedes in detail without
+                replacing (that block reads the LIVE result; this one reads
+                the recorded attempt, thresholds included). */}
+            {report === null ? null : (
+              <CalibrationReportCard report={report} strings={reportStrings} />
+            )}
 
             {/* D3 (field calibration fix) -- what actually happened, in plain English:
                 coverage percent, the longest uncovered stretch (if any), and the top
