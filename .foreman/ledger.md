@@ -895,3 +895,16 @@ P11-CODEX-REV3 | 1 | Codex read-only | rev3 | NO VERDICT -- QUOTA EXHAUSTED MID-
    1. A detached retry was scheduled for ~04:43 (verified alive: /usr/bin/sleep PID 1795 started 01:13:40). It writes to .foreman/scratch/p11-codex-rev3b-out.txt. NO task notification will fire for it -- the wrapper already returned -- so the LEAD must poll that file.
    2. A Claude blind verifier (foreman-verifier, opus) was dispatched as the substitute second reader, given the OWNER'S ORIGINAL WORDS verbatim rather than any worker's restatement, and pointed at the round-1 and round-2 outputs so it presses where this code has already broken twice. Cross-family verification is LOST for that pass and this is recorded as a reduction in assurance, not glossed.
 P11-VERIFY | 1 | foreman-verifier opus (blind) | rev1 | DISPATCHED | 6 items incl. the end-to-end zero-lap survival path driven personally, both pit directions, storage under-reporting, calibration honesty across restart, full gates, and a SIZING of the RN-render-harness gap | 2026-09-22 01:1x
+
+## SESSION RESTARTED 2026-09-22 20:01 — reconciled against the tree: HEAD c9bb9bf, clean except kicad (pre-existing). The detached Codex retry DID run (output written 04:49).
+P11-CODEX-REV3b | 1 | Codex read-only | rev3 | REPORTED(FAIL) | .foreman/scratch/p11-codex-rev3b-out.txt (271 KB) | 2026-09-22 04:49
+  FIXED: H3-B residue (all 1,865 driven fixes stored after recovery, 0 missing), H5-B write gate (17-fix variant survives unrelated rollback), H6-B, H7-B (logic/source boundary; RN render UNVERIFIED), M8.
+  3 HIGH REMAIN:
+   1. crossing-detector.ts:656 — missing occupancy treated as clear. motorparkPitLaneTransitLap, speed omitted, fixes 133-141 removed, shortened fixes 130-149 nudged 5 m toward centerline -> 118.066981 + 115.709573, BOTH valid:true, no marker. 27 such cases in its sweep.
+   2. crossing-detector.ts:972 — correlated bias satisfies entry confirmation and deletes a real boundary. Two ordinary MotorPark laps, 40 m/s, 2 Hz, zero noise, fixes 175-204 nudged 10 m toward the pit polyline -> two 101.453 s laps collapse into 202.907 s. 34 deletion cases in its sweep.
+   3. sessionController.ts:2375 — a retried OLDER lap commit overwrites a NEWER checkpoint ([1,2] -> [1]); restart then turns completed lap 2 into a zero-duration RECOVERY lap although its 927 samples remain.
+  CROSS-FAMILY CAUGHT WHAT SAME-FAMILY MISSED: the Claude blind verifier passed this same code with no HIGH, because its sweeps were narrower (8 m bias, not 10 m; never combined a missed entry with a wider perturbation). Recorded as evidence for keeping Codex as the release reader.
+
+*** PRECEDENCE ROW 5 TRIGGERED: two consecutive FAILED fix waves (P10 -> round 2 FAIL, P11 -> round 3 FAIL) against the same findings list. STOP. NO BUILD. Hand to the owner with evidence. ***
+  In every one of the 3 remaining HIGHs the raw GNSS trace and OBD data SURVIVE and are exportable; what is wrong is a lap BOUNDARY (deleted, unmarked-invented) or a lap's recovery label. Laps are recomputable offline from the raw trace.
+  Pattern on the pit decision: each round, the reviewer finds a wider or combined perturbation that defeats the current rule (5 m/3 fixes -> 5 m/9 fixes -> 10 m/30 fixes + missing entry). Codex's suggested fix has been the same all three rounds: never delete a disputed boundary; retain and mark it.
