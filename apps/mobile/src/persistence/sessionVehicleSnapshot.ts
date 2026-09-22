@@ -33,6 +33,15 @@ export interface VehicleProfileSnapshotBinding {
   [key: string]: unknown;
 }
 
+/**
+ * WHAT THIS IS, EXACTLY: the configuration the session STARTED under.
+ *
+ * Ticket P15 F2 (Codex P14 round, disclosed limit): it is a snapshot at one
+ * instant, not an account of the whole recording. A profile switched or a
+ * channel re-bound while the session was running is NOT described here, and
+ * nothing in this record may be read as covering every sample in the trace.
+ * The report states that in the row it exports.
+ */
 export interface SessionVehicleSnapshot {
   /** The profile that was ACTIVE when this session started. */
   profileId: string;
@@ -42,7 +51,10 @@ export interface SessionVehicleSnapshot {
   capturedAtUtc: string;
 }
 
-/** `vehicle-profile-snapshot:<sessionId>`. One row per session, replaced if a session somehow starts twice. */
+/**
+ * `vehicle-profile-snapshot:<sessionId>`. One row per session, WRITTEN ONCE
+ * -- see {@link writeSessionVehicleSnapshot}.
+ */
 export function sessionVehicleSnapshotKey(sessionId: string): string {
   return `vehicle-profile-snapshot:${sessionId}`;
 }
@@ -59,11 +71,31 @@ function isSnapshot(value: unknown): value is SessionVehicleSnapshot {
 }
 
 /**
- * Records the profile this session is being driven under.
+ * Records the profile this session is being driven under. WRITE-ONCE: a
+ * session id that already has a snapshot keeps the one it has.
+ *
+ * Ticket P15 F2 (Codex P14 round) -- WHY WRITE-ONCE AND NOT `OR REPLACE`.
+ *
+ * This is called from `initializeSessionStage()`, which runs on a normal
+ * session start AND from `resumeRecovery()` with the EXISTING session id.
+ * With `INSERT OR REPLACE` the recovery call overwrote the snapshot of the
+ * profile the session was actually recorded with (A) with whatever is active
+ * at recovery time (B) -- reinstating, on the recovery path, precisely the
+ * defect this module was introduced to prevent, and with B empty the export
+ * went on to claim the session had decoded no OBD channel at all.
+ *
+ * A session is recorded under the configuration it STARTED under, so the
+ * first snapshot is the true one and every later write for that id is noise.
+ * `INSERT OR IGNORE` against `settings(key TEXT PRIMARY KEY)` is that rule in
+ * one statement -- no read-then-write window for a second call to slip
+ * through. An existing row is kept even when it will not decode: an
+ * unreadable snapshot is reported UNAVAILABLE, and replacing it with today's
+ * profile would turn "we do not know" into a confident wrong answer.
  *
  * NEVER THROWS: a driver must not be refused a session by a bookkeeping
- * write. Resolves `false` when the snapshot did not land, which is the state
- * the export then reports as UNAVAILABLE.
+ * write. Resolves `true` when this session HAS a snapshot afterwards --
+ * whether this call wrote it or an earlier one did -- and `false` when the
+ * write did not land, which is the state the export reports as UNAVAILABLE.
  */
 export async function writeSessionVehicleSnapshot(
   db: SqlDatabase,
@@ -72,7 +104,7 @@ export async function writeSessionVehicleSnapshot(
 ): Promise<boolean> {
   if (sessionId.length === 0) return false;
   try {
-    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+    await db.runAsync('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', [
       sessionVehicleSnapshotKey(sessionId),
       JSON.stringify(snapshot),
     ]);

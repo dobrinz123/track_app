@@ -4597,8 +4597,15 @@ function sessionReportExtras(sessionId: string): SessionReportExtra[] {
     },
     {
       source: 'vehicleProfile',
+      // Ticket P15 F2 (Codex P14 round): say what this IS. It is a snapshot
+      // taken at SESSION START, not an account of the whole recording. If the
+      // owner changed profile or re-bound a channel while the session was
+      // running, this row still describes the configuration the session
+      // started under and cannot say that it changed -- and a reader must not
+      // take it for the configuration every sample in the trace was decoded
+      // with.
       description:
-        'The active vehicle profile and its confirmed channel bindings -- the durable output of the Signal Finder.',
+        'The vehicle profile and confirmed channel bindings this session STARTED under -- a snapshot taken at session start, not a record of the whole recording: a profile or binding changed mid-session is not visible here.',
       read: () => {
         // Ticket P14 H7 (binding) -- THE SNAPSHOT, NEVER TODAY'S PROFILE.
         //

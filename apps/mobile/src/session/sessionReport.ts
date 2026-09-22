@@ -356,16 +356,52 @@ export function buildSessionReportDocument(input: SessionReportInput): SessionRe
 
   const verdictSummary = summarizeLapVerdicts(verdicts);
 
+  /**
+   * Ticket P15 F1 (Codex P14 round) -- EVERY SENTENCE BELOW IS DERIVED FROM
+   * THE SECTION'S AVAILABILITY, NEVER FROM THE EMPTINESS OF ITS COLLECTION.
+   *
+   * P14 made `availability` four-valued so a failed read can never be
+   * reported as `empty`. The flags came out right and the PROSE did not: a
+   * section marked `failed` still produced "were never judged by the owner"
+   * and "No calibration attempt was recorded", so the machine-readable half
+   * of the document said one thing and the half the owner actually reads said
+   * the opposite. An empty collection is now evidence of nothing until the
+   * availability row says the read succeeded.
+   *
+   * Every row is pushed above; nothing after this point adds one.
+   */
+  const stateByPart = new Map(availability.map((row) => [row.part, row.state]));
+  const partState = (part: string): SessionReportPartState | undefined => stateByPart.get(part);
+  const lapVerdictsState = partState('lapVerdicts');
+  const calibrationAttemptsState = partState('calibrationAttempts');
+
   const notes: string[] = [
     'A complete record of one session: the raw measurements, the app\'s own verdicts, and the owner\'s verdict on those verdicts. Nothing here is smoothed, inferred or corrected.',
-    'Every part of this document has an entry in `availability`. A part marked `empty` was read and had nothing; a part marked `unavailable` was never readable on this device. They are not the same and must not be treated as the same.',
+    'Every part of this document has an entry in `availability`. A part marked `empty` was read and had nothing; a part marked `unavailable` was never readable on this device; a part marked `failed` WAS read and the read did not succeed, so what it holds is unknown. They are three different facts and must not be treated as one.',
   ];
   if (laps.length === 0) {
+    // Ticket P15 F1: "completed no lap" is a statement about a lap list that
+    // was READ. The list normally comes off the session row and cannot fail,
+    // but a host that reports `laps` as unreadable must not have this said
+    // over the top of it.
+    const lapsState = partState('laps');
     notes.push(
-      'This session completed no lap. The timing engine never detected a start/finish crossing, so there are no lap times -- the trace in `raw` is the drive itself.',
+      lapsState === 'failed' || lapsState === 'unavailable'
+        ? 'The lap list for this session could NOT be read, so this document cannot say whether a lap was completed. An absent lap here is unreadable, not absent.'
+        : 'This session completed no lap. The timing engine never detected a start/finish crossing, so there are no lap times -- the trace in `raw` is the drive itself.',
     );
   }
-  if (input.lapVerdicts === null) {
+  // Ticket P15 F1: three branches, one per availability state, and the
+  // "never judged" count is reachable ONLY from a read that succeeded.
+  if (lapVerdictsState === 'failed') {
+    notes.push(
+      `The owner's lap verdicts could NOT be read for this session: ${
+        failureByPart.get('lapVerdicts') ?? 'the read failed'
+      } A lap listed below as \`unanswered\` may in fact carry an answer this device could not decode -- \`unanswered\` here is the absence of a READ, not the absence of an answer, and the ${String(
+        verdictSummary.unanswered,
+      )} of ${String(verdicts.length)} lap(s) it applies to must not be counted either way.`,
+    );
+  } else if (lapVerdictsState === 'unavailable') {
     notes.push(
       'The owner\'s lap verdicts could NOT be read on this device. Every lap below shows `unanswered`, which here means "not readable", NOT "not answered".',
     );
@@ -374,7 +410,21 @@ export function buildSessionReportDocument(input: SessionReportInput): SessionRe
       `${String(verdictSummary.unanswered)} of ${String(verdicts.length)} lap(s) were never judged by the owner. An unanswered lap is evidence of nothing -- do not count it as agreement with the app.`,
     );
   }
-  if (input.calibrationAttempts !== null && input.calibrationAttempts.length === 0) {
+  // Ticket P15 F1: likewise here. "No calibration attempt was recorded" is a
+  // statement about a successful read, and was being made about a failed one.
+  if (calibrationAttemptsState === 'failed') {
+    notes.push(
+      `This session's calibration attempt records could NOT be read in full: ${
+        failureByPart.get('calibrationAttempts') ?? 'the read failed'
+      } ${String(
+        (input.calibrationAttempts ?? []).length,
+      )} attempt(s) are listed below -- that is what survived, not necessarily every attempt made. An attempt missing from this document is UNREADABLE, not absent.`,
+    );
+  } else if (calibrationAttemptsState === 'unavailable') {
+    notes.push(
+      'The calibration attempt records could NOT be read on this device, so this document makes no statement about whether a Learn lap was run for this session. That is not the same as none having been run.',
+    );
+  } else if (input.calibrationAttempts !== null && input.calibrationAttempts.length === 0) {
     notes.push(
       'No calibration attempt was recorded for this session. Either it was recorded before attempts were tracked, or it resumed an earlier session without a fresh Learn lap.',
     );
@@ -382,7 +432,16 @@ export function buildSessionReportDocument(input: SessionReportInput): SessionRe
   const unconcluded = (input.calibrationAttempts ?? []).filter((attempt) => !attempt.concluded);
   if (unconcluded.length > 0) {
     notes.push(
-      `${String(unconcluded.length)} calibration attempt(s) never concluded: the Learn lap was still running when the app stopped. Their coverage figures are the last live reading, not a verdict.`,
+      calibrationAttemptsState === 'failed'
+        ? // Ticket P15 F1: H4's case. The conclusion WAS reached and its write
+          // failed, so the row still on disk is the earlier, provisional one.
+          // Reporting that row's missing conclusion as a fact about the Learn
+          // lap is precisely the over-claim the four-valued flags exist to
+          // stop.
+          `${String(
+            unconcluded.length,
+          )} calibration attempt(s) are stored as PROVISIONAL: their stored row carries no conclusion. Because this session's calibration records could not be read or written in full (see above), a provisional row does NOT establish that no conclusion was ever reached -- the conclusion may have been reached and failed to reach storage. Their coverage figures are the last live reading either way.`
+        : `${String(unconcluded.length)} calibration attempt(s) never concluded: the Learn lap was still running when the app stopped. Their coverage figures are the last live reading, not a verdict.`,
     );
   }
   if (input.calibrationStatus === 'unvalidated') {
@@ -504,6 +563,32 @@ function formatMs(ms: number): string {
  * verdict check actually got done.
  */
 export function buildSessionReportMarkdown(doc: SessionReportDocument): string {
+  /**
+   * Ticket P15 F1 (Codex P14 round) -- THE SUMMARY READS ITS OWN FLAGS.
+   *
+   * This is the half of the export a human opens first, and it was writing
+   * confident negatives ("0 unanswered", "None recorded.", "owner: not
+   * answered", "Telemetry samples: 0") straight over the top of an
+   * `availability` block that said those sections had FAILED to read. Every
+   * sentence below now asks the availability row first. Nothing is deleted:
+   * the counts still appear, qualified by what is known about the read that
+   * produced them.
+   */
+  const stateOf = (part: string): SessionReportPartState | undefined =>
+    doc.availability.find((row) => row.part === part)?.state;
+  const detailOf = (part: string): string =>
+    doc.availability.find((row) => row.part === part)?.detail ?? 'the read failed';
+  const circuitState = stateOf('circuit');
+  const verdictState = stateOf('lapVerdicts');
+  const lapsState = stateOf('laps');
+  const calibrationState = stateOf('calibrationAttempts');
+  const extrasState = stateOf('extras');
+  const unread = (state: SessionReportPartState | undefined): boolean =>
+    state === 'failed' || state === 'unavailable';
+  /** A raw component whose read did not succeed makes its count a floor, not a total. */
+  const rawComponentUnread = (prefix: string): boolean =>
+    doc.availability.some((row) => row.part.startsWith(prefix) && unread(row.state));
+
   const lines: string[] = [
     `# Session report -- ${doc.session.circuitId}`,
     '',
@@ -511,9 +596,15 @@ export function buildSessionReportMarkdown(doc: SessionReportDocument): string {
     `- Started: ${doc.session.startedAtUtc}`,
     `- Layout: ${doc.session.layoutId}${doc.circuit === null ? '' : ` v${String(doc.circuit.layoutVersion)}`}`,
     doc.circuit === null
-      ? '- Circuit geometry: **unknown** -- the device could not identify this circuit'
+      ? circuitState === 'failed'
+        ? `- Circuit geometry: **not readable** -- the circuit record could not be read on this device (${detailOf(
+            'circuit',
+          )}). That is not the same as this circuit being unidentifiable.`
+        : '- Circuit geometry: **unknown** -- the device could not identify this circuit'
       : `- Circuit geometry: ${doc.circuit.geometryStatus} (sectors ${doc.circuit.sectorStatus})`,
-    `- Laps: ${String(doc.session.lapCount)}`,
+    `- Laps: ${String(doc.session.lapCount)}${
+      unread(lapsState) ? ' -- **the lap list could not be read**, so this count is not a total' : ''
+    }`,
   ];
   lines.push(
     doc.session.calibrationStatus === 'unvalidated'
@@ -522,8 +613,16 @@ export function buildSessionReportMarkdown(doc: SessionReportDocument): string {
         ? '- Calibration: **unknown** -- the device holds no record of whether matching was validated'
         : '- Calibration: validated',
   );
+  // Ticket P15 F1: the counts stay; what the word "unanswered" means in them
+  // is stated when the verdict read did not succeed.
   lines.push(
-    `- Owner verdicts: ${String(doc.verdictSummary.agreed)} agreed, ${String(doc.verdictSummary.disagreed)} disagreed, ${String(doc.verdictSummary.unanswered)} unanswered`,
+    `- Owner verdicts: ${String(doc.verdictSummary.agreed)} agreed, ${String(doc.verdictSummary.disagreed)} disagreed, ${String(doc.verdictSummary.unanswered)} unanswered${
+      verdictState === 'failed'
+        ? ' -- **the stored verdicts could not be read**, so "unanswered" here means not readable, not unanswered'
+        : verdictState === 'unavailable'
+          ? ' -- **this device cannot read the owner\'s verdicts**, so "unanswered" here means not readable, not unanswered'
+          : ''
+    }`,
   );
   // Ticket P14 H3: driven by `completeness`, never by "the count is zero".
   lines.push(
@@ -535,29 +634,64 @@ export function buildSessionReportMarkdown(doc: SessionReportDocument): string {
           ? '- Recording completeness: **unknown** -- this recording was never finalised, so the stored counters are not a final account'
           : '- Recording completeness: **unknown**',
   );
-  if (doc.raw !== null) {
+  if (doc.raw === null) {
+    // Ticket P15 F1: previously these two lines were simply omitted, which is
+    // the silent absence rule 2 exists to forbid -- a reader cannot tell a
+    // missing line from a zero.
     lines.push(
-      `- GNSS fixes: ${String(doc.raw.gnss.totalSampleCount)} (${String(doc.raw.gnss.lapSampleCount)} in laps, ${String(doc.raw.gnss.unclaimedSampleCount)} unclaimed)`,
+      '- GNSS fixes / telemetry samples: **not stated** -- the raw measurement record could not be assembled, so no count of either is known',
+    );
+  } else {
+    // Ticket P15 F1: a component read that failed makes its count a FLOOR.
+    // Stating `0` flat beside an availability block saying the table was
+    // locked is the same over-claim in the other half of the document.
+    lines.push(
+      `- GNSS fixes: ${String(doc.raw.gnss.totalSampleCount)} (${String(doc.raw.gnss.lapSampleCount)} in laps, ${String(doc.raw.gnss.unclaimedSampleCount)} unclaimed)${
+        rawComponentUnread('raw:gnss')
+          ? ' -- **a floor, not a total**: part of the GNSS record could not be read (see the availability list below)'
+          : ''
+      }`,
     );
     lines.push(
       `- Telemetry samples: ${String(doc.raw.telemetry.sampleCount)}${
         doc.raw.telemetry.channels.length === 0 ? '' : ` across ${doc.raw.telemetry.channels.join(', ')}`
+      }${
+        rawComponentUnread('raw:telemetry')
+          ? ' -- **a floor, not a total**: the telemetry record could not be read (see the availability list below)'
+          : ''
       }`,
     );
   }
 
   lines.push('', '## Calibration attempts');
   if (doc.calibrationAttempts.length === 0) {
-    const state = doc.availability.find((entry) => entry.part === 'calibrationAttempts')?.state;
     lines.push(
-      state === 'unavailable' || state === 'failed'
-        ? '- **Not readable on this device.** This is not the same as "none were made".'
-        : '- None recorded.',
+      calibrationState === 'failed'
+        ? `- **Not readable on this device.** The stored calibration records could not be read: ${detailOf(
+            'calibrationAttempts',
+          )} This is not the same as "none were made".`
+        : calibrationState === 'unavailable'
+          ? '- **Not readable on this device.** This device cannot store or read calibration attempt records. This is not the same as "none were made".'
+          : '- None recorded.',
     );
   } else {
-    for (const attempt of doc.calibrationAttempts) {
+    if (calibrationState === 'failed') {
+      // Ticket P15 F1: the list below is what survived, and at least one row
+      // in it may be an earlier PROVISIONAL row whose conclusion never landed.
       lines.push(
-        `- ${attempt.outcome.toUpperCase()}${attempt.concluded ? '' : ' (never concluded)'} -- coverage ${(attempt.coverageFraction * 100).toFixed(1)}%, ${String(Math.round(attempt.durationMs / 1_000))} s, ${String(attempt.samplesFed)} fix(es)`,
+        `- **PARTIAL.** This session's calibration records could not be read or written in full: ${detailOf(
+          'calibrationAttempts',
+        )} What follows is what the device could produce, not necessarily every attempt nor its final account.`,
+      );
+    }
+    for (const attempt of doc.calibrationAttempts) {
+      const conclusion = attempt.concluded
+        ? ''
+        : calibrationState === 'failed'
+          ? ' (PROVISIONAL -- the stored row carries no conclusion; the conclusion may have been reached and failed to reach storage)'
+          : ' (never concluded)';
+      lines.push(
+        `- ${attempt.outcome.toUpperCase()}${conclusion} -- coverage ${(attempt.coverageFraction * 100).toFixed(1)}%, ${String(Math.round(attempt.durationMs / 1_000))} s, ${String(attempt.samplesFed)} fix(es)`,
       );
       for (const line of attempt.explanation) lines.push(`  - ${line}`);
     }
@@ -565,15 +699,26 @@ export function buildSessionReportMarkdown(doc: SessionReportDocument): string {
 
   lines.push('', '## Laps and verdicts');
   if (doc.laps.length === 0) {
-    lines.push('- No lap was completed.');
+    lines.push(
+      unread(lapsState)
+        ? '- **Not readable.** The lap list for this session could not be read, so this document cannot say whether a lap was completed.'
+        : '- No lap was completed.',
+    );
   } else {
     for (const entry of doc.laps) {
       const appVerdict = entry.lap.valid
         ? 'app: VALID'
         : `app: INVALID (${entry.lap.invalidReasons.join(', ') || 'no reason recorded'})`;
+      // Ticket P15 F1: "not answered" is a claim about a read that succeeded.
+      // An answer that WAS read is real whatever else failed, so only the
+      // `unanswered` placeholder is re-labelled.
       const owner =
         entry.verdict.answer === 'unanswered'
-          ? 'owner: not answered'
+          ? verdictState === 'failed'
+            ? 'owner: NOT READABLE -- a stored verdict for this lap could not be decoded'
+            : verdictState === 'unavailable'
+              ? 'owner: NOT READABLE -- this device cannot read the owner\'s verdicts'
+              : 'owner: not answered'
           : `owner: ${entry.verdict.answer}${entry.verdict.answerRevision > 1 ? ` (answer ${String(entry.verdict.answerRevision)})` : ''}`;
       lines.push(`- Lap ${String(entry.lap.lapNumber)} ${formatMs(entry.lap.durationMs)} -- ${appVerdict}; ${owner}`);
       if (entry.verdict.note !== undefined) lines.push(`  - note: ${entry.verdict.note}`);
@@ -584,7 +729,15 @@ export function buildSessionReportMarkdown(doc: SessionReportDocument): string {
   // person forwarding the file can see at a glance which tools answered.
   lines.push('', '## Other tools');
   if (doc.extras.length === 0) {
-    lines.push('- No tool output was enumerated for this session.');
+    lines.push(
+      extrasState === 'failed'
+        ? `- **Not readable.** The tool roll-call could not be read for this session: ${detailOf(
+            'extras',
+          )} This is not the same as no tool having produced anything.`
+        : extrasState === 'unavailable'
+          ? '- **Not readable on this device.** The tool roll-call could not be read here. This is not the same as no tool having produced anything.'
+          : '- No tool output was enumerated for this session.',
+    );
   } else {
     for (const extra of doc.extras) {
       const state = extra.state ?? 'present';

@@ -179,6 +179,15 @@ describe('P14 H7 -- an exported session carries the profile IT was recorded with
     const data = profile.data as { profileId: string; bindings: { channel: string }[] };
     expect(data.profileId).toBe('toyota-supra-b58');
     expect(data.bindings.map((binding) => binding.channel)).toEqual(['brakePressure']);
+
+    // Ticket P15 F2 (Codex P14 round, disclosed limit): the row says what it
+    // IS -- a snapshot taken at session start -- so a reader never takes it
+    // for an account of a configuration that may have changed mid-recording.
+    const described = (doc as { extras: { source: string; description: string }[] }).extras.find(
+      (row) => row.source === 'vehicleProfile',
+    );
+    expect(described?.description).toContain('snapshot taken at session start');
+    expect(described?.description).toContain('changed mid-session is not visible here');
   });
 
   it('says UNAVAILABLE -- never today’s profile -- when no snapshot was taken', async () => {
