@@ -85,10 +85,13 @@ towards the phone at the same time. Alternatives considered:
 | **Pod is hub** | One clock, one pairing, pod logs even if phone sleeps, can also bridge WiFi adapters | Pod firmware speaks ELM327 | **Chosen** |
 | GNSS inside OBD dongle | One device | §2: no sky, no rigid mount | Rejected |
 
-The WiFi bridge matters for the user's own car: today the iPhone has to join
-the MHD adapter's WiFi (losing internet). With the pod as WiFi station the
-phone keeps its own connection and only talks BLE. It is a tier-2 bonus, not a
-rev A requirement.
+**The MHD WiFi bridge is a rev A requirement.** The owner's car (Supra B58)
+runs on the MHD WiFi adapter today (ENET/HSFZ, already supported by the app;
+the brake switch 0x29/0x500C and brake pressure 0x12/0x58B7 were found through
+it). Today the iPhone has to join the MHD WiFi and loses internet. With the
+pod as a WiFi station on the MHD network, the phone keeps its own connection
+and only talks BLE to the pod. MHD/ENET covers BMW-platform cars only, so it
+is the owner's reference path, not the any-car answer (that is §6).
 
 **Time base.** The GNSS time pulse (1 PPS, TIMEPULSE pin) disciplines the
 pod's microsecond clock. Every GNSS epoch, IMU FIFO sample and OBD response
@@ -160,7 +163,7 @@ BLE ELM327 clones usually expose a UART-like GATT service (often FFE0/FFE1)
 | Phase | What | Exit criterion |
 |---|---|---|
 | **P0 spike** (no PCB) | Buy: V03H4, MAX-M10S breakout, LSM6DSV16X breakout, ESP32-S3 devkit, patch antenna. App: BLE transport. Measure V03H4 PID/s phone-direct; stream breadboard pod at 20/25 Hz; one driveway + one circuit session vs phone GPS | Real numbers for PID/s, BLE rate, lap-time repeatability 25 Hz vs phone |
-| P0b CAN rate | Rev-A4 dongle firmware: BLE + raw CAN polling (read-only guard unchanged). Measure req/s on the Supra (CAN) | A measured number to put next to dragy's "200 Hz" |
+| P0b OBD rate | First on MHD (no new hardware: existing ENET transport + known Supra DIDs), measure reads/s phone-direct and then through the breadboard pod as WiFi station. Then rev-A4 dongle firmware: BLE + raw CAN polling (read-only guard unchanged) | Measured numbers for MHD and for our dongle, next to dragy's "200 Hz" |
 | P1 PCB rev A | Schematic + 4-layer board (GNSS RF needs a solid ground), JLCPCB assembly | ERC/DRC clean, Codex hardware review 0 HIGH (same bar as the dongle) |
 | P2 enclosure | Slim shell + magnetic mount, antenna window | Fits, rigid, no GNSS gain loss vs breadboard |
 | P3 firmware | Hub, PPS time base, fusion, logging, OTA | Field session: fused stream, OBD on pod clock |
