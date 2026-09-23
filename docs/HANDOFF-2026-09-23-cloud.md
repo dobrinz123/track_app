@@ -10,7 +10,8 @@ Nothing from this session has been built, installed or seen on the phone.
 
 ## State of `main`
 
-`main` is at `dd84864`. Everything below "On main" is merged. Everything below "Open PRs" is **not** on
+`main` ends with this handoff commit. Both open PRs branch from `dd84864`, the commit before it. Everything
+below "On main" is merged. Everything below "Open PRs" is **not** on
 `main`, so a plain `git pull` does not bring it in.
 
 ### On main (documentation and config only, no code)
