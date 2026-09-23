@@ -935,3 +935,22 @@ CHAIN: gates (typecheck 0, lint 0 errors, 3384 tests = 1775 core + 1609 mobile, 
 CONTAINS vs build 12: the overnight mapping job's output. Four architecture maps + flow review + public-release plan in docs/architecture/. Fixes found BY the map: one corrupt lap row no longer hides every session; the geometry safety gate no longer fails open; markInvalid is on the contract; hardware DESIGN.md no longer contradicts its own BOM on the CAN transceiver. Fixes found BY the flow trace: cancelling the Learn lap no longer strands the app (the Monday protocol instructs exactly that action); Discard no longer destroys the laps its banner counted, and neither does starting the next session; a learned circuit never named is no longer unreachable; learned circuits can be deleted; a failed learn phase resets on re-entry. Every driver-causable refusal now reaches the driver instead of a console.
 NEW EXPECTED BEHAVIOUR, in the protocol so it is not reported as a bug: an abandoned calibration leaves a ZERO-LAP session in history -- the honest record, replacing a phantom recovery banner.
 OPEN: flow-review F8/F9/F10/F11 and the correct-but-confusing list; the three accepted P14/P15 residuals; Codex re-verification of the flow fixes (quota).
+
+## P18 — cloud session review + delete-all fix waves — 2026-09-23 (local lead)
+Pulled the cloud session's work (HANDOFF-2026-09-23-cloud.md: PR #1 prompt audit, PR #2 delete-all device wipe, PR #3 Signal Finder early wake). Local gates on 6d6f90b matched the cloud's: typecheck 0, lint 0 errors, 3407 tests, expo export 0.
+P18-CODEX-REV1 | Codex read-only | dd84864..edb7bd5 | REPORTED(FAIL) 3 HIGH 2 MED 1 LOW, all in delete-all; PR #3 (runner early wake) clean | .foreman/scratch/p18-codex-rev1-out.txt
+  HIGH: VIN resurrected after verified wipe (in-flight VIN read; queued whole-blob settings write); "Tag as channel" specs (enetChannelSpecsJson, provenance can hold the VIN) survived; a failed Test Loop adoption could resume onto the fallback controller after its circuit was deleted.
+  OWNER DECISION: delete-all erases custom channel definitions.
+P18-FIX1 d2b26f6 -> P18-CODEX-REV2 | REPORTED(FAIL) 1 HIGH 3 MED | p18-codex-rev2-out.txt
+  HIGH: a VIN read started AFTER the second memory reset outlived the final read-back. MED: 'error' refusal told the driver to leave Test Loop, which abandons nothing; terminal Test Loop state kept geometry; Settings channel draft kept the VIN.
+P18-FIX2 1dee7b2 -> P18-CODEX-REV3 | REPORTED(FAIL) 0 HIGH 1 MED 1 LOW | p18-codex-rev3-out.txt
+  MED was a regression of FIX2 itself: the fence-only return stranded VIN detection at 'attempting' after a REFUSED delete.
+P18-FIX3 939b93f -> P18-CODEX-REV4 | PASS_WITH_NOTES, 0 HIGH | p18-codex-rev4-out.txt
+  LOW fixed after REV4 (refusal text now says "or let it finish saving"; string only, gates re-run green).
+  FINAL GATES: typecheck 0, lint 0 errors, 3413 tests = 1787 core + 1626 mobile, expo export 0.
+ACCEPTED RESIDUALS (all LOW or scope, none report false success):
+  - history cache not refreshed when delete-all FAILS partway (active-pointer rejection, or one circuit rejected) — reports failure, stale list until next refresh.
+  - adoption journal deleted by key without ownership compare — only matters with two app runtimes on one DB.
+  - untested: Settings rejection cleanup, injected storage failures in the wipe tail; sql.js double does not model the production FIFO gate for standalone ops.
+  - pre-existing, not delete-all: after leaving a Test Loop in 'error', a NEW learn phase can reuse the stale adoptionProgress ledger (adoptionProgress ??= ...).
+NOT DONE: device check of delete-all (handoff step 4); no build made.

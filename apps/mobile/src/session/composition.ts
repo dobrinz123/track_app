@@ -3809,7 +3809,7 @@ async function runDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDataRes
       referenceLapCleared: false,
       failedCircuitIds: [],
       reason: 'TEST_LOOP_ACTIVE',
-      errorText: 'a test loop is learning or saving a track -- stop it before deleting all data',
+      errorText: 'a test loop is learning or saving a track -- stop it, or let it finish saving, before deleting all data',
     };
   }
   // 1d. Every other Test Loop phase is ABANDONED instead. `error` holds a
