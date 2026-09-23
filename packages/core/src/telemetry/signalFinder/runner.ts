@@ -581,7 +581,14 @@ export async function runFinderRound(input: RunFinderRoundInput): Promise<Finder
       // (every entry unrouted) is genuinely finished.
       if (coolingThisPass === 0) break;
       const boundaryMs = startedAtMs + (windowAt(input.clock.now()) + 1) * windowMs;
-      await waitMs(Math.min(boundaryMs - input.clock.now(), Math.max(0, endAtMs - input.clock.now())));
+      // A timer can fire before `input.clock` reaches its target (the two are
+      // separate clocks), so keep sleeping until the clock itself crosses the
+      // boundary. Ending the round on an early wake-up emptied every later
+      // window, the Y3 failure all over again.
+      const wakeAtMs = Math.min(boundaryMs, endAtMs);
+      while (input.clock.now() < wakeAtMs && !input.control.stopped) {
+        await waitMs(Math.max(1, wakeAtMs - input.clock.now()));
+      }
       if (input.clock.now() < boundaryMs) break; // the round's own duration ran out first.
       continue;
     }
