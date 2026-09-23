@@ -138,6 +138,16 @@ The dongle's rev A4 speaks WiFi (SoftAP + ELM327 subset). For the pod
 pairing it needs a BLE link instead: the ESP32-C3 already has BLE, so this is
 a firmware change plus a native binary protocol, not a new board — **VERIFY**
 that the rev-A4 antenna/layout is fine for BLE use (same 2.4 GHz radio).
+**Baseline already measured (MHD, Supra B58).** The Signal Finder exports in
+`data/field/signal-finder/` record the app's own `measuredReqPerSec` over the
+MHD ENET adapter: 36–45 requests/s total on 2026-08-30/31 (one UDS DID per
+request; ~27–30/s counting timeouts), 12–15/s in two sessions on older builds
+or one outlier. So MHD ≈ 40 reads/s shared across all polled channels —
+about 10 Hz per channel when four channels are polled. That is the number the
+competitive tier has to beat (dragy claims "200 Hz"). Measured while the
+Signal Finder rotated through 12–48 DIDs; re-measure with a fixed telemetry
+poll list in P0b.
+
 **Measure the V03H4's real PID/s in P0 before designing anything around a
 number**, and benchmark against a dragy OBD if one can be borrowed.
 
