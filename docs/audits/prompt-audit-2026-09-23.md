@@ -1,6 +1,6 @@
 # Prompt audit, 2026-09-23
 
-Proposed diff: `docs/audits/prompt-audit-2026-09-23.patch`. It has not been applied. To take all of it, run `git apply docs/audits/prompt-audit-2026-09-23.patch`. Each hunk is one finding, so you can also take them one at a time.
+Proposed diff: `docs/audits/prompt-audit-2026-09-23.patch`. Applied in full on 2026-09-23.
 
 ## Assumptions
 

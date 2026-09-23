@@ -33,7 +33,6 @@ State at this commit: **3397 tests green**, typecheck 0, lint 0 errors (6 pre-ex
 These are the owner's, learned the hard way. Breaking them is how this app lost him a track day.
 
 1. **No build without the full chain.** Gates → independent review at **zero HIGH findings** → then build.
-   The owner states this repeatedly and means it.
 2. **Never report success you did not observe.** Weeks of work went into making a failed read surface as
    FAILED rather than as "there was nothing". If you cannot verify something, say so.
 3. **Field facts come from the owner, never guessed.** What happened at the track, how the phone is

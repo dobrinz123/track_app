@@ -4,6 +4,11 @@ Written 2026-08-27 by the LEAD after the user's directive. **Read this before to
 coaching, or session export.** It records WHY the telemetry data exists, WHAT must be built on top
 of it, and in WHICH ORDER — so an agent in a fresh session can pick it up without the conversation.
 
+> **Status:** §3 step 4 and "Decision: no user API keys" are superseded. Corner analysis is a deterministic
+> on-device engine, not an LLM (see "REVISION 2026-08-28 01:30" at the end, and
+> `docs/architecture/analysis-engine.md` for what shipped). Read §§0–2 and §4 as data requirements; do not
+> build an LLM call, backend, or prompt from §3 step 4 without a new decision from the owner.
+
 ## 0. The goal, in the user's words
 
 > "Scopul datelor ăstea e ca pe viitor să introducem un LLM care analizează limitele mașinii și ne
