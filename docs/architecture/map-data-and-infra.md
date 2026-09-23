@@ -1,5 +1,7 @@
 # Map: data, assets and infrastructure
 
+> Updated to HEAD `4e88d13` on 2026-09-23 (originally written at `ec153ef`, 2026-09-22).
+
 Everything in this repo that is **not** application logic: the circuit assets and the generators
 that produce them, the archived field and OSM data, CI, the firmware and board, the shipped `.ipa`
 files, and the two parked backlogs. Written so a fresh session can rebuild, regenerate or ship
@@ -25,6 +27,7 @@ eslint.config.mjs             flat config, one file for the whole repo
 .github/workflows/            build-unsigned-ios.yml, security-and-ci.yml
 .gitleaksignore               1 allowlisted false-positive fingerprint
 .pre-commit-config.yaml       opt-in local gitleaks hook (mirrors CI)
+.claude/                      launch.json (web-preview target), settings.local.json (tracked; §8 S14)
 packages/core/                @circuit/core — pure TS domain package
   assets/circuits/            the generated circuit profile JSON assets
   scripts/                    the two generator scripts
@@ -150,18 +153,24 @@ sectorStatus:   'official' | 'app-defined';
 
 | Value | Meaning | What it permits downstream |
 |---|---|---|
-| `geometryStatus: 'official'` | Geometry from an authoritative source (organizer / homologation document). | **The only value that sets `geometryValidated: true`** in `apps/mobile/src/session/analysisAssembly.ts:551`, which is what the suggestion engine gates on. Coaching suggestions are only fully unlocked here. |
-| `'community-derived'` | Real third-party geometry (OSM), transformed deterministically, unvalidated on site. **Both shipped circuits.** | Timing and analysis run; `sessionReport.ts:456` injects a caveat into every exported report: *"The circuit geometry is … not an officially surveyed layout. Lap boundaries and sector splits were computed against it and inherit its uncertainty."* |
+| `geometryStatus: 'official'` | Geometry from an authoritative source (organizer / homologation document). | **The only value that sets `geometryValidated: true`** in `apps/mobile/src/session/analysisAssembly.ts:552`, and the only one that maps to provenance `'surveyed'` (`geometryProvenanceOf()`, `packages/core/src/coaching/sessionInsights.ts:102`). Since P17 this gates only **live cue moves** (voice cues at speed); everything else runs on any stated provenance. |
+| `'community-derived'` | Real third-party geometry (OSM), transformed deterministically, unvalidated on site. **Both shipped circuits.** | Provenance `'mapped'`: timing, analysis **and, since P17, pit suggestions** run, with corners labelled as "our numbering" and positions as "on the line we traced"; live cue moves stay off. `sessionReport.ts:456` injects a caveat into every exported report: *"The circuit geometry is … not an officially surveyed layout. Lap boundaries and sector splits were computed against it and inherit its uncertainty."* |
 | `'dev-only'` | Synthetic test fixture (`packages/core/src/profile/test-fixture.ts`). | Test/replay use only. |
-| `'ad-hoc'` | Geometry **learned from one lap of driving** (the Test Loop / learned-circuits feature). | `packages/core/src/testloop/testLoopCircuit.ts` writes this as a **constant, never taken from a caller** — a learned circuit can never present itself as surveyed. `isLearnedGeometry()` is the single predicate every honesty check reads; the UI adds a distinct badge and note (`analysisViewModel.ts:1095-1096`) and the selection list labels learned circuits differently from bundled ones. |
+| `'ad-hoc'` | Geometry **learned from one lap of driving** (the Test Loop / learned-circuits feature). | `packages/core/src/testloop/testLoopCircuit.ts` writes this as a **constant, never taken from a caller** — a learned circuit can never present itself as surveyed. Provenance `'learned'` (pit suggestions allowed, live cue moves off). `isLearnedGeometry()` is the single predicate every honesty check reads; the UI adds a distinct badge and note (`analysisViewModel.ts:1101-1102`) and the selection list labels learned circuits differently from bundled ones. |
 | `sectorStatus: 'official'` | Sector splits from the sanctioning body. | Nothing in the repo currently sets this. |
 | `'app-defined'` | Gates the app invented deterministically. **Both shipped circuits.** | Reported as such in the session report (`- Circuit geometry: <status> (sectors <sectorStatus>)`) and in the circuit-detail UI. Never labelled "Official". |
 
 The binding rule (ADR-0002, restated as a checklist in `docs/adding-a-circuit.md`): *`'official'`
 requires an actual authoritative source — do not mark a community-derived source `'official'`
-because it happens to be accurate.* The current consequence, recorded in the ledger, is deliberate:
-**on both real circuits the honesty gate keeps coaching suggestions off**, because the geometry is
-not official. That is the gate working, not a bug.
+because it happens to be accurate.* Until P17 (commit `5561364`, 2026-09-23, shipped in build 14)
+the consequence was that **on both real circuits the honesty gate kept coaching suggestions off**.
+P17 replaced the binary gate with three tiers (`surveyed` / `mapped` / `learned`), on the argument,
+pinned by `packages/core/test/coaching/geometryTiers.test.ts`, that the analysis is
+self-referential: every lap is measured through the same windows, so a displaced centerline moves
+every lap equally and the comparison is unaffected. Pit suggestions now run on any **stated**
+provenance (an unstated one still refuses); live cue moves stay on `'official'`. `'official'` is
+still never set by anything in the repo, and the rule above is unchanged. The reasoning is in the
+P17 commit message and in `docs/architecture/public-release-plan.md` §3.
 
 The same file (`circuitCatalog.ts:78-85`) records the invariant that keeps it honest at runtime:
 the only way `geometryStatus` changes is a **new, re-reviewed catalog asset at build time** — it is
@@ -177,10 +186,10 @@ Discharged in four places:
 
 1. **In the asset**, `source: { name: "© OpenStreetMap contributors", license: "ODbL 1.0", url, retrievedAt }`,
    plus the leading sentence of MotorPark's `confidenceNotes`.
-2. **In the app's About card** — `apps/mobile/src/ui/screens/SettingsScreen.tsx:1076`:
+2. **In the app's About card** — `apps/mobile/src/ui/screens/SettingsScreen.tsx:1084`:
    *"Circuit geometry data © OpenStreetMap contributors, available under the Open Database License
    (ODbL)…"*
-3. **In the circuit-detail screen** — `apps/mobile/src/ui/screens/CircuitDetailScreen.tsx:262`
+3. **In the circuit-detail screen** — `apps/mobile/src/ui/screens/CircuitDetailScreen.tsx:376`
    (ODbL attribution + advisory disclaimer, condensed), built from
    `apps/mobile/src/ui/data/circuit.ts:5` (`OSM_ATTRIBUTION = '© OpenStreetMap contributors (ODbL)'`)
    which composes a per-circuit provenance line including way ids and retrieval date.
@@ -289,7 +298,9 @@ here remains unknown until someone drives it."*
 `docs/adding-a-circuit.md` is the process document (profile schema requirements, the provenance
 rules, the generator-script pattern, and the full table of `validateProfile()` error codes a new
 asset must clear). `docs/NEXT-CIRCUIT-PLAYBOOK.md` is the lessons-learned companion written after
-the TMR campaign — read it first; it encodes what the code cannot tell you.
+the TMR campaign — read its §0 before the first change and each later section before touching the
+area it covers (scoping added by the 2026-09-23 prompt audit); it encodes what the code cannot tell
+you.
 
 ---
 
@@ -365,7 +376,8 @@ Two workflows, deliberately separate.
   gets a live check.
 - **Artifacts:** `CircuitTimer-release-unsigned.ipa` and `CircuitTimer-devclient-unsigned.ipa`.
 - **Getting an artifact into `builds/ipa/`:** there is **no automation for this step**. The operator
-  downloads the artifact from the completed run (GitHub UI or `gh run download`), unzips it, renames
+  downloads the artifact from the completed run (GitHub UI or `gh run download`; the exact commands
+  used for build 14 are in §7 steps 6–7), unzips it, renames
   it to the project's convention `TRACE-v<N>-<slug>-release-<YYYY-MM-DD>.ipa`, and drops it in
   `builds/ipa/` alongside a hand-written `TEST-<N>-PROTOCOL.md`. The ledger entry for each build
   records the run id, the source commit, the byte size and the md5 — that is the audit trail
@@ -427,7 +439,7 @@ npm run lint                                      # repo root
 cd apps/mobile && npx expo export --platform ios  # NOT the repo root
 ```
 
-`docs/NEXT-CIRCUIT-PLAYBOOK.md:19` states it, and every ticket in `.foreman/scratch/` repeats it.
+`docs/NEXT-CIRCUIT-PLAYBOOK.md:20` states it, and every ticket in `.foreman/scratch/` repeats it.
 `apps/mobile/package.json` also exposes it as `npm run export:ios` from within that workspace.
 The playbook adds one more rule with a scar behind it: **gates must be taken from real exit codes**
 (`cmd > log 2>&1; ec=$?`), never piped through grep — `npm test | grep …` returns grep's exit code,
@@ -441,11 +453,23 @@ them — byte-search UTF-16-LE instead of concluding a string is missing.
 
 ### 4.4 `builds/` (gitignored)
 
-`builds/ipa/` holds 24 shipped `.ipa` files (2026-08-06 → 2026-09-22, the newest being
-`TRACE-v12-data-collection-release-2026-09-22.ipa`, 14,442,637 bytes, md5
-`02dc5a80aa4191d217108c1532baef7e`, from run `35776004295` on `cb7dee1`) plus ten
-`TEST-<N>-PROTOCOL.md` field-test protocols and an unpacked `coach/inspect/Payload/TRACE.app/` tree
-used for forensics. None of this is in git — **if the working copy is lost, the `.ipa` files are
+`builds/ipa/` holds 28 shipped `.ipa` files (2026-08-06 → 2026-09-23) plus ten
+`TEST-<N>-PROTOCOL.md` field-test protocols (3–11 and 13; build 12's protocol was renamed
+`TEST-13-PROTOCOL.md` for build 13, and build 14 added none) and unpacked `inspect/Payload/` and
+`coach/inspect/` trees used for forensics. The three newest, from the ledger and checked against
+the files on disk:
+
+| Build | File | Run | Commit | Bytes | md5 |
+|---|---|---|---|---|---|
+| 12 | `TRACE-v12-data-collection-release-2026-09-22.ipa` | `35776004295` | `cb7dee1` | 14,442,637 | `02dc5a80aa4191d217108c1532baef7e` |
+| 13 | `TRACE-v13-flow-fixes-release-2026-09-23.ipa` | `35821677110` | `c462af2` | 14,448,092 | `7252beb9631491480bd17162ab8a0922` |
+| 14 | `TRACE-v14-delete-all-release-2026-09-23.ipa` | `35892924777` | `3c6c342` | 14,457,445 | `84127f5234393defbd7168093a984ad0` |
+
+Build 13 carried the mapping job's fixes and the flow-review fixes; its Codex cross-verification
+could not complete (quota), which the ledger records. Build 14 carried the cloud session's work
+(delete-all now wipes VIN, vehicle data and learned circuits; Signal Finder early-wake fix; prompt
+audit), P17's coaching tiers, and the P18 fix waves, and went through the full chain: gates →
+Codex P18-REV4 0 HIGH → headless preview E2E → forensics. None of this is in git — **if the working copy is lost, the `.ipa` files are
 gone**; only the ledger's per-build record survives.
 
 Two process rules from the ledger apply to anything that lands here:
@@ -565,8 +589,8 @@ on-via, tuning profiles, footprint-filter and footprint-type mismatches).
 **Two part changes are recorded in `generate_board.py`'s REV A3 header and matter if you read
 DESIGN.md §2 alone:** the TPS54202DDCR pin map was corrected against the live TI datasheet
 (1=GND, 2=SW, 3=VIN, 4=FB, 5=EN, 6=BOOT), and **U2 was replaced: TJA1051T/3 → TCAN330DR**, because
-the TJA1051T/3 needs 4.5–5.5 V VCC and this design has only a 3.3 V rail. DESIGN.md §2's table and
-`firmware/README.md` still name the TJA1051T/3 — see §8.
+the TJA1051T/3 needs 4.5–5.5 V VCC and this design has only a 3.3 V rail. DESIGN.md §2's table
+(with the reasoning in §8.4) and `firmware/README.md` were brought into line in `ec153ef` — see §8 S4.
 
 **Honest limitation, stated in both DESIGN.md §6 and firmware/README.md:** **no physical validation
 yet**. No board has been fabricated or brought up.
@@ -615,6 +639,12 @@ They now are — none is AGPL/GPL; the classes are OFL-1.1 (font files), CC-BY (
 (file-level copyleft). **The correct answer is a deliberate documented policy plus a NOTICES file
 that discharges attribution — not a silent widening.** Every admission must carry its reason so the
 owner can veto any single line.
+
+**Since 2026-09-23 a draft exists for the NOTICES half:** `docs/legal/oss-notices.md` (1.0-draft,
+for lawyer review) states that the app has **no** open-source notices screen, that the About-card
+sentence does not discharge the MIT/BSD/Apache, OFL or CC attribution obligations, and proposes
+how to generate the notices. It also says the ODbL obligation **is** discharged (§1.4). Nothing
+from it is implemented yet, and the CI policy itself is unchanged.
 
 ### 6.2 Dependency-advisory backlog (was ticket P7F)
 
@@ -666,14 +696,26 @@ npm test
 npm run lint
 cd apps/mobile && npx expo export --platform ios
 ```
-Note the fourth command's working directory. Expect roughly 3,366 tests as of build 12 (1,765 core
-+ 1,601 mobile); a count that drops is a regression, not noise.
+Note the fourth command's working directory. Expect roughly 3,413 tests as of build 14 (1,787 core
++ 1,626 mobile); a count that drops is a regression, not noise. To keep the real exit code:
+`npm test > test.log 2>&1; echo $?` (the form `docs/HANDOFF-2026-09-23-cloud.md` uses).
 
 **3. Run it locally, for visual work.**
 The fastest loop is the web preview: `.claude/launch.json` defines a `mobile-web` target on port
 8082, and the in-app DevReplay screen drives the **real production controller** with bundled
 fixtures. Web has no SQLite (in-memory fallback), and RN-web under mobile emulation needs synthetic
 pointer+mouse+click sequences; long-press needs touchstart/touchend held ~2.6 s.
+For the pre-build E2E, use the **headless `agent-browser` CLI** against `npx expo start --web`
+(from `apps/mobile`), at 360x640, as build 14's E2E did (playbook Lesson 10; the Chrome-extension
+preview can be occluded and throttle the replay). Its mechanics, as exercised on 2026-09-23:
+- `agent-browser open <url>` **hangs**, because Metro never fires `load`. Navigate with
+  `agent-browser eval "location.href='http://localhost:<port>/'"` instead, then poll (`eval`) until
+  the app's rendered divs exist.
+- Long-press (e.g. hold-to-end) is `agent-browser mouse down`, a wait, then `mouse up`.
+- Give screenshot paths as absolute paths (the daemon's cwd is not yours).
+- The web preview has **no SQLite and no GPS**. On-disk behaviour (e.g. the delete-all wipe) and
+  anything GPS-driven outside DevReplay is covered only by tests, and the ledger entry must say so.
+
 For a device loop: `npx expo start` from `apps/mobile` against an installed dev-client build.
 **Expo Go does not work** for this SDK / the native TCP module.
 
@@ -693,14 +735,31 @@ This is a standing user rule (2026-08-30). Do not trigger a build in parallel wi
 time; build 6 did exactly that and its `.ipa` was withdrawn. Visual features get visual verification
 in the web preview and an explicit user OK **before** a build.
 
+The cross-review is Codex, read-only, fed a ticket on stdin:
+```
+codex exec --sandbox read-only -C <repo> - < .foreman/scratch/ticket-<id>-codex.md > .foreman/scratch/<id>-out.txt
+```
+(`docs/HANDOFF.md`, "Codex is the release reviewer"). Fix wave → re-review on the fix diff, until
+0 HIGH; P18 took four rounds. Codex has hit its quota mid-review twice — a partial run is **not** a
+pass (build 13's ledger entry records exactly that).
+
 **6. Build the `.ipa`.**
 Run the **Build unsigned iOS** workflow in `dobrinz123/track_app` — either `workflow_dispatch` with
 `variant` (`release` / `dev-client` / `both`), or push a `build-*` tag. It runs on a free macOS
 runner, takes ~14–15 minutes, needs no secrets. Output artifacts:
-`CircuitTimer-release-unsigned` and/or `CircuitTimer-devclient-unsigned`.
+`CircuitTimer-release-unsigned` and/or `CircuitTimer-devclient-unsigned`. From the CLI (as for
+build 14):
+```
+gh workflow run build-unsigned-ios.yml --ref main -f variant=release
+gh run list --workflow build-unsigned-ios.yml     # take the run id
+gh run watch <run-id>
+```
 
 **7. Forensics, then file the build.**
-Download the artifact, unzip, and check the Hermes bundle: bundle id `app.circuittimer.tmr`
+```
+gh run download <run-id> -n CircuitTimer-release-unsigned -D <dir>
+```
+Unzip the `.ipa` and grep the Hermes bundle at `Payload/TRACE.app/main.jsbundle`: bundle id `app.circuittimer.tmr`
 unchanged; the build's new UI strings present (**byte-search UTF-16-LE for anything with diacritics
 or em-dashes — `strings -a` will not find them**); `motorpark-romania`, `transilvania-motor-ring`
 and `ODbL` present; expected native symbols (`TcpSocket`, `ExpoLocation`, `ExpoFileSystem`, …).
@@ -725,6 +784,8 @@ Flashing procedure: `firmware/README.md`.
 
 | Topic | Document |
 |---|---|
+| Start here: state, rules, what to do next | `docs/HANDOFF.md`, then `docs/HANDOFF-2026-09-23-cloud.md` (cloud session of 2026-09-23: prompt audit, delete-all, Signal Finder early wake) |
+| The other architecture maps / flow review / public-release plan | `docs/architecture/map-core-timing.md`, `map-core-analysis.md`, `map-mobile-app.md`, `flow-review.md`, `public-release-plan.md` |
 | Module contracts | `docs/architecture/contracts.md` |
 | What is built today | `docs/architecture/current-state.md` |
 | Analysis engine | `docs/architecture/analysis-engine.md` |
@@ -738,6 +799,8 @@ Flashing procedure: `firmware/README.md`.
 | TMR research packet (per-claim confidence tags) | `docs/research/transilvania-motor-ring.md` |
 | Verification baseline / final report / performance / track checklist | `docs/verification/*.md` |
 | Planned GNSS device | `docs/hardware/gnss-device-design.md` |
+| Legal drafts (privacy policy RO/EN, terms, App Store labels, permission strings, OSS notices, compliance checklist) | `docs/legal/*.md` — privacy policy §3.3/§7 and checklist item 3.5 (DONE) describe the build-14 delete-all |
+| Agent instruction files and their audit | `apps/mobile/AGENTS.md` (loaded via `apps/mobile/CLAUDE.md`), `docs/HANDOFF.md`, `docs/NEXT-CIRCUIT-PLAYBOOK.md` §0, `.claude/settings.local.json`; audit in `docs/audits/prompt-audit-2026-09-23.md` (+ `.patch`), applied in full |
 | Board design (binding) | `hardware/DESIGN.md` |
 | Firmware | `firmware/README.md` |
 | Campaign history, every build, every decision | `.foreman/ledger.md` |
@@ -746,7 +809,9 @@ Flashing procedure: `firmware/README.md`.
 
 ## 8. Questions and suspicions
 
-Recorded, **not fixed**. Each with the evidence that raised it.
+Recorded, **not fixed**. Each with the evidence that raised it. Status re-checked against
+`4e88d13` on 2026-09-23: S4 is **answered**; S1, S2, S3, S5, S6, S8–S10, S12, S13 are still open as
+written; S7 and S11 are updated in place; S14 is new.
 
 **S1 — `docs/adding-a-circuit.md` lists a stale `geometryStatus` enum.** It documents
 `'official' | 'community-derived' | 'dev-only'`; `packages/core/src/contracts.ts:57` and
@@ -766,6 +831,10 @@ ships as `motorpark-romania.v1.json`. The `.v2` in the playbook is a generalisat
 new circuit author following it literally would produce a mismatched filename. Minor, but it is the
 first document a new-circuit campaign reads.
 
+**S4 — ANSWERED (fixed in `ec153ef`, the commit this map was written in; shipped in build 13).**
+DESIGN.md §2's U2 row now reads TCAN330DR, states it matches `production/bom.csv`, and points to
+§8.4 for the TJA1051T/3 withdrawal; `firmware/README.md` no longer names the TJA1051T/3. Original
+finding kept below for the record.
 **S4 — `hardware/DESIGN.md` §2 and `firmware/README.md` still name the TJA1051T/3.**
 `generate_board.py`'s REV A3 header records that **U2 was replaced by a TCAN330DR** because the
 TJA1051T/3 requires 4.5–5.5 V VCC and the design has only a 3.3 V rail — with the pin map verified
@@ -787,9 +856,11 @@ anyone within WiFi range who has read this repo, and the dongle sits on the vehi
 2026-08-11). These are KiCad project/local-settings files that change simply from opening the project
 in the GUI, so this is most likely incidental — but the working tree has carried them dirty across
 multiple campaigns (the RUN P7 baseline line explicitly says *"clean except hardware/kicad/*
-(pre-existing)"*). Worth confirming no design intent is sitting uncommitted there.
+(pre-existing)"*). Worth confirming no design intent is sitting uncommitted there. Still dirty at
+`4e88d13`; the 2026-09-23 sessions treated it as the owner's uncommitted work and left it alone.
 
-**S7 — `builds/` is gitignored and holds the only copies of 24 shipped `.ipa` files.** Losing the
+**S7 — `builds/` is gitignored and holds the only copies of 28 shipped `.ipa` files** (24 when
+first written; builds 13 and 14 added since, and the count on disk is 28). Losing the
 working copy loses every shipped artifact and all ten `TEST-*-PROTOCOL.md` field protocols. The
 ledger keeps run ids, commits, sizes and md5s, and the GitHub artifacts have 90-day retention — so
 anything older than 90 days is **not reproducible without re-running the build from its commit**.
@@ -815,8 +886,12 @@ date (3–11) was OBD/signal work on street or driveway; `data/field/` contains 
 captures only, and zero session or lap data. Build 12 was shipped specifically as a data-collection
 build for the first real circuit session. Everything in this repo about lap boundaries, sector
 splits, corridor matching and calibration coverage at a real track is therefore **validated in
-replay against synthetic and derived fixtures, not against a real lap**. That is the honest state,
-and it is exactly why the `geometryStatus` gate keeps coaching suggestions off.
+replay against synthetic and derived fixtures, not against a real lap**. That is the honest state.
+Still true at `4e88d13` (no new files under `data/`). The first real circuit session is planned
+for **Monday 28 Sep 2026 at MotorPark România**, following `builds/ipa/TEST-13-PROTOCOL.md`
+(`docs/HANDOFF.md`). Note that the reason once given here, "the `geometryStatus` gate keeps
+coaching suggestions off", no longer holds: since P17 pit suggestions run on mapped geometry (§1.3).
+Only live cue moves wait for `'official'`.
 
 **S12 — blank area: no hardware has been fabricated.** DESIGN.md §6 and `firmware/README.md` both
 state "no physical validation yet". DRC is clean and production files exist, but no board has been
@@ -826,3 +901,10 @@ built or brought up, and the firmware has never talked to a real vehicle bus thr
 (including the read-only guard whitelist, the safety-critical one), but neither GitHub workflow
 builds or runs it. A firmware regression would be caught only by whoever remembers to run it
 locally.
+
+**S14 — `.claude/settings.local.json` is tracked in git** (`git ls-files .claude` lists it next to
+`launch.json`). `*.local.json` files are normally per-machine. The prompt audit
+(`docs/audits/prompt-audit-2026-09-23.md`, finding 7) pruned 14 one-off entries but deliberately kept
+the file tracked, because untracking it would delete it from existing clones on their next pull.
+Any session that adds a permission locally changes a committed file. Low risk; recorded so that a
+diff there is not mistaken for project configuration.

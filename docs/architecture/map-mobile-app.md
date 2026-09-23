@@ -2,6 +2,9 @@
 
 > Orientation document for a fresh session or a new contributor. Written 2026-09-22 against
 > `main` @ `4676545`. Expo SDK 57 / React Native 0.86, iOS, installed by sideloading.
+> **Updated 2026-09-23 to `main` @ `4e88d13`** (navigation/state-machine reconciliation, P17
+> geometry tiers, the delete-all device wipe and its P18 fix waves; every `composition.ts` line
+> number re-checked).
 >
 > Everything below is grounded in `file:line`. Line numbers drift; the **exported symbol names**
 > alongside them do not — search by symbol first, use the line as a hint.
@@ -26,7 +29,7 @@ index.ts → App.tsx  (font gate, NavigationContainer, dark theme)
                         │      ├── ui/components/*      dumb, untested
                         │      └── ui/screens/*Strings  RO/EN copy tables (pure, tested)
                         │
-                        └──────► session/composition.ts   ◄── THE WIRING HUB (4862 lines)
+                        └──────► session/composition.ts   ◄── THE WIRING HUB (5271 lines)
                                         │
                    ┌────────────────────┼────────────────────────┐
                    │                    │                        │
@@ -53,13 +56,13 @@ Three rules that explain most of the code you will read:
    test runner cannot parse React Native's Flow-typed source. See §4 — this is the single most
    common way to get a baffling error here.
 
-Rough size: 44 k lines of TS/TSX under `src/`, 144 test files under `test/`.
+Rough size: 45 k lines of TS/TSX under `src/`, 147 test files under `test/`.
 
 ---
 
 ## 1. The composition root — `src/session/composition.ts`
 
-One file, 4862 lines, and the only place the app is assembled. It is a **module with
+One file, 5271 lines, and the only place the app is assembled. It is a **module with
 module-level side effects**: importing it starts bootstrap. Read it in the order below rather
 than top to bottom.
 
@@ -69,53 +72,54 @@ These run the instant anything imports the module — including a test file.
 
 | Line | What | Why it is eager |
 |---|---|---|
-| `composition.ts:35` | `IS_WEB_RUNTIME = typeof document !== 'undefined'` | Web detection *without* importing `react-native` (§4, fence 1). Distinguishes browser preview / Hermes-on-device / node-test correctly. |
-| `composition.ts:208` | `lifecycleLock = createLifecycleLock()` | Declared above `SwappableFacade`, because the facade wrapper is itself one of its users. |
-| `composition.ts:643-650` | `facade`, `sessionHistoryStore`, `settingsStore` | React components import these synchronously at module load; opening SQLite is async. Each starts on an in-memory placeholder and is *swapped* later. |
-| `composition.ts:661` | `startVoiceCoach(facade, settingsStore)` | Subscribes to the stable wrappers, so it survives every inner swap. |
-| `composition.ts:1042,1058` | `baseTelemetryProvider` / exported `telemetryProvider` | Long-lived OBD singleton with its own clock, independent of any `SessionController`. |
-| `composition.ts:1108` | `gForceProvider` | Accelerometer/IMU singleton on the **same** `telemetryClock` (`:675`) so all telemetry shares one time base. |
-| `composition.ts:1395` | `facadeWrapper.setEndSessionSideEffect(...)` | Telemetry shutdown fires the instant `facade.endSession()` is called, regardless of which inner facade is active or whether persistence later fails. |
-| `composition.ts:1408` | `facadeWrapper.setSessionCompleteBarrier(...)` | Holds the `sessionComplete` broadcast until telemetry shutdown settles (capped at 2 s, `:192`). |
-| `composition.ts:1560` | `startLifecycleListener({ onBackground })` | App-background checkpoint. Registered outside bootstrap so a background transition during boot is a harmless no-op. |
-| `composition.ts:794` | settings subscription — active vehicle profile changed | Invalidates the binding cache. |
-| `composition.ts:1984` | settings subscription — `coachingEnabled` changed | Rebuilds the controller if (and only if) it is idle/terminal. |
-| `composition.ts:2290` | `testLoopController` | Holds no db and no provider, so it is safe before bootstrap. |
-| `composition.ts:2314` | `testLoopController.subscribe` — auto-teardown on `failed` | A learn phase that gives up must not leave GNSS running. |
-| `composition.ts:3153` | `bootstrapPromise = runBootstrap()` | **Bootstrap starts here.** |
-| `composition.ts:4217` | `suggestionJournal` | One per app run — in memory, deliberately (see §9). |
-| `composition.ts:4363` | `lapVerdictStore` | Reads `repository()` on demand, so it works before and after bootstrap. |
-| `composition.ts:4836` | `facade.subscribe(...)` lap-boundary hook | Drives the between-lap stint pass (`runStintPass`, `:4854`). |
+| `composition.ts:36` | `IS_WEB_RUNTIME = typeof document !== 'undefined'` | Web detection *without* importing `react-native` (§4, fence 1). Distinguishes browser preview / Hermes-on-device / node-test correctly. |
+| `composition.ts:215` | `lifecycleLock = createLifecycleLock()` | Declared above `SwappableFacade`, because the facade wrapper is itself one of its users. |
+| `composition.ts:650-657` | `facade`, `sessionHistoryStore`, `settingsStore` | React components import these synchronously at module load; opening SQLite is async. Each starts on an in-memory placeholder and is *swapped* later. |
+| `composition.ts:668` | `startVoiceCoach(facade, settingsStore)` | Subscribes to the stable wrappers, so it survives every inner swap. |
+| `composition.ts:1078,1094` | `baseTelemetryProvider` / exported `telemetryProvider` | Long-lived OBD singleton with its own clock, independent of any `SessionController`. |
+| `composition.ts:1144` | `gForceProvider` | Accelerometer/IMU singleton on the **same** `telemetryClock` (`:682`) so all telemetry shares one time base. |
+| `composition.ts:1431` | `facadeWrapper.setEndSessionSideEffect(...)` | Telemetry shutdown fires the instant `facade.endSession()` is called, regardless of which inner facade is active or whether persistence later fails. |
+| `composition.ts:1444` | `facadeWrapper.setSessionCompleteBarrier(...)` | Holds the `sessionComplete` broadcast until telemetry shutdown settles (capped at 2 s, `:199`). |
+| `composition.ts:1596` | `startLifecycleListener({ onBackground })` | App-background checkpoint. Registered outside bootstrap so a background transition during boot is a harmless no-op. |
+| `composition.ts:805` | settings subscription — active vehicle profile changed | Invalidates the binding cache. |
+| `composition.ts:879,886` | `deviceDataGeneration`, `deviceWipeInProgress` | The delete-all VIN fence (§1.8). Plain module state, but every VIN read and bindings refresh consults it, including ones fired before bootstrap. |
+| `composition.ts:2020` | settings subscription — `coachingEnabled` changed | Rebuilds the controller if (and only if) it is idle/terminal. |
+| `composition.ts:2449` | `testLoopController` | Holds no db and no provider, so it is safe before bootstrap. |
+| `composition.ts:2473` | `testLoopController.subscribe` — auto-teardown on `failed` | A learn phase that gives up must not leave GNSS running. |
+| `composition.ts:3340` | `bootstrapPromise = runBootstrap()` | **Bootstrap starts here.** |
+| `composition.ts:4626` | `suggestionJournal` | One per app run — in memory, deliberately (see §9). |
+| `composition.ts:4772` | `lapVerdictStore` | Reads `repository()` on demand, so it works before and after bootstrap. |
+| `composition.ts:5245` | `facade.subscribe(...)` lap-boundary hook | Drives the between-lap stint pass (`runStintPass`, `:5263`). |
 
 ### 1.2 The three swappable wrappers
 
-`composition.ts:168-183` states the reason: screens import stable bindings whose identity never
+`composition.ts:175-190` states the reason: screens import stable bindings whose identity never
 changes, while the thing behind them is replaced twice — once when SQLite opens, and again for
 every DevReplay transition.
 
 | Class | Line | Starts as | Becomes |
 |---|---|---|---|
-| `SwappableFacade` | `:270` | `PendingFacade` (`:618`) — every command a silent no-op, state frozen | `RealSessionFacade` over the production controller; in `__DEV__`, a replay or `MockSessionFacade` |
-| `SwappableSessionHistoryStore` | `:528` | `MockSessionHistoryStore` | `SqlSessionHistoryStore` for the selected circuit |
-| `SwappableSettingsStore` | `:544` | `InMemorySettingsStore` | `SqlSettingsStore` |
+| `SwappableFacade` | `:277` | `PendingFacade` (`:625`) — every command a silent no-op, state frozen | `RealSessionFacade` over the production controller; in `__DEV__`, a replay or `MockSessionFacade` |
+| `SwappableSessionHistoryStore` | `:535` | `MockSessionHistoryStore` | `SqlSessionHistoryStore` for the selected circuit |
+| `SwappableSettingsStore` | `:551` | `InMemorySettingsStore` | `SqlSettingsStore` |
 
-`PendingFacade` is deliberately **inert**, not a live mock (`:581-593`): an earlier version left a
+`PendingFacade` is deliberately **inert**, not a live mock (`:588-600`): an earlier version left a
 fully functional `MockSessionFacade` in place on a failed bootstrap, so calibration could start
 against a fake timer with no persistence and no visible error.
 
 `SwappableFacade` is more than a delegator. It owns four cross-cutting behaviours:
 
-- **`relaySessionCompleteBarrier`** (`:229`, exported and unit-tested as a free function): every
+- **`relaySessionCompleteBarrier`** (`:236`, exported and unit-tested as a free function): every
   state except `sessionComplete` passes straight through; `sessionComplete` is held until the
   telemetry-shutdown promise settles or 2 s elapses, with later states queued behind it in order.
   A `null` barrier creates no timer at all.
-- **The preflight gate** (`:296`, installed at `:2989`): every `startPreflight()` runs inside
+- **The preflight gate** (`:303`, installed at `:3176`): every `startPreflight()` runs inside
   `lifecycleLock`, checks whether the production controller is terminal or built for a different
   circuit, rebuilds if so, and *then* forwards — from inside the lock.
-- **`runLockedCommand`** (`:426`): `beginCalibration`/`endSession` hold `lifecycleLock` until the
+- **`runLockedCommand`** (`:433`): `beginCalibration`/`endSession` hold `lifecycleLock` until the
   command's async work has *settled* (`SessionFacade.whenCommandsSettled`), not merely until the
   synchronous dispatch returned.
-- **Queued-calibration cancel tokens** (`:467`): `rejectCalibration()` is deliberately *unlocked*
+- **Queued-calibration cancel tokens** (`:474`): `rejectCalibration()` is deliberately *unlocked*
   so a Cancel acts immediately, and it cancels starts still waiting for the lock.
 
 ### 1.3 `lifecycleLock` — the one ordering boundary
@@ -130,7 +134,7 @@ queue behind itself. The synchronously detectable form of that mistake throws
 `LifecycleLockReentry` (`lifecycleLock.ts:41`) instead of hanging; the post-`await` form cannot be
 detected and is covered only by the structural rule.
 
-**Bootstrap deliberately never takes the lock** (`composition.ts:1875-1879`): locked operations
+**Bootstrap deliberately never takes the lock** (`composition.ts:1911-1915`): locked operations
 `await ready()` from *inside* their section, so a bootstrap that held the lock would deadlock
 against the first such caller.
 
@@ -138,119 +142,235 @@ Sections: `selectCircuit` · `resumeRecovery` · `discardRecovery` · `deleteAll
 `restoreProductionFacade` · `startDevReplaySession` · `runDevReplayScenario` ·
 `useMockFacadeForDevReplay` · `startTestLoop` · `tearDownLearnPhase` · `adoptLearnedCircuit` ·
 `deleteLearnedCircuit` · the preflight gate · the coaching rebuild · `beginCalibration` ·
-`endSession`.
+`endSession` · `abandonPendingSession` (an *empty-then-rebuild* section queued straight after
+its own `facade.endSession()`, so FIFO order proves the end has settled — `composition.ts:2336-2354`).
+
+Newest `unlocked*` split: `unlockedTearDownLearnPhase` (`:2508`) is the body of
+`tearDownLearnPhase`, extracted so delete-all — already inside its section — can abandon a Test
+Loop without re-entering the lock.
 
 ### 1.4 `runBootstrap()` — the order matters, and every step's order is justified in place
 
-`composition.ts:2879`. Kicked off once at `:3153`; re-invocable via `retryBootstrap()` (`:3170`).
+`composition.ts:3066`. Kicked off once at `:3340`; re-invocable via `retryBootstrap()` (`:3357`).
 
-1. `:2884-2893` — clean slate. Every module singleton nulled, so a retry never reuses a
+1. `:3071-3080` — clean slate. Every module singleton nulled, so a retry never reuses a
    half-built previous attempt.
-2. `:2895-2911` — open storage. Web preview → `InMemorySessionRepository` (expo-sqlite's wasm
+2. `:3082-3098` — open storage. Web preview → `InMemorySessionRepository` (expo-sqlite's wasm
    backend throws `disk I/O error` in embedded browsers). Native → `openAppDatabase(DB_NAME)`,
    which returns both the migrated repository and the gated raw handle.
-3. `:2919` — prime the vehicle-profile bindings cache (fire and forget).
-4. `:2921` — construct `GnssLocationProvider`.
-5. `:2932-2949` — hydrate settings **before** building the controller, so `coachingEnabled` and
+3. `:3106` — prime the vehicle-profile bindings cache (fire and forget).
+4. `:3108` — construct `GnssLocationProvider`.
+5. `:3119-3136` — hydrate settings **before** building the controller, so `coachingEnabled` and
    `selectedCircuitId` are the persisted values on the very first controller. Then the one-time
    active-profile migration, a second cache refresh, and the unvalidated-matching log.
-6. `:2957-2968` — migrate and load learned circuits, then `publishLearnedCircuits()` — *before*
+6. `:3144-3155` — migrate and load learned circuits, then `publishLearnedCircuits()` — *before*
    the controller, so a persisted `selectedCircuitId` naming a learned circuit resolves.
-7. `:2971` — `repairInterruptedAdoption(db)`: finish or undo a half-adopted Test Loop.
-8. `:2978` — `buildProductionController()` — built but **not activated**.
-9. `:2989` — install the preflight gate.
-10. `:3033-3043` — build `SqlSessionHistoryStore` for the persisted selection.
-11. `:3045-3127` — recovery. Resolve the checkpoint's circuit in binding priority order:
+7. `:3158` — `repairInterruptedAdoption(db)`: finish or undo a half-adopted Test Loop.
+8. `:3165` — `buildProductionController()` — built but **not activated**.
+9. `:3176` — install the preflight gate.
+10. `:3220-3230` — build `SqlSessionHistoryStore` for the persisted selection.
+11. `:3232-3314` — recovery. Resolve the checkpoint's circuit in binding priority order:
     persisted `activeSessionCircuitId` → `listSessions` scan (legacy) → current selection. An
     explicit-but-unbundled pointer is a hard discard.
-12. `:3134-3135` — `activateProductionFacade()`, then `setBootstrapState('ready')`. **This is the
+12. `:3321-3322` — `activateProductionFacade()`, then `setBootstrapState('ready')`. **This is the
     only line that makes the real facade reachable from the UI.**
-13. `:3136-3150` — on any throw: `facade` stays on `PendingFacade`, state flips to `'failed'`,
+13. `:3323-3337` — on any throw: `facade` stays on `PendingFacade`, state flips to `'failed'`,
     `CircuitDetailScreen` shows an inline banner with Retry.
 
 ### 1.5 What composition owns the lifecycle of
 
 | Resource | Created | Disposed / stopped |
 |---|---|---|
-| SQLite `db` + `repository` | `runBootstrap` `:2904-2910` | never (process lifetime); wiped by `deleteAllStoredUserData` |
-| `GnssLocationProvider` | `:2921` | `unlockedRebuildProductionController` `:1947` — **composition stops it, not core** (core cannot know who owns a shared provider) |
-| production `SessionController` | `createProductionController` `:1694` via `buildProductionController` `:1824` | `unlockedRebuildProductionController` `:1909` |
-| `RealSessionFacade` | `:1839` | `staleFacade?.dispose()` `:1910` |
-| `TelemetryRecorder` | `startTelemetryRecording` `:1327` | `stopTelemetryRecording` `:1285` |
-| OBD `telemetryProvider` | module load `:1058` | `stopTelemetryRecording`; `TelemetryScreen` also start/stops it manually |
-| `gForceProvider` | module load `:1108` | **reference counted** — `acquireGForce`/`releaseGForce` `:1142-1158`; two independent users (monitor screen, driving session) |
-| `TestLoopLocationProvider` | `startTestLoop` `:2577` | `disposeTestLoopProvider` `:2613`; released at handover `:2753` |
-| replay `SessionController` | `unlockedStartDevReplaySession` `:3729` | `flushAndDisposeReplay` `:3596` |
-| `SqlLearnedCircuitStore` | `:2960` | — |
-| `AnalysisRunner` | lazily, `getAnalysisRunner` `:4175` | never (one cache for the whole app) |
-| `StintRunner` / `StintCoach` | lazily, `:4305` / `:4326` | never |
+| SQLite `db` + `repository` | `runBootstrap` `:3091-3097` | never (process lifetime); wiped by `deleteAllStoredUserData` |
+| `GnssLocationProvider` | `:3108` | `unlockedRebuildProductionController` `:1983` — **composition stops it, not core** (core cannot know who owns a shared provider) |
+| production `SessionController` | `createProductionController` `:1730` via `buildProductionController` `:1860` | `unlockedRebuildProductionController` `:1945` |
+| `RealSessionFacade` | `:1875` | `staleFacade?.dispose()` `:1946` |
+| `TelemetryRecorder` | `startTelemetryRecording` `:1363` | `stopTelemetryRecording` `:1321` |
+| OBD `telemetryProvider` | module load `:1094` | `stopTelemetryRecording`; `TelemetryScreen` also start/stops it manually |
+| `gForceProvider` | module load `:1144` | **reference counted** — `acquireGForce`/`releaseGForce` `:1178-1194`; two independent users (monitor screen, driving session) |
+| `TestLoopLocationProvider` | `startTestLoop` `:2741` | `disposeTestLoopProvider` `:2777` (via `unlockedTearDownLearnPhase` `:2508`, also from delete-all); released at handover `:2919` |
+| replay `SessionController` | `unlockedStartDevReplaySession` `:4138` | `flushAndDisposeReplay` `:4005` |
+| `SqlLearnedCircuitStore` | `:3147` | — (its rows are wiped by delete-all, then re-read by `resyncAfterDeviceWipe` `:3684`) |
+| `AnalysisRunner` | lazily, `getAnalysisRunner` `:4584` | never (one cache for the whole app) |
+| `StintRunner` / `StintCoach` | lazily, `:4714` / `:4735` | never |
 
 ### 1.6 Exported entry points
 
 Everything the UI (or a test) may call. **Screens import only from here**, never from `Mock*`,
-`Sql*` or `Real*` directly (`composition.ts:637-642`).
+`Sql*` or `Real*` directly (`composition.ts:644-649`).
 
 | Export | Line | What it does | Called by |
 |---|---|---|---|
-| `facade` | 644 | live session state + commands | every session screen |
-| `sessionHistoryStore` | 647 | stored sessions + PB | History, PB, LapDetail, Settings |
-| `settingsStore` | 650 | app settings (live) | nearly every screen |
-| `telemetryProvider` | 1058 | OBD provider singleton (wraps the base with a binding-cache refresh on `start()`) | Telemetry, SignalFinder, DidProbe, TelemetryStrip |
-| `gForceProvider` | 1108 | IMU provider singleton | TelemetryScreen |
-| `acquireGForce` / `releaseGForce` / `gForceHolderCount` | 1142 / 1153 / 1161 | refcounted G ownership | TelemetryScreen (first two); third is tests only |
-| `subscribeBootstrapState` / `BootstrapState` | 1426 / 1416 | gate "Start Session" until ready | CircuitDetailScreen |
-| `retryBootstrap` | 3170 | re-run bootstrap from a clean slate | CircuitDetailScreen |
-| `subscribeRecovery` / `PendingRecovery` | 1463 / 1439 | crash-recovery banner (carries its own `circuitId`) | CircuitDetailScreen |
-| `subscribeRecoveryNotice` | 1487 | one-off recovery error text | CircuitDetailScreen |
-| `resumeRecovery` / `discardRecovery` | 3220 / 3361 | resume or terminalize a checkpoint | CircuitDetailScreen |
-| `selectCircuit` / `SelectCircuitResult` | 2173 / 2053 | the app's ONE active circuit; refuses mid-session | CircuitSelectionScreen |
-| `proceedWithoutCalibration` | 4090 | the calibration escape hatch; returns `armed-accepted` / `armed-unvalidated` / `refused` | ActiveCalibration, CalibrationResult |
-| `getLiveCalibrationAttempt` | 4489 | the live controller's Learn-lap record | CalibrationInstructions, CalibrationResult |
-| `resolveSessionCalibrationStatus` | 4009 | durable 3-valued provenance of a stored session | History, PB, Analysis |
-| `resolveResultsCalibrationStatus` | 4030 | live ∧ stored precedence rule (pure, testable — that is why it is here and not in the screen) | SessionResultsScreen |
-| `sessionUnwrittenSampleCount` | 4042 | fixes captured and never written | SessionHistoryScreen |
-| `isSessionMatchingUnvalidated` | 4054 | legacy boolean predicate | (referenced only in an AnalysisScreen comment; see §9) |
-| `getMostRecentSessionId` | 3971 | `FacadeState` has laps but no session id | SessionResultsScreen |
-| `getTelemetryReadDb` | 3952 | raw SQLite handle, read-on-demand; `null` on web | LapDetail, DidSweep, SignalFinder |
-| `getSessionRepository` | 3962 | shared repository | internal (analysis loader) |
-| `getAnalysisRunner` | 4175 | THE one analysis runner/cache for the app | AnalysisScreen |
-| `getStintCoach` / `getStintRunner` / `getTrackdayRecord` | 4326 / 4305 / 4346 | trackday stage | PitViewScreen (`getStintCoach`, `getActiveStintContext`) |
-| `getActiveStintContext` | 4814 | `{ sessionId, completedLapCount }` or `null` | PitViewScreen |
-| `lapVerdictSupport` / `refreshLapVerdicts` / `getLapVerdicts` / `getUnsavedLapVerdicts` / `getLapVerdictSummary` / `recordLapValidityVerdict` | 4375–4423 | owner's true/false verdict on each lap | SessionResults, LapDetail, History (`summary`) |
-| `buildSessionReport` | 4672 | the one complete per-session document | SessionResults, SessionHistory |
-| `buildRawSessionExport` | 4130 | raw GNSS + OBD/IMU dump, works with zero laps | internal (`buildSessionReport`) + tests |
-| `deleteAllStoredUserData` / `AggregatedDeleteUserDataResult` | 3406 / 3393 | wipe; refuses mid-session and during DevReplay | SettingsScreen |
-| `getLiveDiagnostics` / `LiveDiagnosticsSnapshot` / `estimateObservedRateHz` / `getProductionCircuitId` | 3914 / 3891 / 3932 / 3909 | read-on-demand diagnostics (deliberately not a subscription — no polling while timing) | Settings, DevReplay |
-| `subscribeTestLoop` / `testLoopSnapshot` / `startTestLoop` / `stopTestLoop` / `retryTestLoopAdoption` | 2484 / 2488 / 2564 / 2593 / 2608 | Test Loop learn phase | TestLoopScreen |
-| `resetTestLoop` | 2602 | leave Test Loop mode entirely | **nothing — see §9** |
-| `testLoopDiagnostics` | 2493 | who still holds the GNSS watcher | tests |
-| `saveLearnedCircuit` / `listLearnedCircuits` / `deleteLearnedCircuit` | 2815 / 2798 / 2837 | learned-circuit registry | `saveLearnedCircuit`: TestLoopScreen. Other two: internal/tests only — see §9 |
-| `refreshVehicleProfileBindingsCache` / `getVehicleProfileBindingsCache` / `getActiveVehicleProfileId` | 722 / 732 / 704 | the synchronous binding snapshot the OBD provider reads | SignalFinderScreen (first) |
-| `setActiveVehicleProfileIdExplicit` | 883 | the ONLY way a UI profile choice may be written (sets `activeVehicleProfileSource: 'user'` atomically) | SignalFinderScreen |
-| `subscribeVinAutoDetectNotice` / `dismissVinAutoDetectNotice` / `VinAutoDetectNotice` | 902 / 911 / 887 | "Detected from VIN — …" banner | SignalFinderScreen |
-| `maybeDetectVehicleFromVin` | 996 | one-shot ENET VIN read, never steals the adapter | SignalFinderScreen + `telemetryProvider.start()` |
-| `decideVinAutoSelect` / `applyVinAutoSelect` / `maskVin` / `hasUserExplicitlyChosenVehicleProfileThisRun` / `applyInitialActiveVehicleProfile` | 927 / 946 / 968 / 873 / 812 | pure rules + the one-time profile migration | internal + tests |
-| `relaySessionCompleteBarrier` | 229 | the settle-or-cap relay, as a free function so it is directly unit-testable | `SwappableFacade` + tests |
-| `restoreProductionFacade` / `startDevReplaySession` / `runDevReplayScenario` / `useMockFacadeForDevReplay` / `DevReplayScenarioResult` | 3616 / 3680 / 3802 / 3864 / 3778 | `__DEV__` replay transitions | DevReplayScreen |
-| `listUnvalidatedMatchingSessionIds` | 4059 | — | **nothing — see §9** |
+| `facade` | 651 | live session state + commands | every session screen |
+| `sessionHistoryStore` | 654 | stored sessions + PB | History, PB, LapDetail, Settings |
+| `settingsStore` | 657 | app settings (live) | nearly every screen |
+| `telemetryProvider` | 1094 | OBD provider singleton (wraps the base with a binding-cache refresh on `start()`) | Telemetry, SignalFinder, DidProbe, TelemetryStrip |
+| `gForceProvider` | 1144 | IMU provider singleton | TelemetryScreen |
+| `acquireGForce` / `releaseGForce` / `gForceHolderCount` | 1178 / 1189 / 1197 | refcounted G ownership | TelemetryScreen (first two); third is tests only |
+| `subscribeBootstrapState` / `BootstrapState` | 1462 / 1452 | gate "Start Session" until ready | CircuitDetailScreen |
+| `retryBootstrap` | 3357 | re-run bootstrap from a clean slate | CircuitDetailScreen |
+| `subscribeRecovery` / `PendingRecovery` | 1499 / 1475 | crash-recovery banner (carries its own `circuitId`) | CircuitDetailScreen |
+| `subscribeRecoveryNotice` | 1523 | one-off recovery error text | CircuitDetailScreen |
+| `resumeRecovery` / `discardRecovery` | 3407 / 3575 | resume or terminalize a checkpoint; Discard is non-destructive since D2 (§1.9) | CircuitDetailScreen |
+| `selectCircuit` / `SelectCircuitResult` | 2209 / 2089 | the app's ONE active circuit; refuses mid-session | CircuitSelectionScreen |
+| `pendingSessionStage` / `PendingSessionStage` | 2297 / 2279 | *why* selection is refused: `none` / `setup` / `calibrating` / `driving` (§1.9) | CircuitSelectionScreen |
+| `abandonPendingSession` / `AbandonPendingSessionResult` | 2327 / 2306 | end a session stranded in `awaitingCalibration`/`calibrationReview`; refuses anything else (§1.9) | CircuitSelectionScreen, CalibrationInstructionsScreen |
+| `proceedWithoutCalibration` | 4499 | the calibration escape hatch; returns `armed-accepted` / `armed-unvalidated` / `refused` | ActiveCalibration, CalibrationResult |
+| `getLiveCalibrationAttempt` | 4898 | the live controller's Learn-lap record | CalibrationInstructions, CalibrationResult |
+| `resolveSessionCalibrationStatus` | 4418 | durable 3-valued provenance of a stored session | History, PB, Analysis |
+| `resolveResultsCalibrationStatus` | 4439 | live ∧ stored precedence rule (pure, testable — that is why it is here and not in the screen) | SessionResultsScreen |
+| `sessionUnwrittenSampleCount` | 4451 | fixes captured and never written | SessionHistoryScreen |
+| `isSessionMatchingUnvalidated` | 4463 | legacy boolean predicate | (referenced only in an AnalysisScreen comment; see §9) |
+| `getMostRecentSessionId` | 4380 | `FacadeState` has laps but no session id | SessionResultsScreen |
+| `getTelemetryReadDb` | 4361 | raw SQLite handle, read-on-demand; `null` on web | LapDetail, DidSweep, SignalFinder |
+| `getSessionRepository` | 4371 | shared repository | internal (analysis loader) |
+| `getAnalysisRunner` | 4584 | THE one analysis runner/cache for the app | AnalysisScreen |
+| `getStintCoach` / `getStintRunner` / `getTrackdayRecord` | 4735 / 4714 / 4755 | trackday stage | PitViewScreen (`getStintCoach`, `getActiveStintContext`) |
+| `getActiveStintContext` | 5223 | `{ sessionId, completedLapCount }` or `null` | PitViewScreen |
+| `lapVerdictSupport` / `refreshLapVerdicts` / `getLapVerdicts` / `getUnsavedLapVerdicts` / `getLapVerdictSummary` / `recordLapValidityVerdict` | 4784–4832 | owner's true/false verdict on each lap | SessionResults, LapDetail, History (`summary`) |
+| `buildSessionReport` | 5081 | the one complete per-session document | SessionResults, SessionHistory |
+| `buildRawSessionExport` | 4539 | raw GNSS + OBD/IMU dump, works with zero laps | internal (`buildSessionReport`) + tests |
+| `deleteAllStoredUserData` / `AggregatedDeleteUserDataResult` | 3744 / 3645 | wipe; refuses mid-session, during DevReplay, and while a Test Loop is learning/adopting (§1.8) | SettingsScreen |
+| `getLiveDiagnostics` / `LiveDiagnosticsSnapshot` / `estimateObservedRateHz` / `getProductionCircuitId` | 4323 / 4300 / 4341 / 4318 | read-on-demand diagnostics (deliberately not a subscription — no polling while timing) | Settings, DevReplay |
+| `subscribeTestLoop` / `testLoopSnapshot` / `startTestLoop` / `stopTestLoop` / `retryTestLoopAdoption` | 2648 / 2652 / 2728 / 2757 / 2772 | Test Loop learn phase | TestLoopScreen |
+| `resetTestLoop` | 2766 | leave Test Loop mode entirely | TestLoopScreen — on mount, only when the phase is `failed` (`TestLoopScreen.tsx:56-61`) |
+| `testLoopDiagnostics` | 2657 | who still holds the GNSS watcher | tests |
+| `saveLearnedCircuit` / `listLearnedCircuits` / `deleteLearnedCircuit` | 3002 / 2981 / 3024 | learned-circuit registry; since D3 `saveLearnedCircuit` is a **rename** — adoption already stores the circuit listed | `saveLearnedCircuit`: TestLoopScreen. `deleteLearnedCircuit`: CircuitDetailScreen. `listLearnedCircuits`: internal/tests only — see §9 |
+| `refreshVehicleProfileBindingsCache` / `getVehicleProfileBindingsCache` / `getActiveVehicleProfileId` | 729 / 743 / 711 | the synchronous binding snapshot the OBD provider reads; a refresh that raced delete-all drops its result (`:730`, `:735`) | SignalFinderScreen (first) |
+| `setActiveVehicleProfileIdExplicit` | 907 | the ONLY way a UI profile choice may be written (sets `activeVehicleProfileSource: 'user'` atomically) | SignalFinderScreen |
+| `subscribeVinAutoDetectNotice` / `dismissVinAutoDetectNotice` / `VinAutoDetectNotice` | 926 / 935 / 911 | "Detected from VIN — …" banner | SignalFinderScreen |
+| `maybeDetectVehicleFromVin` | 1020 | one-shot ENET VIN read, never steals the adapter; fenced by delete-all (§1.8) | SignalFinderScreen + `telemetryProvider.start()` |
+| `decideVinAutoSelect` / `applyVinAutoSelect` / `maskVin` / `hasUserExplicitlyChosenVehicleProfileThisRun` / `applyInitialActiveVehicleProfile` | 951 / 970 / 992 / 897 / 823 | pure rules + the one-time profile migration | internal + tests |
+| `relaySessionCompleteBarrier` | 236 | the settle-or-cap relay, as a free function so it is directly unit-testable | `SwappableFacade` + tests |
+| `restoreProductionFacade` / `startDevReplaySession` / `runDevReplayScenario` / `useMockFacadeForDevReplay` / `DevReplayScenarioResult` | 4025 / 4089 / 4211 / 4273 / 4187 | `__DEV__` replay transitions | DevReplayScreen |
+| `listUnvalidatedMatchingSessionIds` | 4468 | — | **nothing — see §9** |
 
 ### 1.7 Test Loop mode — the one flow that consumes GNSS before a controller exists
 
-`composition.ts:2199-2223` is the best summary in the codebase; read it. The short version: lap 1
+`composition.ts:2358-2382` is the best summary in the codebase; read it. The short version: lap 1
 *creates* the circuit, so the recording pipeline must run before any `SessionController` can
 exist. `TestLoopLocationProvider` (`src/session/testLoopProvider.ts`) wraps the GNSS singleton
-and **buffers every fix**; when lap 1 closes, `adoptLearnedCircuit` (`:2633`) persists the
+and **buffers every fix**; when lap 1 closes, `adoptLearnedCircuit` (`:2797`) persists the
 geometry, selects it, builds a controller *on the buffering provider*, starts and arms a session,
 and replays the whole backlog in order. Nothing is stopped and nothing is dropped.
 
 Two durability mechanisms hang off it and are easy to miss:
 
-- **The adoption ledger** (`adoptionProgress`, `:2246`) — each of the six steps is skipped if the
+- **The adoption ledger** (`adoptionProgress`, `:2405`) — each of the six steps is skipped if the
   ledger says it already happened, so a retry *resumes* rather than inserting a second circuit.
-- **The adoption journal** (`src/session/adoptionJournal.ts`, staged at `:2363`) — on disk before
+- **The adoption journal** (`src/session/adoptionJournal.ts`, staged at `:2527`) — on disk before
   the first side effect, claimed by compare-and-swap at the next launch
-  (`repairInterruptedAdoption`, `:2431`), with an attempt budget. Geometry on disk → complete the
+  (`repairInterruptedAdoption`, `:2595`), with an attempt budget. Geometry on disk → complete the
   adoption; geometry missing → delete the orphan session and circuit row in one transaction.
+
+**A learned circuit is listed from the moment it is adopted** (ticket D3, `:2933-2948`).
+`putLearnedCircuitWithFreshId` (`:2950`) inserts it `saved: true` (`:2957`) and the in-memory
+catalog entry is `listed: true` (`:2836`), under the dated name `makeDisplayName` already mints.
+It used to be stored unsaved and filtered out of the picker, so a driver who tapped "Open
+dashboard" without naming it lost the circuit and every session on it. Naming is now a rename.
+
+**Delete-all and the Test Loop** (§1.8): `learning`/`adopting` refuse the wipe; every other
+non-idle phase (`learned`, `failed`, `error`) is reset and torn down *by* the wipe.
+
+### 1.8 Delete-all — `deleteAllStoredUserData` (`:3744`)
+
+One `lifecycleLock` section. `unlockedDeleteAllStoredUserData` (`:3752`) sets
+`deviceWipeInProgress` for the whole run in a `try/finally`, then `runDeleteAllStoredUserData`
+(`:3761`) does the work. The order is deliberate. Each step's reason is written at the step.
+
+1. **Refusals. They touch nothing and return `reason` + `errorText`:**
+   `SESSION_ACTIVE` when the controller is in `MID_SESSION_STATES` (`:3771-3780`; the set is
+   `outLap`/`timing`/`inPit`/`paused`, `:2118`). `DEV_REPLAY_ACTIVE` when a replay controller
+   is installed (`:3789-3798`). `TEST_LOOP_ACTIVE` when the Test Loop phase is `learning` or
+   `adopting` (`:3804-3814`). A wipe under those phases would let the adoption store the circuit
+   again, or resume onto the fallback controller. The refusal text names both remedies:
+   "stop it, or let it finish saving".
+2. **Abandon any other Test Loop state** (`:3821-3831`): `testLoopController.reset()`, bump
+   `teardownGeneration`, `unlockedTearDownLearnPhase()`, null the in-memory adoption ledger
+   and journal ids. This runs *before* step 3, so the new controller is never built on a
+   provider that is about to stop. The journal **row** stays until step 8 succeeds, because
+   until then it is what lets the next launch repair a half-adopted state.
+3. **Rebuild** (`:3842-3844`): drop the pending recovery and notice, then replace the
+   production controller with an idle one that has no session identity it could re-persist.
+4. **Session tables**, through core's `deleteAllUserData`, per catalog circuit, each in its own
+   `try/catch` with verify-empty (`:3858-3875`).
+5. **`telemetry_samples`**: `stopTelemetryRecording()`, then DELETE and verify in one
+   transaction (`:3890-3923`). Always runs.
+6. **Vehicle identity leaves memory first.** `forgetVehicleIdentityInMemory()` (`:3667`, called
+   `:3928`) bumps `deviceDataGeneration`, puts VIN detection back to `idle`, clears
+   `cachedDetectedVin` and the VIN notice, patches the settings store with
+   `vehicleIdentityResetPatch`, and empties the bindings cache and `sessionVehicleSnapshots`.
+   This has to happen before the disk wipe: the settings store rewrites its whole blob on every
+   `update()`, so a write queued earlier would carry the VIN back.
+7. **Disk wipe**: `wipeDeviceUserData(db)` (`:3930-3941`, always attempted), then
+   `resyncAfterDeviceWipe()` (`:3684`, called `:3942`). The resync runs the in-memory forget
+   again (a read may have finished during the wipe), re-reads the learned circuits and
+   republishes the catalog, and falls back to TMR if the selected circuit no longer exists (a
+   failed fallback is only logged). It then refreshes the bindings cache and finally runs
+   `countStoredVehicleIdentity(db)`: a read-back through the same serialized handle, after
+   every settings write queued so far. Any identity field left, or a failed learned-circuit
+   re-read, fails delete-all.
+8. **Records about sessions go only once the sessions are gone** (`:3943-3948`): if circuits,
+   telemetry and device data all verified, `forgetAbandonedAdoption()` (`:3730`) deletes the
+   `ADOPTION_JOURNAL_KEY` settings row.
+9. If still `ok`: clear the active-session pointer (`:3952`) and the unvalidated-matching log
+   (`:3957-3964`). **A log clear that fails now fails delete-all** (P18-FIX1 L6; this reverses
+   §9 S7).
+10. History refresh follows the per-circuit result alone (`:3967`): refreshed whenever the
+    sessions verified gone, even if a later half failed.
+11. `errorText` (`:3969-3979`) joins a fixed phrase for each half that failed. The two new ones
+    are "vehicle or learned-circuit data remained or could not be deleted" and "session records
+    remained or could not be deleted". `SettingsScreen.tsx:1182-1185` shows a refusal as
+    "Nothing was deleted: …" and a failure as "Could not delete all data (…). Please try again."
+
+**Erased:** session tables, `telemetry_samples`, the six `DEVICE_USER_DATA_TABLES`
+(`deviceDataWipe.ts:22-29`: bindings, ruled-out signals, four DID-sweep tables), every
+`learned_circuits` row no surviving session references, every `vehicle-profile-snapshot:*`
+key. From the `app-settings` row it erases `lastSeenVin`, `enetChannelSpecsJson` (all custom
+channel definitions, tagged or typed, by owner decision in P18, because their provenance can
+hold the VIN) and a profile the VIN selected. It also erases the adoption journal, the
+active-session pointer and the unvalidated-matching log. In memory it clears everything above,
+plus the Settings screen's uncommitted channel-specs draft (`SettingsScreen.tsx:476-483`, in
+`finally`, so also after a refusal or a throw).
+**Kept:** units, language, adapter host and port, coaching/voice/suggestion toggles, the
+selected circuit (unless it was a deleted learned circuit), a profile the *user* chose, and a
+learned circuit a surviving session still needs. That circuit is counted as remaining, so the
+wipe reports failure.
+
+**The VIN detection fence.** `maybeDetectVehicleFromVin` returns `null` *without* marking
+itself done while `deviceWipeInProgress` is set (`:1021`). A read that started earlier
+captures `deviceDataGeneration` after reserving the adapter (`:1031`). When it completes it
+drops its result if the generation moved (`:1055`; delete-all has already re-armed
+detection). If a wipe is still running and has reset nothing yet, for example a delete that
+will be refused, it drops the result and re-arms to `idle` itself (`:1059-1062`). That second
+branch is P18-FIX3 M1: the FIX2 version stranded detection at `attempting` after a refused
+delete. `refreshVehicleProfileBindingsCache` uses the same generation check (`:730`, `:735`).
+So the VIN is reset twice, before and after the wipe, and then read back once. Each reset
+closes a different window.
+
+### 1.9 The navigation graph vs the session state machine (flow review, `c462af2`)
+
+The navigator and `SessionReducer` are two models of where the driver is. Three places where
+they disagreed are now reconciled in composition:
+
+- **Stranded setup (D1, `:2235-2264`).** Cancelling the Learn lap parks the controller in
+  `awaitingCalibration`. That state is not in `SELECTABLE_STATES` (`:2109`), so every circuit
+  row went inert and only a force-quit got out. `ABANDONABLE_SETUP_STATES` (`:2276`:
+  `awaitingCalibration`, `calibrationReview`) holds the states no reachable screen can leave.
+  `pendingSessionStage()` (`:2297`) classifies what is in the way. `abandonPendingSession()`
+  (`:2327`) ends **only** those states, through `facade.endSession()`. `END_SESSION` is legal
+  there and `idle` is not, and a session with an id, a pointer, a recorder and a row genuinely
+  exists by then. The end writes an honest zero-lap row and a terminal checkpoint, then the
+  controller is rebuilt idle (`:2339-2354`). Anything else returns
+  `{ ok: false, reason: 'driving' }`. **Expected consequence:** an abandoned setup leaves a
+  zero-lap session in History.
+- **Discard is non-destructive (D2, `:3553-3574`).** `discardRecovery` reads the checkpoint's
+  laps first. `preserveRecoveredLaps` (`:3619`) copies them onto the `sessions` row when the row
+  holds fewer (checkpoints from older builds). The laps stay in the terminal checkpoint
+  (`:3600`), and History is refreshed (`:3607`). The main fix is core-side: `SessionController`
+  now writes each committed lap onto the row as it commits.
+- **Learned circuits are always reachable (D3).** See §1.7. Their delete now has a screen
+  (§2).
 
 ---
 
@@ -262,10 +382,10 @@ Route params: `src/ui/navigation/types.ts`. Dark theme is the default and is not
 
 | Screen | File | Shows | Reads | Can do | Reached from → goes to |
 |---|---|---|---|---|---|
-| **CircuitSelection** (S1) | `CircuitSelectionScreen.tsx:24` | N-row catalog list (bundled + learned, labelled differently), logo/wordmark | `circuitCatalog.list()`, `settingsStore` | tap a circuit (persists selection *before* navigating); enter Test Loop | app start → `CircuitDetail`, `TestLoop` |
-| **CircuitDetail** (S2) | `CircuitDetailScreen.tsx:38` | circuit metadata, provenance, corners, ODbL + advisory notice; **recovery banner**; **bootstrap-failed banner with Retry** | `subscribeRecovery`, `subscribeRecoveryNotice`, `subscribeBootstrapState` | Start Session (disabled until `bootstrapState==='ready'`), Resume/Discard recovery, Retry bootstrap | Selection → `Preflight`, `SessionHistory`, `Settings`, `ActiveDashboard` (after resume) |
+| **CircuitSelection** (S1) | `CircuitSelectionScreen.tsx:81` | N-row catalog list (bundled + learned, labelled differently), logo/wordmark; **a refusal card** when `selectCircuit` refuses (`:188`), one message and one way out per `pendingSessionStage()` (`:42-73`, EN-only literals — see §9) | `circuitCatalog.list()`, `settingsStore`, `pendingSessionStage` | tap a circuit (persists selection *before* navigating); enter Test Loop; on a refusal: **Close it** (`abandonPendingSession`, then retries the tapped circuit), back to the Learn lap, or back to the session (`handleBlockAction`, `:140`) | app start → `CircuitDetail`, `TestLoop`; from a refusal → `ActiveCalibration`, `ActiveDashboard` |
+| **CircuitDetail** (S2) | `CircuitDetailScreen.tsx:43` | circuit metadata, provenance, corners, ODbL + advisory notice; **recovery banner** (says the laps stay in history either way, `:211`); **bootstrap-failed banner with Retry**; for a learned circuit only, a **two-step delete card** (`:310`) | `subscribeRecovery`, `subscribeRecoveryNotice`, `subscribeBootstrapState`, `isLearnedCircuitId` | Start Session (disabled until `bootstrapState==='ready'`), Resume/Discard recovery, Retry bootstrap, delete a learned circuit (`deleteLearnedCircuit`, every refusal shown in words, `:123-148`) | Selection → `Preflight`, `SessionHistory`, `Settings`, `ActiveDashboard` (after resume), `CircuitSelection` (after a delete) |
 | **Preflight** (S3) | `PreflightScreen.tsx` | the six checks (location services, permission, precise location, GNSS fix, battery, keep-awake) + circuit proximity | `runPreflightChecks()` from `platform/preflight.ts`, `evaluatePreflightProximity` | request permission, re-run, proceed anyway | Detail → `CalibrationInstructions` |
-| **CalibrationInstructions** (S4) | `CalibrationInstructionsScreen.tsx:24` | the four Learn-lap steps **and, unasked, the report of the attempt that just failed** | `getLiveCalibrationAttempt()` → `buildCalibrationReport()` | Start Calibration (`facade.beginCalibration()`) | Preflight, or a Cancel/Retry from calibration → `ActiveCalibration` |
+| **CalibrationInstructions** (S4) | `CalibrationInstructionsScreen.tsx:28` | the four Learn-lap steps **and, unasked, the report of the attempt that just failed** | `getLiveCalibrationAttempt()` → `buildCalibrationReport()` | Start Calibration (`facade.beginCalibration()`); **leaving the screen abandons a stranded setup session** — a `beforeRemove` listener fires `abandonPendingSession()` (`:63-70`, no-op unless `awaitingCalibration`/`calibrationReview`) | Preflight, or a Cancel/Retry from calibration → `ActiveCalibration` |
 | **ActiveCalibration** (S5) | `ActiveCalibrationScreen.tsx` | coverage ring, live track map, status banner | `useFacadeState(facade)` | Cancel (long-press, intercepts the back gesture via `calibrationEscape.ts`), **"Start session anyway"** (`proceedWithoutCalibration`) | → `CalibrationResult`, `CalibrationInstructions`, `ActiveDashboard` |
 | **CalibrationResult** (S6) | `CalibrationResultScreen.tsx` | accept/reject verdict, per-reason plain-language copy, the full calibration report card | `useFacadeState`, `getLiveCalibrationAttempt` | Accept & arm, Retry, "Start session anyway" | → `ActiveDashboard`, `CalibrationInstructions` |
 | **ActiveDashboard** (S7) | `ActiveDashboardScreen.tsx:33` | THE driving screen: dominant delta, lap time, sector bar, quality pill, coach strip, telemetry strip, calibration chip. No scroll, no modals, `useKeepAwake()` | `useFacadeState`, `settingsStore` | End Session (2 s long-press) only; Pit View entry **only while stopped** (`inPit`/`paused`) and only with `suggestionsEnabled` | → `SessionResults`, `PitView` |
@@ -274,9 +394,9 @@ Route params: `src/ui/navigation/types.ts`. Dark theme is the default and is not
 | **LapDetail** (S10) | `LapDetailScreen.tsx` | one lap: time, sectors, quality, invalid reasons, verdict control, **telemetry sparklines** bucketed from `telemetry_samples` | `sessionHistoryStore`, `getTelemetryReadDb()` + `telemetryRead.ts`, verdict fns | record a verdict | ← History, PB. Leaf. |
 | **PersonalBest** (S11) | `PersonalBestScreen.tsx:36` | the PB lap with provenance, **plus its own calibration qualification** (copy from `ui/calibrationNotice.ts`) | `sessionHistoryStore.getPersonalBest()`, `resolveSessionCalibrationStatus(pb.sessionId)` | open the PB lap | ← History → `LapDetail` |
 | **Analysis** (S14) | `AnalysisScreen.tsx:43` | post-session corner analysis: corner rows with badges, expanding into per-lap numbers, the envelope visual and the engine's own sentence | `getAnalysisRunner()` + `createAnalysisController`, `getTrackdayRecord`, `facade` | expand rows, export (`shareAnalysisExport` / `shareAnalysisJson`) | ← Results, History. Leaf. Ordinary product route, no dev gate. |
-| **PitView** (S15) | `PitViewScreen.tsx:32` | between-stint view: corners costing the most time, each expanding into the same corner visual; bounded suggestions only when opted in | `getActiveStintContext()`, `getStintCoach()` → `buildPitViewState` | acknowledge/apply a suggestion, back | ← Dashboard (while stopped). Read-only over the running session. |
-| **TestLoop** | `TestLoopScreen.tsx:33` | learn-phase progress, the "track learned" banner, a name field to save it | `subscribeTestLoop`, `testLoopSnapshot` | start/stop learning, retry adoption, `saveLearnedCircuit` | ← Selection → `ActiveDashboard` |
-| **Settings** (S12) | `SettingsScreen.tsx` (1474 lines) | units, delta deadband, coaching + voice, suggestions, IMU fusion/gyro/smoothing, telemetry + adapter config (ELM327/ENET host/port/target/PIDs), language, diagnostics, About, **Delete all my data** (two-step, hidden during an active session) | almost everything | edit every setting, run adapter discovery, wipe all data; **hidden developer section** via `registerDevTap` | ← Detail → `Telemetry`, and (dev only) `DevReplay`, `DidProbe`, `DidSweep`, `SignalFinder` |
+| **PitView** (S15) | `PitViewScreen.tsx:32` | between-stint view: corners costing the most time, each expanding into the same corner visual; bounded suggestions only when opted in — since P17 on **any stated** geometry provenance (surveyed / mapped / learned), with the corner number qualified in the sentence and the status line (`pitViewModel.ts:113-129`) | `getActiveStintContext()`, `getStintCoach()` → `buildPitViewState` | acknowledge/apply a suggestion, back | ← Dashboard (while stopped). Read-only over the running session. |
+| **TestLoop** | `TestLoopScreen.tsx:34` | learn-phase progress, the "track learned" banner, a name field to **rename** it (it is already listed) | `subscribeTestLoop`, `testLoopSnapshot` | start/stop learning, retry adoption, `saveLearnedCircuit`; on mount, resets a `failed` phase left from a previous visit (`resetTestLoop`, `:56-61`) | ← Selection → `ActiveDashboard` |
+| **Settings** (S12) | `SettingsScreen.tsx` (1482 lines) | units, delta deadband, coaching + voice, suggestions, IMU fusion/gyro/smoothing, telemetry + adapter config (ELM327/ENET host/port/target/PIDs), language, diagnostics, About, **Delete all my data** (two-step, hidden during an active session; drops an uncommitted channel-specs draft afterwards, §1.8) | almost everything | edit every setting, run adapter discovery, wipe all data; **hidden developer section** via `registerDevTap` | ← Detail → `Telemetry`, and (dev only) `DevReplay`, `DidProbe`, `DidSweep`, `SignalFinder` |
 | **Telemetry** | `TelemetryScreen.tsx` | manual OBD monitor: per-channel live values, provider state, ENET diagnostics (frames, NRCs, latency percentiles), G-force summary, network info | `telemetryProvider` + `gForceProvider` directly | Start/Stop the provider (takes its own G reference via `acquireGForce`) | ← Settings. Leaf. |
 | **SignalFinder** | `SignalFinderScreen.tsx` (992 lines) | guided channel discovery: target catalog, metronome pacing, candidate scores, confirm-a-binding, profile chips, VIN banner | `signalFinderController`, `didSweepStore`, VIN/profile fns | run a finder session, confirm a binding (then `refreshVehicleProfileBindingsCache()`), switch profile, export | ← Settings (dev-gated entry) → `DidSweep` with a range |
 | **DidSweep** | `DidSweepScreen.tsx` (1449 lines) | raw DID range sweep, responder table, resumable runs, tag-as-channel, export | `didSweepController`, `didSweepStore`, `facade` (refuses during a session) | start/pause/resume/stop a sweep, export | ← Settings, SignalFinder, DidProbe. Leaf. |
@@ -326,7 +446,8 @@ Where it appears:
 | `session/telemetryProvider.ts` `lifecycleGeneration` (`:1275`, `:2490`) | user-intent generation | a pedal-fallback relaunch continuation running after the user pressed Stop |
 | `session/didSweepController.ts:675` | `generation` | every await point in the sweep/observation loops (most heavily guarded module in the app) |
 | `session/analysisViewModel.ts:239` (runner) and `:428` (controller) | epoch | a superseded analysis pass publishing, and a result landing after the screen left |
-| `composition.ts:2256` `teardownGeneration` | learn-phase teardown | a teardown queued for a learn phase that has since restarted |
+| `composition.ts:2415` `teardownGeneration` | learn-phase teardown | a teardown queued for a learn phase that has since restarted (delete-all bumps it too, `:3823`) |
+| `composition.ts:879` `deviceDataGeneration` | delete-all | a VIN read or bindings refresh that was in flight across a wipe restoring erased data (§1.8). Paired with the `deviceWipeInProgress` flag, which also stops a *new* read starting mid-wipe. |
 | `DevReplayScreen.tsx` run generation → `runDevReplayScenario(scenario, isCancelled)` | screen generation | installing a replay into a screen that is already gone |
 
 ### 3.2 GNSS — `src/platform/gnssLocationProvider.ts`
@@ -338,11 +459,11 @@ Where it appears:
   once, then opens the watcher with `BestForNavigation`, `timeInterval: 0`, `distanceInterval: 0`.
 - **Stop:** `doStop()` (`:202`) removes the subscription. Idempotent.
 - **Failure:** there is no internal retry. Recovery is the core watchdog's job via
-  `restartProvider` (wired in `createProductionController`, `composition.ts:1708`).
+  `restartProvider` (wired in `createProductionController`, `composition.ts:1744`).
 - **Absent / dies mid-session:** the ADR-0003 §1 watchdog in `SessionController` restarts the
   provider; `FacadeState.gnssQuality` degrades and the dashboard's quality pill and banner show
   it. Lap timing simply has no input — nothing crashes.
-- **Ownership:** composition stops it after a controller rebuild (`composition.ts:1947`), because
+- **Ownership:** composition stops it after a controller rebuild (`composition.ts:1983`), because
   `SessionController.dispose()` deliberately will not stop a possibly-shared provider. The one
   exception is a Test Loop handover, where the watcher is genuinely still owned.
 - **Mocked samples:** Android's `location.mocked` rejects the sample and counts it (`:232`); iOS
@@ -378,13 +499,15 @@ Two adapter families behind one interface: **ELM327** (ASCII, `TcpObdTransport`)
   timeout; if the timeout wins, *this generation's own* transport is force-closed. This is the
   "socket left open" driveway-test bug.
 - **Absent / dies mid-session:** nothing. `MUST NOT interact with lap timing` is stated at
-  `composition.ts:664-673` and enforced structurally — the provider never calls into `facade` or
+  `composition.ts:671-680` and enforced structurally — the provider never calls into `facade` or
   `SessionController`; composition only subscribes to its samples outbound. A dead adapter means
   no OBD rows; the session, laps, PB and analysis are unaffected.
 - **Vehicle-profile bindings:** read **synchronously** by `buildEnetConfig`, so composition keeps
-  an async-refreshed cache (`composition.ts:708-734`). Refreshed (a) when bootstrap resolves `db`,
+  an async-refreshed cache (`composition.ts:715-745`). Refreshed (a) when bootstrap resolves `db`,
   (b) when the Signal Finder confirms a channel, (c) defensively on every `start()` — (c) affects
-  the *next* start, not the one it is called from.
+  the *next* start, not the one it is called from — and (d) by delete-all after its wipe. A refresh
+  that was in flight across a wipe discards its rows (`deviceDataGeneration`, `composition.ts:730`,
+  `:735`).
 
 ### 3.4 Device sensors — `src/session/gforceProvider.ts` (1177 lines)
 
@@ -393,9 +516,9 @@ Two adapter families behind one interface: **ELM327** (ASCII, `TcpObdTransport`)
   every await. A throw anywhere is swallowed — an absent accelerometer means no data, never a
   failure.
 - **Stop** (`:1132`): bumps the generation and unsubscribes.
-- **Ownership:** refcounted in composition (`acquireGForce`/`releaseGForce`, `:1142-1158`) because
+- **Ownership:** refcounted in composition (`acquireGForce`/`releaseGForce`, `:1178-1194`) because
   there are two independent users — the Telemetry monitor screen and a driving session. The
-  session's own hold is tracked separately (`sessionHoldsGForce`, `:1182`) so a session that
+  session's own hold is tracked separately (`sessionHoldsGForce`, `:1218`) so a session that
   *never acquired* (telemetry disabled, web, recovery) cannot release the monitor's reference.
 - **Portrait mount is assumed** and not detected (`gforceProvider.ts:27-33`). `latG` = device X,
   `longG` = device Y.
@@ -420,7 +543,7 @@ Two adapter families behind one interface: **ELM327** (ASCII, `TcpObdTransport`)
   **re-stamped into a scaled virtual time domain** so the fixture's own inter-sample spacing
   survives the 10× delivery pace; otherwise the quality evaluator's implied-speed check reads
   compressed speeds. `restartProvider` must restart the *wrapper*, not the inner provider — only
-  the wrapper re-anchors the time source (`composition.ts:3669-3679`).
+  the wrapper re-anchors the time source (`composition.ts:4078-4088`).
 
 ---
 
@@ -436,10 +559,10 @@ to parse.
 
 **Symptom.** `Expected 'from', got 'typeOf'` (or a similar Flow parse error) from vitest, naming a
 file deep inside `node_modules/react-native`, and **every** suite that transitively imports
-`composition.ts` goes red at once — currently ~23 test files.
+`composition.ts` goes red at once — currently ~25 test files.
 
-**Evidence.** `composition.ts:31-35` (web detection via `typeof document` rather than
-`Platform.OS`), `composition.ts:1093-1106` (the platform accelerometer read deliberately does not
+**Evidence.** `composition.ts:32-36` (web detection via `typeof document` rather than
+`Platform.OS`), `composition.ts:1129-1142` (the platform accelerometer read deliberately does not
 live in composition; measured on that exact change), `rawSessionExport.ts:54`,
 `sessionReportShare.ts:21`, `.foreman/ledger.md:799` ("broke 136 composition tests by pulling
 react-native into composition's graph").
@@ -464,13 +587,13 @@ react-native into composition's graph").
    screens). Same split: `sessionReport.ts` / `sessionReportShare.ts`.
 
 **What is allowed.** `expo-constants` is imported statically by `composition.ts:1` — it is plain
-JS and tests mock it anyway (22 test files do). Pure `@circuit/core` imports are always fine.
+JS and tests mock it anyway (24 test files do). Pure `@circuit/core` imports are always fine.
 
 **Where the boundary currently sits.** Static `react-native` importers are exactly: every
 `ui/components/*.tsx`, every `ui/screens/*.tsx`, `ui/theme/index.ts` (type-only) and
 `platform/lifecycle.ts`. `platform/lifecycle.ts` is the interesting one — it *is* in
 composition's graph via `platform/index.ts`, which is why **every composition test mocks
-`../../src/platform` wholesale** (23 test files do exactly that).
+`../../src/platform` wholesale** (25 test files do exactly that).
 
 ### Fence 2 — `expo export` must run from `apps/mobile`, never the repo root
 
@@ -505,11 +628,11 @@ where the test is. There is no render harness to fall back on (§5).
 
 Explicitly-documented cases: `resolveResultsCalibrationStatus` lives in composition rather than
 `SessionResultsScreen` "so the precedence rule is testable — `SessionResultsScreen.tsx` reaches
-into react-native and cannot be imported by the test runner" (`composition.ts:4026-4029`); the
+into react-native and cannot be imported by the test runner" (`composition.ts:4435-4438`); the
 telemetry-strip tint/visibility rules live in `telemetryProvider.ts:737-745` rather than
 `TelemetryStrip.tsx`; the calibration copy lives in `ui/calibrationNotice.ts`; the learned-circuit
 default name lives in `ui/screens/testLoopStrings.ts` even though composition mints it
-(`composition.ts:116-118`).
+(`composition.ts:118-120`).
 
 ### Fence 5 — `__DEV__`-only code must be behind an inline `require()`, not a top-level import
 
@@ -572,9 +695,9 @@ network-capable module.
 
 ### Fence 10 — the web preview has no SQLite
 
-`composition.ts:2895-2902`: `IS_WEB_RUNTIME` falls back to `InMemorySessionRepository`. So
+`composition.ts:3082-3089`: `IS_WEB_RUNTIME` falls back to `InMemorySessionRepository`. So
 `getTelemetryReadDb()` is permanently `null` there, learned circuits live in memory only
-(`memoryLearnedCircuits`, `:2228`), and nothing survives a reload. This is the surface the visual
+(`memoryLearnedCircuits`, `:2387`), and nothing survives a reload. This is the surface the visual
 review uses (`.claude/launch.json` → mobile-web on :8082) — every session flow works, nothing
 persists. Related RN-web quirks are listed in `docs/NEXT-CIRCUIT-PLAYBOOK.md:30-35`.
 
@@ -606,15 +729,34 @@ Consequences, and how the codebase lives with them:
 
 | Double | File | Notes |
 |---|---|---|
-| `../../src/platform` | mocked in 23 test files | Whole-module mock. Required because `platform/lifecycle.ts` imports `react-native`. |
-| `expo-constants` | mocked in 22 files | `composition.ts:1` imports it statically for `appVersion()`. |
-| `../../src/persistence/expoSqlDatabase` | mocked in 22 files | Replaced with a `sql.js`-backed handle. |
-| `sql.js` `SqlDatabase` | `test/support/sqlJsDatabase.ts` | **Applies the same write gate as production** (`:18-30`) — an ungated double hid a real "cannot start a transaction within a transaction" collision. |
+| `../../src/platform` | mocked in 25 test files | Whole-module mock. Required because `platform/lifecycle.ts` imports `react-native`. |
+| `expo-constants` | mocked in 24 files | `composition.ts:1` imports it statically for `appVersion()`. |
+| `../../src/persistence/expoSqlDatabase` | mocked in 24 files | Replaced with a `sql.js`-backed handle. |
+| `sql.js` `SqlDatabase` | `test/support/sqlJsDatabase.ts` | **Serializes transactions the way production does** (`:18-30`); an ungated double hid a real "cannot start a transaction within a transaction" collision. It does **not** queue standalone statements behind the gate the way `openAppDatabase()`'s handle does (fence 6). That is a P18 accepted residual, §9 S12. |
 | `FakeClock` / `FakeLocationProvider` | `test/support/coreTestDoubles.ts` | Local copies, not imports from `packages/core/test/**`, because that tree is only typechecked under core's own tsconfig. |
 | harnesses | `test/support/{analysisHarness,didSweepHarness,signalFinderHarness,testLoopTraces}.ts` | |
 
-Also mocked where needed: `expo-file-system`, `expo-sharing` (9 each), `gforceProvider`,
-`enetTcpTransport` (9 each), `telemetryProvider`, `tcpObdTransport` (4 each), `@circuit/core` (6).
+Also mocked where needed: `expo-file-system`, `expo-sharing` (9 each), `gforceProvider` (9),
+`enetTcpTransport` (10), `telemetryProvider`, `tcpObdTransport` (4 each), `@circuit/core` (7).
+
+### Tests added since `ec153ef`
+
+Every one runs against the sql.js double. None renders a screen, so the new screen wiring (the
+refusal card, the `beforeRemove` listener, the delete card, the Settings draft reset) is covered
+only by typecheck, like every other `.tsx`.
+
+| File | Pins |
+|---|---|
+| `test/persistence/deviceDataWipe.test.ts` (new, 9 tests) | `vehicleIdentityResetPatch` (keeps a user-chosen profile, resets a VIN-chosen one); `wipeDeviceUserData`: full wipe, preferences and foreign settings keys kept, a referenced learned circuit kept *and reported*, empty device, unparseable settings row dropped, a stale settings write after the wipe caught by `countStoredVehicleIdentity`, a missing table rolls back and rejects |
+| `test/session/composition.deleteAllVinFence.test.ts` (new, 2) | P18-REV2 H1: a VIN read triggered from every settings change *during* delete-all never starts and never restores the VIN, and detection is re-armed afterwards. P18-REV3 M1: a read that completes into a delete refused with `TEST_LOOP_ACTIVE` leaves detection re-armed, not stuck at `attempting` |
+| `test/session/composition.strandedJourneys.test.ts` (new, 8) | D1: reproduction of the cancelled-Learn-lap strand; `abandonPendingSession` leaves an idle, selectable controller, with no active-session pointer; a running Learn lap reports `calibrating`; a real drive is refused. D2: Discard keeps the laps in History, starting a new session does not orphan them, an older-build checkpoint's laps are copied onto the row |
+| `composition.circuitSelection.test.ts` (+1, `:425`) | end-to-end: delete-all forgets VIN, bindings, sweep records and unreferenced learned circuits, on disk and in memory |
+| `composition.testLoop.test.ts` (+5, `:183-309`) | D3 listed-on-adoption and rename; P18: delete-all refused while learning, clears a `failed` phase, clears a `learned` loop once its session ended |
+| `pitViewModel`, `stintCoachingSafety`, `testLoopGuards`, `analysis*` tests | P17: the graduated geometry gate and the qualified corner copy; export schema 7 |
+
+Four composition suites (`circuitSelection`, `facadeBoundary`, `gForceOwnership`,
+`telemetryRecording`) now run `migrateDidSweepSchema` on their database, as `openAppDatabase()`
+does in production. Without it the wipe hits `no such table`.
 
 ### How to structure new UI so it stays testable
 
@@ -669,11 +811,11 @@ solely so `SwappableFacade` can hold `lifecycleLock` across a command's real asy
 |---|---|---|
 | `RealSessionFacade` | `session/realFacade.ts:50` | Adapts `SessionController`. Owns no pipeline logic; every command is a pass-through. Fires `onSessionStarted` (session id known) and `onSessionEnded` (summary saved) — the two hooks composition uses for the active-session pointer, telemetry recording and history refresh. `dispose()` detaches the subscription without disposing the controller, which composition owns. |
 | `MockSessionFacade` | `session/mockFacade.ts` | A **scripted** facade: three deterministic lap scripts cycled indefinitely, a fake calibration timer, a fixed initial PB. Reaches nothing — no provider, no repository, no clock beyond `setInterval`. |
-| `PendingFacade` | `composition.ts:618` | Inert. Every command a no-op, one frozen state (`PENDING_FACADE_STATE`, `:595`). |
+| `PendingFacade` | `composition.ts:625` | Inert. Every command a no-op, one frozen state (`PENDING_FACADE_STATE`, `:602`). |
 
-**Why the mock still exists.** One reason only, and it is stated at `composition.ts:582-592`: pure
+**Why the mock still exists.** One reason only, and it is stated at `composition.ts:589-599`: pure
 UI/style iteration on the DevReplay screen's `__DEV__` toggle
-(`useMockFacadeForDevReplay`, `:3864`). It produces plausible laps and deltas with no GNSS, no
+(`useMockFacadeForDevReplay`, `:4273`). It produces plausible laps and deltas with no GNSS, no
 adapter and no database, which is what you want when you are adjusting a font size. It is **not**
 a test double — no test uses it — and it is **not** a fallback: the "bootstrap failed → live mock"
 behaviour was removed precisely because it let calibration start against a fake timer with no
@@ -682,7 +824,7 @@ persistence and no visible error.
 `MockSessionHistoryStore` (`session/mockHistory.ts`) plays the same role for past sessions and is
 the initial inner of `SwappableSessionHistoryStore` until bootstrap swaps in `SqlSessionHistoryStore`.
 
-Every facade swap point clears `telemetryShutdown` (`:3634`, `:3762`, `:3875`) so a settled promise
+Every facade swap point clears `telemetryShutdown` (`:4043`, `:4171`, `:4284`) so a settled promise
 from a previous session cannot be mistaken for the new facade's in-flight shutdown.
 
 ---
@@ -712,8 +854,10 @@ replay (fixtures) and tests all feed the *same* pipeline.
 table (`learnedCircuitSchema.ts`), the per-session vehicle snapshot
 (`sessionVehicleSnapshot.ts`), and the `settings` key-value rows the app writes. Each is an
 additive migration with its own version row applied over the *same* connection. This is why
-`deleteAllStoredUserData` has to delete `telemetry_samples` itself (`composition.ts:3496-3543`) —
-core's `deleteAllUserData` has never heard of it.
+`deleteAllStoredUserData` has to delete `telemetry_samples` itself (`composition.ts:3876-3923`) —
+core's `deleteAllUserData` has never heard of it. The same holds for every other table in the
+list. Since `ae12a10` those go through `persistence/deviceDataWipe.ts` (§1.8), which also scrubs
+the VIN out of the app's own `app-settings` row.
 
 ---
 
@@ -738,7 +882,7 @@ core's `deleteAllUserData` has never heard of it.
 | `pedalNormalization.ts` | 0x49 rest-offset learning |
 | `didProbe.ts` / `didSweepController.ts` / `didSweepExport.ts` | one-shot probe; the sweep state machine (most generation-guarded module); sweep export |
 | `signalFinderController.ts` / `signalFinderExport.ts` / `signalFinderHaptics.ts` | guided channel discovery; export; a **deliberate no-op haptics seam** (`expo-haptics` is not a dependency) |
-| `analysisViewModel.ts` / `analysisAssembly.ts` / `analysisSessionLoader.ts` / `analysisExport.ts` | the analysis screen's every decision; the runner + cache; the read path; export (touches `expo-file-system`) |
+| `analysisViewModel.ts` / `analysisAssembly.ts` / `analysisSessionLoader.ts` / `analysisExport.ts` | the analysis screen's every decision; the runner + cache; the read path; export (touches `expo-file-system`; schema 7 since P17 adds the required `session.geometryProvenance`, `analysisExport.ts:74-81`) |
 | `stintCoaching.ts` / `pitViewModel.ts` | the trackday stage; the pit view's every decision |
 | `lapVerdictStore.ts` / `lapVerdictViewModel.ts` | the owner's verdict on each lap; the control's every decision |
 | `sessionReport.ts` / `reportExtras.ts` / `sessionReportShare.ts` | the complete per-session document; the tool roll-call; the share half |
@@ -758,8 +902,12 @@ core's `deleteAllUserData` has never heard of it.
 **`src/persistence/`** — `expoSqlDatabase.ts` (`openAppDatabase`, the one place the connection is
 opened and all migrations applied), `sqlWriteGate.ts` (fence 6), `telemetrySchema.ts` +
 `telemetryRecorder.ts` + `telemetryRead.ts`, `didSweepSchema.ts` + `didSweepStore.ts` (also holds
-the vehicle-profile binding store), `learnedCircuitSchema.ts`, `sessionVehicleSnapshot.ts`,
-`sqlSettingsStore.ts`.
+the vehicle-profile binding store), `learnedCircuitSchema.ts`, `sessionVehicleSnapshot.ts` (exports `SESSION_VEHICLE_SNAPSHOT_KEY_PREFIX`),
+`sqlSettingsStore.ts` (exports `SETTINGS_KEY`), `deviceDataWipe.ts` (the device half of
+delete-all. Pure TS, no RN: `wipeDeviceUserData` deletes and verifies in **one** transaction,
+`:113-139`. `vehicleIdentityResetPatch` is at `:44-52` and `countStoredVehicleIdentity`, the
+post-wipe read-back, at `:99-105`. An unparseable settings row is deleted rather than kept,
+`:83-85`, because it might hold a VIN).
 
 **`src/ui/`** — `navigation/`, `screens/` (§2) + `*Strings.ts`, `components/` (16 dumb
 components), `hooks/` (`useFacadeState`, `useSettings`), `theme/index.ts` (colors, spacing,
@@ -771,6 +919,8 @@ radii, typography, `fontFamily`), `format.ts`, `data/circuit.ts`, `calibrationNo
 ## 9. Questions and suspicions
 
 Recorded, **not fixed**. Each carries its evidence so a later phase can investigate cheaply.
+Entries later code has answered are marked **ANSWERED** with the commit, and the original
+evidence is kept so the reasoning trail survives. S10–S14 were added at `4e88d13`.
 
 ### S1 — `rawSessionShare.ts` is dead code (CONFIRMED)
 
@@ -780,8 +930,8 @@ The only other occurrences are doc-comment references in `rawSessionExport.ts:54
 `sessionReportShare.ts:21` (both citing it as the *example* of the split-for-testability pattern),
 plus three `.foreman/` history entries.
 
-`buildRawSessionExport` (`composition.ts:4130`) is alive, but only as the `loadRaw` dependency of
-`buildSessionReport` (`:4686`) and in two tests. Both share buttons in the UI call
+`buildRawSessionExport` (`composition.ts:4539`) is alive, but only as the `loadRaw` dependency of
+`buildSessionReport` (`:5095`) and in two tests. Both share buttons in the UI call
 `shareSessionReport` (`sessionReportShare.ts`), from `SessionResultsScreen.tsx:21` and
 `SessionHistoryScreen.tsx:18`.
 
@@ -792,9 +942,16 @@ the standalone raw-export button, and the share half of the raw export was left 
 `test/session/rawSessionExport.test.ts`, so deleting `rawSessionShare.ts` alone would break
 nothing. **Risk: low. Confidence: high.**
 
-### S2 — `resetTestLoop` and `listUnvalidatedMatchingSessionIds` have zero callers
+### S2 — `resetTestLoop` and `listUnvalidatedMatchingSessionIds` have zero callers — `resetTestLoop` half ANSWERED (`c462af2`)
 
-`composition.ts:2602` (`resetTestLoop`) and `composition.ts:4059`
+**Answer:** the UX bug was real. `TestLoopScreen.tsx:56-61` now calls `resetTestLoop()` on
+mount, and **only** when the phase is `failed`. `error` keeps its Retry, and
+`learning`/`adopting`/`learned` are live. The function is also exercised by
+`composition.testLoop.test.ts:276` and `composition.deleteAllVinFence.test.ts:169`.
+`listUnvalidatedMatchingSessionIds` (`composition.ts:4468`) still has zero callers. That half
+stays open.
+
+Original finding (line numbers as of `ec153ef`): `composition.ts:2602` (`resetTestLoop`) and `composition.ts:4059`
 (`listUnvalidatedMatchingSessionIds`): each has exactly one occurrence in the whole repo — its own
 declaration. No screen, no test, no internal use.
 
@@ -805,9 +962,16 @@ terminal snapshot on re-entry. **Worth checking against the actual screen behavi
 deleting either.** Risk: low, but the Test Loop one is a possible real UX bug rather than mere
 dead code.
 
-### S3 — learned circuits can be created but not deleted from any screen
+### S3 — learned circuits can be created but not deleted from any screen — ANSWERED (`c462af2`)
 
-`deleteLearnedCircuit` (`composition.ts:2837`) is a careful, fully-tested function — it refuses
+**Answer:** `CircuitDetailScreen` now has a two-step delete card for learned circuits only
+(`CircuitDetailScreen.tsx:310`). `handleDelete` (`:123-148`) shows every refusal
+(`has-sessions` with the count, `active-session`, failure) in RO/EN from `testLoopStrings`.
+It then returns to the selection list. The function is now at `composition.ts:3024` and its
+test at `composition.testLoop.test.ts:230-262`. `listLearnedCircuits` (`:2981`) is still read
+only by the report roll-call (`:4997`) and tests.
+
+Original finding (line numbers as of `ec153ef`): `deleteLearnedCircuit` (`composition.ts:2837`) is a careful, fully-tested function — it refuses
 while the circuit is in use, falls back to the default selection, and is exercised by
 `test/session/composition.testLoop.test.ts:207-226`. **No screen imports it.** Nor does any screen
 import `listLearnedCircuits` (`:2798`) — the selection list gets learned circuits through
@@ -821,7 +985,7 @@ unfinished surface rather than a bug, but it is a user-visible gap. **Risk: medi
 ### S4 — `platform/motionCapture.ts` is unused and eagerly imports `expo-sensors`
 
 `createMotionCapture` has no caller anywhere in `src` or `test`. It is re-exported from
-`platform/index.ts:22-27`, which `composition.ts:36-42` imports from, and it imports
+`platform/index.ts:22-27`, which `composition.ts:37-43` imports from, and it imports
 `expo-sensors` **eagerly at module top level** (`motionCapture.ts:1`).
 
 `gforceProvider.ts:15-26` explains that it deliberately did *not* reuse this module, for exactly
@@ -832,7 +996,7 @@ it makes fence 1 harder to reason about than it needs to be.**
 
 ### S5 — `isSessionMatchingUnvalidated` is documented as superseded and still exported
 
-`composition.ts:4046-4056` says every screen has been moved off it in favour of
+`composition.ts:4455-4465` says every screen has been moved off it in favour of
 `resolveSessionCalibrationStatus`, and the code agrees: the only UI occurrence is inside a
 *comment* at `AnalysisScreen.tsx:98`. It still has a test
 (`composition.p10aZeroLapRecovery.test.ts:197`). Harmless, but it is a trap — the predicate cannot
@@ -841,29 +1005,34 @@ wave was about.
 
 ### S6 — the trackday suggestion journal is in-memory only, and the report says so honestly
 
-`suggestionJournal` (`composition.ts:4217`) does not survive a restart. `sessionReportExtras`
-handles this correctly — `:4514-4526` reports `unavailable` with an explicit explanation rather
+`suggestionJournal` (`composition.ts:4626`) does not survive a restart. `sessionReportExtras`
+handles this correctly — `:4923-4935` reports `unavailable` with an explicit explanation rather
 than claiming the stage did nothing. Flagging it not as a defect but because it is a genuine data
 gap a reader of an exported report needs to know about, and because it is the kind of thing that
 gets "fixed" by someone who has not read that comment.
 
-### S7 — `AggregatedDeleteUserDataResult.ok` does not cover the unvalidated-matching log
+### S7 — `AggregatedDeleteUserDataResult.ok` does not cover the unvalidated-matching log — ANSWERED, and reversed (`d2b26f6`)
 
-`composition.ts:3554-3559`: the log clear is best-effort and, if it fails, only logs a warning —
+**Answer:** the reasoning below was overruled in the P18 review (Codex P18-REV1 L6). A failed
+log clear now sets `ok: false` and adds "session records remained or could not be deleted"
+(`composition.ts:3957-3964`). The new comment says: "delete-all promises the records are gone,
+not that it tried." Kept below only as history.
+
+Original finding (line numbers as of `ec153ef`): `composition.ts:3554-3559`: the log clear is best-effort and, if it fails, only logs a warning —
 the aggregate `ok` stays `true`. This is deliberate and commented ("a stale label on a deleted
 session must never turn a successful wipe into a failed one"), and it is almost certainly right.
 Recording it only so nobody "discovers" it later and changes it without reading the reasoning.
 
 ### S8 — `recoveryOperationInFlight` shares a promise across mixed return types
 
-`composition.ts:3199-3211`: `runRecoveryOperation<T>` returns the in-flight promise cast to
+`composition.ts:3386-3398`: `runRecoveryOperation<T>` returns the in-flight promise cast to
 `Promise<T>`, so a concurrent `discardRecovery()` (returns `void`) and `resumeRecovery()` (returns
 `boolean`) share one value. The comment acknowledges this: *"the cast is unsound in theory but
 safe in practice — the only typed consumer treats a non-true result as 'do not navigate'."*
-`CircuitDetailScreen.tsx:93` (`if (resumed) navigation.navigate('ActiveDashboard')`) confirms the
+`CircuitDetailScreen.tsx:108` (`if (resumed) navigation.navigate('ActiveDashboard')`) confirms the
 claim holds today. It is an invariant held by one call site, not by the type system.
 
-### S9 — `composition.ts` is 4862 lines and carries ~40 distinct responsibilities
+### S9 — `composition.ts` is 5271 lines and carries ~40 distinct responsibilities
 
 Not a defect — the ordering guarantees are the reason it is one file, and every section documents
 why it sits where it does. But it is the single largest comprehension cost in the app, the file
@@ -871,9 +1040,52 @@ with by far the most test files pointed at it (23 `composition.*.test.ts`), and 
 missed `unlocked*` call hangs the app silently (fence 7). If anything here is ever split, the
 `lifecycleLock` sections must stay together.
 
+### S10 — delete-all that fails partway can leave History stale (P18 accepted residual)
+
+`composition.ts:3967` refreshes the history cache only when the per-circuit session wipe
+verified (`result.ok`). If a circuit delete rejects, the list is not refreshed. If
+`setActiveSession(db, null)` (`:3952`) throws, the function throws before it reaches the
+refresh. In both cases the screen already reports failure, so nothing claims false success.
+The list is just stale until its next refresh. **Risk: low.**
+
+### S11 — the adoption journal is deleted by key, not by ownership (P18 accepted residual)
+
+`forgetAbandonedAdoption` (`composition.ts:3730-3742`) runs
+`DELETE FROM settings WHERE key = ADOPTION_JOURNAL_KEY`. Every other journal path clears
+through the claimed row's compare-and-delete (`adoptionJournal.ts`, P5d-FIX5 H1). This only
+matters with two app runtimes on one database, which the app never has. **Risk: low.**
+
+### S12 — parts of delete-all are untested (P18 accepted residual)
+
+No test drives the Settings cleanup after a *rejected* delete-all
+(`SettingsScreen.tsx:476-483`, a `.tsx`, so it cannot be tested here anyway; §5). None injects
+storage failures into the wipe tail: the learned-circuit re-read, the identity read-back, the
+journal delete, the log clear. And the sql.js double serializes transactions but not standalone
+statements (§5), so the "read-back sees every queued settings write" argument in §1.8 step 7
+holds for production's gated handle but is **not** what the tests exercise. **Risk: low-medium.
+The VIN guarantee rests on the gate's FIFO order, which only fence 6 documents.**
+
+### S13 — a new learn phase can reuse a stale adoption ledger (pre-existing, P18 accepted residual)
+
+`adoptLearnedCircuit` takes `adoptionProgress ??= { circuitId: … }` (`composition.ts:2813`).
+Only a successful adoption (`:2921`) and delete-all (`:3828`, `:3731`) null the ledger. So after
+a Test Loop is left in `error`, the *next* learn phase's adoption can inherit its "already
+done" steps. Delete-all is not affected. Not caused by the delete-all work. Recorded there
+because the review found it. **Risk: medium if reached. Nobody has checked how reachable it is
+from the screen.**
+
+### S14 — the circuit-selection refusal copy is hard-coded English in the `.tsx`
+
+Found while updating this map. `CircuitSelectionScreen.tsx:42-73` (`BLOCK_SETUP`,
+`BLOCK_DRIVING`, `BLOCK_CALIBRATING`, `BLOCK_UNKNOWN`) holds the messages and button labels as
+English literals. They are not in a `*Strings.ts` table, so RO users get English, and §5 rule 2
+is broken on the one screen every driver starts on. The recovery banner in
+`CircuitDetailScreen.tsx:209-212` is pre-existing and also English-only. **Risk: low (copy),
+but the pattern is the kind fence 4 exists to prevent.**
+
 ### Stated gaps in this document
 
-- **`SettingsScreen.tsx` (1474 lines), `DidSweepScreen.tsx` (1449) and `SignalFinderScreen.tsx`
+- **`SettingsScreen.tsx` (1482 lines), `DidSweepScreen.tsx` (1449) and `SignalFinderScreen.tsx`
   (992) were surveyed, not read line by line.** Their §2 rows describe their surface accurately,
   but there may be logic embedded in them that ought to live in a pure module (fence 4). Worth a
   dedicated pass.
@@ -886,3 +1098,9 @@ missed `unlocked*` call hangs the app silently (fence 7). If anything here is ev
 - **No builds or tests were run** (read-only constraint). Every claim above is from source text,
   not from observed behaviour. In particular, the *symptoms* in §4 are quoted from the code
   comments and ledger entries that recorded them, not reproduced.
+- **The `4e88d13` update** was made from `git diff ec153ef..HEAD -- apps/mobile`, the commit
+  messages, the P18 ledger entry and `docs/HANDOFF-2026-09-23-cloud.md`, and checked against
+  HEAD source. No tests were run for it either. The core-side halves it mentions (D2's
+  lap-at-commit publishing in `SessionController`, P17's `geometryProvenanceOf` and the
+  suggestion scope) were **not** read. Line numbers outside `composition.ts` and the files the
+  update touched were not re-checked.

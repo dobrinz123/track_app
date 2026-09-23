@@ -2,6 +2,7 @@
 
 > Orientation map for `packages/core/src/{contracts.ts, geometry, matching, timing, calibration, controller, statemachine, profile, catalog}`.
 > Written 2026-09-22 against the working tree at commit `4676545`. Every reference is `path:line` **plus** an exported symbol name — when a line has drifted, search the symbol.
+> **Updated 2026-09-23 to HEAD `4e88d13`**: `sessionController.ts` references re-verified after c462af2 (ticket D2 — completed laps now reach the durable session row, §1 row 17, §3.8, §5.2; new test `test/controller/sessionControllerD2.test.ts`) and the P17 geometry-tier change noted in §3.3. `contracts.ts` references re-verified too (ec153ef had shifted everything from `:369` on; see §8).
 > Scope note: `coach/`, `coaching/`, `corners/`, `reference/`, `fusion/`, `signal/`, `telemetry/`, `persistence*/`, `replay/`, `testloop/`, `fixtures/` are the *other* half of `packages/core` and are described here only where the timing path touches them.
 
 ---
@@ -16,10 +17,10 @@
 
 | # | What happens | Where |
 |---|---|---|
-| 1 | Platform GNSS emits. `LocationProvider.subscribe(cb)` hands over a `LocationSample` (`tMono` from the injected `MonotonicClock`, never `Date.now()`). | `contracts.ts:590` `LocationProvider`; `contracts.ts:13` `LocationSample`; impl `apps/mobile/src/platform/gnssLocationProvider.ts` |
-| 2 | `SessionController` subscribed this callback inside `ensureProviderRunning()`, and only *after* `provider.start()` resolved. | `controller/sessionController.ts:1812` `ensureProviderRunning`; subscription is captured in `providerUnsubscribe` (`:966`) |
-| 3 | `handleSample(sample)`. Stamps `lastSampleAtMono` (watchdog), returns early if paused, then **records the raw trace unconditionally** — above the mode branch, so a Learn lap that never completes still leaves its fixes on disk. | `controller/sessionController.ts:1846` `handleSample`; `:2372` `recordRawTrace` |
-| 4 | If `mode === 'calibrating'`: the sample goes to `CalibrationEngine.feed()` and **never reaches the timing pipeline**. Coverage ≥ 0.98 force-finishes the Learn lap. Returns. | `calibration/calibration-engine.ts:215` `feed`; `sessionController.ts:349` `CALIBRATION_COMPLETE_COVERAGE_FRACTION`; `:1360` `finishCalibrationNow` |
+| 1 | Platform GNSS emits. `LocationProvider.subscribe(cb)` hands over a `LocationSample` (`tMono` from the injected `MonotonicClock`, never `Date.now()`). | `contracts.ts:630` `LocationProvider`; `contracts.ts:13` `LocationSample`; impl `apps/mobile/src/platform/gnssLocationProvider.ts` |
+| 2 | `SessionController` subscribed this callback inside `ensureProviderRunning()`, and only *after* `provider.start()` resolved. | `controller/sessionController.ts:1823` `ensureProviderRunning`; subscription is captured in `providerUnsubscribe` (`:971`) |
+| 3 | `handleSample(sample)`. Stamps `lastSampleAtMono` (watchdog), returns early if paused, then **records the raw trace unconditionally** — above the mode branch, so a Learn lap that never completes still leaves its fixes on disk. | `controller/sessionController.ts:1857` `handleSample`; `:2440` `recordRawTrace` |
+| 4 | If `mode === 'calibrating'`: the sample goes to `CalibrationEngine.feed()` and **never reaches the timing pipeline**. Coverage ≥ 0.98 force-finishes the Learn lap. Returns. | `calibration/calibration-engine.ts:215` `feed`; `sessionController.ts:349` `CALIBRATION_COMPLETE_COVERAGE_FRACTION`; `:1364` `finishCalibrationNow` |
 | 5 | If `mode === 'live'`: `SessionPipelineCore.ingest(sample)` — the single canonical ordering, shared with the batch replay harness. | `controller/pipelineCore.ts:260` `ingest` |
 | 6 | **Quality.** `TelemetryQualityEvaluator.assess(sample, prev)` → `QualityAssessment {level, reasons}`. Accuracy, sample gap, duplicate/non-increasing timestamp, implied-speed teleport. | `matching/quality-evaluator.ts:49` class, `:56` `assess`; thresholds `:18` `DEFAULT_TELEMETRY_QUALITY_CONFIG` |
 | 7 | **Gap handling.** A `tMono` gap > `pauseGapMs` (30 s) synthesises `PAUSE` + `RESUME`; a gap > 3 s synthesises `GNSS_LOST`/`GNSS_RECOVERED` and, past `lowQualityGapMs` (10 s), marks the active lap `LOW_QUALITY`. | `pipelineCore.ts:268-289` |
@@ -31,9 +32,9 @@
 | 13 | Per crossing, in emission order: append to `crossings`, `dispatch({type:'CROSSING', event})` into the reducer, update pit pending/exit state, then `LapTimingEngine.onCrossing(event, match.quality.level, state==='inPit')`. | `pipelineCore.ts:362-384`; reducer `statemachine/reducer.ts:84` `sessionReducer` |
 | 14 | **Lap assembly.** `LapTimingEngine` starts a lap on a forward start/finish crossing, accumulates sector times and invalid reasons, and on the *next* forward start/finish returns the completed `LapRecord` and immediately opens the next lap. | `timing/lap-timing-engine.ts:144` `onCrossing`, `:187` `startLap`, `:265` `completeLap`; `contracts.ts:318` `LapRecord` |
 | 15 | Completed laps are pushed onto `SessionPipelineCore.laps` and returned in `SampleIngestResult.completedLaps`. | `pipelineCore.ts:378-381`, `:100` `SampleIngestResult` |
-| 16 | `SessionController` reacts: clears the stale delta/cue on a lap boundary, recomputes the live delta otherwise, feeds `CoachEngine`, then fires `onLapCompleted(lap)` asynchronously per completed lap. | `sessionController.ts:1892-1985` |
-| 17 | **Persistence.** `onLapCompleted` builds the lap's telemetry entries and the recovery checkpoint and commits them through `writeLapCommit` — `repository.saveLapCommit` when the store offers it (one transaction), otherwise checkpoint-first-then-telemetry. | `sessionController.ts:2928` `onLapCompleted`, `:2820` `writeLapCommit`; contract `contracts.ts:543` `saveLapCommit` |
-| 18 | **Session record.** `endSession()` stops the provider, concludes any open calibration attempt, does the *final* raw-trace flush, awaits `flush()`, sets `recordingFinalized`, writes `SessionSummary` (laps + calibration provenance + trace shortfall) and a terminal checkpoint. | `sessionController.ts:1544` `endSession`, `:2099` `buildSessionSummary`; `contracts.ts:425` `SessionSummary` |
+| 16 | `SessionController` reacts: clears the stale delta/cue on a lap boundary, recomputes the live delta otherwise, feeds `CoachEngine`, then fires `onLapCompleted(lap)` asynchronously per completed lap. | `sessionController.ts:1903-1996` |
+| 17 | **Persistence.** `onLapCompleted` builds the lap's telemetry entries and the recovery checkpoint and commits them through `writeLapCommit` — `repository.saveLapCommit` when the store offers it (one transaction), otherwise checkpoint-first-then-telemetry. **Only once that commit resolves**, `attemptLapCommit` publishes the commit's own checkpoint lap list onto the durable `sessions` row (`persistCommittedLaps`, ticket D2) — so a completed lap is on the row History reads *while the session is still running*, not only at `endSession()` (§3.8). | `sessionController.ts:3001` `onLapCompleted`, `:2711` `commitLapTelemetry`, `:2763` `attemptLapCommit`, `:2893` `writeLapCommit`, `:2847` the publish call, `:2190` `persistCommittedLaps`; contract `contracts.ts:583` `saveLapCommit` |
+| 18 | **Session record.** `endSession()` stops the provider, concludes any open calibration attempt, does the *final* raw-trace flush, awaits `flush()`, sets `recordingFinalized`, writes `SessionSummary` (laps + calibration provenance + trace shortfall) and a terminal checkpoint. The final write also raises the D2 lap-count watermark so no still-retrying lap commit can later publish a shorter list over it (`:1585-1591`). | `sessionController.ts:1548` `endSession`, `:2118` `buildSessionSummary`; `contracts.ts:447` `SessionSummary` |
 
 **Read this line if you read nothing else:** the pipeline order is `quality → matcher → pit/reverse guards → crossings → state machine → timing → delta`, it exists exactly once (`SessionPipelineCore.ingest`), and both the live controller and the batch replay harness drive it.
 
@@ -41,9 +42,9 @@
 
 ## 2. Module by module
 
-### `contracts.ts` — the spine (675 lines, no runtime code except three consts)
+### `contracts.ts` — the spine (715 lines, no runtime code except three consts)
 
-Owns every binding interface and the vocabulary the rest of the repo speaks. Three runtime values live here: `CALIBRATION_ATTEMPT_RECORD_VERSION` (`:194`), `CORNER_ANALYSIS_VERSION` (`:639`), and nothing else — everything else is erased at compile time. That erasure is why `index.ts:8` exports `CORE_PACKAGE_ID`, a dummy value import so a consumer's bundler can prove `@circuit/core` actually resolved.
+Owns every binding interface and the vocabulary the rest of the repo speaks. Three runtime values live here: `CALIBRATION_ATTEMPT_RECORD_VERSION` (`:194`), `CORNER_ANALYSIS_VERSION` (`:679`), and nothing else — everything else is erased at compile time. That erasure is why `index.ts:8` exports `CORE_PACKAGE_ID`, a dummy value import so a consumer's bundler can prove `@circuit/core` actually resolved.
 
 | Section | Key declarations |
 |---|---|
@@ -53,10 +54,10 @@ Owns every binding interface and the vocabulary the rest of the repo speaks. Thr
 | Crossings | `CrossingEvent` `:92` (`pitAmbiguous` `:121`), `CrossingDetector` `:124` |
 | Calibration | `CalibrationDiagnostics` `:130`, `CalibrationResult` `:162`, `CalibrationEngine` `:170`, `CalibrationThresholds` `:220`, `CalibrationAttemptRecord` `:247` |
 | State machine | `SessionState` `:299`, `SessionEvent` `:303`, `SessionMachineSnapshot` `:313`, `SessionReducer` `:314` |
-| Timing | `SectorTime` `:317`, `LapRecord` `:318`, `LapTimingEngine` `:368`, `LapValidityVerdict` `:344` |
-| Reference/delta | `ReferenceLap` `:375`, `DeltaUpdate` `:386`, `LiveDeltaEngine` `:393` |
-| Persistence | `SessionCalibrationStatus` `:423`, `SessionSummary` `:425`, `StoredRecordRead<T>` `:483`, `LocalSessionRepository` `:489` |
-| Providers | `LocationProvider` `:590`, `MonotonicClock` `:594` |
+| Timing | `SectorTime` `:317`, `LapRecord` `:318`, `LapTimingEngine` `:368` (`markInvalid` `:393`), `LapValidityVerdict` `:344` |
+| Reference/delta | `ReferenceLap` `:397`, `DeltaUpdate` `:408`, `LiveDeltaEngine` `:415` |
+| Persistence | `SessionCalibrationStatus` `:445`, `SessionSummary` `:447`, `StoredRecordRead<T>` `:523`, `LocalSessionRepository` `:529` |
+| Providers | `LocationProvider` `:630`, `MonotonicClock` `:634` |
 
 ### The interface-vs-class naming rule (read this once, then stop being surprised)
 
@@ -159,16 +160,16 @@ Several concrete classes deliberately **share a name with the `contracts.ts` int
 
 **`pipelineCore.ts` (401 lines).** Exists so the batch replay harness and the live controller can never drift on pipeline order (`:32-46`). `createPipelineComponents` (`:141`) is the *only* place the five engines are constructed. `SessionPipelineCore` (`:178`) owns the state-machine snapshot plus the engines, and exposes `ingest()` (`:260`), `dispatch()` (`:238`), `computeDelta()`, `currentLap()`, `setReference()`. Diagnostic arrays (`matches`, `rejectedSamples`, `stateHistory`) grow unbounded by default and are capped only when `boundedTelemetry` is set — the live controller sets it, replay does not (`:65-73`).
 
-**`sessionController.ts` (3393 lines).** The production orchestrator. Roughly six concerns in one class, and the file is organised by them:
+**`sessionController.ts` (3466 lines).** The production orchestrator. Roughly six concerns in one class, and the file is organised by them:
 
 | Concern | Anchors |
 |---|---|
-| Live facade state | `FacadeStateCore` `:52`, `snapshotState` `:1055`, `subscribe` `:1042`, `emit` `:1050` |
-| Session lifecycle | `start` `:1194`, `arm` `:1508`, `pause` `:1514`, `resume` `:1523`, `endSession` `:1544`, `dispose` `:1609`, `restoreFromCheckpoint` `:1651` |
-| Calibration lifecycle | `finishCalibrationNow` `:1360`, `acceptCalibration` `:1375`, `proceedWithoutValidatedCalibration` `:1426`, `rejectCalibration` `:1457`, attempt records `:2154`/`:2192`/`:2213`/`:2235` |
-| Sample handling | `handleSample` `:1846` |
-| Raw-trace persistence | `TRACE_CHUNK_KEY_STRIDE` `:426`, `decodeTraceChunkKey` `:442`, `beginTraceRun` `:1995`, `flushRawTraceInternal` `:2403`, retry/retain `:2479-2586` |
-| Durable writes | `persistInitialSessionRecord` `:2079`, `buildSessionSummary` `:2099`, `onLapCompleted` `:2928`, `writeLapCommit` `:2820`, checkpoint watermark `:2884` |
+| Live facade state | `FacadeStateCore` `:52`, `snapshotState` `:1059`, `subscribe` `:1046`, `emit` `:1054` |
+| Session lifecycle | `start` `:1198`, `arm` `:1512`, `pause` `:1518`, `resume` `:1527`, `endSession` `:1548`, `dispose` `:1620`, `restoreFromCheckpoint` `:1662` |
+| Calibration lifecycle | `finishCalibrationNow` `:1364`, `acceptCalibration` `:1379`, `proceedWithoutValidatedCalibration` `:1430`, `rejectCalibration` `:1461`, attempt records `beginCalibrationAttempt` `:2222` / `noteCalibrationProgress` `:2260` / `concludeCalibrationAttempt` `:2281` / `writeCalibrationAttempt` `:2303` |
+| Sample handling | `handleSample` `:1857` |
+| Raw-trace persistence | `TRACE_CHUNK_KEY_STRIDE` `:426`, `decodeTraceChunkKey` `:442`, `beginTraceRun` `:2006`, `flushRawTraceInternal` `:2471`, retry/retain `:2547-2654` |
+| Durable writes | `persistInitialSessionRecord` `:2090`, `buildSessionSummary` `:2118` (now takes an optional `laps` override, D2), `persistSessionRecord` `:2145`, `persistCommittedLaps` `:2190` (D2; watermark fields `sessionRowLapSessionId`/`sessionRowLapCount` `:895`/`:897`), `onLapCompleted` `:3001`, `attemptLapCommit` `:2763`, `writeLapCommit` `:2893`, checkpoint watermark `:2957` |
 
 Also present and easy to miss: a GNSS watchdog (`WatchdogScheduler` `:313`, default 5 s timeout / 1 s poll) that restarts the provider on a stale sample, and the coaching-cue plumbing (`CUE_POSITION_TOLERANCE_M` `:260`, `VOICE_LIFT_MAX_SEVERITY` `:252`, `applyCueUpdates`) which belongs to the *other* half of core and is only hosted here.
 
@@ -216,7 +217,7 @@ Geometric acceptance rules, all in `validation.ts:96-197`: ≥50 centerline vert
 
 ### 3.1 One monotonic clock, per-process, never wall-clock
 
-**Rule.** `LocationSample.tMono` (`contracts.ts:14`) and `TelemetrySample.tMonoMs` (`telemetry/contracts.ts:53`, "SAME monotonic clock as LocationSample — injected, never `Date.now()`") are the *same* clock. It is `MonotonicClock` (`contracts.ts:594`), implemented in the app as `performance.now()` (`apps/mobile/src/platform/clock.ts:31` `PerformanceNowClock`). `tUtc` exists on `LocationSample` but is explicitly *metadata only* (`contracts.ts:15`).
+**Rule.** `LocationSample.tMono` (`contracts.ts:14`) and `TelemetrySample.tMonoMs` (`telemetry/contracts.ts:53`, "SAME monotonic clock as LocationSample — injected, never `Date.now()`") are the *same* clock. It is `MonotonicClock` (`contracts.ts:634`), implemented in the app as `performance.now()` (`apps/mobile/src/platform/clock.ts:31` `PerformanceNowClock`). `tUtc` exists on `LocationSample` but is explicitly *metadata only* (`contracts.ts:15`).
 
 **Why.** `Date.now()` can jump backwards on an NTP correction. Under Hermes on iOS `performance.now()` derives from `mach_continuous_time()` — monotonic, and still advancing through brief device sleep (`clock.ts:12-17`).
 
@@ -245,16 +246,16 @@ Geometric acceptance rules, all in `validation.ts:96-197`: ≥50 centerline vert
 
 | Consumer | Rule |
 |---|---|
-| `apps/mobile/src/session/analysisAssembly.ts:551` | `geometryValidated: circuit.profile.geometryStatus === 'official'` — **only `'official'`** unlocks advice. |
-| `apps/mobile/src/session/testLoopGuards.ts:14,35` | The same predicate, named, for the live-cue gate. |
+| `apps/mobile/src/session/analysisAssembly.ts:552` | `geometryValidated: circuit.profile.geometryStatus === 'official'` — **only `'official'`** unlocks live-cue moves and absolute claims. Since P17 (5561364) it also passes `geometryProvenance: geometryProvenanceOf(geometryStatus)` (`:557`), a three-tier reading of the same field (`packages/core/src/coaching/sessionInsights.ts:95` `GeometryProvenance`, `:102` `geometryProvenanceOf`: `'official'`→`'surveyed'`, `'ad-hoc'`→`'learned'`, everything else →`'mapped'`). `'mapped'`/`'learned'` unlock **pit suggestions only** (self-referential: the driver's own clean laps); an *unstated* provenance still refuses (`coaching/suggestions.ts:233-248`, `statedGeometry` `:279`). The cue path is unchanged: `cueEvidenceFromInsights` still tests `geometryValidated` alone (`suggestions.ts:700-706`). |
+| `apps/mobile/src/session/testLoopGuards.ts:39` `learnedCoachingEnabled` | Live cues forced off on a learned circuit via `isLearnedGeometry` (`:43`); header comment `:13-23` restates the P17 split. |
 | `apps/mobile/src/session/sessionReport.ts:456` | Anything other than `'official'` adds an explicit caveat line to the exported report. |
 | `packages/core/src/testloop/testLoopCircuit.ts:40` `isLearnedGeometry`, `:189` | A learned circuit writes `'ad-hoc'` as a **constant**, not a parameter. |
 
-A learned circuit may be **timed and analysed but never advised on**. It still goes through `loadProfileFromJson` and the full validator, because the point is that one validation path serves every source (`profile/schema.ts:44-46`, `testloop/codec.ts:109`).
+A learned circuit may be **timed and analysed, and (since P17) given stationary pit suggestions, but never have a live cue moved**. It still goes through `loadProfileFromJson` and the full validator, because the point is that one validation path serves every source (`profile/schema.ts:44-46`, `testloop/codec.ts:109`).
 
-**A separate, parallel honesty gate:** `SessionCalibrationStatus` (`contracts.ts:423`) is three-valued — `'validated'` / `'unvalidated'` / `'unknown'` — precisely because the previous single boolean in a side log conflated "we know this ran on accepted calibration" with "we could not read the label". **The binding rule for every reader: `'unknown'` is never rendered, exported or summarised as calibrated** (`contracts.ts:420-422`). `'validated'` is assigned in exactly one place (`sessionController.ts:1375` `acceptCalibration`).
+**A separate, parallel honesty gate:** `SessionCalibrationStatus` (`contracts.ts:445`) is three-valued — `'validated'` / `'unvalidated'` / `'unknown'` — precisely because the previous single boolean in a side log conflated "we know this ran on accepted calibration" with "we could not read the label". **The binding rule for every reader: `'unknown'` is never rendered, exported or summarised as calibrated** (`contracts.ts:442-443`). `'validated'` is assigned in exactly one place (`sessionController.ts:1379` `acceptCalibration`).
 
-**What breaks.** Loosen the `=== 'official'` predicate anywhere and the app starts giving braking advice computed against a centerline traced from a single noisy lap. Default a missing `calibrationStatus` to `'validated'` and a session driven past a *rejected* calibration comes back from a crash wearing no warning at all — which is a bug the reviewer actually reproduced (`contracts.ts:400-422`, `sessionController.ts:1651` options doc).
+**What breaks.** Loosen the `=== 'official'` predicate anywhere on the cue path and the app starts moving live braking cues computed against a centerline traced from a single noisy lap. Default a missing `calibrationStatus` to `'validated'` and a session driven past a *rejected* calibration comes back from a crash wearing no warning at all — which is a bug the reviewer actually reproduced (`contracts.ts:422-444`, `sessionController.ts:1662` options doc).
 
 ### 3.4 A crossing is never deleted, only marked
 
@@ -295,25 +296,39 @@ Plus two more verdicts with no constant: `WRONG_DIRECTION` (`:432`) and `CALIBRA
 
 **What breaks.** Restate a bar as a literal anywhere else and a stored record can contradict the refusal it explains — which is the specific failure `uncoveredGapLengthM` was added to fix (`contracts.ts:146-158`: exporting the *clamped* span as "the gap" under-reports a gap that wraps the start/finish line, so the record said one thing and the engine judged another).
 
-**Corollary invariant — every attempt leaves a record.** `contracts.ts:178-193`: the owner lost a track day to a Learn lap parked at ~83 % coverage that produced no verdict and wrote nothing. A row is now written when the lap **starts**, rewritten every 5 % of coverage (`sessionController.ts:503` `CALIBRATION_ATTEMPT_COVERAGE_STEP`), and rewritten on conclusion — whatever the conclusion, **including Cancel**, which is recorded as an outcome and never as an absence (`contracts.ts:209-211`, `sessionController.ts:1457`).
+**Corollary invariant — every attempt leaves a record.** `contracts.ts:178-193`: the owner lost a track day to a Learn lap parked at ~83 % coverage that produced no verdict and wrote nothing. A row is now written when the lap **starts**, rewritten every 5 % of coverage (`sessionController.ts:503` `CALIBRATION_ATTEMPT_COVERAGE_STEP`), and rewritten on conclusion — whatever the conclusion, **including Cancel**, which is recorded as an outcome and never as an absence (`contracts.ts:209-211`, `sessionController.ts:1461`).
 
 **Pinned by.** `test/calibration/calibration-engine.test.ts:271` (insufficient/discontinuous coverage), `:282` (wrong direction), `:292` (POOR_GNSS relaxed to the wide accept set), `:320` (rate), `:354` (`CALIBRATION_OVERRUN`), `:507` (a genuine 700 m dropout still fails, gap pointing at the missing stretch).
 
 ### 3.6 Optional repository methods mean "cannot", never "there were none"
 
-**Rule.** `LocalSessionRepository` (`contracts.ts:489`) has four *required* methods and several **optional** ones: `saveLapCommit?` `:543`, `saveLapValidityVerdict?` `:561`, `listLapValidityVerdicts?` `:563`, `listLapValidityVerdictsWithDiagnostics?` `:570`, `saveCalibrationAttempt?` `:577`, `listCalibrationAttempts?` `:579`, `listCalibrationAttemptsWithDiagnostics?` `:581`.
+**Rule.** `LocalSessionRepository` (`contracts.ts:529`) has four *required* methods and several **optional** ones: `saveLapCommit?` `:583`, `saveLapValidityVerdict?` `:601`, `listLapValidityVerdicts?` `:603`, `listLapValidityVerdictsWithDiagnostics?` `:610`, `saveCalibrationAttempt?` `:617`, `listCalibrationAttempts?` `:619`, `listCalibrationAttemptsWithDiagnostics?` `:621`.
 
 **Why optional.** Not every store can offer them — a test double, or the web preview's stand-in. Both first-party repositories implement them.
 
-**The binding reader rule.** A reader that finds one absent must report the data as **UNAVAILABLE**, never as empty (`contracts.ts:555-559`). `'unanswered'` and "we could not ask the store" are different facts. The `*WithDiagnostics` variants exist for exactly the same reason one level down: `StoredRecordRead<T>` (`contracts.ts:483`) returns `unreadableCount` so a caller can say "this section FAILED" rather than "this section is empty".
+**The binding reader rule.** A reader that finds one absent must report the data as **UNAVAILABLE**, never as empty (`contracts.ts:594-599`). `'unanswered'` and "we could not ask the store" are different facts. The `*WithDiagnostics` variants exist for exactly the same reason one level down: `StoredRecordRead<T>` (`contracts.ts:523`) returns `unreadableCount` so a caller can say "this section FAILED" rather than "this section is empty".
 
-**What breaks.** Report an absent optional as an empty list and a corrupt database looks like a clean one. `saveLapCommit` in particular: with it, a lap's telemetry and its checkpoint commit atomically; without it, the controller falls back to **checkpoint-first, telemetry-second** — the safe order, because a checkpoint naming a lap whose telemetry never landed merely reserves a lap number, whereas the reverse leaves a committed lap row the next run's numbering overwrites. The reviewer measured that overwrite at **93 lost fixes** (`contracts.ts:513-526`).
+**What breaks.** Report an absent optional as an empty list and a corrupt database looks like a clean one. `saveLapCommit` in particular: with it, a lap's telemetry and its checkpoint commit atomically; without it, the controller falls back to **checkpoint-first, telemetry-second** — the safe order, because a checkpoint naming a lap whose telemetry never landed merely reserves a lap number, whereas the reverse leaves a committed lap row the next run's numbering overwrites. The reviewer measured that overwrite at **93 lost fixes** (`contracts.ts:554-565`).
 
 ### 3.7 The checkpoint is monotonic, and the comparison is inside the transaction
 
-**Rule.** An implementer of `saveLapCommit` **must** replace the stored checkpoint only when the incoming one supersedes it — strictly more laps — and **must** make that comparison inside the same transaction as the write (`contracts.ts:527-541`). `checkpointSupersedes` in `persistence/checkpointCodec` is the shared predicate; the controller mirrors it with a per-session watermark (`sessionController.ts:2884` `noteCheckpointGeneration`, `:2820` `writeLapCommit`).
+**Rule.** An implementer of `saveLapCommit` **must** replace the stored checkpoint only when the incoming one supersedes it — strictly more laps — and **must** make that comparison inside the same transaction as the write (`contracts.ts:567-581`). `checkpointSupersedes` in `persistence/checkpointCodec` is the shared predicate; the controller mirrors it with a per-session watermark (`sessionController.ts:2957` `noteCheckpointGeneration`, `:2893` `writeLapCommit`).
 
 **What breaks.** The controller **retries** a failed lap commit with the checkpoint it captured at the time. Without the rule, a lap-1 retry landing after lap 2 committed rolls the stored checkpoint back to `[1]`, and the next launch re-makes the completed lap 2 as a zero-duration `RECOVERY` lap.
+
+### 3.8 A committed lap is on the session row, and the row's lap list only grows (ticket D2, c462af2)
+
+**Rule.** The durable `sessions` row learns about a lap at the same moment storage does. `attemptLapCommit` (`sessionController.ts:2763`), **only after** `writeLapCommit` resolved, awaits `persistCommittedLaps(sessionId, checkpoint.laps)` (`:2847`) — the lap list *that commit's own checkpoint carried*, never `core.laps`. `buildSessionSummary` (`:2118`) grew an optional `laps` parameter for exactly this (doc `:2109-2117`). A per-session watermark (`sessionRowLapSessionId`/`sessionRowLapCount`, `:895`/`:897`) makes the publish **monotonic**: a list no longer than what was already published is skipped (`:2195`), and a different session id resets the count to 0 (`:2191-2194`). `endSession()` raises the watermark to its final row's lap count after its `saveSession` (`:1585-1591`), so a late retry cannot shorten the finalised row.
+
+**Sequencing.** The write is chained on `sessionRecordTail` (so `flush()` covers it, `:1029`) *and* awaited by its caller inside `tracePersistenceTail` (via `commitLapTelemetry` `:2711`), so a non-re-entrant repository never sees it open while the lap commit's own transaction is. It never rejects: a failure goes to `noteRecordFailure('lap-committed', …)` (`:2199-2203`) and cannot fail the lap.
+
+**Why.** Before D2 the row was written exactly twice — `laps: []` at recording start (`persistInitialSessionRecord` `:2090`) and at `endSession()` — so between them every completed lap lived only in the recovery checkpoint. "Discard" on the recovery banner overwrites that checkpoint, and starting the next session replaces the active-session pointer it hangs off; either turned a four-lap drive into History's "0 laps" with no warning (`docs/architecture/flow-review.md` F2/F3; doc comment `:2158-2189`).
+
+**What it deliberately does not do.** A lap whose commit **failed** is not published — the checkpoint stays the authority, the invariant `attemptLapCommit`'s failure branch documents (`:2811-2823`) and `sessionController.test.ts:528` (C4) pins. Nor does it change `recordingFinalized`: mid-session rows still read `false`; only `endSession()` sets it.
+
+**Consequence (stated in the commit).** A session abandoned during setup — the cancelled Learn lap, now ended app-side (§5.1) — leaves an honest zero-lap session in History rather than a phantom recovery banner.
+
+**Pinned by.** `test/controller/sessionControllerD2.test.ts` (new): `:64` the row carries every completed lap while the session is still running, lap numbers equal to the checkpoint's, `recordingFinalized` still `false`; `:95` a lap whose `saveLapCommit` rejects leaves the row at 0 laps; `:131` `endSession()` still wins — final row finalised and never shorter than the mid-run one.
 
 ---
 
@@ -359,11 +374,13 @@ Pinned by `test/timing/crossing-detector.test.ts:124` — the whole `P7M M4` blo
 
 The 4 m margin is chosen from measured asset geometry from both sides (`track-matcher.ts:34-63`): below the smallest margin any fix of a genuine pit transit shows (TMR 4.9 m, MotorPark 5.1 m), above ~1σ of the ambiguity it rejects. A **negative** margin is refused at construction (`:286-293`) because that is the one direction this must never go. The 800 m confirmed-clear range (`crossing-detector.ts:294`) is bounded above *and* below by the two circuits — 720 m (longest pit lane) < 800 < 881.5 m (TMR pit exit to next timing gate) — a 161 m window, so it is not a tuning parameter with a comfortable value picked out of it.
 
-And the deliberate asymmetry in `sessionController.ts:1892-1960`: cue **display** suppression uses the conservative OR (`confirmedInPit || match.onPitLane`), but the **stint latch** reacts *only* to the debounced session state, because one noisy sample latching and un-latching re-armed the one-change-per-corner allowance with no real pit stop at all.
+And the deliberate asymmetry in `sessionController.ts:1903-1971`: cue **display** suppression uses the conservative OR (`confirmedInPit || match.onPitLane`), but the **stint latch** reacts *only* to the debounced session state, because one noisy sample latching and un-latching re-armed the one-change-per-corner allowance with no real pit stop at all.
 
 ### 4.6 `LapTimingEngine.markInvalid` is not on the contract
 
 `contracts.ts:368` declares only `reset`, `onCrossing`, `currentLap`. The concrete class adds `markInvalid(reason)` (`lap-timing-engine.ts:140`), which is how the pipeline injects `LOW_QUALITY` on a sample gap and how the reducer's `pendingInvalidReasons` (e.g. `PIT_TRANSIT`, `PAUSE_GAP`) reach a lap at all (`pipelineCore.ts:245` `invalidateActiveLap`, `:251` `syncInvalidReasons`). Anyone typing against the interface loses that path entirely.
+
+> **Resolved at HEAD** (fixed in ec153ef, ticket P16 C3 — the same commit that added this map): `contracts.ts:393` now declares `markInvalid(reason: string): void` on `LapTimingEngine`, with a doc comment stating it is the only route for `PAUSE_GAP`/`PIT_TRANSIT`/gap `LOW_QUALITY`. See §7.6.
 
 ### 4.7 The matcher periodically doubts itself, on purpose
 
@@ -371,7 +388,7 @@ Hinted projection is an optimisation, but a hint that has walked away from reali
 
 ### 4.8 `CalibrationEngine` is a *parallel* consumer, not a pipeline stage
 
-It builds its own `TrackMatcher` and its own `TelemetryQualityEvaluator` (`calibration-engine.ts:452`, `:185`) and is fed directly from `handleSample` before the pipeline branch. During `mode === 'calibrating'` **no sample reaches `SessionPipelineCore` at all** (`sessionController.ts:1859-1883`). Consequences: the crossing detector, the timing engine and the state machine see nothing of the Learn lap, and `progress().coverageFraction` (tight corridor, live) can legitimately be **lower** than the final `finish()` coverage (bias-corrected) — documented at `calibration-engine.ts:293-303`.
+It builds its own `TrackMatcher` and its own `TelemetryQualityEvaluator` (`calibration-engine.ts:452`, `:185`) and is fed directly from `handleSample` before the pipeline branch. During `mode === 'calibrating'` **no sample reaches `SessionPipelineCore` at all** (`sessionController.ts:1870-1894`). Consequences: the crossing detector, the timing engine and the state machine see nothing of the Learn lap, and `progress().coverageFraction` (tight corridor, live) can legitimately be **lower** than the final `finish()` coverage (bias-corrected) — documented at `calibration-engine.ts:293-303`.
 
 ### 4.9 `projectOntoPolyline` returns `0`, not `totalLength`, at the wrap point
 
@@ -383,7 +400,7 @@ It builds its own `TrackMatcher` and its own `TelemetryQualityEvaluator` (`calib
 
 ### 4.11 `lapNumber` is carried redundantly at two levels, kept in sync by hand
 
-`SessionMachineSnapshot.lapNumber` and `context.lapNumber` (`reducer.ts:8-10`, `:72-74`). And the live display number is offset separately again — `SessionController.lapNumberOffset` (assigned `sessionController.ts:1737`, applied in `snapshotState` `:1055`) — because a recovered session must not renumber back to 1. Three places, one number.
+`SessionMachineSnapshot.lapNumber` and `context.lapNumber` (`reducer.ts:8-10`, `:72-74`). And the live display number is offset separately again — `SessionController.lapNumberOffset` (assigned `sessionController.ts:1748`, applied in `snapshotState` `:1059`) — because a recovered session must not renumber back to 1. Three places, one number.
 
 ---
 
@@ -434,37 +451,38 @@ Notes worth knowing:
 - `GNSS_LOST`/`GNSS_RECOVERED` are meaningful **only while `timing`**; ignored elsewhere (`:24-26`).
 - `pendingInvalidReasons` is cleared only when a *new* lap begins (`startLap` `:80-82`), so a `PIT_TRANSIT` recorded during a pit stop survives the stop and lands on the next lap that actually starts timing.
 - `PAUSE_GAP` is strictly `> 30000` (pinned: `test/statemachine/reducer.test.ts:565`).
+- **`awaitingCalibration` has no exit the UI used to reach** (flow-review F1). `rejectCalibration()` (`sessionController.ts:1461`) still parks the machine there — neither the reducer nor the controller changed in c462af2 — and the only transitions out remain `CALIBRATION_STARTED`, `FATAL` and `END_SESSION`. The fix is app-side: `abandonPendingSession()` (`apps/mobile/src/session/composition.ts:2327`) treats `awaitingCalibration`/`calibrationReview` as abandonable setup (`ABANDONABLE_SETUP_STATES` `:2276`) and calls `facade.endSession()` (`:2336`), i.e. the ordinary `END_SESSION` → `sessionComplete` path with its zero-lap row and terminal checkpoint — deliberately **not** a forced transition to `idle`, because by then a real session (id, active pointer, recorder, row on disk) exists.
 
 **Who drives transitions.** Only `SessionPipelineCore.dispatch` (`pipelineCore.ts:238`) calls `sessionReducer`. Its callers: `ingest` (synthesised `PAUSE`/`RESUME`/`GNSS_*` from timestamp gaps, `CROSSING` per detected event, `PIT_ENTERED`/`PIT_EXITED` from the pit logic) and `SessionController` (`START_PREFLIGHT`, `PREFLIGHT_PASSED`, `CALIBRATION_*`, `PAUSE`/`RESUME`, `END_SESSION`).
 
 ### 5.2 Cold start vs recovery resume
 
-**Cold start** — `SessionController.start('calibration')` (`sessionController.ts:1194`):
-1. `disposed` re-checked after **every** await (`:1207`, `:1272`, `:1294`) — a start is not instantaneous and the controller reports `idle` for the whole window, so a circuit change or delete-all can legally dispose mid-start.
+**Cold start** — `SessionController.start('calibration')` (`sessionController.ts:1198`):
+1. `disposed` re-checked after **every** await (`:1211`, `:1276`, `:1298`) — a start is not instantaneous and the controller reports `idle` for the whole window, so a circuit change or delete-all can legally dispose mid-start.
 2. Mint session id, reset stint/cue state, `beginTraceRun()`, `resetTrackMatch()`.
-3. `await ensureProviderRunning()` — **and only after it resolves** are any state-machine dispatches or the mode change performed (`:1170-1192` explains why: doing it the other way round left a failed start mutated into `'calibrating'` with a duplicate sample listener on retry).
+3. `await ensureProviderRunning()` — **and only after it resolves** are any state-machine dispatches or the mode change performed (`:1179-1196` explains why: doing it the other way round left a failed start mutated into `'calibrating'` with a duplicate sample listener on retry).
 4. `START_PREFLIGHT` → `PREFLIGHT_PASSED` → new `CalibrationEngine` → `calibrationStatus = 'unknown'` → `CALIBRATION_STARTED` → `mode = 'calibrating'` → `beginCalibrationAttempt()` (the attempt row is durable from **here**, not from its conclusion).
 5. Start watchdog, `persistInitialSessionRecord()` — the session is discoverable from the first fix, not from the first lap.
 
-**A cancel that lands during that window** is recorded, not dropped: `rejectCalibration()` sets `calibrationStartCancelled` while `calibrationStartInFlight` (`:1457`, `:1462-1468`), and `start()` consumes it at its next await checkpoint and unwinds identically to a disposal (`:1281-1296`).
+**A cancel that lands during that window** is recorded, not dropped: `rejectCalibration()` sets `calibrationStartCancelled` while `calibrationStartInFlight` (`:1461`, `:1466-1472`), and `start()` consumes it at its next await checkpoint and unwinds identically to a disposal (`:1285-1300`).
 
-**Recovery** — `restoreFromCheckpoint(sessionId, snapshot, laps, options)` (`sessionController.ts:1651`). What it does **differently**:
+**Recovery** — `restoreFromCheckpoint(sessionId, snapshot, laps, options)` (`sessionController.ts:1662`). What it does **differently**:
 
 | | Cold start | Recovery |
 |---|---|---|
 | In-flight lap | n/a | **Never resumed.** A lap open at checkpoint time (state `outLap`/`timing`/`inPit`, or `paused` with one of those as `priorState`) is appended as a zero-duration, explicitly invalid `RECOVERY` lap rather than a fabricated time — because the old `tMono` is on a dead timeline (§3.1). |
 | Lap numbering | `initialLapNumber` 1 | `lapNumberOffset = max(checkpoint lap numbers, in-flight lap number, **storedLapNumbers**) `; the new pipeline is built with `timing.initialLapNumber = offset + 1`. `storedLapNumbers` is what storage actually holds — a database interrupted before the atomicity fix can hold lap 1's fixes with a checkpoint naming no laps, and reusing lap 1 would replace that row. |
-| Calibration provenance | `'unknown'` until accepted | `mergeCalibrationStatus(carriedStatus, options.calibrationStatus)` (`:1749`). **Monotonic**: an incoming `'validated'`/`'unvalidated'` always wins; an incoming `'unknown'` can never overwrite a known carried value, because `'unknown'` is absence of information, not information. The option is **mandatory**, not optional, so a caller that forgets it is a compile error. |
+| Calibration provenance | `'unknown'` until accepted | `mergeCalibrationStatus(carriedStatus, options.calibrationStatus)` (`:1760`). **Monotonic**: an incoming `'validated'`/`'unvalidated'` always wins; an incoming `'unknown'` can never overwrite a known carried value, because `'unknown'` is absence of information, not information. The option is **mandatory**, not optional, so a caller that forgets it is a compile error. |
 | Checkpoint watermark | starts at nothing | seeded from the restored checkpoint's generation (`checkpointGeneration(laps)`), **raised never lowered** |
 | Trace keys | new run band | **new run band, same session id** — which is what stops this run's chunks overwriting the pre-crash ones |
 | Coaching/cue state | fresh | explicitly cleared: `currentCue = null`, `coachEngine.reset()`, `cueGeneration += 1`, `stintIndex = 0`, overrides cleared |
 | Resulting state | `calibrating` | `awaitingCalibration` — **a fresh Learn lap is required before timing resumes** |
 
-**Resume without recalibrating** is a *separate* call: `start('session')` (`sessionController.ts:1263-1277`). It loads the stored reference lap, then synthesises `CALIBRATION_STARTED` → `CALIBRATION_FINISHED(recoverySkippedCalibrationResult())` → `CALIBRATION_ACCEPTED` to reach `armed` legally, and sets `calibrationStatus = restoredCalibration ?? 'unknown'` — it performs no calibration, so it makes no new claim about one.
+**Resume without recalibrating** is a *separate* call: `start('session')` (`sessionController.ts:1269-1281`). It loads the stored reference lap, then synthesises `CALIBRATION_STARTED` → `CALIBRATION_FINISHED(recoverySkippedCalibrationResult())` → `CALIBRATION_ACCEPTED` to reach `armed` legally, and sets `calibrationStatus = restoredCalibration ?? 'unknown'` — it performs no calibration, so it makes no new claim about one.
 
-**The calibration escape hatch** — `proceedWithoutValidatedCalibration()` (`:1426`). Covers **two** states, not one, and the doc comment (`:1389-1425`) explains why: a Learn lap stuck below the 0.85 acceptance bar never reaches `calibrationReview` at all, because review requires 0.98 coverage. It does not fail; it simply never finishes, and the only control left is Cancel. That is the failure that cost a track day. So from `calibrating` it force-finishes through the engine's own `finish()` (no threshold lowered or skipped), then: engine accepted → ordinary `acceptCalibration()`, labelled nothing special; engine rejected → `calibrationStatus = 'unvalidated'`, persisted immediately, session armed anyway.
+**The calibration escape hatch** — `proceedWithoutValidatedCalibration()` (`:1430`). Covers **two** states, not one, and the doc comment (`:1393-1429`) explains why: a Learn lap stuck below the 0.85 acceptance bar never reaches `calibrationReview` at all, because review requires 0.98 coverage. It does not fail; it simply never finishes, and the only control left is Cancel. That is the failure that cost a track day. So from `calibrating` it force-finishes through the engine's own `finish()` (no threshold lowered or skipped), then: engine accepted → ordinary `acceptCalibration()`, labelled nothing special; engine rejected → `calibrationStatus = 'unvalidated'`, persisted immediately, session armed anyway.
 
-**Teardown** — `endSession()` order is binding (`:1533-1542`): conclude any open calibration attempt (as `'stalled'`) → stop provider → `END_SESSION` → **final** raw-trace flush (forces one last attempt on every retained batch, ignoring backoff and attempt caps) → `await flush()` → `recordingFinalized = true` → `saveSession` → terminal checkpoint. `flush()` rejecting **propagates** rather than being swallowed, so it reaches the facade's error path instead of leaving `sessionComplete` un-emitted.
+**Teardown** — `endSession()` order is binding (`:1537-1547`): conclude any open calibration attempt (as `'stalled'`) → stop provider → `END_SESSION` → **final** raw-trace flush (forces one last attempt on every retained batch, ignoring backoff and attempt caps) → `await flush()` → `recordingFinalized = true` → `saveSession` → raise the D2 session-row watermark (§3.8) → terminal checkpoint. `flush()` rejecting **propagates** rather than being swallowed, so it reaches the facade's error path instead of leaving `sessionComplete` un-emitted.
 
 ---
 
@@ -497,7 +515,7 @@ Notes worth knowing:
 `timing/index.ts:1-8` exports `PIT_AMBIGUOUS_REASON` and the `PitAssessment` type, but the root barrel (`index.ts:69-75`) re-exports only `CrossingDetector`, `LapTimingEngine`, and four types. Likewise `matching/index.ts:8-13` exports `AlongTrackFilter` and its three types, and the root (`index.ts:42-47`) does not. Consequence observed: `apps/mobile/src/ui/screens/invalidReasonCopy.ts:28` hardcodes the string literal `PIT_AMBIGUOUS` as an object key rather than importing the constant. Nothing is broken today — the literal matches — but the constant and its only consumer can now drift silently. **Question:** is the omission deliberate (keeping `AlongTrackFilter` internal is defensible; keeping `PIT_AMBIGUOUS_REASON` internal seems less so), or an oversight when the explicit re-export lists were written? *Risk: low-to-moderate — a string-literal coupling across a package boundary with no compile-time link.*
 
 **7.2 — A doc comment states the wrong acceptance bar.**
-`sessionController.ts:335-347` (the claim is at `:337-339`): "Deliberately set ABOVE `CalibrationEngine.finish()`'s own **>=95%** `INSUFFICIENT_COVERAGE` bar ... finishing the instant coverage first crosses **95%** cuts the lap short". The actual bar is `CALIBRATION_MIN_COVERAGE_FRACTION = 0.85` (`calibration-engine.ts:85`, applied `:431`). The 0.98 constant and its *reasoning* are unaffected — 0.98 > 0.85 just as it is > 0.95 — but the comment is the only place a reader learns the relationship between the two numbers, and it names a value that does not exist. The 0.85/0.98 gap is also exactly the gap that produces the "never finishes, only Cancel is left" failure the escape hatch exists for (`sessionController.ts:1399-1402`, which *does* quote 0.85 correctly). **Question:** was the acceptance bar lowered from 0.95 to 0.85 (the D-series field fixes) without updating this comment? *Risk: documentation only, but it is documentation someone will reason from.*
+`sessionController.ts:335-347` (the claim is at `:337-339`): "Deliberately set ABOVE `CalibrationEngine.finish()`'s own **>=95%** `INSUFFICIENT_COVERAGE` bar ... finishing the instant coverage first crosses **95%** cuts the lap short". The actual bar is `CALIBRATION_MIN_COVERAGE_FRACTION = 0.85` (`calibration-engine.ts:85`, applied `:431`). The 0.98 constant and its *reasoning* are unaffected — 0.98 > 0.85 just as it is > 0.95 — but the comment is the only place a reader learns the relationship between the two numbers, and it names a value that does not exist. The 0.85/0.98 gap is also exactly the gap that produces the "never finishes, only Cancel is left" failure the escape hatch exists for (`sessionController.ts:1402-1406`, which *does* quote 0.85 correctly). **Question:** was the acceptance bar lowered from 0.95 to 0.85 (the D-series field fixes) without updating this comment? *Risk: documentation only, but it is documentation someone will reason from.*
 
 **7.3 — `stepDiagnostics()` has no consumer.**
 `crossing-detector.ts:337-341` says so explicitly: "Nothing consumes it yet (`SessionPipelineCore` owns the detector privately and is outside this ticket's write set); it exists so the next investigation of a missing lap can be answered instead of guessed at." Same for `pitEvidenceDiagnostics()` (`:489`) and `timingDiagnostics()` (`:528`) — I found no reader in `packages/core/src` or `apps/mobile/src`. So the record that a fix gap big enough to have skipped the line actually happened exists in memory and is discarded at session end. **Question:** should these reach `SessionControllerDiagnostics` (`sessionController.ts:262`) and the session export? *Risk: moderate — this is the instrumentation for the exact failure mode (§4.3) that has already cost laps, and it currently cannot be read off a device.*
@@ -510,9 +528,16 @@ Notes worth knowing:
 
 **7.6 — `LapTimingEngine.markInvalid` is load-bearing and off-contract.**
 Stated as a surprise in §4.6, repeated here as a question: `contracts.ts:368` does not declare it, yet `PAUSE_GAP`, `PIT_TRANSIT` and gap-derived `LOW_QUALITY` reach a lap **only** through it. Any alternative implementation written against the published interface would silently produce laps that are never invalidated for those reasons. **Question:** should the contract declare it (required or optional-with-a-documented-reader-rule, as §3.6 does elsewhere)? *Risk: moderate — it is a real hole in the binding interface, in a codebase that is otherwise meticulous about exactly this.*
+**ANSWERED (ec153ef, P16 C3):** yes, as a **required** member — `contracts.ts:393` `markInvalid(reason: string): void`.
 
 **7.7 — `LapRecord.invalidReasons` has no enumerated type.**
 It is `string[]` (`contracts.ts:324`) with examples in a comment. The producers are spread across `lap-timing-engine.ts` (7 codes), `pipelineCore.ts`, `reducer.ts` (`PIT_TRANSIT`, `PAUSE_GAP`) and `sessionController.ts` (`RECOVERY`). The consumer that must render all of them is `apps/mobile/src/ui/screens/invalidReasonCopy.ts`. **Question:** is a union type wanted, or is open-endedness deliberate so a new reason cannot break a stored record's round-trip? *Risk: low — but it is the mechanism behind 7.1.*
+
+**7.8 — The reclaim-failure session write bypasses the D2 watermark and publishes `core.laps`.** *(new, 2026-09-23)*
+§3.8's rule is that the session row never claims a lap the durable checkpoint does not agree happened (`buildSessionSummary` doc, `sessionController.ts:2109-2117`), and `persistCommittedLaps` enforces it by publishing only a committed checkpoint's lap list. But `noteReclaimFailure` (`:2681`) — reached when `loadTelemetry` rejects inside `attemptLapCommit` (`:2796`), i.e. for a lap whose commit is about to return `ok: false` — calls `persistSessionRecord('reclaim-failure')` (`:2683`), which builds the summary from the **default** `core.laps` (`:2148`) and neither reads nor raises `sessionRowLapCount`. INFERRED from reading, not executed: `core.laps` already holds the lap being committed (the pipeline pushes it before `onLapCompleted` fires, §1 rows 15–16), so that write appears to publish exactly the uncommitted lap the failure branch (`:2811-2823`) takes care not to publish; and because the watermark is not raised, the next successful commit's shorter-or-equal list can then pass the `<=` check (`:2195`) and overwrite it — the row's lap list would then shrink, which D2's "monotonic" wording rules out. The D2 failure test (`sessionControllerD2.test.ts:95`) rejects `saveLapCommit`/`saveTelemetry`, not `loadTelemetry`, so this path is unpinned. **Question:** should `persistSessionRecord` publish the last committed list (and respect the watermark) rather than `core.laps`? *Risk: low-to-moderate — needs a read failure on a partially-overlapping chunk, but it is the one remaining writer of the row's `laps` that D2 did not route through its rule.*
+
+**7.9 — A failed D2 row write leaves the watermark already advanced.** *(new, 2026-09-23)*
+`persistCommittedLaps` sets `sessionRowLapCount = laps.length` (`:2196`) *before* the queued `saveSession` runs, and the catch (`:2199-2203`) only records the failure. A lap commit is not retried once it succeeded, so if that row write fails the row lags until the *next* lap's publish (which carries the full list) or `endSession()`. After the last lap before a crash, nothing re-publishes, and the row is one lap short of the checkpoint — the F2/F3 exposure D2 closes, reopened for that one lap. **Question:** intended (bookkeeping failures are counted and never block the lap), or should the watermark advance only on a resolved write? *Risk: low — requires a `saveSession` failure right after a successful lap commit.*
 
 ---
 
@@ -527,4 +552,5 @@ Stated plainly so nobody mistakes a blank for a clean bill of health.
 - **Test files** I read only names and a handful of bodies (the direction convention, the rearm/reverse behaviour, the strict-interior property). Where I cite a test as "pinning" an invariant, I am citing its **name and location**, which I verified; I did not in every case read its assertions.
 - **I ran no builds and no tests**, per the task constraints. Nothing here is verified by execution.
 - **Line numbers** were taken from the working tree at `4676545` with two files (`hardware/kicad/*`) modified and no source files dirty. Where a number came from arithmetic on a concatenated dump rather than a direct grep, I re-verified it against `grep -n` on the exported symbol; the few in-method line references inside `crossing-detector.ts`'s `update` and `sessionController.ts`'s long methods are approximate and should be located by the quoted comment text instead.
+- **2026-09-23 update (HEAD `4e88d13`).** Commits since the map in `packages/core/src`: c462af2 (`sessionController.ts`, +79 — the only one in this map's scope), 5561364 (`coaching/` — other half; touched here only where §3.3 described the honesty gates), 8c495b6 (`telemetry/signalFinder/runner.ts` — out of scope). `statemachine/`, `timing/`, `matching/`, `geometry/`, `calibration/`, `profile/`, `catalog/`, `pipelineCore.ts` and `index.ts` are unchanged since ec153ef, so their line numbers were not touched. Every `sessionController.ts` reference was re-grepped against HEAD. **`contracts.ts` references were also re-verified**: ec153ef itself (the commit that added this map) grew `contracts.ts` from 675 to 715 lines after the `4676545` the map was read at — +22 at `LapTimingEngine.markInvalid` (after `:368`) and +18 in `SessionSummary` (after old `:430`) — so every reference from `:369` onward was re-grepped against HEAD and corrected (§2 table, §1 rows 1/17/18, §3.1, §3.3, §3.6, §3.7); references below `:369` were spot-checked and had not moved. I ran no tests for this update.
 - **`fusion/`, `signal/`, `replay/`, `persistence/`, `persistence-sql/`, `reference/`, `coach/`, `coaching/`, `corners/`, `testloop/`, `fixtures/`** were out of scope. I touched them only to establish who depends on the modules in scope. The claim "`catalog/` is consumed only by `apps/mobile`" and the dependency lists in §2 come from `grep` over import paths and are as good as that method — a dynamic or re-exported import would not show up.
