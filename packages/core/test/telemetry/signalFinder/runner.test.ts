@@ -394,6 +394,32 @@ describe('runFinderRound -- P4m-FIX2 probe completeness, honest rate, bounded co
     expect(result.respondingEcus).toEqual([0x12]);
   });
 
+  it('Y3: a cooldown sleep that wakes before the clock reaches the window boundary keeps waiting instead of ending the round', async () => {
+    // Timers and `Date.now()` are separate clocks: a timer can fire a
+    // millisecond before `Date.now()` reaches its target. A clock that runs
+    // 2 % slow makes every wake-up early, so the round must keep waiting
+    // until the clock itself crosses the boundary.
+    const origin = Date.now();
+    const slowClock = { now: (): number => origin + Math.floor((Date.now() - origin) * 0.98) };
+    let silent = true;
+    setTimeout(() => {
+      silent = false;
+    }, 150);
+    const { channels } = harness(() => (silent ? 'silent' : Uint8Array.from([0x07])), [0x12]);
+    const result = await runFinderRound({
+      entries: [{ ecu: 0x12, did: 0x4002 }],
+      channels,
+      clock: slowClock,
+      control: { paused: false, stopped: false },
+      durationMs: 600,
+      requestTimeoutMs: 10,
+      windowMs: 100,
+      missesBeforeBackoff: 3,
+    });
+    expect(result.elapsedMs).toBeGreaterThanOrEqual(600);
+    expect(result.samples.length).toBeGreaterThan(0);
+  });
+
   it('Y4: a send that throws leaves the key UNATTEMPTED and uncounted', async () => {
     const channels = new Map<number, SweepTransport>([
       [
