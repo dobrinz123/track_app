@@ -13,7 +13,7 @@ Native 0.86 on iOS, installed by sideloading. Repo is **public**: `dobrinz123/tr
 State at this commit: **3397 tests green**, typecheck 0, lint 0 errors (6 pre-existing warnings in
 `didSweep*` files — leave them). Build 13 delivered to the owner.
 
-**Read these before doing anything.** They are current and were written for exactly this purpose:
+**Before changing an area, read the documents that cover it.** They are current and were written for exactly this purpose:
 
 | Document | What it gives you |
 |---|---|

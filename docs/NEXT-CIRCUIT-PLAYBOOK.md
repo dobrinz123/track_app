@@ -1,11 +1,12 @@
 # Adding the Next Circuit — Playbook & Lessons Learned
 
 Written 2026-08-16, after the full TMR (Transilvania Motor Ring) campaign: build,
-field failure, field fix. **Read this before touching anything.** It encodes what
+field failure, field fix. **Read §0 before your first change, and each later section
+before touching the area it covers.** It encodes what
 the codebase alone cannot tell you — why things are the way they are, and what
 broke in the real world.
 
-## 0. How to work in this repo (non-negotiable process)
+## 0. How to work in this repo
 
 - **Lead / worker / cross-reviewer split**: the lead session plans, writes
   delegation tickets, and verifies; worker sessions implement; Codex (if
