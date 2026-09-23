@@ -11,9 +11,11 @@ import { SETTINGS_KEY } from './sqlSettingsStore';
  *
  * A VIN is personal data in the EU, and so is what hangs off it -- the DID
  * bindings and sweep results are fingerprints of one specific vehicle, and a
- * learned circuit is a trace of where the driver drove. Preferences (units,
- * language, adapter address, coaching toggles, a profile the USER picked) are
- * not data about the driver and survive the wipe.
+ * learned circuit is a trace of where the driver drove. So are the custom
+ * channel definitions tagged from a sweep ("Tag as channel"): they are the
+ * same findings as the bindings, and their provenance text can hold the VIN.
+ * Preferences (units, language, adapter address, coaching toggles, a profile
+ * the USER picked) are not data about the driver and survive the wipe.
  */
 
 /** Mobile-owned tables whose every row is vehicle- or driver-specific. */
@@ -33,18 +35,29 @@ export interface DeviceDataWipeResult {
 }
 
 /**
- * The settings patch that forgets the vehicle's identity. The VIN goes; a
- * profile the VIN auto-selected goes with it, because keeping it would keep
- * the make and model the VIN resolved to. A profile the user chose is a
- * preference and stays.
+ * The settings patch that forgets the vehicle's identity. The VIN goes, and
+ * so do the channel definitions tagged from this car's sweeps; a profile the
+ * VIN auto-selected goes with them, because keeping it would keep the make
+ * and model the VIN resolved to. A profile the user chose is a preference and
+ * stays.
  */
 export function vehicleIdentityResetPatch(settings: AppSettings): Partial<AppSettings> {
-  if (settings.activeVehicleProfileSource !== 'vin') return { lastSeenVin: null };
+  const vehicleFindings = { lastSeenVin: null, enetChannelSpecsJson: DEFAULT_SETTINGS.enetChannelSpecsJson };
+  if (settings.activeVehicleProfileSource !== 'vin') return vehicleFindings;
   return {
-    lastSeenVin: null,
+    ...vehicleFindings,
     activeVehicleProfileId: DEFAULT_SETTINGS.activeVehicleProfileId,
     activeVehicleProfileSource: DEFAULT_SETTINGS.activeVehicleProfileSource,
   };
+}
+
+/** How many identity fields a stored settings blob still carries -- 0 when {@link vehicleIdentityResetPatch} has been applied. */
+function identityFieldsLeft(stored: Partial<AppSettings>): number {
+  let left = 0;
+  if (stored.lastSeenVin !== null && stored.lastSeenVin !== undefined) left += 1;
+  if (typeof stored.enetChannelSpecsJson === 'string' && stored.enetChannelSpecsJson !== '') left += 1;
+  if (stored.activeVehicleProfileSource === 'vin') left += 1;
+  return left;
 }
 
 function parseSettingsRow(raw: string | undefined): Partial<AppSettings> | null {
@@ -75,7 +88,20 @@ async function scrubStoredSettings(tx: SqlDatabase): Promise<number> {
   await tx.runAsync('UPDATE settings SET value = ? WHERE key = ?', [JSON.stringify(scrubbed), SETTINGS_KEY]);
   const after = await tx.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [SETTINGS_KEY]);
   const verified = parseSettingsRow(after[0]?.value);
-  return verified === null || verified.lastSeenVin === null || verified.lastSeenVin === undefined ? 0 : 1;
+  return verified === null ? 1 : identityFieldsLeft(verified);
+}
+
+/**
+ * How many identity fields the stored settings row carries right now. Run
+ * after the wipe, through the same serialized handle as every settings
+ * write, it sees the row as it is once every write queued before it landed.
+ */
+export async function countStoredVehicleIdentity(db: SqlDatabase): Promise<number> {
+  const rows = await db.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [SETTINGS_KEY]);
+  const raw = rows[0]?.value;
+  if (raw === undefined) return 0;
+  const stored = parseSettingsRow(raw);
+  return stored === null ? 1 : identityFieldsLeft(stored);
 }
 
 /**
@@ -105,7 +131,7 @@ export async function wipeDeviceUserData(db: SqlDatabase): Promise<DeviceDataWip
       [prefix, prefix],
     );
 
-    remaining.last_seen_vin = await scrubStoredSettings(tx);
+    remaining.vehicle_identity_settings = await scrubStoredSettings(tx);
   });
 
   const leftovers = Object.fromEntries(Object.entries(remaining).filter(([, count]) => count > 0));

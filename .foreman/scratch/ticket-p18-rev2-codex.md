@@ -1,0 +1,13 @@
+# Review ticket P18-REV2 — Codex read-only cross-review of the P18-FIX1 fix wave
+Adversarial READ-ONLY reviewer. The fix is commit `d2b26f6` on branch `p18-fix1-delete-all`: `git diff 6d6f90b..d2b26f6`.
+It answers your own P18-REV1 review (`.foreman/scratch/p18-codex-rev1-out.txt`, the final section after the last `codex` line): 3 HIGH, 2 MEDIUM, 1 LOW, all in delete-all (`deleteAllStoredUserData` in `apps/mobile/src/session/composition.ts`, `apps/mobile/src/persistence/deviceDataWipe.ts`). Decision taken for H2: tagged channel definitions (`enetChannelSpecsJson`) are erased by delete-all.
+Binding: HANDOFF.md item 1 (a VIN is personal data; delete-all must remove it), docs/legal/privacy-policy.*.md §3.3 and §7 as changed in this diff.
+For EACH of the six REV1 findings: say CLOSED / PARTIAL / OPEN with file:line and, if not closed, a concrete failing sequence. Then attack the fix itself:
+1. Ordering: `forgetVehicleIdentityInMemory()` runs before `wipeDeviceUserData`, again at the start of `resyncAfterDeviceWipe()`, then `countStoredVehicleIdentity` reads back. Is there still a sequence (VIN read, active-profile subscription, any other `settingsStore.update` caller, the SettingsScreen editor) where delete-all returns `ok: true` and the disk or memory still holds the VIN or tagged channels? Is the "read-back sees every queued write" claim true for the production gated handle and `SqlSettingsStore.persist()`?
+2. `deviceDataGeneration`: can the guard in `maybeDetectVehicleFromVin` or `refreshVehicleProfileBindingsCache` drop a legitimate result outside delete-all, or leave `vinDetectionState` stuck at 'attempting'?
+3. The `TEST_LOOP_ACTIVE` refusal: phases learning/adopting/error. Is 'learned' or 'failed' also unsafe? Can `adoptionProgress` be non-null while the phase is idle, and is clearing it plus the `testLoopAdoption` row in `forgetAbandonedAdoption()` safe against bootstrap repair and a newer adoption?
+4. The new failure paths (learned refresh, identity read-back, adoption journal, unvalidated log) — are any reported as success, or do any turn a genuinely clean wipe into a spurious failure? `finalResult.ok` is now mutated after `setActiveSession`/history refresh: any consequence?
+5. Tests: do the new/changed tests fail without the fix and pin the behaviour claimed? Is anything claimed in the commit message untested?
+6. Policy text EN/RO vs code: over- or under-claims.
+7. Anything else in the diff that changes behaviour the commit message does not mention.
+OUTPUT: first line PASS / FAIL / PASS_WITH_NOTES; per-REV1-finding status; new findings by severity with file:line + scenario + evidence; Clean list. Stdout only. No agents.

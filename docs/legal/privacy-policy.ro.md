@@ -122,8 +122,8 @@ tratează ca atare:
 - Este afișat integral pe ecranul Signal Finder, adică exact acolo unde ai avea nevoie să îl citești.
 
 - „Delete all my data" (§7) șterge VIN-ul stocat și, odată cu el, un profil de vehicul pe care
-  aplicația l-a ales pe baza VIN-ului. Aplicația citește din nou VIN-ul data viitoare când este
-  conectat un adaptor de tip BMW ENET.
+  aplicația l-a ales pe baza VIN-ului. Aplicația încearcă să citească din nou VIN-ul data viitoare
+  când este conectat un adaptor de tip BMW ENET care nu e ocupat cu altă operațiune.
 
 ### 3.4 Senzorii de mișcare ai dispozitivului
 
@@ -270,19 +270,21 @@ ireversibilă.
 
 Șterge de asemenea VIN-ul stocat, un profil de vehicul ales de aplicație pe baza VIN-ului,
 legăturile de semnal confirmate pentru vehicul, semnalele excluse, înregistrările de baleiaj din
-diagnosticare, evidența profilului de vehicul folosit în fiecare sesiune și geometria circuitelor pe
-care le-ai învățat aplicației.
+diagnosticare, definițiile de canale de semnal personalizate (fie etichetate dintr-un baleiaj cu „Tag
+as channel", fie scrise în Setări), evidența profilului de vehicul folosit în fiecare sesiune, nota
+unui Test Loop întrerupt, un traseu pe care Test Loop l-a învățat dar nu l-a putut salva și geometria
+circuitelor pe care le-ai învățat aplicației.
 
 Păstrează doar **preferințele** tale: unitățile de măsură, limba, adresa și portul adaptorului,
-comutatoarele pentru coaching, voce și sugestii, circuitul selectat și un profil de vehicul ales chiar
-de tine. Niciuna dintre ele nu te identifică pe tine sau mașina ta. Dezinstalarea aplicației le
+comutatoarele pentru coaching, voce și sugestii, circuitul selectat (cu excepția unui circuit învățat
+care a fost șters; atunci se selectează circuitul implicit) și un profil de vehicul ales chiar de tine. Niciuna dintre ele nu te identifică pe tine sau mașina ta. Dezinstalarea aplicației le
 elimină și pe acestea.
 
 Două precizări oneste:
 
-1. Comanda este **refuzată cât timp o sesiune este în desfășurare**; încheie mai întâi sesiunea.
-   Această regulă există ca ștergerea să nu se poată suprapune peste o înregistrare vie și să lase
-   date în urmă.
+1. Comanda este **refuzată cât timp o sesiune este în desfășurare sau cât timp un Test Loop învață
+   ori salvează un traseu**; încheie mai întâi sesiunea sau oprește Test Loop (ori așteaptă să termine salvarea). Această regulă
+   există ca ștergerea să nu se poată suprapune peste o înregistrare vie și să lase date în urmă.
 2. Dacă o parte a ștergerii eșuează, aplicația spune asta în loc să raporteze succes. În acest caz,
    un circuit învățat pe care îl folosește încă o sesiune rămasă este păstrat, ca sesiunea să poată fi
    analizată în continuare; rulează din nou ștergerea.

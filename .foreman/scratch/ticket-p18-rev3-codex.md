@@ -1,0 +1,12 @@
+# Review ticket P18-REV3 — Codex read-only cross-review of the P18-FIX2 fix wave
+Adversarial READ-ONLY reviewer. The fix is commit `1dee7b2` on branch `p18-fix1-delete-all`: `git diff d2b26f6..1dee7b2` (the whole delete-all rework since the cloud handoff: `git diff 6d6f90b..1dee7b2`).
+It answers your P18-REV2 review (`.foreman/scratch/p18-codex-rev2-out.txt`, final section after the last `codex` line): HIGH 1 (VIN read started after the second reset outlives the final check), MEDIUM 2 (`error` phase refusal with an instruction the UI cannot follow), MEDIUM 3 (terminal Test Loop state keeps geometry/coordinates), MEDIUM 4 (Settings channel-specs draft survives), plus the history-refresh and policy qualifications.
+Binding: HANDOFF.md item 1 (a VIN is personal data; delete-all must remove it), docs/legal/privacy-policy.*.md §3.3 and §7 as changed.
+For EACH REV2 finding and qualification: CLOSED / PARTIAL / OPEN with file:line, and a concrete failing sequence if not closed. Then attack the new code:
+1. `deviceWipeInProgress` fence (`unlockedDeleteAllStoredUserData` try/finally, `maybeDetectVehicleFromVin`): any path where delete-all returns `ok: true` with the VIN in memory or on disk; any path that leaves detection stuck or permanently disabled; refusal paths.
+2. Test Loop abandonment in delete-all (step 1d): `testLoopController.reset()` + `unlockedTearDownLearnPhase()` under `lifecycleLock` for phases `learned`/`failed`/`error`, before `unlockedRebuildProductionController()`. Can it stop providers a live or just-ended session still needs, race the auto-teardown subscription on `failed`, or leave `TestLoopScreen` in a state it cannot recover from? Is clearing the in-memory ledger while keeping the journal row until success correct against bootstrap repair?
+3. SettingsScreen draft reset: correct after both success and failure? any stale ref interplay?
+4. Tests: does `composition.deleteAllVinFence.test.ts` pin the HIGH (it fails on d2b26f6 with 3 reads started — is asserting "no read starts" the right property, and is the VIN/disk assertion meaningful)? Do the Test Loop tests pin M3?
+5. Policy EN/RO vs code: over- or under-claims.
+6. Anything else in the diff that changes behaviour the commit messages do not mention.
+OUTPUT: first line PASS / FAIL / PASS_WITH_NOTES; per-REV2-finding status; new findings by severity with file:line + scenario + evidence; Clean list. Stdout only. No agents.

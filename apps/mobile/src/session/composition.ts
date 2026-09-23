@@ -101,6 +101,7 @@ import {
   type RemoveLearnedCircuitResult,
 } from './learnedCircuitStore';
 import {
+  ADOPTION_JOURNAL_KEY,
   claimAdoptionJournal,
   clearClaimedJournal,
   deleteOrphanSession,
@@ -127,7 +128,11 @@ import {
   writeSessionVehicleSnapshot,
   type SessionVehicleSnapshot,
 } from '../persistence/sessionVehicleSnapshot';
-import { vehicleIdentityResetPatch, wipeDeviceUserData } from '../persistence/deviceDataWipe';
+import {
+  countStoredVehicleIdentity,
+  vehicleIdentityResetPatch,
+  wipeDeviceUserData,
+} from '../persistence/deviceDataWipe';
 import { createRawUdsChannel } from './didSweepController';
 import { EnetTcpTransport } from './enetTcpTransport';
 import { enetAdapterReservation as sharedEnetAdapterReservation } from './enetAdapterReservation';
@@ -722,9 +727,13 @@ let vehicleProfileBindingsCache: readonly VehicleProfileBindingLike[] = [];
  * "telemetry must never fail to start" discipline in this module.
  */
 export async function refreshVehicleProfileBindingsCache(): Promise<void> {
+  const generation = deviceDataGeneration;
   try {
     const store = createVehicleProfileBindingStore(getTelemetryReadDb());
-    vehicleProfileBindingsCache = await store.listBindings(getActiveVehicleProfileId());
+    const bindings = await store.listBindings(getActiveVehicleProfileId());
+    // A read that raced delete-all may hold rows the wipe removed.
+    if (generation !== deviceDataGeneration) return;
+    vehicleProfileBindingsCache = bindings;
   } catch (error) {
     console.warn('[composition] could not refresh the vehicle profile bindings cache', error);
   }
@@ -862,6 +871,19 @@ type VinDetectionState = 'idle' | 'attempting' | 'done';
 let vinDetectionState: VinDetectionState = 'idle';
 /** The result of the ONE completed attempt this app run has made (or will make) -- `null` before `vinDetectionState === 'done'`, and forever after if the read found nothing usable. */
 let cachedDetectedVin: string | null = null;
+/**
+ * Bumped by delete-all. A VIN read that started before the wipe and finishes
+ * after it belongs to data the driver asked to erase, so it is dropped rather
+ * than cached, persisted or used for auto-select.
+ */
+let deviceDataGeneration = 0;
+/**
+ * True for the whole of delete-all, from the first identity reset to the
+ * result. No VIN read starts inside it and none that was running completes
+ * into it: a read that finished between the final check and the result
+ * would otherwise put the VIN back behind a success banner.
+ */
+let deviceWipeInProgress = false;
 
 /**
  * Codex R2 fix (ticket P4q follow-up, binding, MEDIUM): "the explicit-choice
@@ -996,6 +1018,7 @@ export function maskVin(vin: string): string {
  * already returned by then.
  */
 export async function maybeDetectVehicleFromVin(): Promise<string | null> {
+  if (deviceWipeInProgress) return null; // not marked done: the next trigger after delete-all reads again.
   if (vinDetectionState !== 'idle') return cachedDetectedVin;
   const settings = settingsStore.getSettings();
   // Q1 (binding): ENET only -- the ELM327 session has no mode-09 support.
@@ -1006,6 +1029,7 @@ export async function maybeDetectVehicleFromVin(): Promise<string | null> {
   if (token === null) return null; // lost the race to acquire -- another trigger point retries later.
 
   vinDetectionState = 'attempting';
+  const generation = deviceDataGeneration;
   const transport = new EnetTcpTransport({ host: settings.enetHost, port: settings.enetPort });
   let vin: string | null = null;
   try {
@@ -1027,6 +1051,16 @@ export async function maybeDetectVehicleFromVin(): Promise<string | null> {
     sharedEnetAdapterReservation.release(token);
   }
 
+  // Delete-all ran while this read was in flight: it has already put
+  // detection back to 'idle', so the next connection reads again.
+  if (generation !== deviceDataGeneration) return null;
+  // Delete-all is running and has not reset anything yet -- it may still be
+  // refused. Drop the result, and re-arm here rather than rely on a reset
+  // that a refusal never reaches.
+  if (deviceWipeInProgress) {
+    vinDetectionState = 'idle';
+    return null;
+  }
   vinDetectionState = 'done';
   cachedDetectedVin = vin;
   if (vin !== null) {
@@ -2461,17 +2495,22 @@ function tearDownLearnPhase(): Promise<void> {
   const run = lifecycleLock
     .run(async () => {
       if (generation !== teardownGeneration) return;
-      detachTestLoopRecording();
-      testLoopTelemetryBuffer = [];
-      await releaseTestLoopGForce();
-      await stopTelemetryRecording();
-      await disposeTestLoopProvider();
+      await unlockedTearDownLearnPhase();
     })
     .finally(() => {
       if (teardownInFlight === run) teardownInFlight = null;
     });
   teardownInFlight = run;
   return run;
+}
+
+/** The body of {@link tearDownLearnPhase}, for a caller that already holds `lifecycleLock`. */
+async function unlockedTearDownLearnPhase(): Promise<void> {
+  detachTestLoopRecording();
+  testLoopTelemetryBuffer = [];
+  await releaseTestLoopGForce();
+  await stopTelemetryRecording();
+  await disposeTestLoopProvider();
 }
 
 /**
@@ -3612,27 +3651,48 @@ export interface AggregatedDeleteUserDataResult extends DeleteUserDataResult {
    * verified on those paths. `'SESSION_ACTIVE'`: a session is genuinely
    * mid-drive (CN-FIX4, facade boundary amendment). `'DEV_REPLAY_ACTIVE'`: a
    * `__DEV__` replay controller is installed (CN-FIX5, closing amendment).
+   * `'TEST_LOOP_ACTIVE'`: a Test Loop is learning a track or saving one.
    */
-  reason?: 'SESSION_ACTIVE' | 'DEV_REPLAY_ACTIVE';
+  reason?: 'SESSION_ACTIVE' | 'DEV_REPLAY_ACTIVE' | 'TEST_LOOP_ACTIVE';
 }
 
 /**
- * The in-memory mirror of {@link wipeDeviceUserData}: drops every cached copy
- * of what that wipe deleted, so nothing on screen or in the next session
- * start still carries it. Runs whether or not the on-disk wipe verified clean
- * -- a cache must never outlive the rows it was read from.
+ * The in-memory half of {@link wipeDeviceUserData}, run BEFORE the disk wipe:
+ * the settings store rewrites its whole blob on every `update()`, so the VIN
+ * has to leave memory first. Any settings write queued before this lands
+ * ahead of the wipe's transaction and is scrubbed by it; every write after it
+ * carries no VIN. The generation bump makes a VIN read or a bindings read
+ * already in flight drop its result instead of restoring it.
  */
-async function forgetDeviceUserDataInMemory(): Promise<void> {
-  settingsStore.update(vehicleIdentityResetPatch(settingsStore.getSettings()));
+function forgetVehicleIdentityInMemory(): void {
+  deviceDataGeneration += 1;
+  vinDetectionState = 'idle';
   cachedDetectedVin = null;
+  setVinAutoDetectNotice(null);
+  settingsStore.update(vehicleIdentityResetPatch(settingsStore.getSettings()));
   vehicleProfileBindingsCache = [];
   sessionVehicleSnapshots.clear();
+}
+
+/**
+ * Brings every in-memory copy of the learned circuits and the bindings back in
+ * line with the disk after the wipe. Resolves `false` when the learned
+ * circuits could not be re-read (the deleted geometry may then still be
+ * selectable) or the stored settings still carry the vehicle's identity:
+ * either way delete-all must not report success.
+ */
+async function resyncAfterDeviceWipe(): Promise<boolean> {
+  // Again, now the wipe has committed: a VIN or bindings read that finished
+  // while it ran may have put the old values back in memory.
+  forgetVehicleIdentityInMemory();
+  let learnedOk = true;
   memoryLearnedCircuits = [];
   if (learnedCircuitStore !== null) {
     try {
       await learnedCircuitStore.refresh();
     } catch (error) {
       console.warn('[composition] could not refresh learned circuits after delete-all', error);
+      learnedOk = false;
     }
   }
   publishLearnedCircuits();
@@ -3646,6 +3706,39 @@ async function forgetDeviceUserDataInMemory(): Promise<void> {
     }
   }
   await refreshVehicleProfileBindingsCache();
+  // The last word on the VIN: read back after every settings write queued so
+  // far, so a write that carried the old blob cannot hide behind the wipe.
+  let identityOk = true;
+  if (db !== null) {
+    try {
+      identityOk = (await countStoredVehicleIdentity(db)) === 0;
+    } catch (error) {
+      console.warn('[composition] could not verify the vehicle identity was deleted', error);
+      identityOk = false;
+    }
+  }
+  return learnedOk && identityOk;
+}
+
+/**
+ * Drops what an abandoned Test Loop adoption left behind: its in-memory
+ * ledger and its journal row. Only called once the sessions are gone -- the
+ * journal names a session and a circuit, and a retry must never resume onto a
+ * circuit this wipe deleted. Resolves `false` when the row could not be
+ * removed.
+ */
+async function forgetAbandonedAdoption(): Promise<boolean> {
+  adoptionProgress = null;
+  adoptionJournalId = null;
+  adoptionJournalOwned = null;
+  if (db === null) return true;
+  try {
+    await db.runAsync('DELETE FROM settings WHERE key = ?', [ADOPTION_JOURNAL_KEY]);
+    return true;
+  } catch (error) {
+    console.warn('[composition] could not clear the test-loop adoption journal', error);
+    return false;
+  }
 }
 
 export async function deleteAllStoredUserData(): Promise<AggregatedDeleteUserDataResult> {
@@ -3657,6 +3750,15 @@ export async function deleteAllStoredUserData(): Promise<AggregatedDeleteUserDat
 }
 
 async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDataResult> {
+  deviceWipeInProgress = true;
+  try {
+    return await runDeleteAllStoredUserData();
+  } finally {
+    deviceWipeInProgress = false;
+  }
+}
+
+async function runDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDataResult> {
   const { repository: repo } = await ready();
   // C fix (contracts.md's facade boundary amendment, binding, ticket
   // CN-FIX4): durability. Two things had to change for "delete-all means
@@ -3693,6 +3795,39 @@ async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDa
       reason: 'DEV_REPLAY_ACTIVE',
       errorText: 'a developer replay or mock session is active -- leave the Dev Replay screen before deleting all data',
     };
+  }
+  // 1c. REFUSE while a Test Loop is learning or saving a track: a wipe
+  //    underneath would let the adoption store the circuit again, or resume
+  //    onto the fallback circuit's controller while writing the out-lap for
+  //    the one just deleted. Stopping the learn phase on the Test Loop screen
+  //    ends the first; the second finishes on its own.
+  const testLoopPhase = testLoopController.snapshot().phase;
+  if (testLoopPhase === 'learning' || testLoopPhase === 'adopting') {
+    return {
+      ok: false,
+      remainingSessionCount: 0,
+      referenceLapCleared: false,
+      failedCircuitIds: [],
+      reason: 'TEST_LOOP_ACTIVE',
+      errorText: 'a test loop is learning or saving a track -- stop it, or let it finish saving, before deleting all data',
+    };
+  }
+  // 1d. Every other Test Loop phase is ABANDONED instead. `error` holds a
+  //    learned track waiting for a Retry that must not run onto a circuit
+  //    this wipe deletes; `learned` and `failed` still hold the traced
+  //    geometry and coordinates of where the driver drove. The learn phase is
+  //    torn down before step 2 rebuilds the controller, so the new controller
+  //    is never built on a provider that is about to stop.
+  if (testLoopPhase !== 'idle') {
+    testLoopController.reset();
+    teardownGeneration += 1;
+    await unlockedTearDownLearnPhase();
+    // Its learned track is gone, so its ledger can never be resumed. The
+    // journal row stays until the wipe succeeds: until then it is what lets
+    // the next launch repair the half-adopted state.
+    adoptionProgress = null;
+    adoptionJournalId = null;
+    adoptionJournalOwned = null;
   }
   // 2. Otherwise: drop any pending recovery and REPLACE the production
   //    controller with a fresh, idle one BEFORE deleting anything. A
@@ -3790,6 +3925,7 @@ async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDa
   // records, and the learned circuits live outside every table the steps
   // above touch. Always attempted, like the telemetry step; a learned circuit
   // a surviving session still needs is kept and reported as remaining.
+  forgetVehicleIdentityInMemory();
   let deviceDataOk = true;
   if (db !== null) {
     try {
@@ -3803,24 +3939,32 @@ async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDa
       deviceDataOk = false;
     }
   }
-  await forgetDeviceUserDataInMemory();
-  const finalResult: DeleteUserDataResult = { ...result, ok: result.ok && telemetryOk && deviceDataOk };
+  if (!(await resyncAfterDeviceWipe())) deviceDataOk = false;
+  const sessionDataOk = result.ok && telemetryOk && deviceDataOk;
+  // Records ABOUT the sessions go only once the sessions themselves are gone:
+  // while one survives, its label and any adoption journal still describe it.
+  let sessionRecordsOk = true;
+  if (sessionDataOk && !(await forgetAbandonedAdoption())) sessionRecordsOk = false;
+  const finalResult: DeleteUserDataResult = { ...result, ok: sessionDataOk && sessionRecordsOk };
   // M4 fix (binding): a leftover active-session pointer is meaningless once
   // all stored data is gone -- cleared together, the SAME way session
   // end/discard/vanished-checkpoint do (`setActiveSession(db, null)`).
   if (finalResult.ok && db !== null) await setActiveSession(db, null);
   // Ticket P7R E2: the unvalidated-matching log is a list of facts about
   // sessions that no longer exist -- cleared with them, for the same reason
-  // the active-session pointer above is. Best-effort, exactly like the log's
-  // own writes: a stale label on a deleted session must never turn a
-  // successful wipe into a failed one.
+  // the active-session pointer above is. A row that cannot be removed is
+  // reported: delete-all promises the records are gone, not that it tried.
   if (finalResult.ok) {
     unvalidatedMatchingSessionIds = new Set();
     if (db !== null && !(await clearUnvalidatedMatchingSessionIds(db))) {
       console.warn('[composition] could not clear the unvalidated-matching log');
+      sessionRecordsOk = false;
+      finalResult.ok = false;
     }
   }
-  if (finalResult.ok && historyStore !== null) await historyStore.refresh();
+  // The history list follows the sessions: refreshed whenever they verified
+  // gone, even if a later half of the wipe failed.
+  if (result.ok && historyStore !== null) await historyStore.refresh();
 
   const errorText = finalResult.ok
     ? null
@@ -3829,6 +3973,7 @@ async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDa
         !perCircuitOk && failedCircuitIds.length === 0 ? 'one or more circuits did not verify empty' : null,
         !telemetryOk ? 'telemetry rows remained or could not be deleted' : null,
         !deviceDataOk ? 'vehicle or learned-circuit data remained or could not be deleted' : null,
+        !sessionRecordsOk ? 'session records remained or could not be deleted' : null,
       ]
         .filter((part): part is string => part !== null)
         .join('; ') || 'delete-all failed';

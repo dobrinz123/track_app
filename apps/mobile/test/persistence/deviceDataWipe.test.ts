@@ -5,6 +5,7 @@ import { migrateDidSweepSchema } from '../../src/persistence/didSweepSchema';
 import { migrateLearnedCircuitSchema } from '../../src/persistence/learnedCircuitSchema';
 import {
   DEVICE_USER_DATA_TABLES,
+  countStoredVehicleIdentity,
   vehicleIdentityResetPatch,
   wipeDeviceUserData,
 } from '../../src/persistence/deviceDataWipe';
@@ -18,6 +19,10 @@ import { createSqlJsDatabase } from '../support/sqlJsDatabase';
  */
 
 const VIN = 'WZ1DB0C04LW000001';
+/** A "Tag as channel" definition whose provenance names the car -- the settings editor accepts exactly this. */
+const TAGGED_CHANNELS = JSON.stringify([
+  { channel: 'transOilC', ecu: 18, did: 0x4002, decode: 'u8', provenance: `Measured on VIN ${VIN}` },
+]);
 
 async function freshDb(): Promise<SqlDatabase> {
   const db = await createSqlJsDatabase();
@@ -47,6 +52,7 @@ async function seedEverything(db: SqlDatabase): Promise<void> {
       lastSeenVin: VIN,
       activeVehicleProfileId: 'toyota-gr-supra-a90-b58',
       activeVehicleProfileSource: 'vin',
+      enetChannelSpecsJson: TAGGED_CHANNELS,
     }),
   ]);
   await db.runAsync('INSERT INTO settings (key, value) VALUES (?, ?)', ['vehicle-profile-snapshot:driver-1--a', '{}']);
@@ -76,15 +82,16 @@ async function seedEverything(db: SqlDatabase): Promise<void> {
 }
 
 describe('vehicleIdentityResetPatch', () => {
-  it('forgets the VIN and keeps a profile the user chose', () => {
+  it('forgets the VIN and the tagged channels, and keeps a profile the user chose', () => {
     expect(
       vehicleIdentityResetPatch({
         ...DEFAULT_SETTINGS,
         lastSeenVin: VIN,
+        enetChannelSpecsJson: TAGGED_CHANNELS,
         activeVehicleProfileId: 'toyota-gr-supra-a90-b58',
         activeVehicleProfileSource: 'user',
       }),
-    ).toEqual({ lastSeenVin: null });
+    ).toEqual({ lastSeenVin: null, enetChannelSpecsJson: '' });
   });
 
   it('also resets a profile the VIN selected, because it encodes what the VIN resolved to', () => {
@@ -97,6 +104,7 @@ describe('vehicleIdentityResetPatch', () => {
       }),
     ).toEqual({
       lastSeenVin: null,
+      enetChannelSpecsJson: '',
       activeVehicleProfileId: DEFAULT_SETTINGS.activeVehicleProfileId,
       activeVehicleProfileSource: DEFAULT_SETTINGS.activeVehicleProfileSource,
     });
@@ -119,7 +127,9 @@ describe('wipeDeviceUserData', () => {
     expect(snapshots).toEqual([]);
     const settings = await storedSettings(db);
     expect(settings?.lastSeenVin).toBeNull();
+    expect(settings?.enetChannelSpecsJson).toBe('');
     expect(settings?.activeVehicleProfileSource).toBe('default');
+    expect(JSON.stringify(await db.getAllAsync('SELECT value FROM settings'))).not.toContain(VIN);
   });
 
   it('keeps preferences and every settings key it does not own', async () => {
@@ -165,6 +175,21 @@ describe('wipeDeviceUserData', () => {
 
     expect(await wipeDeviceUserData(db)).toEqual({ ok: true, remaining: {} });
     expect(await storedSettings(db)).toBeNull();
+  });
+
+  it('the post-wipe check catches a stale settings write that lands after the wipe', async () => {
+    const db = await freshDb();
+    await seedEverything(db);
+    await wipeDeviceUserData(db);
+    expect(await countStoredVehicleIdentity(db)).toBe(0);
+
+    // What a whole-blob persist queued with the old in-memory settings would write.
+    await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+      'app-settings',
+      JSON.stringify({ lastSeenVin: VIN, enetChannelSpecsJson: TAGGED_CHANNELS, activeVehicleProfileSource: 'vin' }),
+    ]);
+
+    expect(await countStoredVehicleIdentity(db)).toBe(3);
   });
 
   it('rolls back and rejects when a table is missing, so the caller reports failure', async () => {

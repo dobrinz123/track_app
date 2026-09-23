@@ -1,0 +1,3002 @@
+OpenAI Codex v0.153.4
+--------
+workdir: D:\CODE\APLICTIE_Circuit
+model: gpt-6-astra
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: none
+reasoning summaries: none
+session id: 01a0cf17-4b89-7871-b022-ecfbf9910178
+--------
+user
+# Review ticket P18-REV3 — Codex read-only cross-review of the P18-FIX2 fix wave
+Adversarial READ-ONLY reviewer. The fix is commit `1dee7b2` on branch `p18-fix1-delete-all`: `git diff d2b26f6..1dee7b2` (the whole delete-all rework since the cloud handoff: `git diff 6d6f90b..1dee7b2`).
+It answers your P18-REV2 review (`.foreman/scratch/p18-codex-rev2-out.txt`, final section after the last `codex` line): HIGH 1 (VIN read started after the second reset outlives the final check), MEDIUM 2 (`error` phase refusal with an instruction the UI cannot follow), MEDIUM 3 (terminal Test Loop state keeps geometry/coordinates), MEDIUM 4 (Settings channel-specs draft survives), plus the history-refresh and policy qualifications.
+Binding: HANDOFF.md item 1 (a VIN is personal data; delete-all must remove it), docs/legal/privacy-policy.*.md §3.3 and §7 as changed.
+For EACH REV2 finding and qualification: CLOSED / PARTIAL / OPEN with file:line, and a concrete failing sequence if not closed. Then attack the new code:
+1. `deviceWipeInProgress` fence (`unlockedDeleteAllStoredUserData` try/finally, `maybeDetectVehicleFromVin`): any path where delete-all returns `ok: true` with the VIN in memory or on disk; any path that leaves detection stuck or permanently disabled; refusal paths.
+2. Test Loop abandonment in delete-all (step 1d): `testLoopController.reset()` + `unlockedTearDownLearnPhase()` under `lifecycleLock` for phases `learned`/`failed`/`error`, before `unlockedRebuildProductionController()`. Can it stop providers a live or just-ended session still needs, race the auto-teardown subscription on `failed`, or leave `TestLoopScreen` in a state it cannot recover from? Is clearing the in-memory ledger while keeping the journal row until success correct against bootstrap repair?
+3. SettingsScreen draft reset: correct after both success and failure? any stale ref interplay?
+4. Tests: does `composition.deleteAllVinFence.test.ts` pin the HIGH (it fails on d2b26f6 with 3 reads started — is asserting "no read starts" the right property, and is the VIN/disk assertion meaningful)? Do the Test Loop tests pin M3?
+5. Policy EN/RO vs code: over- or under-claims.
+6. Anything else in the diff that changes behaviour the commit messages do not mention.
+OUTPUT: first line PASS / FAIL / PASS_WITH_NOTES; per-REV2-finding status; new findings by severity with file:line + scenario + evidence; Clean list. Stdout only. No agents.
+
+codex
+I’ll check the REV2 findings against the fix, trace the lifecycle and VIN races, and review the tests and policy claims. I’ll keep the review read-only and use no agents.
+
+exec
+"C:\\Users\\dobri\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe" -Command 'git status --short; git diff d2b26f6..1dee7b2 --stat; Get-Content .foreman/scratch/p18-codex-rev2-out.txt -Tail 220' in D:\CODE\APLICTIE_Circuit
+ succeeded in 55ms:
+
+  async refresh(): Promise<void> {
+    const summaries = await this.repository.listSessions(this.userId, this.circuitId);
+    this.cache = summaries
+      .filter((s) => s.layoutId === this.layoutId && s.layoutVersion === this.layoutVersion)
+      .map((s) => ({
+        sessionId: s.sessionId,
+        circuitId: s.circuitId,
+        layoutId: s.layoutId,
+        displayDateUtc: s.startedAtUtc,
+        laps: s.laps,
+        // Ticket P10A H6/H7: carried straight through from the stored row.
+        // An absent value stays absent here -- the readers turn that into
+        // `'unknown'`, never into `'validated'`.
+        ...(s.calibrationStatus === undefined ? {} : { calibrationStatus: s.calibrationStatus }),
+        // Ticket P12 item C: BOTH trace figures, not just the first. The
+        // session report has to be able to say "storage misbehaved N times
+        // and nothing was lost" as well as "N fixes never landed".
+        ...(s.trace === undefined
+          ? {}
+          : {
+              unwrittenSampleCount: s.trace.unwrittenSampleCount,
+              failedWriteCount: s.trace.failedWriteCount,
+              // Ticket P14 H3: absent stays ABSENT (= unknown). A row written
+              // before the column existed must not read back as finalised.
+              ...(s.trace.recordingFinalized === undefined
+                ? {}
+                : { recordingFinalized: s.trace.recordingFinalized }),
+            }),
+      }));
+
+    const ref = await this.repository.getReferenceLap(this.userId, this.circuitId, this.layoutId, this.layoutVersion);
+    if (ref === null) {
+      this.pb = null;
+      return;
+    }
+    const session = this.cache.find((s) => s.sessionId === ref.sessionId);
+    const lap = session?.laps.find((l) => l.lapNumber === ref.lapNumber) ?? syntheticLapFromReference(ref);
+    this.pb = { lap, sessionId: ref.sessionId, recordedAtUtc: ref.recordedAtUtc };
+  }
+
+  listSessions(): StoredSession[] {
+    return [...this.cache];
+  }
+
+  getSession(sessionId: string): StoredSession | null {
+    return this.cache.find((s) => s.sessionId === sessionId) ?? null;
+  }
+
+  getPersonalBest(): PersonalBestEntry | null {
+
+codex
+FAIL
+
+Reviewed `6d6f90b..d2b26f6`; HEAD matches the fix. No files changed; no agents used.
+
+**REV1 dispositions**
+
+| Finding | Status | Evidence |
+|---|---|---|
+| H1 â€” VIN resurrection | **PARTIAL** | [composition.ts:1048](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:1048) rejects reads from earlier generations, and the initial memory reset fixes stale whole-blob writes. However, detection started after the **second** reset can restore VIN after verification. Failing sequence below. |
+| H2 â€” persisted tagged channels survive | **CLOSED** | [deviceDataWipe.ts:45](D:/CODE/APLICTIE_Circuit/apps/mobile/src/persistence/deviceDataWipe.ts:45) clears `enetChannelSpecsJson`; verification counts remaining nonempty strings. The original persisted-channel scenario is fixed. An editor-memory gap remains below. |
+| H3 â€” stale adoption resumes against fallback controller | **CLOSED** | [composition.ts:3777](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3777) refuses the failed-adoption `error` phase. [composition.ts:3711](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3711) clears an abandoned ledger before success. The prescribed UI escape is broken, as detailed below. |
+| M4 â€” learned refresh failure reported as success | **CLOSED** | [composition.ts:3673](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3673) records refresh failure; line 3898 incorporates it into the result. Stale geometry can remain, but success is withheld. |
+| M5 â€” detection disabled until restart | **CLOSED** | [composition.ts:3650](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3650) resets detection to `idle`; obsolete completions cannot set it back to `done`. This restores eligibility at the next trigger, subject to adapter availability. |
+| L6 â€” session-linked settings survive silently | **CLOSED** | [composition.ts:3717](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3717) deletes the adoption journal; [composition.ts:3915](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3915) turns an unvalidated-log deletion failure into aggregate failure. |
+
+**New and residual findings**
+
+1. **HIGH â€” The second reset permits a fresh VIN read to outlive the final check.**  
+   [composition.ts:3668](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3668), [composition.ts:3695](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3695), [composition.ts:1057](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:1057).
+
+   Sequence:
+   - Delete-all performs its second identity reset, setting detection to `idle`.
+   - While deletion awaits subsequent work, opening Signal Finder starts detection with the **current** generation.
+   - Identity read-back returns zero.
+   - Detection completes while deletion awaits journal, active-pointer, log, or history operations. Its generation matches, so it restores both `cachedDetectedVin` and `lastSeenVin`.
+   - Those remaining operations succeed; delete-all returns `ok: true`.
+
+   **Evidence:** A read-only, in-memory reproduction using the source-extracted reset/detection functions, actual `SqlSettingsStore`, actual FIFO gate and sql.js produced:
+   ```
+   identityCountAtFinalCheck: 0
+   memoryVin: WZ1DB0C04LW000001
+   diskVin: WZ1DB0C04LW000001
+   vinDetectionState: done
+   ```
+   This is a component reproduction, not a full composition integration test. The remaining success path contains no further generation change or identity check.
+
+   A generation fence must cover the whole deletion interval; two isolated resets do not provide that fence.
+
+2. **MEDIUM â€” The refusal tells users to leave Test Loop, but leaving does not abandon it.**  
+   [composition.ts:3777](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3777), [TestLoopScreen.tsx:56](D:/CODE/APLICTIE_Circuit/apps/mobile/src/ui/screens/TestLoopScreen.tsx:56).
+
+   Sequence: adoption fails at the selected-journal write before session start â†’ phase becomes `error` â†’ leave Test Loop â†’ request delete-all. It refuses. Following its instruction and leaving again does not help.
+
+   **Evidence:** The screen has no unmount/blur reset. Its mount effect resets **only `failed`**, expressly preserving `error`. The error UI offers retry, without abandonment. Thus a repeatedly failing adoption can block deletion for the rest of the run despite following the advertised remedy.
+
+   The new test directly calls `resetTestLoop()`, bypassing the missing UI path.
+
+3. **MEDIUM â€” Allowed terminal Test Loop phases retain personal location data after success.**  
+   [composition.ts:3777](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3777), [composition.ts:3712](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3712), [testLoopController.ts:286](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/testLoopController.ts:286).
+
+   Sequence: learn a circuit â†’ finish its session â†’ delete-all while the Test Loop singleton remains `learned`. Disk deletion and catalog refresh succeed, but nothing resets that singleton. It retains `pendingCircuit`, including geometry, and the learning samples.
+
+   `failed` also retains `lastQualified` and `qualifiedStart`; its failure cleanup clears arrays but not those coordinates. A read-only reproduction confirmed both coordinates remain after entering `failed`.
+
+   These phases cannot retry adoption directly, so this is **retained personal data**, not the original wrong-controller retry. Clear terminal Test Loop state as part of successful deletion.
+
+4. **MEDIUM â€” VIN-bearing Settings drafts can survive deletion.**  
+   [SettingsScreen.tsx:330](D:/CODE/APLICTIE_Circuit/apps/mobile/src/ui/screens/SettingsScreen.tsx:330), [SettingsScreen.tsx:334](D:/CODE/APLICTIE_Circuit/apps/mobile/src/ui/screens/SettingsScreen.tsx:334).
+
+   Sequence: persisted channel JSON is empty â†’ enter an invalid JSON draft containing VIN-bearing channel provenance â†’ blur, which fails validation â†’ delete-all.
+
+   Both resets leave persisted `enetChannelSpecsJson` equal to `''`. The draft-reset effect sees no field change, so delete-all can return success while the editor still holds and displays the VIN. Correcting the draft and blurring subsequently persists it.
+
+   **Evidence:** Draft state is independent of the settings store; reset depends exclusively on the stored field changing. There is no deletion-generation reset for the editor. This is distinct from the fixed persisted-channel case.
+
+**Tests and verification**
+
+- The changed patch expectations, tagged-channel assertions, journal assertion and learning-phase refusal test would reject the corresponding pre-fix behavior.
+- The new read-back test proves the helper detects an explicitly awaited stale write. It does **not** prove composition ordering or protection against writes after read-back.
+- The composition database double serializes transactions, but its standalone reads/writes bypass that transaction queue. These tests therefore do not exercise the production gateâ€™s complete ordering behavior.
+- Untested commit claims include pending VIN/bindings invalidation, detection rearming, failed reset persistence, learned-refresh failure propagation, adoption-journal deletion failure, unvalidated-log deletion failure, and error/adopting refusal. Editor reset and terminal Test Loop cleanup are also uncovered.
+- I attempted the three changed test files with caching disabled. Vitest could not start tests because its temporary-directory creation was rejected by the read-only environment. **No test-suite pass is claimed.**
+
+**Clean list and remaining qualifications**
+
+- **FIFO claim:** correct for writes already submitted before the read-back. `SqlSettingsStore.persist()` serializes and submits synchronously before its first `await`; the production gate queues calls FIFO. Ordinary preference updates after reset serialize the cleared identity. This does not cover future writes.
+- **Active-profile subscription:** its pre-wipe bindings read can run under the first resetâ€™s generation, but the second reset invalidates that generation. The subsequent refresh reads after the committed wipe.
+- **Generation state:** only deletion increments `deviceDataGeneration`. I found no newly introduced result-dropping path outside deletion, or path where the mismatch return itself leaves detection stuck at `attempting`.
+- **Abandoned adoption:** `adoptionProgress` can remain non-null after `resetTestLoop()` makes the phase idle. Clearing it is necessary. In one runtime, `ready()` places bootstrap repair before deletion, and the lifecycle lock serializes newer adoption writes. The unconditional journal delete is not a cross-runtime ownership guarantee.
+- **Failure reporting:** learned-refresh, identity-read, journal-delete and log-delete failures all prevent success. Verification failure can conservatively report failure even when disk happens to be empty; that is not demonstrated corruption or a false-success bug.
+- **Result mutation:** the log failure changes `finalResult.ok` **after active-pointer clearing but before history refresh**, not after history refresh. Consequently history refresh is skipped and may leave stale cached history on this reported-failure path.
+- **Policy:** EN/RO broadly agree. Their deletion promises remain too strong given findings 1, 3 and 4. Their instruction to leave Test Loop is unsupported by the UI, and their refusal description omits the persistent `error` phase. â€œNext connectionâ€ also describes eligibility too strongly: detection can skip while the adapter reservation is held.
+- **Other behavior changes:** all custom channel JSON is cleared, including manually entered definitions, while policy specifically mentions sweep-tagged channels. The wipe diagnostic key changes from `last_seen_vin` to `vehicle_identity_settings`. Neither is separately identified in the commit message.
+tokens used
+78,249
+FAIL
+
+Reviewed `6d6f90b..d2b26f6`; HEAD matches the fix. No files changed; no agents used.
+
+**REV1 dispositions**
+
+| Finding | Status | Evidence |
+|---|---|---|
+| H1 â€” VIN resurrection | **PARTIAL** | [composition.ts:1048](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:1048) rejects reads from earlier generations, and the initial memory reset fixes stale whole-blob writes. However, detection started after the **second** reset can restore VIN after verification. Failing sequence below. |
+| H2 â€” persisted tagged channels survive | **CLOSED** | [deviceDataWipe.ts:45](D:/CODE/APLICTIE_Circuit/apps/mobile/src/persistence/deviceDataWipe.ts:45) clears `enetChannelSpecsJson`; verification counts remaining nonempty strings. The original persisted-channel scenario is fixed. An editor-memory gap remains below. |
+| H3 â€” stale adoption resumes against fallback controller | **CLOSED** | [composition.ts:3777](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3777) refuses the failed-adoption `error` phase. [composition.ts:3711](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3711) clears an abandoned ledger before success. The prescribed UI escape is broken, as detailed below. |
+| M4 â€” learned refresh failure reported as success | **CLOSED** | [composition.ts:3673](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3673) records refresh failure; line 3898 incorporates it into the result. Stale geometry can remain, but success is withheld. |
+| M5 â€” detection disabled until restart | **CLOSED** | [composition.ts:3650](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3650) resets detection to `idle`; obsolete completions cannot set it back to `done`. This restores eligibility at the next trigger, subject to adapter availability. |
+| L6 â€” session-linked settings survive silently | **CLOSED** | [composition.ts:3717](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3717) deletes the adoption journal; [composition.ts:3915](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3915) turns an unvalidated-log deletion failure into aggregate failure. |
+
+**New and residual findings**
+
+1. **HIGH â€” The second reset permits a fresh VIN read to outlive the final check.**  
+   [composition.ts:3668](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3668), [composition.ts:3695](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3695), [composition.ts:1057](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:1057).
+
+   Sequence:
+   - Delete-all performs its second identity reset, setting detection to `idle`.
+   - While deletion awaits subsequent work, opening Signal Finder starts detection with the **current** generation.
+   - Identity read-back returns zero.
+   - Detection completes while deletion awaits journal, active-pointer, log, or history operations. Its generation matches, so it restores both `cachedDetectedVin` and `lastSeenVin`.
+   - Those remaining operations succeed; delete-all returns `ok: true`.
+
+   **Evidence:** A read-only, in-memory reproduction using the source-extracted reset/detection functions, actual `SqlSettingsStore`, actual FIFO gate and sql.js produced:
+   ```
+   identityCountAtFinalCheck: 0
+   memoryVin: WZ1DB0C04LW000001
+   diskVin: WZ1DB0C04LW000001
+   vinDetectionState: done
+   ```
+   This is a component reproduction, not a full composition integration test. The remaining success path contains no further generation change or identity check.
+
+   A generation fence must cover the whole deletion interval; two isolated resets do not provide that fence.
+
+2. **MEDIUM â€” The refusal tells users to leave Test Loop, but leaving does not abandon it.**  
+   [composition.ts:3777](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3777), [TestLoopScreen.tsx:56](D:/CODE/APLICTIE_Circuit/apps/mobile/src/ui/screens/TestLoopScreen.tsx:56).
+
+   Sequence: adoption fails at the selected-journal write before session start â†’ phase becomes `error` â†’ leave Test Loop â†’ request delete-all. It refuses. Following its instruction and leaving again does not help.
+
+   **Evidence:** The screen has no unmount/blur reset. Its mount effect resets **only `failed`**, expressly preserving `error`. The error UI offers retry, without abandonment. Thus a repeatedly failing adoption can block deletion for the rest of the run despite following the advertised remedy.
+
+   The new test directly calls `resetTestLoop()`, bypassing the missing UI path.
+
+3. **MEDIUM â€” Allowed terminal Test Loop phases retain personal location data after success.**  
+   [composition.ts:3777](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3777), [composition.ts:3712](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3712), [testLoopController.ts:286](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/testLoopController.ts:286).
+
+   Sequence: learn a circuit â†’ finish its session â†’ delete-all while the Test Loop singleton remains `learned`. Disk deletion and catalog refresh succeed, but nothing resets that singleton. It retains `pendingCircuit`, including geometry, and the learning samples.
+
+   `failed` also retains `lastQualified` and `qualifiedStart`; its failure cleanup clears arrays but not those coordinates. A read-only reproduction confirmed both coordinates remain after entering `failed`.
+
+   These phases cannot retry adoption directly, so this is **retained personal data**, not the original wrong-controller retry. Clear terminal Test Loop state as part of successful deletion.
+
+4. **MEDIUM â€” VIN-bearing Settings drafts can survive deletion.**  
+   [SettingsScreen.tsx:330](D:/CODE/APLICTIE_Circuit/apps/mobile/src/ui/screens/SettingsScreen.tsx:330), [SettingsScreen.tsx:334](D:/CODE/APLICTIE_Circuit/apps/mobile/src/ui/screens/SettingsScreen.tsx:334).
+
+   Sequence: persisted channel JSON is empty â†’ enter an invalid JSON draft containing VIN-bearing channel provenance â†’ blur, which fails validation â†’ delete-all.
+
+   Both resets leave persisted `enetChannelSpecsJson` equal to `''`. The draft-reset effect sees no field change, so delete-all can return success while the editor still holds and displays the VIN. Correcting the draft and blurring subsequently persists it.
+
+   **Evidence:** Draft state is independent of the settings store; reset depends exclusively on the stored field changing. There is no deletion-generation reset for the editor. This is distinct from the fixed persisted-channel case.
+
+**Tests and verification**
+
+- The changed patch expectations, tagged-channel assertions, journal assertion and learning-phase refusal test would reject the corresponding pre-fix behavior.
+- The new read-back test proves the helper detects an explicitly awaited stale write. It does **not** prove composition ordering or protection against writes after read-back.
+- The composition database double serializes transactions, but its standalone reads/writes bypass that transaction queue. These tests therefore do not exercise the production gateâ€™s complete ordering behavior.
+- Untested commit claims include pending VIN/bindings invalidation, detection rearming, failed reset persistence, learned-refresh failure propagation, adoption-journal deletion failure, unvalidated-log deletion failure, and error/adopting refusal. Editor reset and terminal Test Loop cleanup are also uncovered.
+- I attempted the three changed test files with caching disabled. Vitest could not start tests because its temporary-directory creation was rejected by the read-only environment. **No test-suite pass is claimed.**
+
+**Clean list and remaining qualifications**
+
+- **FIFO claim:** correct for writes already submitted before the read-back. `SqlSettingsStore.persist()` serializes and submits synchronously before its first `await`; the production gate queues calls FIFO. Ordinary preference updates after reset serialize the cleared identity. This does not cover future writes.
+- **Active-profile subscription:** its pre-wipe bindings read can run under the first resetâ€™s generation, but the second reset invalidates that generation. The subsequent refresh reads after the committed wipe.
+- **Generation state:** only deletion increments `deviceDataGeneration`. I found no newly introduced result-dropping path outside deletion, or path where the mismatch return itself leaves detection stuck at `attempting`.
+- **Abandoned adoption:** `adoptionProgress` can remain non-null after `resetTestLoop()` makes the phase idle. Clearing it is necessary. In one runtime, `ready()` places bootstrap repair before deletion, and the lifecycle lock serializes newer adoption writes. The unconditional journal delete is not a cross-runtime ownership guarantee.
+- **Failure reporting:** learned-refresh, identity-read, journal-delete and log-delete failures all prevent success. Verification failure can conservatively report failure even when disk happens to be empty; that is not demonstrated corruption or a false-success bug.
+- **Result mutation:** the log failure changes `finalResult.ok` **after active-pointer clearing but before history refresh**, not after history refresh. Consequently history refresh is skipped and may leave stale cached history on this reported-failure path.
+- **Policy:** EN/RO broadly agree. Their deletion promises remain too strong given findings 1, 3 and 4. Their instruction to leave Test Loop is unsupported by the UI, and their refusal description omits the persistent `error` phase. â€œNext connectionâ€ also describes eligibility too strongly: detection can skip while the adapter reservation is held.
+- **Other behavior changes:** all custom channel JSON is cleared, including manually entered definitions, while policy specifically mentions sweep-tagged channels. The wipe diagnostic key changes from `last_seen_vin` to `vehicle_identity_settings`. Neither is separately identified in the commit message.
+
+exec
+"C:\\Users\\dobri\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe" -Command 'rg --files -g AGENTS.md -g HANDOFF.md; git rev-parse HEAD; git diff d2b26f6..1dee7b2 -- apps docs; git diff 6d6f90b..1dee7b2 --stat' in D:\CODE\APLICTIE_Circuit
+ succeeded in 24ms:
+ .foreman/scratch/p18-codex-rev1-out.txt            | 5148 ++++++++++++
+ .foreman/scratch/p18-codex-rev2-out.txt            | 8672 ++++++++++++++++++++
+ .foreman/scratch/ticket-p18-rev2-codex.md          |   13 +
+ apps/mobile/src/persistence/deviceDataWipe.ts      |   48 +-
+ apps/mobile/src/session/composition.ts             |  176 +-
+ apps/mobile/src/ui/screens/SettingsScreen.tsx      |    7 +
+ .../mobile/test/persistence/deviceDataWipe.test.ts |   29 +-
+ .../session/composition.circuitSelection.test.ts   |   11 +
+ .../session/composition.deleteAllVinFence.test.ts  |  134 +
+ .../test/session/composition.testLoop.test.ts      |   47 +
+ docs/legal/privacy-policy.en.md                    |   14 +-
+ docs/legal/privacy-policy.ro.md                    |   16 +-
+ 12 files changed, 14270 insertions(+), 45 deletions(-)
+
+exec
+"C:\\Users\\dobri\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe" -Command "Get-Content apps/mobile/AGENTS.md; Get-Content docs/HANDOFF.md -TotalCount 75; rg -n 'unlockedRebuildProductionController|teardownGeneration|tearDownLearnPhase|disposeTestLoopProvider|releaseTestLoopGForce|stopTelemetryRecording|resetTestLoop|testLoopController.subscribe|lifecycleLock|maybeDetectVehicleFromVin' apps/mobile/src/session/composition.ts; "'$p='"'apps/mobile/src/session/composition.ts'; "'$s=Get-Content $p; $s[3630..3980]; $s[1015..1110]' in D:\CODE\APLICTIE_Circuit
+ succeeded in 36ms:
+// verify-empty logic lives in `@circuit/core`'s `deleteAllUserData` (unit
+// tested there; the mobile UI itself is not unit-testable in this repo).
+// Refreshes the shared `sessionHistoryStore` cache on success so
+// `SessionHistoryScreen` reflects the deletion without a manual reload.
+// ---------------------------------------------------------------------------
+
+/** M3 fix: `deleteAllStoredUserData()`'s own return shape, layered on top of `@circuit/core`'s `DeleteUserDataResult` -- `failedCircuitIds`/`errorText` cannot live on that type itself (`packages/core/**` is out of this ticket's write set). `errorText` is `null` whenever `ok` is `true`. */
+export interface AggregatedDeleteUserDataResult extends DeleteUserDataResult {
+  /** Bundled circuit ids whose `deleteAllUserData()` call REJECTED (not just returned `ok: false`) -- empty unless a per-circuit delete actually threw. */
+  failedCircuitIds: string[];
+  errorText: string | null;
+  /**
+   * Set when the wipe was REFUSED outright -- nothing was read, deleted, or
+   * verified on those paths. `'SESSION_ACTIVE'`: a session is genuinely
+   * mid-drive (CN-FIX4, facade boundary amendment). `'DEV_REPLAY_ACTIVE'`: a
+   * `__DEV__` replay controller is installed (CN-FIX5, closing amendment).
+   * `'TEST_LOOP_ACTIVE'`: a Test Loop is learning a track or saving one.
+   */
+  reason?: 'SESSION_ACTIVE' | 'DEV_REPLAY_ACTIVE' | 'TEST_LOOP_ACTIVE';
+}
+
+/**
+ * The in-memory half of {@link wipeDeviceUserData}, run BEFORE the disk wipe:
+ * the settings store rewrites its whole blob on every `update()`, so the VIN
+ * has to leave memory first. Any settings write queued before this lands
+ * ahead of the wipe's transaction and is scrubbed by it; every write after it
+ * carries no VIN. The generation bump makes a VIN read or a bindings read
+ * already in flight drop its result instead of restoring it.
+ */
+function forgetVehicleIdentityInMemory(): void {
+  deviceDataGeneration += 1;
+  vinDetectionState = 'idle';
+  cachedDetectedVin = null;
+  setVinAutoDetectNotice(null);
+  settingsStore.update(vehicleIdentityResetPatch(settingsStore.getSettings()));
+  vehicleProfileBindingsCache = [];
+  sessionVehicleSnapshots.clear();
+}
+
+/**
+ * Brings every in-memory copy of the learned circuits and the bindings back in
+ * line with the disk after the wipe. Resolves `false` when the learned
+ * circuits could not be re-read (the deleted geometry may then still be
+ * selectable) or the stored settings still carry the vehicle's identity:
+ * either way delete-all must not report success.
+ */
+async function resyncAfterDeviceWipe(): Promise<boolean> {
+  // Again, now the wipe has committed: a VIN or bindings read that finished
+  // while it ran may have put the old values back in memory.
+  forgetVehicleIdentityInMemory();
+  let learnedOk = true;
+  memoryLearnedCircuits = [];
+  if (learnedCircuitStore !== null) {
+    try {
+      await learnedCircuitStore.refresh();
+    } catch (error) {
+      console.warn('[composition] could not refresh learned circuits after delete-all', error);
+      learnedOk = false;
+    }
+  }
+  publishLearnedCircuits();
+  const selectedCircuitId = settingsStore.getSettings().selectedCircuitId;
+  if (circuitCatalog.get(selectedCircuitId) === null) {
+    const fallback = circuitCatalog.get(TMR_CIRCUIT_PROFILE.circuitId);
+    try {
+      if (fallback !== null) await unlockedApplySelection(fallback);
+    } catch (error) {
+      console.warn('[composition] could not fall back to the default circuit after delete-all', error);
+    }
+  }
+  await refreshVehicleProfileBindingsCache();
+  // The last word on the VIN: read back after every settings write queued so
+  // far, so a write that carried the old blob cannot hide behind the wipe.
+  let identityOk = true;
+  if (db !== null) {
+    try {
+      identityOk = (await countStoredVehicleIdentity(db)) === 0;
+    } catch (error) {
+      console.warn('[composition] could not verify the vehicle identity was deleted', error);
+      identityOk = false;
+    }
+  }
+  return learnedOk && identityOk;
+}
+
+/**
+ * Drops what an abandoned Test Loop adoption left behind: its in-memory
+ * ledger and its journal row. Only called once the sessions are gone -- the
+ * journal names a session and a circuit, and a retry must never resume onto a
+ * circuit this wipe deleted. Resolves `false` when the row could not be
+ * removed.
+ */
+async function forgetAbandonedAdoption(): Promise<boolean> {
+  adoptionProgress = null;
+  adoptionJournalId = null;
+  adoptionJournalOwned = null;
+  if (db === null) return true;
+  try {
+    await db.runAsync('DELETE FROM settings WHERE key = ?', [ADOPTION_JOURNAL_KEY]);
+    return true;
+  } catch (error) {
+    console.warn('[composition] could not clear the test-loop adoption journal', error);
+    return false;
+  }
+}
+
+export async function deleteAllStoredUserData(): Promise<AggregatedDeleteUserDataResult> {
+  // Lifecycle lock amendment (binding): delete-all wipes the very data the
+  // recovery/selection/rebuild operations read and write, so it runs as one
+  // section of the SAME lock they do -- never interleaved with a resume, a
+  // selection change, or a controller rebuild.
+  return lifecycleLock.run(unlockedDeleteAllStoredUserData);
+}
+
+async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDataResult> {
+  deviceWipeInProgress = true;
+  try {
+    return await runDeleteAllStoredUserData();
+  } finally {
+    deviceWipeInProgress = false;
+  }
+}
+
+async function runDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDataResult> {
+  const { repository: repo } = await ready();
+  // C fix (contracts.md's facade boundary amendment, binding, ticket
+  // CN-FIX4): durability. Two things had to change for "delete-all means
+  // deleted" to actually hold.
+  //
+  // 1. REFUSE while a session is genuinely mid-drive. A live controller goes
+  //    on writing checkpoints/laps/PBs by design, so a wipe underneath it
+  //    would be re-populated moments later -- and silently tearing the
+  //    driver's session down instead is not this action's job.
+  if (activeController !== null && MID_SESSION_STATES.has(currentControllerState(activeController))) {
+    return {
+      ok: false,
+      remainingSessionCount: 0,
+      referenceLapCleared: false,
+      failedCircuitIds: [],
+      reason: 'SESSION_ACTIVE',
+      errorText: 'a session is currently active -- end it before deleting all data',
+    };
+  }
+  // 1b. REFUSE while a `__DEV__` DevReplay controller is installed (CN-FIX5
+  //    item 3, closing amendment, binding). A replay controller sits in
+  //    `calibrating`/`calibrationReview`/`armed` -- none of them
+  //    `MID_SESSION_STATES` -- and step 2's rebuild deliberately no-ops
+  //    while it owns `facade`, so the wipe would leave a live controller
+  //    holding a session id that persists its session/checkpoint right back
+  //    over the deleted data. Durability wins over convenience on the dev
+  //    path: leave the replay, refuse the delete.
+  if (controller !== null && activeController !== controller) {
+    return {
+      ok: false,
+      remainingSessionCount: 0,
+      referenceLapCleared: false,
+      failedCircuitIds: [],
+      reason: 'DEV_REPLAY_ACTIVE',
+      errorText: 'a developer replay or mock session is active -- leave the Dev Replay screen before deleting all data',
+    };
+  }
+  // 1c. REFUSE while a Test Loop is learning or saving a track: a wipe
+  //    underneath would let the adoption store the circuit again, or resume
+  //    onto the fallback circuit's controller while writing the out-lap for
+  //    the one just deleted. Stopping the learn phase on the Test Loop screen
+  //    ends the first; the second finishes on its own.
+  const testLoopPhase = testLoopController.snapshot().phase;
+  if (testLoopPhase === 'learning' || testLoopPhase === 'adopting') {
+    return {
+      ok: false,
+      remainingSessionCount: 0,
+      referenceLapCleared: false,
+      failedCircuitIds: [],
+      reason: 'TEST_LOOP_ACTIVE',
+      errorText: 'a test loop is learning or saving a track -- stop it before deleting all data',
+    };
+  }
+  // 1d. Every other Test Loop phase is ABANDONED instead. `error` holds a
+  //    learned track waiting for a Retry that must not run onto a circuit
+  //    this wipe deletes; `learned` and `failed` still hold the traced
+  //    geometry and coordinates of where the driver drove. The learn phase is
+  //    torn down before step 2 rebuilds the controller, so the new controller
+  //    is never built on a provider that is about to stop.
+  if (testLoopPhase !== 'idle') {
+    testLoopController.reset();
+    teardownGeneration += 1;
+    await unlockedTearDownLearnPhase();
+    // Its learned track is gone, so its ledger can never be resumed. The
+    // journal row stays until the wipe succeeds: until then it is what lets
+    // the next launch repair the half-adopted state.
+    adoptionProgress = null;
+    adoptionJournalId = null;
+    adoptionJournalOwned = null;
+  }
+  // 2. Otherwise: drop any pending recovery and REPLACE the production
+  //    controller with a fresh, idle one BEFORE deleting anything. A
+  //    terminal (`sessionComplete`) controller still holds a `sessionId`
+  //    and a full lap set, so anything that later touches it --
+  //    `checkpointNow()` from a background transition, a straggler
+  //    `endSession()` persistence path -- would re-create rows this wipe
+  //    just removed. A fresh controller has no session identity at all, so
+  //    there is nothing left to re-persist. (`endSession()` itself is now
+  //    serialized on this same lock, so an in-flight one has already
+  //    completed by the time this section runs.)
+  setPendingRecovery(null);
+  setRecoveryNotice(null);
+  await unlockedRebuildProductionController();
+  // Multi-circuit selection addendum (ticket CN-W3): delete-all spans EVERY
+  // bundled circuit, not just the currently selected one -- `deleteUserData`
+  // itself is a single per-userId wipe (not circuit-scoped), so this loop's
+  // real job is the per-circuit VERIFY-EMPTY check; success requires every
+  // bundled circuit to come back empty.
+  //
+  // M3 fix (binding): each circuit's call is its own try/catch -- a REJECTED
+  // per-circuit `deleteAllUserData()` (e.g. a transient SQLite error) no
+  // longer aborts the loop; every remaining bundled circuit is still
+  // attempted, and the rejection is reflected in the aggregate `ok: false`
+  // plus `failedCircuitIds`/`errorText` instead of silently stopping partway
+  // through (previously leaving later circuits' data untouched with no
+  // indication why).
+  const perCircuitResults: DeleteUserDataResult[] = [];
+  const failedCircuitIds: string[] = [];
+  for (const summary of circuitCatalog.list()) {
+    try {
+      perCircuitResults.push(
+        await deleteAllUserData(repo, LOCAL_USER_ID, summary.circuitId, summary.layoutId, summary.layoutVersion),
+      );
+    } catch (error) {
+      console.warn(`[composition] deleteAllStoredUserData: circuit "${summary.circuitId}" failed`, error);
+      failedCircuitIds.push(summary.circuitId);
+    }
+  }
+  const perCircuitOk = failedCircuitIds.length === 0 && perCircuitResults.every((r) => r.ok);
+  const result: DeleteUserDataResult = {
+    ok: perCircuitOk,
+    remainingSessionCount: perCircuitResults.reduce((sum, r) => sum + r.remainingSessionCount, 0),
+    referenceLapCleared: perCircuitResults.length > 0 && perCircuitResults.every((r) => r.referenceLapCleared),
+  };
+  // F7 fix (WPT3, binding): `telemetry_samples` (Telemetry addendum) is a
+  // mobile-owned table (`persistence/telemetrySchema.ts`) that
+  // `@circuit/core`'s `deleteAllUserData`/`LocalSessionRepository.deleteUserData`
+  // (packages/core, out of this ticket's write set) has no knowledge of at
+  // all -- delete it here, in the SAME flow, and verify it actually landed
+  // empty before ever reporting success, so the UI's "All stored data
+  // deleted" banner is never shown while up to 200,000 rows/session remain.
+  //
+  // N4 fix (lifecycle lock amendment, binding, ticket CN-FIX3): this step is
+  // NO LONGER gated on the per-circuit aggregate. A rejected circuit delete
+  // used to suppress the telemetry DELETE + verify-empty entirely, leaving up
+  // to 200,000 rows/session on disk after the user asked for a full wipe. The
+  // telemetry step always runs; the aggregate `ok` is `circuitsOk &&
+  // telemetryOk`, and `errorText` names whichever half failed.
+  let telemetryOk = true;
+  if (db !== null) {
+    // N1-confirm residue fix (LEAD): a session's final telemetry flush can
+    // still be in flight when the user reaches delete-all -- await any
+    // in-progress shutdown first, then run DELETE + verify while HOLDING the
+    // shared write gate, so no straggler batch INSERT can land between (or
+    // after) them. `stopTelemetryRecording()` is an idempotent no-op when
+    // nothing is recording.
+    await stopTelemetryRecording();
+    const database = db;
+    try {
+      // P10B H5-B: expressed as a TRANSACTION rather than as a gate hold.
+      // The gated database now acquires the gate around every call made
+      // through it, so holding it here as well would deadlock -- and the
+      // DELETE + verify pair needs to be indivisible anyway, which is what
+      // `withTransactionAsync` (and only it) actually provides.
+      let remainingRows = 1;
+      await database.withTransactionAsync(async (tx) => {
+        await tx.runAsync('DELETE FROM telemetry_samples');
+        const remaining = await tx.getAllAsync<{ count: number }>(
+          'SELECT COUNT(*) AS count FROM telemetry_samples',
+        );
+        remainingRows = remaining[0]?.count ?? 0;
+      });
+      telemetryOk = remainingRows === 0;
+    } catch (error) {
+      // N4 (binding): symmetric with the per-circuit try/catch above -- a
+      // rejected telemetry delete/verify is reported as `ok: false` plus the
+      // fixed "telemetry" phrase in `errorText`, never as raw exception text
+      // and never as a rejection escaping into the UI's delete handler.
+      console.warn('[composition] deleteAllStoredUserData: telemetry deletion failed', error);
+      telemetryOk = false;
+    }
+  }
+  // HANDOFF release blocker: the VIN, the vehicle bindings and sweep
+  // records, and the learned circuits live outside every table the steps
+  // above touch. Always attempted, like the telemetry step; a learned circuit
+  // a surviving session still needs is kept and reported as remaining.
+  forgetVehicleIdentityInMemory();
+  let deviceDataOk = true;
+  if (db !== null) {
+    try {
+      const wipe = await wipeDeviceUserData(db);
+      deviceDataOk = wipe.ok;
+      if (!wipe.ok) {
+        console.warn('[composition] deleteAllStoredUserData: device data remained', wipe.remaining);
+      }
+    } catch (error) {
+      console.warn('[composition] deleteAllStoredUserData: device data deletion failed', error);
+      deviceDataOk = false;
+    }
+  }
+  if (!(await resyncAfterDeviceWipe())) deviceDataOk = false;
+  const sessionDataOk = result.ok && telemetryOk && deviceDataOk;
+  // Records ABOUT the sessions go only once the sessions themselves are gone:
+  // while one survives, its label and any adoption journal still describe it.
+  let sessionRecordsOk = true;
+  if (sessionDataOk && !(await forgetAbandonedAdoption())) sessionRecordsOk = false;
+  const finalResult: DeleteUserDataResult = { ...result, ok: sessionDataOk && sessionRecordsOk };
+  // M4 fix (binding): a leftover active-session pointer is meaningless once
+  // all stored data is gone -- cleared together, the SAME way session
+  // end/discard/vanished-checkpoint do (`setActiveSession(db, null)`).
+  if (finalResult.ok && db !== null) await setActiveSession(db, null);
+  // Ticket P7R E2: the unvalidated-matching log is a list of facts about
+  // sessions that no longer exist -- cleared with them, for the same reason
+  // the active-session pointer above is. A row that cannot be removed is
+  // reported: delete-all promises the records are gone, not that it tried.
+  if (finalResult.ok) {
+    unvalidatedMatchingSessionIds = new Set();
+    if (db !== null && !(await clearUnvalidatedMatchingSessionIds(db))) {
+      console.warn('[composition] could not clear the unvalidated-matching log');
+      sessionRecordsOk = false;
+      finalResult.ok = false;
+    }
+  }
+  if (sessionDataOk && historyStore !== null) await historyStore.refresh();
+
+  const errorText = finalResult.ok
+    ? null
+    : [
+        failedCircuitIds.length > 0 ? `circuits rejected: ${failedCircuitIds.join(', ')}` : null,
+        !perCircuitOk && failedCircuitIds.length === 0 ? 'one or more circuits did not verify empty' : null,
+        !telemetryOk ? 'telemetry rows remained or could not be deleted' : null,
+        !deviceDataOk ? 'vehicle or learned-circuit data remained or could not be deleted' : null,
+        !sessionRecordsOk ? 'session records remained or could not be deleted' : null,
+      ]
+        .filter((part): part is string => part !== null)
+        .join('; ') || 'delete-all failed';
+
+  return { ...finalResult, failedCircuitIds, errorText };
+}
+
+// ---------------------------------------------------------------------------
+// DevReplayScreen support (MUST DO #6, __DEV__ only).
+//
+// F4 fix (C6 residue): `startDevReplaySession` / `restoreProductionFacade` /
+// `useMockFacadeForDevReplay` all mutate the SAME shared state
+// (`replayController`/`activeController`/`facadeWrapper`'s inner) but
+// previously ran independently -- a rapid start/restore/start "storm"
+ * `Promise.race` itself attaches a handler to every promise it is given, so
+ * it can never surface as an unhandled rejection, and this function has
+ * already returned by then.
+ */
+export async function maybeDetectVehicleFromVin(): Promise<string | null> {
+  if (deviceWipeInProgress) return null; // not marked done: the next trigger after delete-all reads again.
+  if (vinDetectionState !== 'idle') return cachedDetectedVin;
+  const settings = settingsStore.getSettings();
+  // Q1 (binding): ENET only -- the ELM327 session has no mode-09 support.
+  if (settings.adapterType !== 'enet') return null;
+  if (settings.enetHost.trim() === '') return null; // nothing configured to connect to.
+  if (sharedEnetAdapterReservation.holder() !== null) return null; // never steals a running flow's adapter.
+  const token = sharedEnetAdapterReservation.tryAcquire('signalFinder');
+  if (token === null) return null; // lost the race to acquire -- another trigger point retries later.
+
+  vinDetectionState = 'attempting';
+  const generation = deviceDataGeneration;
+  const transport = new EnetTcpTransport({ host: settings.enetHost, port: settings.enetPort });
+  let vin: string | null = null;
+  try {
+    const attempt = (async (): Promise<string | null> => {
+      await transport.connect();
+      const channel = createRawUdsChannel(transport, settings.enetTesterAddress, VIN_READ_ECU);
+      return readVinFromChannel(channel);
+    })();
+    const timedOut = new Promise<'timeout'>((resolve) => {
+      setTimeout(() => resolve('timeout'), VIN_READ_OVERALL_TIMEOUT_MS);
+    });
+    const raced = await Promise.race([attempt, timedOut]);
+    vin = raced === 'timeout' ? null : raced;
+  } catch (error) {
+    console.warn('[composition] the one-shot VIN read failed', error);
+    vin = null;
+  } finally {
+    await transport.close().catch(() => undefined);
+    sharedEnetAdapterReservation.release(token);
+  }
+
+  // Delete-all ran (or is running) while this read was in flight: it has
+  // already put detection back to 'idle', so the next connection reads again.
+  if (generation !== deviceDataGeneration || deviceWipeInProgress) return null;
+  vinDetectionState = 'done';
+  cachedDetectedVin = vin;
+  if (vin !== null) {
+    // Q2 (binding): logged so a pattern can be added LATER from the real
+    // car -- never invented here. R4 fix (binding, LOW): MASKED -- a VIN is
+    // personal data, and the full value is never written to a log line; the
+    // driver reads it in full only on the Signal Finder screen / `lastSeenVin`.
+    console.info(`[composition] VIN detected: ${maskVin(vin)}`);
+    settingsStore.update({ lastSeenVin: vin });
+    applyVinAutoSelect(vin);
+  }
+  return vin;
+}
+
+const baseTelemetryProvider: TelemetryProvider = createTelemetryProvider({
+  settingsStore,
+  monotonicNow: () => telemetryClock.now(),
+  isDev: telemetryIsDev,
+  readVehicleProfileBindings: () => vehicleProfileBindingsCache,
+});
+
+/**
+ * Thin wrapper, not a second implementation: every method delegates straight
+ * to {@link baseTelemetryProvider}, EXCEPT `start()`, which also fires a
+ * defensive cache refresh (fire-and-forget -- see (c) above) before
+ * delegating. Both of this app's `start()` call sites --
+ * `startTelemetryRecording()` below and `TelemetryScreen.tsx`'s manual
+ * monitor -- go through this SAME exported singleton, so neither needs its
+ * own refresh call.
+ */
+export const telemetryProvider: TelemetryProvider = {
+  ...baseTelemetryProvider,
+  start(): void {
+    void refreshVehicleProfileBindingsCache();
+    baseTelemetryProvider.start();
+    // Ticket P4q (binding): one of this app's two VIN-detection trigger
+    // points ("when ... telemetry connects") -- fire-and-forget, and called
+    // AFTER `baseTelemetryProvider.start()` on purpose: that call may itself
+    // synchronously acquire the SAME shared reservation (owner `'provider'`)
+    // before yielding, and this must never race it for the claim -- "never
+    // blocks or steals the adapter from a running flow". `holder()` is
+    // therefore whatever telemetry's own start just left it as; a no-op
+    // (skipped, not marked done, so a LATER trigger still gets its own
+    // chance) whenever that reservation is held.
+    void maybeDetectVehicleFromVin();
+  },
+};
+
+// ---------------------------------------------------------------------------
+// G-force telemetry (Telemetry addendum â€” channel revision, binding):
+// `gforceProvider.ts`'s own module doc comment covers its math/portrait-mount
+// assumption/unit handling in full. SAME `telemetryClock` as the OBD
+// `telemetryProvider` above, so every telemetry channel (OBD + accelerometer)
+// shares one time base. Session-scoped, started/stopped alongside the OBD
+// provider by `startTelemetryRecording()`/`stopTelemetryRecording()` below --
+
+exec
+"C:\\Users\\dobri\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe" -Command '$s=Get-Content apps/mobile/src/session/composition.ts; $s[1919..1987]; $s[2390..2497]; $s[2685..2940]; $s=Get-Content apps/mobile/src/ui/screens/SettingsScreen.tsx; $s[315..365]; $s[445..500]; Get-Content apps/mobile/src/ui/screens/TestLoopScreen.tsx; rg -n '"'reset\\(|retry|pendingCircuit|lastQualified|qualifiedStart' apps/mobile/src/session/testLoopController.ts; Get-Content apps/mobile/src/session/lifecycleLock.ts" in D:\CODE\APLICTIE_Circuit
+ succeeded in 80ms:
+  // before the controller it was recording alongside is disposed -- in the
+  // normal flow `onSessionEnded` (above) already did this; this guards the
+  // 'error' terminal-state path, which does not run through `endSession()`.
+  // Awaited (F2 fix) so the final flush actually lands before disposal
+  // proceeds, instead of racing ahead of it.
+  //
+  // P5d-FIX1 H1: skipped during a Test Loop handover. Nothing is recording
+  // through a `TelemetryRecorder` at that moment (the learn phase BUFFERS,
+  // and the recorder is created a few lines later, for the session this
+  // rebuild is installing), so the only thing this call would do is stop the
+  // OBD provider that is mid-stream -- a blink in the very continuity this
+  // rebuild exists to preserve.
+  if (!testLoopHandoverActive) await stopTelemetryRecording();
+  await staleController.dispose();
+  staleFacade?.dispose();
+  installProductionController();
+  // CN-FIX6 (contracts.md's "Multi-circuit selection â€” provider ownership
+  // amendment", binding, user finding): THIS layer owns the GNSS provider
+  // singleton, so the provider is stopped here, after the fresh controller
+  // is installed.
+  //
+  // Why it is needed: `SessionController.dispose()` stops only a provider
+  // the disposed controller itself had running (`providerRunning`), and a
+  // `start()` aborted by disposal deliberately never stops a possibly-shared
+  // provider (CN-FIX5 item 2 -- core cannot know who owns it). Both are
+  // right core-side, and both can leave the OS watcher running with no
+  // session behind it: a lit location indicator and a battery drain the user
+  // can see, which is exactly the residual this closes.
+  //
+  // Why it is safe: the controller just installed is idle BY CONSTRUCTION
+  // (nothing has started it), the previous controller's pending `start()` --
+  // if any -- is serialized by the provider ahead of this stop, and every
+  // command that starts a session is itself a locked section queued BEHIND
+  // this one, so it restarts the provider through `ensureProviderRunning()`
+  // as usual. Idempotent: stopping an already-stopped provider is a no-op.
+  //
+  // Failure is logged, never thrown: a provider that cannot be stopped (a
+  // revoked permission, an OS hiccup) must not fail the selection/recovery/
+  // delete-all operation that drove this rebuild.
+  try {
+    // P5d-FIX1 H1 (binding, Codex P5d-REV1 HIGH 1): the ONE exception to the
+    // ownership stop. While a Test Loop is being learned or handed over, the
+    // watcher is NOT session-less -- the learn phase owns it, its fixes are
+    // being recorded, and the session about to start on the just-learned
+    // circuit is what this very rebuild exists to install. Stopping it here
+    // would blind the recording for the length of the rebuild, which is
+    // exactly the gap this fix wave removed. Everything the amendment guards
+    // against (a lit indicator with nothing behind it) still holds: the
+    // Test Loop path stops the provider itself when a learn phase ends
+    // without a track (`stopTestLoop`), and the session's own end still runs
+    // the ordinary teardown.
+    if (!testLoopHandoverActive) await gnssProvider?.stop();
+  } catch (error) {
+    console.warn('[composition] stopping the GNSS provider after a controller rebuild failed', error);
+  }
+}
+
+/**
+ * F3 fix: `coachingConfig()` is baked into a `SessionController` for its own
+ * whole lifetime (`SessionControllerDeps.coaching`'s own doc comment) --
+ * previously, flipping the coaching toggle before the first session (or
+ * while idle between sessions) had NO effect until some UNRELATED
+ * terminal-state rebuild happened to fire later; the UI showed a fresh
+ * coaching slot immediately, but it stayed empty. Rebuild immediately
+ * provider reference, so a rebuild AFTER the handover cleans up normally.
+ */
+let testLoopHandoverActive = false;
+/**
+ * P5d-FIX2 N2: which adoption steps have already happened, so a retry resumes
+ * instead of repeating them. Cleared when the adoption completes.
+ */
+interface AdoptionProgress {
+  circuitId: string;
+  storedProfile?: CircuitProfile;
+  selected?: boolean;
+  sessionId?: string;
+  recordingStarted?: boolean;
+  outLapSaved?: boolean;
+}
+let adoptionProgress: AdoptionProgress | null = null;
+/** P5d-FIX3 F11: bumped by every new learn phase, so a teardown queued for an older one is a no-op. */
+let teardownGeneration = 0;
+/** The teardown currently running -- a second caller awaits this one instead of starting another. */
+let teardownInFlight: Promise<void> | null = null;
+/** OBD/IMU samples recorded during the learn phase, before a session id exists to tag them with. */
+let testLoopTelemetryBuffer: TelemetrySample[] = [];
+let unsubscribeTestLoopTelemetry: (() => void) | null = null;
+let unsubscribeTestLoopGForce: (() => void) | null = null;
+/** Whether the learn phase holds its own G-force reference (released when the session takes its own). */
+let testLoopHoldsGForce = false;
+/** Bound on the learn-phase telemetry backlog -- an hour of 10 Hz channels. */
+const MAX_TEST_LOOP_TELEMETRY_SAMPLES = 360_000;
+let testLoopTelemetryDropped = 0;
+
+/** Republishes the catalog's learned registry from the store (plus any memory-only entries). */
+function publishLearnedCircuits(): void {
+  const stored: LearnedCatalogEntry[] =
+    learnedCircuitStore === null
+      ? []
+      : learnedCircuitStore.entries().map((entry) => ({
+          circuit: { profile: entry.profile, runtime: entry.runtime, corners: entry.corners },
+          listed: entry.record.saved,
+        }));
+  setLearnedCircuits([...stored, ...memoryLearnedCircuits]);
+}
+
+/**
+ * The learn phase's state machine. Created once at module load: it holds no
+ * database and no provider, so it is safe to exist before bootstrap.
+ *
+ * `makeCircuitId` is a UUID (P5d-FIX1 item 10) -- learned circuits are keyed
+ * by it in the database, and a timestamp-plus-random id invites exactly the
+ * collision that an `INSERT OR REPLACE` would silently resolve by destroying
+ * somebody's saved circuit.
+ */
+const testLoopController = new TestLoopController({
+  nowUtc: () => new Date().toISOString(),
+  makeCircuitId: () => `learned-${newLearnedCircuitId()}`,
+  makeDisplayName: (createdAtUtc) =>
+    defaultLearnedCircuitName(settingsStore.getSettings().language, createdAtUtc),
+  onLearned: (circuit) => adoptLearnedCircuit(circuit),
+});
+
+/** RFC-4122 v4 where the runtime offers one, and a random-hex fallback where it does not. */
+function newLearnedCircuitId(): string {
+  const cryptoApi = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (typeof cryptoApi?.randomUUID === 'function') return cryptoApi.randomUUID();
+  const hex = (length: number): string =>
+    Array.from({ length }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+  return `${hex(8)}-${hex(4)}-4${hex(3)}-a${hex(3)}-${hex(12)}`;
+}
+
+/**
+ * P5d-FIX2 N6 (Codex P5d-REV2): a learn phase that gives up on its own -- the
+ * sample cap, most of all -- must not leave the GNSS watcher and the channel
+ * buffers running behind a screen that now says it failed. The teardown is the
+ * same one `stopTestLoop()` performs, and it is idempotent, so the two paths
+ * cannot fight.
+ */
+testLoopController.subscribe((snapshot) => {
+  if (snapshot.phase !== 'failed') return;
+  if (testLoopProvider === null && !testLoopHoldsGForce) return;
+  void tearDownLearnPhase().catch((error) => {
+    console.warn('[composition] tearing down a failed learn phase failed', error);
+  });
+});
+
+/**
+ * The ONE teardown of a learn phase (P5d-FIX3 F11, Codex P5d-REV3): detach the
+ * learn-phase recording, release its holds, stop the buffering provider.
+ *
+ * Memoized and generation-guarded, and it takes `lifecycleLock` itself. Two
+ * paths reach it for the same failure -- `stopTestLoop()` and the auto-teardown
+ * subscription that the failed phase fires -- and before this they could both
+ * be shutting the GLOBAL providers down at once. Now the second caller awaits
+ * the first, and a teardown queued behind a learn phase that has meanwhile
+ * been restarted does nothing at all (the generation moved on).
+ */
+function tearDownLearnPhase(): Promise<void> {
+  if (teardownInFlight !== null) return teardownInFlight;
+  const generation = teardownGeneration;
+  const run = lifecycleLock
+    .run(async () => {
+      if (generation !== teardownGeneration) return;
+      await unlockedTearDownLearnPhase();
+    })
+    .finally(() => {
+      if (teardownInFlight === run) teardownInFlight = null;
+    });
+  teardownInFlight = run;
+  return run;
+}
+    telemetryProvider.start();
+  } catch (error) {
+    console.warn('[composition] telemetryProvider.start() threw synchronously (test loop)', error);
+  }
+  if (!testLoopHoldsGForce) {
+    acquireGForce();
+    testLoopHoldsGForce = true;
+  }
+}
+
+/** Detaches the learn-phase buffers. The providers themselves keep running -- the session owns them now. */
+function detachTestLoopRecording(): void {
+  unsubscribeTestLoopTelemetry?.();
+  unsubscribeTestLoopTelemetry = null;
+  unsubscribeTestLoopGForce?.();
+  unsubscribeTestLoopGForce = null;
+}
+
+/** Releases the learn phase's own G-force hold (the session takes its own in `startTelemetryRecording`). */
+async function releaseTestLoopGForce(): Promise<void> {
+  if (!testLoopHoldsGForce) return;
+  testLoopHoldsGForce = false;
+  try {
+    await releaseGForce();
+  } catch (error) {
+    console.warn('[composition] releasing the test-loop G-force hold failed', error);
+  }
+}
+
+/**
+ * Begins a learn phase: starts the GNSS provider through the buffering
+ * wrapper, starts the OBD/IMU recording, and feeds every fix to
+ * `TestLoopController`. Refuses while a session is live -- learning a track
+ * and timing laps are two different uses of the same provider.
+ */
+export async function startTestLoop(): Promise<
+  { ok: true } | { ok: false; reason: 'not-ready' | 'session-active' }
+> {
+  await ready();
+  return lifecycleLock.run(async () => {
+    if (gnssProvider === null) return { ok: false as const, reason: 'not-ready' as const };
+    if (controller !== null && sessionIsActive(currentControllerState(controller))) {
+      return { ok: false as const, reason: 'session-active' as const };
+    }
+    await disposeTestLoopProvider();
+    // A fresh learn phase: any teardown still queued for the previous one must
+    // not reach in and stop the providers this one is about to use.
+    teardownGeneration += 1;
+    const provider = new TestLoopLocationProvider(gnssProvider, (sample) =>
+      testLoopController.feed(sample),
+    );
+    testLoopProvider = provider;
+    testLoopController.start();
+    await provider.start();
+    startTestLoopRecording();
+    return { ok: true as const };
+  });
+}
+
+/**
+ * Ends a learn phase that never closed a loop. A loop that WAS learned is
+ * already a running session by the time this can be called, and is ended
+ * through the ordinary `facade.endSession()` instead.
+ */
+export async function stopTestLoop(): Promise<TestLoopSnapshot> {
+  const snapshot = testLoopController.stop();
+  if (snapshot.phase !== 'learned' && snapshot.phase !== 'adopting') {
+    await tearDownLearnPhase();
+  }
+  return snapshot;
+}
+
+/** Leaves Test Loop mode entirely (screen dismissed without a learned track). */
+export async function resetTestLoop(): Promise<void> {
+  await stopTestLoop();
+  testLoopController.reset();
+}
+
+/** P5d-FIX1 H3: retries a handover that failed, on the SAME learned geometry. */
+export function retryTestLoopAdoption(): void {
+  testLoopController.retryAdopt();
+}
+
+/** Stops and clears the buffering provider, handing the GNSS watcher back to the plain singleton. */
+async function disposeTestLoopProvider(): Promise<void> {
+  const provider = testLoopProvider;
+  testLoopProvider = null;
+  testLoopHandoverActive = false;
+  if (provider === null) return;
+  try {
+    await provider.stop();
+  } catch (error) {
+    console.warn('[composition] stopping the test-loop provider failed', error);
+  }
+}
+
+/**
+ * The moment lap 1 closes (P5d-FIX1 H1 + H3). Everything below is ONE
+ * `lifecycleLock` section, and every step is awaited: the driver is only told
+ * the track was learned once it is genuinely persisted, registered, selected
+ * and being timed. A throw anywhere here surfaces as the controller's `error`
+ * phase, with a retry -- never as a session quietly running on the previously
+ * selected circuit.
+ */
+async function adoptLearnedCircuit(circuit: TestLoopCircuit): Promise<void> {
+  const provider = testLoopProvider;
+  // From here on the learner is done, but every fix still arrives and is
+  // still kept -- the controller receives them after it is armed, in order.
+  testLoopHandoverActive = true;
+  provider?.beginHandover();
+  // P5d-FIX2 N7: the out-lap trace is the QUALIFIED lap the geometry was built
+  // from, not everything the buffer happens to hold by now.
+  const learningSamples = circuit.lapSamples;
+
+  await lifecycleLock.run(async () => {
+    // P5d-FIX2 N2 (Codex P5d-REV2 HIGH 2): every step below is recorded in a
+    // ledger, and every step is skipped when the ledger says it already
+    // happened. A retry after a failure half-way through therefore RESUMES --
+    // it never inserts a second circuit, starts a second session, or writes
+    // the out-lap trace twice.
+    const ledger = (adoptionProgress ??= { circuitId: circuit.profile.circuitId });
+    // P5d-FIX3 F10: the journal is on disk BEFORE the first side effect, so a
+    // kill at any point below leaves a state the next launch can finish or undo.
+    await stageAdoptionJournal({ circuitId: ledger.circuitId, stage: 'staged' });
+
+    // 1. Keep it. A learned circuit that cannot be stored cannot be analysed
+    //    after a restart, so this failing is a real failure, not a warning.
+    if (ledger.storedProfile === undefined) {
+      if (learnedCircuitStore !== null) {
+        const stored = await putLearnedCircuitWithFreshId(circuit);
+        ledger.storedProfile = stored.profile;
+      } else {
+        // Web dev preview: no database, so the learned circuit lives for this
+        // process only. It is still a real circuit while it lasts.
+        const profile = circuit.profile;
+        memoryLearnedCircuits = [
+          ...memoryLearnedCircuits.filter(
+            (entry) => entry.circuit.profile.circuitId !== profile.circuitId,
+          ),
+          {
+            circuit: { profile, runtime: circuit.runtime, corners: circuit.corners },
+            // Ticket D3: listed from the moment it is adopted, exactly like
+            // the stored path below.
+            listed: true,
+          },
+        ];
+        ledger.storedProfile = profile;
+      }
+      publishLearnedCircuits();
+      await stageAdoptionJournal({ circuitId: ledger.storedProfile.circuitId, stage: 'stored' });
+    }
+    const profile = ledger.storedProfile;
+
+    // 2. Select it, and rebuild the production controller for it. Both go
+    //    through the SAME unlocked routine `selectCircuit()` uses -- this
+    //    section already holds the lock, so the public wrapper would deadlock.
+    if (!ledger.selected) {
+      const entry = circuitCatalog.get(profile.circuitId);
+      if (entry === null) {
+        throw new Error(`the learned circuit ${profile.circuitId} could not be registered`);
+      }
+      await unlockedApplySelection(entry);
+      if (productionControllerCircuitId !== profile.circuitId) {
+        await unlockedRebuildProductionController();
+      }
+      ledger.selected = true;
+      await stageAdoptionJournal({ circuitId: profile.circuitId, stage: 'selected' });
+    }
+    const ctrl = controller;
+    if (ctrl === null) throw new Error('no production controller to run the learned circuit on');
+
+    // 3. Start the session on it and arm it. `start('session')` deliberately
+    //    skips calibration (the same path `resumeRecovery()` uses): the
+    //    geometry came from this driver, on this road, minutes ago -- there is
+    //    nothing a recognition lap could add to it.
+    if (ledger.sessionId === undefined) {
+      await ctrl.start('session');
+      ctrl.arm();
+      const startedSessionId = ctrl.diagnostics().sessionId;
+      if (startedSessionId === null) throw new Error('the learned-circuit session did not start');
+      ledger.sessionId = startedSessionId;
+      await stageAdoptionJournal({
+        circuitId: profile.circuitId,
+        stage: 'session-started',
+        sessionId: startedSessionId,
+      });
+    }
+    const sessionId = ledger.sessionId;
+
+    // 4. The recording pipeline the learn phase was already running now
+    //    belongs to a session: same hooks a normal start goes through.
+    //
+    //    P5d-FIX2 N3: the learn-phase subscriptions are detached in the SAME
+    //    synchronous step that attaches the session's recorder -- no await
+    //    between them, so no sample can ever reach both and be written twice.
+    if (!ledger.recordingStarted) {
+      detachTestLoopRecording();
+      startTelemetryRecording(sessionId);
+      const startedAtUtc = new Date().toISOString();
+      initializeSessionStage(sessionId, startedAtUtc);
+      ledger.recordingStarted = true;
+      if (db !== null) {
+        await setActiveSession(db, { sessionId, circuitId: profile.circuitId, startedAtUtc });
+      }
+      await flushTestLoopTelemetry();
+      await releaseTestLoopGForce();
+      await stageAdoptionJournal({ circuitId: profile.circuitId, stage: 'recording', sessionId });
+    }
+
+    // 5. The learning lap is STORED as the session's out-lap trace (lap 0),
+    //    so the drive that defined the track is not lost.
+    if (!ledger.outLapSaved) {
+      if (learningSamples.length > 0 && repository !== null) {
+        await repository.saveTelemetry(sessionId, 0, learningSamples);
+      }
+      ledger.outLapSaved = true;
+      await stageAdoptionJournal({ circuitId: profile.circuitId, stage: 'out-lap', sessionId });
+    }
+
+    // 6. Finally, hand the whole backlog to the controller in order -- the
+    //    learning lap first, then every fix that arrived while this ran. From
+    //    the next fix onwards the session is simply live.
+    provider?.flushBuffered();
+    // P5d-FIX2 N5: the handover is over. The module lets go of the buffering
+    // provider (the running controller keeps its own reference) so every later
+    // rebuild takes the ORDINARY provider-cleanup path again.
+    testLoopProvider = null;
+    testLoopHandoverActive = false;
+    adoptionProgress = null;
+    // The adoption is complete: nothing is left for a later launch to repair.
+    await clearOwnAdoptionJournal();
+  });
+}
+
+/**
+ * P5d-FIX1 item 10: a plain INSERT, with a fresh id on the (vanishingly
+ * unlikely) collision, instead of an INSERT OR REPLACE that would silently
+ * overwrite an existing learned circuit -- along with the sessions recorded
+ * on it.
+ *
+ * Ticket D3 (flow review F4) -- A CIRCUIT THE DRIVER HAS ACTUALLY DRIVEN
+ * MUST NOT BE ABLE TO VANISH. This used to store `saved: false`, which
+ * `publishLearnedCircuits` maps to `listed: false` and `circuitCatalog.list()`
+ * filters out. The only control that could ever flip it was the name field
+ * on `TestLoopScreen`, rendered only while the in-memory learn phase is still
+ * `'learned'` -- so a driver who tapped "Open dashboard" (the primary action,
+ * ABOVE that field), drove, and later selected another circuit lost the
+ * circuit, and with it every session, personal best, analysis and export
+ * recorded against it. The data stayed on disk and became unreachable.
+ *
+ * It is therefore stored as a listed circuit immediately, under the automatic
+ * name `TestLoopController.makeDisplayName` already gives it
+ * (`defaultLearnedCircuitName`, RO/EN, dated). Naming it is now a RENAME of a
+ * circuit that is already in the list (`saveLearnedCircuit`), which is a
+ * convenience rather than the only thing standing between the driver and
+ * losing their laps.
+      lastCommittedEnetTargetAddress.current = parsed;
+      settingsStore.update({ enetTargetAddress: parsed });
+      setEnetTargetAddressDraft(formatHexByte(parsed));
+    } else {
+      setEnetTargetAddressDraft(formatHexByte(lastCommittedEnetTargetAddress.current));
+    }
+  }
+
+  // Channel-specs JSON: same "invalid text stays in place, inline error below
+  // the field" pattern as `transOilPidDraft` above -- a syntactically valid
+  // draft is committed as-is (verbatim, not re-serialized) even when
+  // `validateEnetChannelSpecsJson` reports per-entry warnings (those are
+  // shown too, but never block the commit -- matching `validateEnetChannelSpecs`'s
+  // own "drop bad entries, don't reject the whole list" model).
+  const [enetChannelSpecsDraft, setEnetChannelSpecsDraft] = React.useState(settings.enetChannelSpecsJson);
+  const lastCommittedEnetChannelSpecs = React.useRef(settings.enetChannelSpecsJson);
+  const [enetChannelSpecsError, setEnetChannelSpecsError] = React.useState<string | null>(null);
+  const [enetChannelSpecsWarnings, setEnetChannelSpecsWarnings] = React.useState<readonly string[]>([]);
+  React.useEffect(() => {
+    if (settings.enetChannelSpecsJson !== lastCommittedEnetChannelSpecs.current) {
+      lastCommittedEnetChannelSpecs.current = settings.enetChannelSpecsJson;
+      setEnetChannelSpecsDraft(settings.enetChannelSpecsJson);
+    }
+  }, [settings.enetChannelSpecsJson]);
+
+  function commitEnetChannelSpecsDraft(): void {
+    const result = validateEnetChannelSpecsJson(enetChannelSpecsDraft);
+    if (result.ok) {
+      lastCommittedEnetChannelSpecs.current = enetChannelSpecsDraft;
+      settingsStore.update({ enetChannelSpecsJson: enetChannelSpecsDraft });
+      setEnetChannelSpecsError(null);
+      setEnetChannelSpecsWarnings(result.warnings);
+    } else {
+      setEnetChannelSpecsError(result.error);
+      setEnetChannelSpecsWarnings([]);
+    }
+  }
+
+  // ENET auto-discovery addendum (binding, Phase 4f): "Find adapter" --
+  // acquires the shared reservation under the 'discovery' owner (refused
+  // while the provider/probe hold it, same single-client rule as everything
+  // else that touches the adapter), runs `runDiscovery` against a REAL probe
+  // factory, and lets the user apply one result with a tap. `discoveryAbort`
+  // is a plain mutable object (not a real `AbortController` -- `runDiscovery`
+  // only ever reads `.aborted`) so the Cancel button can bound an in-flight
+  // run early.
+  const [discoveryRunning, setDiscoveryRunning] = React.useState(false);
+  const [discoveryResults, setDiscoveryResults] = React.useState<readonly DiscoveryProbeResult[] | null>(null);
+  const [discoveryError, setDiscoveryError] = React.useState<string | null>(null);
+  const discoveryAbortRef = React.useRef<{ aborted: boolean } | null>(null);
+  const discoveryTokenRef = React.useRef<ReturnType<typeof enetAdapterReservation.tryAcquire>>(null);
+  const activeBinPreset =
+    Object.entries(COVERAGE_BIN_PRESETS).find(
+      ([, thresholds]) => thresholds.length === settings.coverageBins.thresholds.length,
+    )?.[0] ?? '4 bins';
+
+  const sessionCount = sessionHistoryStore.listSessions().length;
+  const sessionActive = ACTIVE_SESSION_STATES.has(facadeState.sessionState);
+  const sessionCountLabel = `${sessionCount} stored session${sessionCount === 1 ? '' : 's'}`;
+
+  function startDeleteConfirm(): void {
+    setDeleteBanner(null);
+    setConfirmingDelete(true);
+  }
+
+  function cancelDeleteConfirm(): void {
+    setConfirmingDelete(false);
+  }
+
+  async function confirmDelete(): Promise<void> {
+    setDeleting(true);
+    try {
+      const result = await deleteAllStoredUserData();
+      // An uncommitted channel draft can hold VIN-bearing provenance and is
+      // not in the settings store, so delete-all cannot reach it from there.
+      const channelSpecs = settingsStore.getSettings().enetChannelSpecsJson;
+      lastCommittedEnetChannelSpecs.current = channelSpecs;
+      setEnetChannelSpecsDraft(channelSpecs);
+      setEnetChannelSpecsError(null);
+      setEnetChannelSpecsWarnings([]);
+      setDeleteBanner(result.ok ? 'success' : 'error');
+      setDeleteErrorText(result.ok ? null : result.errorText);
+      setDeleteRefused(!result.ok && result.reason !== undefined);
+    } catch {
+      setDeleteBanner('error');
+      setDeleteErrorText(null);
+      setDeleteRefused(false);
+    } finally {
+      setDeleting(false);
+      setConfirmingDelete(false);
+    }
+  }
+
+  return (
+    <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
+      <ScrollView contentContainerStyle={styles.container}>
+        <Text style={styles.title} maxFontSizeMultiplier={1.3}>
+          Settings
+        </Text>
+
+        {/* Ticket P4l-FIX1 F2 (binding): the app language. Defaulted from the
+            device locale at first hydration (`sqlSettingsStore.ts`); this row
+            is where the user overrides it. Drives the Signal Finder's
+            exportable RO/EN summary today. */}
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel} maxFontSizeMultiplier={1.3}>
+            LANGUAGE
+import React, { useEffect, useState } from 'react';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import type { NativeStackScreenProps } from '@react-navigation/native-stack';
+import type { RootStackParamList } from '../navigation/types';
+import { colors, fontFamily, radii, spacing, typography } from '../theme';
+import {
+  resetTestLoop,
+  retryTestLoopAdoption,
+  saveLearnedCircuit,
+  settingsStore,
+  startTestLoop,
+  stopTestLoop,
+  subscribeTestLoop,
+  testLoopSnapshot,
+} from '../../session/composition';
+import type { TestLoopSnapshot } from '../../session/testLoopController';
+import { useSettings } from '../hooks/useSettings';
+import { resolveTestLoopStrings } from './testLoopStrings';
+
+type Props = NativeStackScreenProps<RootStackParamList, 'TestLoop'>;
+
+/**
+ * Ticket P5d T2/T6 -- Test Loop mode, reached from the circuit selection
+ * screen (NOT from a developer section: learning a track is how an
+ * unregistered circuit becomes usable, which is a product feature).
+ *
+ * The screen is a thin renderer over `TestLoopController`'s snapshot: it
+ * starts and stops the learn phase, shows what has been driven so far, shows
+ * the banner when lap 1 closes, offers to save the track as a reusable
+ * circuit, and hands over to the ordinary session flow. Every sentence it
+ * shows comes from `testLoopStrings.ts`.
+ */
+export function TestLoopScreen({ navigation }: Props): React.JSX.Element {
+  const settings = useSettings(settingsStore);
+  const strings = resolveTestLoopStrings(settings.language);
+  const [snapshot, setSnapshot] = useState<TestLoopSnapshot>(() => testLoopSnapshot());
+  const [busy, setBusy] = useState(false);
+  const [name, setName] = useState('');
+  const [notice, setNotice] = useState<string | null>(null);
+
+  useEffect(() => subscribeTestLoop(setSnapshot), []);
+
+  /**
+   * Ticket D3 (second one-liner): `resetTestLoop()` had no callers anywhere in
+   * the repo, so `TestLoopController`'s terminal snapshot outlived the screen
+   * -- re-entering Test Loop after a learn phase that gave up showed the
+   * failure card from the PREVIOUS attempt, as though this visit had already
+   * failed before the driver pressed anything.
+   *
+   * Cleared on mount, and ONLY for `'failed'`: `'error'` is an adoption that
+   * failed with geometry still in hand and a Retry that must survive
+   * (`retryTestLoopAdoption`), `'learning'`/`'adopting'` are live, and
+   * `'learned'` is a running session this screen is still the face of.
+   */
+  useEffect(() => {
+    if (testLoopSnapshot().phase !== 'failed') return;
+    void resetTestLoop().catch((error: unknown) => {
+      console.warn('[TestLoopScreen] clearing the previous learn phase failed', error);
+    });
+  }, []);
+
+  const onStart = (): void => {
+    setNotice(null);
+    setBusy(true);
+    void (async () => {
+      try {
+        const result = await startTestLoop();
+        if (!result.ok) {
+          setNotice(result.reason === 'session-active' ? strings.sessionActive : strings.notReady);
+        }
+      } finally {
+        setBusy(false);
+      }
+    })();
+  };
+
+  const onStop = (): void => {
+    setBusy(true);
+    void (async () => {
+      try {
+        await stopTestLoop();
+      } finally {
+        setBusy(false);
+      }
+    })();
+  };
+
+  const onSave = (): void => {
+    const learned = snapshot.learned;
+    if (learned === null) return;
+    if (name.trim().length === 0) {
+      setNotice(strings.saveEmptyName);
+      return;
+    }
+    setBusy(true);
+    void (async () => {
+      try {
+        const result = await saveLearnedCircuit(learned.circuitId, name.trim());
+        setNotice(result.ok ? strings.saved(name.trim()) : strings.saveFailed);
+      } finally {
+        setBusy(false);
+      }
+    })();
+  };
+
+  const metres = (value: number): string => Math.round(value).toString();
+
+  return (
+    <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
+      <ScrollView contentContainerStyle={styles.container}>
+        <Text style={styles.title} maxFontSizeMultiplier={1.3}>
+          {strings.screenTitle}
+        </Text>
+        <View style={styles.warnCard}>
+          <Text style={styles.warnText} maxFontSizeMultiplier={1.3}>
+            {strings.intro}
+          </Text>
+          {
+            // P5d-FIX6: the public-road case is a scoped, secondary note under
+            // the racetrack framing -- never the headline.
+          }
+          <Text style={styles.muted} maxFontSizeMultiplier={1.3}>
+            {strings.streetNote}
+          </Text>
+        </View>
+        <Text style={styles.body} maxFontSizeMultiplier={1.3}>
+          {strings.howItWorks}
+        </Text>
+        <Text style={styles.muted} maxFontSizeMultiplier={1.3}>
+          {strings.cuesOff}
+        </Text>
+
+        {snapshot.phase === 'learning' ? (
+          <View style={styles.card}>
+            <View style={styles.rowCentered}>
+              <ActivityIndicator color={colors.accent} />
+              <Text style={styles.cardTitle} maxFontSizeMultiplier={1.3}>
+                {strings.learningTitle}
+              </Text>
+            </View>
+            <Text style={styles.mono} maxFontSizeMultiplier={1.3}>
+              {strings.travelled(metres(snapshot.travelledM))}
+            </Text>
+            <Text style={styles.muted} maxFontSizeMultiplier={1.3}>
+              {strings.learningHint}
+            </Text>
+          </View>
+        ) : null}
+
+        {snapshot.phase === 'learned' && snapshot.learned !== null ? (
+          <View style={styles.successCard}>
+            <Text style={styles.cardTitle} maxFontSizeMultiplier={1.3}>
+              {strings.learnedBanner(snapshot.learned.cornerCount, metres(snapshot.learned.lengthM))}
+            </Text>
+            <Text style={styles.muted} maxFontSizeMultiplier={1.3}>
+              {strings.learnedHint}
+            </Text>
+            <Text style={styles.muted} maxFontSizeMultiplier={1.3}>
+              {strings.timingStarted}
+            </Text>
+            <Text style={styles.muted} maxFontSizeMultiplier={1.3}>
+              {strings.adHocNote}
+            </Text>
+          </View>
+        ) : null}
+
+        {snapshot.phase === 'adopting' ? (
+          <View style={styles.card}>
+            <View style={styles.rowCentered}>
+              <ActivityIndicator color={colors.accent} />
+              <Text style={styles.cardTitle} maxFontSizeMultiplier={1.3}>
+                {strings.adopting}
+              </Text>
+            </View>
+          </View>
+        ) : null}
+
+        {snapshot.phase === 'error' ? (
+          <View style={styles.failCard}>
+            <Text style={styles.cardTitle} maxFontSizeMultiplier={1.3}>
+              {strings.adoptFailedTitle}
+            </Text>
+            <Text style={styles.body} maxFontSizeMultiplier={1.3}>
+              {strings.adoptFailed(snapshot.adoptError ?? '')}
+            </Text>
+            <Pressable
+              style={[styles.button, styles.primaryButton]}
+              onPress={() => retryTestLoopAdoption()}
+              accessibilityRole="button"
+              accessibilityLabel={strings.retryAdoptA11y}
+            >
+              <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.3}>
+                {strings.retryAdopt}
+              </Text>
+            </Pressable>
+          </View>
+        ) : null}
+
+        {snapshot.phase === 'failed' && snapshot.failure !== null ? (
+          <View style={styles.failCard}>
+            <Text style={styles.cardTitle} maxFontSizeMultiplier={1.3}>
+              {strings.failureTitle}
+            </Text>
+            <Text style={styles.body} maxFontSizeMultiplier={1.3}>
+              {strings.failure[snapshot.failure.reason]}
+            </Text>
+            <Text style={styles.mono} maxFontSizeMultiplier={1.3}>
+              {strings.travelled(metres(snapshot.failure.travelledM))}
+            </Text>
+            {snapshot.failure.sampleCap === undefined ? null : (
+              <Text style={styles.muted} maxFontSizeMultiplier={1.3}>
+                {strings.capDetail(snapshot.failure.sampleCap)}
+              </Text>
+            )}
+          </View>
+        ) : null}
+
+        {notice !== null ? (
+          <Text style={styles.notice} maxFontSizeMultiplier={1.3}>
+            {notice}
+          </Text>
+        ) : null}
+
+        {snapshot.phase === 'learning' ? (
+          <Pressable
+            style={[styles.button, styles.secondaryButton, busy && styles.buttonDisabled]}
+            onPress={onStop}
+            disabled={busy}
+            accessibilityRole="button"
+            accessibilityLabel={strings.stopA11y}
+          >
+            <Text style={styles.secondaryButtonText} maxFontSizeMultiplier={1.3}>
+              {strings.stop}
+            </Text>
+          </Pressable>
+        ) : snapshot.phase === 'idle' || snapshot.phase === 'failed' ? (
+          <Pressable
+            style={[styles.button, styles.primaryButton, busy && styles.buttonDisabled]}
+            onPress={onStart}
+            disabled={busy}
+            accessibilityRole="button"
+            accessibilityLabel={strings.startA11y}
+          >
+            <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.3}>
+              {snapshot.phase === 'failed' ? strings.tryAgain : strings.start}
+            </Text>
+          </Pressable>
+        ) : null}
+
+        {snapshot.phase === 'learned' ? (
+          <>
+            <Pressable
+              style={[styles.button, styles.primaryButton]}
+              onPress={() => navigation.navigate('ActiveDashboard')}
+              accessibilityRole="button"
+              accessibilityLabel={strings.openDashboardA11y}
+            >
+              <Text style={styles.primaryButtonText} maxFontSizeMultiplier={1.3}>
+                {strings.openDashboard}
+              </Text>
+            </Pressable>
+
+            <View style={styles.card}>
+              <Text style={styles.cardTitle} maxFontSizeMultiplier={1.3}>
+                {strings.saveTitle}
+              </Text>
+              <Text style={styles.muted} maxFontSizeMultiplier={1.3}>
+                {strings.saveHint}
+              </Text>
+              <TextInput
+                style={styles.input}
+                value={name}
+                onChangeText={setName}
+                editable={!busy}
+                autoCorrect={false}
+                placeholder={strings.namePlaceholder}
+                placeholderTextColor={colors.textMuted}
+                accessibilityLabel={strings.namePlaceholder}
+              />
+              <Pressable
+                style={[styles.button, styles.secondaryButton, busy && styles.buttonDisabled]}
+                onPress={onSave}
+                disabled={busy}
+                accessibilityRole="button"
+                accessibilityLabel={strings.saveA11y}
+              >
+                <Text style={styles.secondaryButtonText} maxFontSizeMultiplier={1.3}>
+                  {strings.save}
+                </Text>
+              </Pressable>
+            </View>
+          </>
+        ) : null}
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: colors.background },
+  container: { padding: spacing.lg, gap: spacing.md },
+  title: { ...typography.title, color: colors.textPrimary },
+  body: { ...typography.body, color: colors.textPrimary },
+  muted: { ...typography.caption, color: colors.textSecondary },
+  mono: { fontFamily: fontFamily.monoMedium, fontSize: 15, color: colors.textPrimary },
+  notice: { ...typography.body, color: colors.accent },
+  card: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.md,
+    gap: spacing.sm,
+  },
+  successCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.accent,
+    padding: spacing.md,
+    gap: spacing.sm,
+  },
+  failCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.md,
+    gap: spacing.sm,
+  },
+  warnCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radii.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.md,
+    gap: spacing.sm,
+  },
+  warnText: { ...typography.body, color: colors.textPrimary },
+  cardTitle: { ...typography.subtitle, color: colors.textPrimary },
+  rowCentered: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  input: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radii.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    color: colors.textPrimary,
+    fontFamily: fontFamily.bodyRegular,
+    fontSize: 16,
+  },
+  button: { borderRadius: radii.lg, paddingVertical: spacing.md, alignItems: 'center' },
+  buttonDisabled: { opacity: 0.5 },
+  primaryButton: { backgroundColor: colors.accent },
+  primaryButtonText: { ...typography.subtitle, color: colors.onAccent },
+  secondaryButton: { borderWidth: 1, borderColor: colors.border },
+  secondaryButtonText: { ...typography.subtitle, color: colors.textPrimary },
+});
+32: * retry), never `learned` -- a driver told the track was learned while the app
+111:  private lastQualified: LocationSample | null = null;
+113:  private qualifiedStart: LocationSample | null = null;
+119:  private pendingCircuit: TestLoopCircuit | null = null;
+154:    this.lastQualified = null;
+155:    this.qualifiedStart = null;
+159:    this.pendingCircuit = null;
+180:    const start = this.qualifiedStart;
+186:    const verdict = qualifyStep(sample, this.lastQualified, DEFAULT_TEST_LOOP_CONFIG);
+187:    if (verdict.reanchor && !verdict.accepted) this.lastQualified = sample;
+189:      const previous = this.lastQualified;
+191:      this.lastQualified = sample;
+192:      this.qualifiedStart ??= sample;
+241:  reset(): void {
+248:    this.lastQualified = null;
+249:    this.qualifiedStart = null;
+253:    this.pendingCircuit = null;
+286:    this.pendingCircuit = circuit;
+317:  retryAdopt(): void {
+318:    const circuit = this.pendingCircuit;
+/**
+ * The ONE ordering boundary for session-lifecycle work (contracts.md's
+ * "Multi-circuit selection â€” lifecycle lock amendment", binding, ticket
+ * CN-FIX3).
+ *
+ * `composition.ts` previously had THREE independent serialization mechanisms
+ * -- `selectionChain` (settings/history writes), `rebuildInFlight`
+ * (controller dispose+install), and `withDevReplayLock` (replay transitions).
+ * Each was individually correct, but they did not form a single ordering
+ * boundary: a rebuild could dispose the controller another operation had
+ * already captured, and the preflight gate could forward START_PREFLIGHT to a
+ * controller built for a circuit a queued selection was about to replace
+ * (Codex CN-REV3 findings H3/N2/N3). All three are replaced by ONE mutex:
+ * every operation that reads or replaces the production controller runs
+ * entirely inside `run()`.
+ *
+ * Semantics:
+ *  - FIFO: sections execute in the order `run()` was called, never
+ *    overlapping. A section "holds" the lock across its own `await`s, so a
+ *    controller it captured cannot be disposed underneath it.
+ *  - Errors propagate to that section's caller only, and always release the
+ *    lock (including a synchronous throw before the section's first `await`),
+ *    so one failed operation can never wedge every later one.
+ *  - Re-entrancy is NOT supported, by design: a section that calls `run()`
+ *    again would queue behind ITSELF and deadlock forever. Composition-level
+ *    code therefore calls `unlocked*` inner routines from inside a section,
+ *    never the locked public wrapper. The synchronously-detectable form of
+ *    that mistake (a `run()` issued from a section's own synchronous body) is
+ *    REFUSED with `LifecycleLockReentry` instead of hanging.
+ *
+ * Detection limit (documented deliberately): JavaScript gives no way to tell
+ * a `run()` issued from a holder's post-`await` continuation apart from a
+ * legitimate concurrent call that must queue -- both see `isHeld() === true`
+ * from an unrelated task. Refusing on `isHeld()` alone would break the
+ * queueing this lock exists for, so the assert covers the synchronous case
+ * only; the structural rule ("inside a section, call `unlocked*`") is what
+ * covers the rest, and every call site in `composition.ts` follows it.
+ */
+
+/** Thrown by `run()` when a section re-enters the lock from its own synchronous body -- a coding error that would otherwise self-deadlock. */
+export class LifecycleLockReentry extends Error {
+  constructor(message = 'lifecycleLock: re-entrant run() from inside a held section -- call the unlocked* inner routine instead') {
+    super(message);
+    this.name = 'LifecycleLockReentry';
+  }
+}
+
+export interface LifecycleLock {
+  /** Queues `fn` behind every earlier call and runs it with the lock held for its whole duration (awaits included). */
+  run<T>(fn: () => Promise<T>): Promise<T>;
+  /** `true` while a section is executing -- diagnostics/tests only; never a substitute for queueing through `run()`. */
+  isHeld(): boolean;
+}
+
+export function createLifecycleLock(): LifecycleLock {
+  let tail: Promise<unknown> = Promise.resolve();
+  let held = false;
+  /** `> 0` only while a section's SYNCHRONOUS body is on the stack -- the one re-entrancy case that is precisely detectable (see the module doc comment). */
+  let syncDepth = 0;
+
+  return {
+    isHeld(): boolean {
+      return held;
+    },
+    run<T>(fn: () => Promise<T>): Promise<T> {
+      if (syncDepth > 0) return Promise.reject(new LifecycleLockReentry());
+      const result = tail.then(async () => {
+        held = true;
+        try {
+          let started: Promise<T>;
+          syncDepth += 1;
+          try {
+            started = fn();
+          } finally {
+            syncDepth -= 1;
+          }
+          return await started;
+        } finally {
+          held = false;
+        }
+      });
+      // The chain tail must survive a rejected section (mirrors
+      // `SqlWriteGate`'s own tail discipline) -- otherwise one failure would
+      // leave every later section queued behind a never-settling link.
+      tail = result.then(
+        () => undefined,
+        () => undefined,
+      );
+      return result;
+    },
+  };
+}
+
+codex
+The fence appears to close the reported VIN resurrection window, and terminal Test Loop states now reset before controller replacement. I’m checking an edge case in the fence: it starts before the refusal checks, so a rejected deletion may affect a VIN read already in flight.
+
+exec
+"C:\\Users\\dobri\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe" -Command '$s=Get-Content apps/mobile/src/ui/screens/SettingsScreen.tsx; $s[320..367]; $s[457..492]; rg -n '"'enetChannelSpecsDraft|lastCommittedEnetChannelSpecs|commitEnet|deleting' apps/mobile/src/ui/screens/SettingsScreen.tsx; "'$s=Get-Content apps/mobile/src/session/testLoopController.ts; $s[225..335]; rg -n '"'function ready|bootstrapPromise|MID_SESSION_STATES' apps/mobile/src/session/composition.ts; Get-Content apps/mobile/test/support/sqlJsDatabase.ts; Get-Content package.json; Get-Content vitest.config.ts; git show -s --format=%B 1dee7b2; git diff 6d6f90b..d2b26f6 -- apps/mobile/src/persistence/deviceDataWipe.ts apps/mobile/src/session/composition.ts" in D:\CODE\APLICTIE_Circuit
+ succeeded in 151ms:
+
+
+
+  /**
+   * Ends the learn phase. A loop that was learned stays learned; one that was
+   * not ends in `failed` with the reason the closure test itself gives -- the
+   * driver is told which of the three conditions did not hold, never just
+   * "something went wrong".
+   */
+  stop(): TestLoopSnapshot {
+    if (this.phase === 'learning') this.fail();
+    return this.snapshot();
+  }
+
+  /** Drops everything and returns to idle (leaving the screen). */
+  reset(): void {
+    this.phase = 'idle';
+    this.samples = [];
+    this.travelled = 0;
+    this.distanceToStart = null;
+    this.departed = false;
+    this.wasInside = true;
+    this.lastQualified = null;
+    this.qualifiedStart = null;
+    this.lapSamples = [];
+    this.learned = null;
+    this.failure = null;
+    this.pendingCircuit = null;
+    this.adoptError = null;
+    this.circuitId = null;
+    this.emit();
+  }
+
+  private tryClose(): void {
+    this.circuitId ??= this.deps.makeCircuitId();
+    const result = buildTestLoopCircuit(this.samples, {
+      circuitId: this.circuitId,
+      displayName: this.deps.makeDisplayName(this.deps.nowUtc()),
+      createdAtUtc: this.deps.nowUtc(),
+    });
+    if (!result.ok) {
+      // Not a loop YET: keep driving. Only `stop()` (or the sample cap) turns
+      // a not-yet into a failure.
+      return;
+    }
+    this.lapSamples = result.lapSamples;
+    this.adopt(result);
+  }
+
+  /** The QUALIFIED fixes of the learned lap -- what the session stores as its out-lap trace. */
+  learnedLapSamples(): LocationSample[] {
+    return [...this.lapSamples];
+  }
+
+  /**
+   * P5d-FIX1 H3: the learned track is handed over and only THEN announced.
+   * `adopting` is a real, visible phase -- the driver is not told the track was
+   * learned while the app is still deciding whether it could keep it.
+   */
+  private adopt(circuit: TestLoopCircuit): void {
+    this.pendingCircuit = circuit;
+    this.phase = 'adopting';
+    this.adoptError = null;
+    this.emit();
+    void Promise.resolve()
+      .then(() => this.deps.onLearned(circuit))
+      .then(() => {
+        this.phase = 'learned';
+        this.learned = {
+          circuitId: circuit.profile.circuitId,
+          displayName: circuit.profile.displayName,
+          lengthM: polylineLength(circuit.runtime.centerline),
+          cornerCount: circuit.corners.length,
+        };
+        this.adoptError = null;
+        this.emit();
+      })
+      .catch((error: unknown) => {
+        // Never `learned`: the track exists in memory but nothing else knows
+        // about it, so timing it would be timing the wrong circuit.
+        this.phase = 'error';
+        this.learned = null;
+        this.adoptError = error instanceof Error ? error.message : String(error);
+        this.emit();
+      });
+  }
+
+  /**
+   * Retries the handover of a track that WAS learned but could not be kept
+   * (P5d-FIX1 H3). The geometry is not re-derived -- it is the same lap.
+   */
+  retryAdopt(): void {
+    const circuit = this.pendingCircuit;
+    if (this.phase !== 'error' || circuit === null) return;
+    this.adopt(circuit);
+  }
+
+  private fail(sampleCap?: number): void {
+    const closure = detectLoopClosure(this.samples);
+    this.failure = {
+      reason: closure.closed ? 'not-returned' : closure.reason,
+      travelledM: closure.closed ? closure.closure.lapLengthM : closure.travelledM,
+      ...(sampleCap === undefined ? {} : { sampleCap }),
+    };
+    this.phase = 'failed';
+    // P5d-FIX2 N6: a learn phase that gave up holds no trace. The buffers are
+    // released here, not left to grow until the screen happens to be dismissed.
+    this.samples = [];
+    this.lapSamples = [];
+    this.emit();
+  }
+1569:// independent of `bootstrapPromise` below -- so a background transition
+1602:    if (!MID_SESSION_STATES.has(currentControllerState(ctrl))) return;
+1717: * factory) -- the SAME deps `bootstrapPromise` used to construct it inline
+2111:const MID_SESSION_STATES = new Set<SessionState>(['outLap', 'timing', 'inPit', 'paused']);
+2113:/** Applies a validated circuit selection to the persisted settings ONLY -- no bootstrap-await, no session-active refusal, no serialization. Shared by the public `selectCircuit()` below and `runBootstrap()`'s own recovery-circuit switch, which CANNOT go through `selectCircuit()` itself: that function awaits `ready()` (i.e. `bootstrapPromise`), and calling it from inside `runBootstrap()` -- the very function that promise is for -- would deadlock forever. */
+3271:          // `ready()`/`bootstrapPromise` -- itself still in flight here,
+3333:let bootstrapPromise: Promise<void> = runBootstrap();
+3338:bootstrapPromise.catch(() => undefined);
+3354:  bootstrapPromise = attempt;
+3364:async function ready(): Promise<{ db: SqlDatabase | null; repository: LocalSessionRepository; controller: SessionController }> {
+3365:  await bootstrapPromise;
+3764:  if (activeController !== null && MID_SESSION_STATES.has(currentControllerState(activeController))) {
+3777:  //    `MID_SESSION_STATES` -- and step 2's rebuild deliberately no-ops
+import initSqlJs, { type Database } from 'sql.js';
+import type { SqlBindValue, SqlDatabase, SqlRunResult } from '@circuit/core';
+
+/**
+ * Local copy of packages/core/test/persistence-sql/sqlJsDatabase.ts's sql.js
+ * `SqlDatabase` adapter -- kept local for the same cross-tsconfig reason as
+ * `coreTestDoubles.ts` (see its top comment). Reuses the `sql.js` PACKAGE
+ * itself via workspace-root hoisting (ticket CONSTRAINTS: "sql.js reuse via
+ * workspace root") -- it is core's devDependency, not re-declared here.
+ */
+
+let sqlJsModulePromise: ReturnType<typeof initSqlJs> | null = null;
+function loadSqlJs(): ReturnType<typeof initSqlJs> {
+  sqlJsModulePromise ??= initSqlJs();
+  return sqlJsModulePromise;
+}
+
+export function wrapSqlJsDatabase(db: Database): SqlDatabase {
+  // Ticket P10A: the SAME serialization the real connection has.
+  // `openAppDatabase()` wraps its `SqlDatabase` in `gateSqlTransactions(...,
+  // createSqlWriteGate())`, so two transactions on the one on-device
+  // connection can never overlap. The composition tests hand this double
+  // straight to a mocked `openAppDatabase` and so had no gate at all --
+  // which stayed invisible only while nothing wrote a transaction
+  // concurrently with the repository's. P10A H2's session record (written at
+  // recording start, alongside the active-session pointer write) does, and
+  // sql.js answers an overlapping BEGIN with "cannot start a transaction
+  // within a transaction". Gating here makes the double faithful to
+  // production rather than papering over the collision.
+  let transactionTail: Promise<unknown> = Promise.resolve();
+  const handle: SqlDatabase = {
+    async execAsync(sql: string): Promise<void> {
+      db.exec(sql);
+    },
+
+    async runAsync(sql: string, params: readonly SqlBindValue[] = []): Promise<SqlRunResult> {
+      db.run(sql, params as SqlBindValue[]);
+      return { changes: db.getRowsModified() };
+    },
+
+    async getAllAsync<T>(sql: string, params: readonly SqlBindValue[] = []): Promise<T[]> {
+      const stmt = db.prepare(sql);
+      try {
+        if (params.length > 0) stmt.bind(params as SqlBindValue[]);
+        const rows: T[] = [];
+        while (stmt.step()) {
+          rows.push(stmt.getAsObject() as T);
+        }
+        return rows;
+      } finally {
+        stmt.free();
+      }
+    },
+
+    // Ticket P10B H5-B: hands the callback the transaction-scoped handle --
+    // this same adapter, which is the ungated connection. In production the
+    // gate sits ABOVE this wrapper (`gateSqlTransactions`), so a callback
+    // that used the outer handle instead would queue behind its own
+    // transaction.
+    withTransactionAsync(fn: (tx: SqlDatabase) => Promise<void>): Promise<void> {
+      const run = transactionTail.then(async () => {
+        db.run('BEGIN');
+        try {
+          await fn(handle);
+          db.run('COMMIT');
+        } catch (err) {
+          db.run('ROLLBACK');
+          throw err;
+        }
+      });
+      transactionTail = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      return run;
+    },
+  };
+  return handle;
+}
+
+/** Creates a brand-new in-memory sql.js-backed `SqlDatabase` for a test. */
+export async function createSqlJsDatabase(): Promise<SqlDatabase> {
+  const SQL = await loadSqlJs();
+  return wrapSqlJsDatabase(new SQL.Database());
+}
+
+/** Wraps a `SqlDatabase` over the SAME underlying sql.js `Database` instance passed in, rather than a fresh one -- used to simulate re-opening the app's on-device database across a restart. */
+export function wrapExistingSqlJsDatabase(db: Database): SqlDatabase {
+  return wrapSqlJsDatabase(db);
+}
+
+export async function createRawSqlJsDatabase(): Promise<Database> {
+  const SQL = await loadSqlJs();
+  return new SQL.Database();
+}
+{
+  "name": "circuit-timer",
+  "private": true,
+  "version": "0.0.0",
+  "description": "GNSS track lap-timing monorepo (npm workspaces)",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "generate:tmr": "node --experimental-strip-types packages/core/scripts/generate-tmr-profile.ts",
+    "generate:motorpark": "node --experimental-strip-types packages/core/scripts/generate-motorpark-profile.ts"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.13.0",
+    "@onebeyond/license-checker": "^2.2.0",
+    "@typescript-eslint/eslint-plugin": "^8.15.0",
+    "@typescript-eslint/parser": "^8.15.0",
+    "eslint": "^9.13.0",
+    "eslint-config-prettier": "^9.1.0",
+    "globals": "^15.11.0",
+    "prettier": "^3.3.3",
+    "typescript": "^5.6.3"
+  }
+}
+Get-Content : Cannot find path 'D:\CODE\APLICTIE_Circuit\vitest.config.ts' because it does not exist.
+At line:2 char:474
++ ... se.ts; Get-Content package.json; Get-Content vitest.config.ts; git sh ...
++                                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (D:\CODE\APLICTI...itest.config.ts:String) [Get-Content], ItemNotFoundEx 
+   ception
+    + FullyQualifiedErrorId : PathNotFound,Microsoft.PowerShell.Commands.GetContentCommand
+ 
+P18-FIX2: close Codex P18-REV2's delete-all findings
+
+- H1: VIN detection is fenced for the whole of delete-all: no read starts
+  while it runs, and none that was running completes into it. Detection is
+  re-armed afterwards. New test drives reads from every settings change
+  during the delete (fails on FIX1: 3 reads started).
+- M2: a failed Test Loop adoption ('error') no longer blocks delete-all
+  with an instruction the UI cannot follow; delete-all abandons it.
+- M3: 'learned', 'failed' and 'error' Test Loop state (geometry, anchor
+  coordinates) is reset and the learn phase torn down, before the
+  controller rebuild; only 'learning'/'adopting' are refused.
+- M4: Settings drops an uncommitted channel-specs draft after delete-all.
+- History refresh now follows the session wipe, not the record cleanup.
+- Policy EN/RO: all custom channel definitions (tagged or typed), the
+  discarded unsaved Test Loop track, "stop the Test Loop", and VIN re-read
+  only when the adapter is free.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+
+diff --git a/apps/mobile/src/persistence/deviceDataWipe.ts b/apps/mobile/src/persistence/deviceDataWipe.ts
+index 971e758..a1c5c18 100644
+--- a/apps/mobile/src/persistence/deviceDataWipe.ts
++++ b/apps/mobile/src/persistence/deviceDataWipe.ts
+@@ -11,9 +11,11 @@ import { SETTINGS_KEY } from './sqlSettingsStore';
+  *
+  * A VIN is personal data in the EU, and so is what hangs off it -- the DID
+  * bindings and sweep results are fingerprints of one specific vehicle, and a
+- * learned circuit is a trace of where the driver drove. Preferences (units,
+- * language, adapter address, coaching toggles, a profile the USER picked) are
+- * not data about the driver and survive the wipe.
++ * learned circuit is a trace of where the driver drove. So are the custom
++ * channel definitions tagged from a sweep ("Tag as channel"): they are the
++ * same findings as the bindings, and their provenance text can hold the VIN.
++ * Preferences (units, language, adapter address, coaching toggles, a profile
++ * the USER picked) are not data about the driver and survive the wipe.
+  */
+ 
+ /** Mobile-owned tables whose every row is vehicle- or driver-specific. */
+@@ -33,20 +35,31 @@ export interface DeviceDataWipeResult {
+ }
+ 
+ /**
+- * The settings patch that forgets the vehicle's identity. The VIN goes; a
+- * profile the VIN auto-selected goes with it, because keeping it would keep
+- * the make and model the VIN resolved to. A profile the user chose is a
+- * preference and stays.
++ * The settings patch that forgets the vehicle's identity. The VIN goes, and
++ * so do the channel definitions tagged from this car's sweeps; a profile the
++ * VIN auto-selected goes with them, because keeping it would keep the make
++ * and model the VIN resolved to. A profile the user chose is a preference and
++ * stays.
+  */
+ export function vehicleIdentityResetPatch(settings: AppSettings): Partial<AppSettings> {
+-  if (settings.activeVehicleProfileSource !== 'vin') return { lastSeenVin: null };
++  const vehicleFindings = { lastSeenVin: null, enetChannelSpecsJson: DEFAULT_SETTINGS.enetChannelSpecsJson };
++  if (settings.activeVehicleProfileSource !== 'vin') return vehicleFindings;
+   return {
+-    lastSeenVin: null,
++    ...vehicleFindings,
+     activeVehicleProfileId: DEFAULT_SETTINGS.activeVehicleProfileId,
+     activeVehicleProfileSource: DEFAULT_SETTINGS.activeVehicleProfileSource,
+   };
+ }
+ 
++/** How many identity fields a stored settings blob still carries -- 0 when {@link vehicleIdentityResetPatch} has been applied. */
++function identityFieldsLeft(stored: Partial<AppSettings>): number {
++  let left = 0;
++  if (stored.lastSeenVin !== null && stored.lastSeenVin !== undefined) left += 1;
++  if (typeof stored.enetChannelSpecsJson === 'string' && stored.enetChannelSpecsJson !== '') left += 1;
++  if (stored.activeVehicleProfileSource === 'vin') left += 1;
++  return left;
++}
++
+ function parseSettingsRow(raw: string | undefined): Partial<AppSettings> | null {
+   if (raw === undefined) return null;
+   try {
+@@ -75,7 +88,20 @@ async function scrubStoredSettings(tx: SqlDatabase): Promise<number> {
+   await tx.runAsync('UPDATE settings SET value = ? WHERE key = ?', [JSON.stringify(scrubbed), SETTINGS_KEY]);
+   const after = await tx.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [SETTINGS_KEY]);
+   const verified = parseSettingsRow(after[0]?.value);
+-  return verified === null || verified.lastSeenVin === null || verified.lastSeenVin === undefined ? 0 : 1;
++  return verified === null ? 1 : identityFieldsLeft(verified);
++}
++
++/**
++ * How many identity fields the stored settings row carries right now. Run
++ * after the wipe, through the same serialized handle as every settings
++ * write, it sees the row as it is once every write queued before it landed.
++ */
++export async function countStoredVehicleIdentity(db: SqlDatabase): Promise<number> {
++  const rows = await db.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [SETTINGS_KEY]);
++  const raw = rows[0]?.value;
++  if (raw === undefined) return 0;
++  const stored = parseSettingsRow(raw);
++  return stored === null ? 1 : identityFieldsLeft(stored);
+ }
+ 
+ /**
+@@ -105,7 +131,7 @@ export async function wipeDeviceUserData(db: SqlDatabase): Promise<DeviceDataWip
+       [prefix, prefix],
+     );
+ 
+-    remaining.last_seen_vin = await scrubStoredSettings(tx);
++    remaining.vehicle_identity_settings = await scrubStoredSettings(tx);
+   });
+ 
+   const leftovers = Object.fromEntries(Object.entries(remaining).filter(([, count]) => count > 0));
+diff --git a/apps/mobile/src/session/composition.ts b/apps/mobile/src/session/composition.ts
+index 89380cb..46414e1 100644
+--- a/apps/mobile/src/session/composition.ts
++++ b/apps/mobile/src/session/composition.ts
+@@ -101,6 +101,7 @@ import {
+   type RemoveLearnedCircuitResult,
+ } from './learnedCircuitStore';
+ import {
++  ADOPTION_JOURNAL_KEY,
+   claimAdoptionJournal,
+   clearClaimedJournal,
+   deleteOrphanSession,
+@@ -127,7 +128,11 @@ import {
+   writeSessionVehicleSnapshot,
+   type SessionVehicleSnapshot,
+ } from '../persistence/sessionVehicleSnapshot';
+-import { vehicleIdentityResetPatch, wipeDeviceUserData } from '../persistence/deviceDataWipe';
++import {
++  countStoredVehicleIdentity,
++  vehicleIdentityResetPatch,
++  wipeDeviceUserData,
++} from '../persistence/deviceDataWipe';
+ import { createRawUdsChannel } from './didSweepController';
+ import { EnetTcpTransport } from './enetTcpTransport';
+ import { enetAdapterReservation as sharedEnetAdapterReservation } from './enetAdapterReservation';
+@@ -722,9 +727,13 @@ let vehicleProfileBindingsCache: readonly VehicleProfileBindingLike[] = [];
+  * "telemetry must never fail to start" discipline in this module.
+  */
+ export async function refreshVehicleProfileBindingsCache(): Promise<void> {
++  const generation = deviceDataGeneration;
+   try {
+     const store = createVehicleProfileBindingStore(getTelemetryReadDb());
+-    vehicleProfileBindingsCache = await store.listBindings(getActiveVehicleProfileId());
++    const bindings = await store.listBindings(getActiveVehicleProfileId());
++    // A read that raced delete-all may hold rows the wipe removed.
++    if (generation !== deviceDataGeneration) return;
++    vehicleProfileBindingsCache = bindings;
+   } catch (error) {
+     console.warn('[composition] could not refresh the vehicle profile bindings cache', error);
+   }
+@@ -862,6 +871,12 @@ type VinDetectionState = 'idle' | 'attempting' | 'done';
+ let vinDetectionState: VinDetectionState = 'idle';
+ /** The result of the ONE completed attempt this app run has made (or will make) -- `null` before `vinDetectionState === 'done'`, and forever after if the read found nothing usable. */
+ let cachedDetectedVin: string | null = null;
++/**
++ * Bumped by delete-all. A VIN read that started before the wipe and finishes
++ * after it belongs to data the driver asked to erase, so it is dropped rather
++ * than cached, persisted or used for auto-select.
++ */
++let deviceDataGeneration = 0;
+ 
+ /**
+  * Codex R2 fix (ticket P4q follow-up, binding, MEDIUM): "the explicit-choice
+@@ -1006,6 +1021,7 @@ export async function maybeDetectVehicleFromVin(): Promise<string | null> {
+   if (token === null) return null; // lost the race to acquire -- another trigger point retries later.
+ 
+   vinDetectionState = 'attempting';
++  const generation = deviceDataGeneration;
+   const transport = new EnetTcpTransport({ host: settings.enetHost, port: settings.enetPort });
+   let vin: string | null = null;
+   try {
+@@ -1027,6 +1043,9 @@ export async function maybeDetectVehicleFromVin(): Promise<string | null> {
+     sharedEnetAdapterReservation.release(token);
+   }
+ 
++  // Delete-all ran while this read was in flight: it has already put
++  // detection back to 'idle', so the next connection reads again.
++  if (generation !== deviceDataGeneration) return null;
+   vinDetectionState = 'done';
+   cachedDetectedVin = vin;
+   if (vin !== null) {
+@@ -3612,27 +3631,49 @@ export interface AggregatedDeleteUserDataResult extends DeleteUserDataResult {
+    * verified on those paths. `'SESSION_ACTIVE'`: a session is genuinely
+    * mid-drive (CN-FIX4, facade boundary amendment). `'DEV_REPLAY_ACTIVE'`: a
+    * `__DEV__` replay controller is installed (CN-FIX5, closing amendment).
++   * `'TEST_LOOP_ACTIVE'`: a Test Loop is learning, adopting, or waiting for a
++   * retry of its adoption.
+    */
+-  reason?: 'SESSION_ACTIVE' | 'DEV_REPLAY_ACTIVE';
++  reason?: 'SESSION_ACTIVE' | 'DEV_REPLAY_ACTIVE' | 'TEST_LOOP_ACTIVE';
+ }
+ 
+ /**
+- * The in-memory mirror of {@link wipeDeviceUserData}: drops every cached copy
+- * of what that wipe deleted, so nothing on screen or in the next session
+- * start still carries it. Runs whether or not the on-disk wipe verified clean
+- * -- a cache must never outlive the rows it was read from.
++ * The in-memory half of {@link wipeDeviceUserData}, run BEFORE the disk wipe:
++ * the settings store rewrites its whole blob on every `update()`, so the VIN
++ * has to leave memory first. Any settings write queued before this lands
++ * ahead of the wipe's transaction and is scrubbed by it; every write after it
++ * carries no VIN. The generation bump makes a VIN read or a bindings read
++ * already in flight drop its result instead of restoring it.
+  */
+-async function forgetDeviceUserDataInMemory(): Promise<void> {
+-  settingsStore.update(vehicleIdentityResetPatch(settingsStore.getSettings()));
++function forgetVehicleIdentityInMemory(): void {
++  deviceDataGeneration += 1;
++  vinDetectionState = 'idle';
+   cachedDetectedVin = null;
++  setVinAutoDetectNotice(null);
++  settingsStore.update(vehicleIdentityResetPatch(settingsStore.getSettings()));
+   vehicleProfileBindingsCache = [];
+   sessionVehicleSnapshots.clear();
++}
++
++/**
++ * Brings every in-memory copy of the learned circuits and the bindings back in
++ * line with the disk after the wipe. Resolves `false` when the learned
++ * circuits could not be re-read (the deleted geometry may then still be
++ * selectable) or the stored settings still carry the vehicle's identity:
++ * either way delete-all must not report success.
++ */
++async function resyncAfterDeviceWipe(): Promise<boolean> {
++  // Again, now the wipe has committed: a VIN or bindings read that finished
++  // while it ran may have put the old values back in memory.
++  forgetVehicleIdentityInMemory();
++  let learnedOk = true;
+   memoryLearnedCircuits = [];
+   if (learnedCircuitStore !== null) {
+     try {
+       await learnedCircuitStore.refresh();
+     } catch (error) {
+       console.warn('[composition] could not refresh learned circuits after delete-all', error);
++      learnedOk = false;
+     }
+   }
+   publishLearnedCircuits();
+@@ -3646,6 +3687,39 @@ async function forgetDeviceUserDataInMemory(): Promise<void> {
+     }
+   }
+   await refreshVehicleProfileBindingsCache();
++  // The last word on the VIN: read back after every settings write queued so
++  // far, so a write that carried the old blob cannot hide behind the wipe.
++  let identityOk = true;
++  if (db !== null) {
++    try {
++      identityOk = (await countStoredVehicleIdentity(db)) === 0;
++    } catch (error) {
++      console.warn('[composition] could not verify the vehicle identity was deleted', error);
++      identityOk = false;
++    }
++  }
++  return learnedOk && identityOk;
++}
++
++/**
++ * Drops what an abandoned Test Loop adoption left behind: its in-memory
++ * ledger and its journal row. Only called once the sessions are gone -- the
++ * journal names a session and a circuit, and a retry must never resume onto a
++ * circuit this wipe deleted. Resolves `false` when the row could not be
++ * removed.
++ */
++async function forgetAbandonedAdoption(): Promise<boolean> {
++  adoptionProgress = null;
++  adoptionJournalId = null;
++  adoptionJournalOwned = null;
++  if (db === null) return true;
++  try {
++    await db.runAsync('DELETE FROM settings WHERE key = ?', [ADOPTION_JOURNAL_KEY]);
++    return true;
++  } catch (error) {
++    console.warn('[composition] could not clear the test-loop adoption journal', error);
++    return false;
++  }
+ }
+ 
+ export async function deleteAllStoredUserData(): Promise<AggregatedDeleteUserDataResult> {
+@@ -3694,6 +3768,23 @@ async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDa
+       errorText: 'a developer replay or mock session is active -- leave the Dev Replay screen before deleting all data',
+     };
+   }
++  // 1c. REFUSE while a Test Loop is learning, adopting, or holding a failed
++  //    adoption for retry. Its geometry and its adoption ledger live in
++  //    memory: a wipe underneath would let the adoption (or its retry) store
++  //    the circuit again, or resume onto the fallback circuit's controller
++  //    while writing the out-lap for the one just deleted. Leaving the Test
++  //    Loop screen ends all three.
++  const testLoopPhase = testLoopController.snapshot().phase;
++  if (testLoopPhase === 'learning' || testLoopPhase === 'adopting' || testLoopPhase === 'error') {
++    return {
++      ok: false,
++      remainingSessionCount: 0,
++      referenceLapCleared: false,
++      failedCircuitIds: [],
++      reason: 'TEST_LOOP_ACTIVE',
++      errorText: 'a test loop is in progress -- leave the Test Loop screen before deleting all data',
++    };
++  }
+   // 2. Otherwise: drop any pending recovery and REPLACE the production
+   //    controller with a fresh, idle one BEFORE deleting anything. A
+   //    terminal (`sessionComplete`) controller still holds a `sessionId`
+@@ -3790,6 +3881,7 @@ async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDa
+   // records, and the learned circuits live outside every table the steps
+   // above touch. Always attempted, like the telemetry step; a learned circuit
+   // a surviving session still needs is kept and reported as remaining.
++  forgetVehicleIdentityInMemory();
+   let deviceDataOk = true;
+   if (db !== null) {
+     try {
+@@ -3803,21 +3895,27 @@ async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDa
+       deviceDataOk = false;
+     }
+   }
+-  await forgetDeviceUserDataInMemory();
+-  const finalResult: DeleteUserDataResult = { ...result, ok: result.ok && telemetryOk && deviceDataOk };
++  if (!(await resyncAfterDeviceWipe())) deviceDataOk = false;
++  const sessionDataOk = result.ok && telemetryOk && deviceDataOk;
++  // Records ABOUT the sessions go only once the sessions themselves are gone:
++  // while one survives, its label and any adoption journal still describe it.
++  let sessionRecordsOk = true;
++  if (sessionDataOk && !(await forgetAbandonedAdoption())) sessionRecordsOk = false;
++  const finalResult: DeleteUserDataResult = { ...result, ok: sessionDataOk && sessionRecordsOk };
+   // M4 fix (binding): a leftover active-session pointer is meaningless once
+   // all stored data is gone -- cleared together, the SAME way session
+   // end/discard/vanished-checkpoint do (`setActiveSession(db, null)`).
+   if (finalResult.ok && db !== null) await setActiveSession(db, null);
+   // Ticket P7R E2: the unvalidated-matching log is a list of facts about
+   // sessions that no longer exist -- cleared with them, for the same reason
+-  // the active-session pointer above is. Best-effort, exactly like the log's
+-  // own writes: a stale label on a deleted session must never turn a
+-  // successful wipe into a failed one.
++  // the active-session pointer above is. A row that cannot be removed is
++  // reported: delete-all promises the records are gone, not that it tried.
+   if (finalResult.ok) {
+     unvalidatedMatchingSessionIds = new Set();
+     if (db !== null && !(await clearUnvalidatedMatchingSessionIds(db))) {
+       console.warn('[composition] could not clear the unvalidated-matching log');
++      sessionRecordsOk = false;
++      finalResult.ok = false;
+     }
+   }
+   if (finalResult.ok && historyStore !== null) await historyStore.refresh();
+@@ -3829,6 +3927,7 @@ async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDa
+         !perCircuitOk && failedCircuitIds.length === 0 ? 'one or more circuits did not verify empty' : null,
+         !telemetryOk ? 'telemetry rows remained or could not be deleted' : null,
+         !deviceDataOk ? 'vehicle or learned-circuit data remained or could not be deleted' : null,
++        !sessionRecordsOk ? 'session records remained or could not be deleted' : null,
+       ]
+         .filter((part): part is string => part !== null)
+         .join('; ') || 'delete-all failed';
+
+exec
+"C:\\Users\\dobri\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe" -Command 'Get-Content apps/mobile/vitest.config.ts; Get-Content apps/mobile/package.json; $s=Get-Content apps/mobile/src/session/composition.ts; $s[1239..1289]; $s[2920..2949]; $s[3160..3230]; $s[3360..3385]; Get-Content apps/mobile/src/persistence/activeSession.ts -TotalCount 140; rg -n '"'repair|stage|deleteOrphan|clearClaimed' apps/mobile/src/session/adoptionJournal.ts" in D:\CODE\APLICTIE_Circuit
+ succeeded in 56ms:
+Get-Content : Cannot find path 'D:\CODE\APLICTIE_Circuit\apps\mobile\src\persistence\activeSession.ts' because it does 
+not exist.
+At line:2 char:200
++ ... 360..3385]; Get-Content apps/mobile/src/persistence/activeSession.ts  ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (D:\CODE\APLICTI...ctiveSession.ts:String) [Get-Content], ItemNotFoundEx 
+   ception
+    + FullyQualifiedErrorId : PathNotFound,Microsoft.PowerShell.Commands.GetContentCommand
+ 
+19: *   * NOBODY CLEARS SOMEONE ELSE'S JOURNAL. `clearClaimedJournal` is a
+23: * The journal is cleared only after a repair fully succeeded; a failed repair
+29:/** After this many failed repairs the journal is abandoned, with a notice -- never retried forever. */
+33:  | 'staged'
+44:  stage: AdoptionStage;
+46:  /** How many launches have tried to repair it. */
+48:  /** The launch that currently owns the repair. */
+56:  /** True when the attempt budget is spent: the caller abandons the journal instead of repairing. */
+74:    if (typeof journal.circuitId !== 'string' || typeof journal.stage !== 'string') return null;
+78:      stage: journal.stage,
+117: * there is nothing to repair or another launch got there first.
+151:export async function clearClaimedJournal(
+183:export async function deleteOrphanSession(db: SqlDatabase, sessionId: string): Promise<void> {
+
+exec
+"C:\\Users\\dobri\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe" -Command "@'
+const fs=require('fs'), ts=require('typescript'), vm=require('vm');
+const src=fs.readFileSync('apps/mobile/src/session/composition.ts','utf8');
+const ast=ts.createSourceFile('composition.ts',src,ts.ScriptTarget.Latest,true);
+const names=new Set(['maybeDetectVehicleFromVin','unlockedDeleteAllStoredUserData','runDeleteAllStoredUserData','ready']);
+const functions=ast.statements.filter(n=>ts.isFunctionDeclaration(n)&&names.has(n.name?.text)).map(n=>n.getText(ast).replace(/"'^export /,'"'')).join('\\n');
+let finishClose, reachedClose; const inClose=new Promise(r=>reachedClose=r); const closing=new Promise(r=>finishClose=r);
+const c={console, setTimeout:()=>0, deviceWipeInProgress:false,vinDetectionState:'idle',cachedDetectedVin:null,deviceDataGeneration:0,settingsStore:{getSettings:()=>({adapterType:'enet',enetHost:'host'})},sharedEnetAdapterReservation:{holder:()=>null,tryAcquire:()=>1,release:()=>{}},EnetTcpTransport:class {async connect(){} close(){reachedClose();return closing;}},createRawUdsChannel:()=>({}),readVinFromChannel:async()=> 'WZ1DB0C04LW000001',VIN_READ_ECU:1,VIN_READ_OVERALL_TIMEOUT_MS:5000,bootstrapPromise:Promise.resolve(),repository:{},controller:{},db:null,activeController:{},MID_SESSION_STATES:new Set(['timing']),currentControllerState:()=> 'timing'};
+vm.createContext(c); vm.runInContext(ts.transpileModule(functions,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText,c);
+const locksrc=fs.readFileSync('apps/mobile/src/session/lifecycleLock.ts','utf8');const mod={exports:{}};vm.runInNewContext(ts.transpileModule(locksrc,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText,{exports:mod.exports});const lock=mod.exports.createLifecycleLock();
+(async()=>{const read=c.maybeDetectVehicleFromVin();await inClose;finishClose();const deletion=lock.run(c.unlockedDeleteAllStoredUserData);console.log(JSON.stringify({read:await read,deletion:await deletion,state:c.vinDetectionState,fence:c.deviceWipeInProgress,generation:c.deviceDataGeneration}));console.log(JSON.stringify({nextTrigger:await c.maybeDetectVehicleFromVin(),state:c.vinDetectionState}));})().catch(console.error);
+'@ | node" in D:\CODE\APLICTIE_Circuit
+ succeeded in 198ms:
+{"read":null,"deletion":{"ok":false,"remainingSessionCount":0,"referenceLapCleared":false,"failedCircuitIds":[],"reason":"SESSION_ACTIVE","errorText":"a session is currently active -- end it before deleting all data"},"state":"attempting","fence":false,"generation":0}
+{"nextTrigger":null,"state":"attempting"}
+
+exec
+"C:\\Users\\dobri\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe" -Command "node --input-type=module -e 'import { startVitest } from \"vitest/node\"; const ctx=await startVitest(\"test\",[\"test/session/composition.deleteAllVinFence.test.ts\",\"test/session/composition.testLoop.test.ts\"],{root:process.cwd(),config:false,cache:false,watch:false}); if(ctx) await ctx.close();'" in D:\CODE\APLICTIE_Circuit\apps\mobile
+ exited 1 in 0ms:
+file:///D:/CODE/APLICTIE_Circuit/apps/mobile/[eval1]:1
+import { startVitest } from vitest/node; const ctx=await startVitest(test,[test/session/composition.deleteAllVinFence.test.ts,test/session/composition.testLoop.test.ts],{root:process.cwd(),config:false,cache:false,watch:false}); if(ctx) await ctx.close();
+                            ^^^^^^
+
+SyntaxError: Unexpected identifier 'vitest'
+    at compileSourceTextModule (node:internal/modules/esm/utils:318:16)
+    at ModuleLoader.createModuleWrap (node:internal/modules/esm/loader:210:12)
+    at ModuleLoader.eval (node:internal/modules/esm/loader:248:23)
+    at node:internal/process/execution:77:24
+    at asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:11)
+    at Object.runEntryPointWithESMLoader (node:internal/modules/run_main:123:19)
+    at evalModuleEntryPoint (node:internal/process/execution:76:47)
+    at node:internal/main/eval_string:37:3
+
+Node.js v24.18.0
+
+exec
+"C:\\Users\\dobri\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe" -Command "@'
+import { startVitest } from 'vitest/node';
+const ctx=await startVitest('test',['test/session/composition.deleteAllVinFence.test.ts','test/session/composition.testLoop.test.ts'],{root:process.cwd(),config:false,cache:false,watch:false}); if(ctx) await ctx.close();
+'@ | node --input-type=module" in D:\CODE\APLICTIE_Circuit\apps\mobile
+ exited 1 in 606ms:
+
+ RUN  v2.1.9 D:/CODE/APLICTIE_Circuit/apps/mobile
+
+
+⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯
+
+Vitest caught 2 unhandled errors during the test run.
+This might cause false positive tests. Resolve unhandled errors to make sure your tests are not affected.
+
+⎯⎯⎯⎯⎯⎯ Unhandled Error ⎯⎯⎯⎯⎯⎯⎯
+Error: EPERM: operation not permitted, mkdir 'C:\Users\dobri\AppData\Local\Temp\lcO7swLgtWgDlIDXCICEN'
+ ❯ mkdir node:internal/fs/promises:859:10
+ ❯ Proxy.fetch ../../node_modules/vitest/dist/chunks/resolveConfig.rBxzbVsl.js:6636:9
+ ❯ EventEmitter.onMessage ../../node_modules/vitest/dist/chunks/index.68735LiX.js:91:20
+
+
+⎯⎯⎯⎯⎯⎯ Unhandled Error ⎯⎯⎯⎯⎯⎯⎯
+Error: EPERM: operation not permitted, mkdir 'C:\Users\dobri\AppData\Local\Temp\lcO7swLgtWgDlIDXCICEN'
+ ❯ mkdir node:internal/fs/promises:859:10
+ ❯ Proxy.fetch ../../node_modules/vitest/dist/chunks/resolveConfig.rBxzbVsl.js:6636:9
+ ❯ EventEmitter.onMessage ../../node_modules/vitest/dist/chunks/index.68735LiX.js:91:20
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+
+ Test Files  no tests
+      Tests  no tests
+     Errors  2 errors
+   Start at  19:28:24
+   Duration  181ms (transform 11ms, setup 0ms, collect 0ms, tests 0ms, environment 0ms, prepare 0ms)
+
+
+codex
+I reproduced a new refusal-path bug: if a VIN read finishes while delete-all is checking whether to refuse, the fence discards it but leaves detection at `attempting`. Later triggers then skip detection until restart or a subsequent wipe resets it. Vitest also failed before collecting tests because the read-only sandbox denied its temporary-directory creation.
+
+exec
+"C:\\Users\\dobri\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe" -Command "rg -n 'setActiveSession|repair.*Adoption|repairInterrupted|claimAdoptionJournal|adoptionJournalOwned' apps/mobile/src/session/composition.ts; rg -n 'function setActiveSession' apps/mobile/src; "'$s=Get-Content apps/mobile/src/session/composition.ts; $s[2520..2640]; $s[3060..3125]; $s=Get-Content apps/mobile/src/ui/screens/SettingsScreen.tsx; $s[918..941]; Get-Content apps/mobile/src/persistence/sqlSettingsStore.ts -TotalCount 170; rg -n '"'VIN|data|export|preferences' docs/legal/privacy-policy.en.md | Select-Object -Last 25; rg -n 'error|delete-all|selected.*fail|journal' apps/mobile/test/session/composition.testLoop.test.ts" in D:\CODE\APLICTIE_Circuit
+ succeeded in 71ms:
+                    />
+                  </View>
+                  <View style={styles.fieldColumn}>
+                    <Text style={styles.fieldLabel} maxFontSizeMultiplier={1.3}>
+                      Channel specs (JSON, advanced)
+                    </Text>
+                    <TextInput
+                      style={styles.multilineInput}
+                      value={enetChannelSpecsDraft}
+                      onChangeText={(text) => {
+                        setEnetChannelSpecsDraft(text);
+                        if (enetChannelSpecsError !== null) setEnetChannelSpecsError(null);
+                      }}
+                      onBlur={commitEnetChannelSpecsDraft}
+                      placeholder="blank = built-in defaults"
+                      placeholderTextColor={colors.textMuted}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      multiline
+                      numberOfLines={4}
+                      accessibilityLabel="ENET channel specs, JSON"
+                    />
+                  </View>
+                  {enetChannelSpecsError === null ? null : (
+import type { SqlDatabase } from '@circuit/core';
+import {
+  DEFAULT_SETTINGS,
+  defaultLanguageForLocale,
+  readDeviceLocale,
+  type AppSettings,
+  type SettingsStore,
+} from '../session/settingsStore';
+import { repairPersistedEnetSettings } from '../session/enetSettingsValidation';
+
+export const SETTINGS_KEY = 'app-settings';
+
+function isPartialAppSettings(value: unknown): value is Partial<AppSettings> {
+  return typeof value === 'object' && value !== null;
+}
+
+/**
+ * `SettingsStore` backed by the `settings` key-value table added in the
+ * persistence-sql v2 migration (MUST DO #4) -- same on-device SQLite
+ * database as session/lap/checkpoint/reference-lap data, not a separate
+ * store. `getSettings()`/`subscribe()` stay synchronous (matching
+ * `SettingsStore`'s existing contract, which `SettingsScreen` calls
+ * directly): the current value is cached in memory and hydrated once from
+ * disk in `create()`; every `update()` applies to the cache immediately and
+ * persists in the background.
+ */
+export class SqlSettingsStore implements SettingsStore {
+  private settings: AppSettings;
+  private readonly listeners = new Set<(s: AppSettings) => void>();
+
+  private constructor(
+    private readonly db: SqlDatabase,
+    initial: AppSettings,
+    /**
+     * Ticket P4p G1 (binding): did the persisted ROW itself carry a usable
+     * `activeVehicleProfileId`? Same question (and same reason) as N7's
+     * `rowHasLanguage` above: `DEFAULT_SETTINGS.activeVehicleProfileId` is a
+     * perfectly valid `'generic'`, so after the merge a row written before
+     * this setting existed is indistinguishable from a deliberate "generic"
+     * choice. `composition.ts`'s one-time migration heuristic runs only while
+     * this is `false`, so a profile the USER chose is never overridden.
+     */
+    readonly activeVehicleProfileIdWasStored: boolean,
+  ) {
+    this.settings = initial;
+  }
+
+  /**
+   * `readLocale` is injectable ONLY so the language-default rule can be
+   * pinned by a test without a native locale API; production always uses the
+   * device's own `readDeviceLocale`.
+   */
+  static async create(
+    db: SqlDatabase,
+    readLocale: () => string | null = readDeviceLocale,
+  ): Promise<SqlSettingsStore> {
+    const rows = await db.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
+      SETTINGS_KEY,
+    ]);
+    let initial = DEFAULT_SETTINGS;
+    // Ticket P4l-FIX4 N7 (binding, Codex P4l-REV2b finding 11): whether the
+    // USER ever chose a language is a fact about the ROW, and it has to be
+    // captured BEFORE the merge below -- `DEFAULT_SETTINGS.language` is a
+    // perfectly valid `'en'`, so after merging, a row written by any build
+    // that predates the setting is indistinguishable from a deliberate
+    // English choice, and the device-locale default was never reachable.
+    let rowHasLanguage = false;
+    // Ticket P4p G1: the same ROW-level question for the active vehicle
+    // profile -- captured here, before the merge, for the reason N7 documents.
+    let rowHasActiveVehicleProfileId = false;
+    const raw = rows[0]?.value;
+    if (raw !== undefined) {
+      try {
+        const parsed: unknown = JSON.parse(raw);
+        if (isPartialAppSettings(parsed)) {
+          rowHasLanguage = parsed.language === 'ro' || parsed.language === 'en';
+          rowHasActiveVehicleProfileId =
+            typeof parsed.activeVehicleProfileId === 'string' && parsed.activeVehicleProfileId.trim() !== '';
+          initial = { ...DEFAULT_SETTINGS, ...parsed };
+        }
+      } catch {
+        // Corrupt/legacy row: fall back to defaults rather than throw --
+        // settings are non-critical and never block app startup.
+      }
+    }
+    // P4e-FIX2 L1 fix (binding, review finding): `isPartialAppSettings` only
+    // proves the persisted JSON was "some object" -- a PRESENT but malformed
+    // ENET field (e.g. `enetPort: 70000`, `enetTesterAddress: -1`) would
+    // otherwise overwrite `DEFAULT_SETTINGS` unchecked. `repairPersistedEnetSettings`
+    // resets exactly those fields back to their defaults when structurally
+    // invalid; every other (including every ELM327) field is untouched.
+    // Applied unconditionally (a no-op when `initial` is already
+    // `DEFAULT_SETTINGS`, i.e. no row / a corrupt row) so there is only one
+    // hydration path to reason about.
+    initial = repairPersistedEnetSettings(initial);
+    // Field revision (2026-08-27, binding, "hidden developer mode"): a
+    // present-but-malformed persisted value (e.g. from a corrupt row, or a
+    // future schema change) must never leave dev-only ENET tools visible in
+    // a release build by accident -- repaired back to `false` (never
+    // trusted as truthy) the same defensive way `repairPersistedEnetSettings`
+    // above handles the ENET fields.
+    if (typeof initial.developerModeEnabled !== 'boolean') {
+      initial = { ...initial, developerModeEnabled: false };
+    }
+    // Ticket P5c-B (contracts.md R2-3): the trackday suggestion stage is
+    // opt-in, so a present-but-malformed persisted value must never be read
+    // as truthy and silently switch it on -- repaired back to `false` exactly
+    // like `developerModeEnabled` above. An install from before this setting
+    // existed carries no key at all and takes `DEFAULT_SETTINGS`' `false`.
+    if (typeof initial.suggestionsEnabled !== 'boolean') {
+      initial = { ...initial, suggestionsEnabled: false };
+    }
+    // Ticket P4l-FIX1 F2 (binding), corrected by P4l-FIX4 N7: the language
+    // DEFAULT comes from the device locale, applied here and only here --
+    // whenever the persisted ROW did not itself carry a valid choice (no row
+    // at all, a row from before the setting existed, or a value outside the
+    // two-value vocabulary, repaired the same defensive way
+    // `developerModeEnabled` above is). A user's own stored choice always
+    // wins and is never re-derived on later launches.
+    if (!rowHasLanguage) {
+      initial = { ...initial, language: defaultLanguageForLocale(readLocale()) };
+    }
+    // Ticket P4p G1 (binding): a present-but-malformed profile id must never
+    // reach the binding cache -- an unresolvable id would silently poll
+    // nothing at all. Repaired back to `'generic'` the same defensive way the
+    // boolean settings above are, and NOT counted as a stored choice (the
+    // migration heuristic then still gets its one chance).
+    if (!rowHasActiveVehicleProfileId) {
+      initial = { ...initial, activeVehicleProfileId: DEFAULT_SETTINGS.activeVehicleProfileId };
+    }
+    // Codex R2 fix (ticket P4q follow-up, binding): a present-but-malformed
+    // `activeVehicleProfileSource` (outside the three-value vocabulary) must
+    // never be read as `'user'` by accident -- that would either wrongly
+    // block a real VIN auto-select, or (worse, if it decoded to something
+    // else entirely) let one silently overwrite a choice the repair itself
+    // cannot prove was ever explicit. Repaired back to the default, the same
+    // defensive discipline every other enum-like field above follows.
+    if (
+      initial.activeVehicleProfileSource !== 'user' &&
+      initial.activeVehicleProfileSource !== 'vin' &&
+      initial.activeVehicleProfileSource !== 'default'
+    ) {
+      initial = { ...initial, activeVehicleProfileSource: DEFAULT_SETTINGS.activeVehicleProfileSource };
+    }
+    // Ticket P4q (binding): a present-but-malformed persisted VIN (wrong
+    // type from a corrupt/legacy row) must never reach the Signal Finder
+    // screen or the VIN-matching logic -- repaired back to `null` (never read
+    // yet), the same defensive way the boolean/ENET fields above are.
+    if (typeof initial.lastSeenVin !== 'string' && initial.lastSeenVin !== null) {
+      initial = { ...initial, lastSeenVin: null };
+    }
+    // Ticket P6a (binding): both new flags are opt-in and both change how a
+    // field-confirmed signal path behaves, so a present-but-malformed
+    // persisted value must never be read as truthy and silently switch one on
+    // -- repaired back to `false` exactly like `suggestionsEnabled` above. An
+    // install from before these settings existed carries no key at all and
+    // takes `DEFAULT_SETTINGS`' `false`.
+    if (typeof initial.imuFusionEnabled !== 'boolean') {
+      initial = { ...initial, imuFusionEnabled: false };
+    }
+    // Ticket P7R E3: the same defensive repair for the gyroscope-CAPTURE
+    // flag, but back to its OWN default (`true`) rather than to `false`. The
+    // rule being applied is "a malformed value is never trusted, the declared
+    // default wins" -- not "a malformed value means off". Capture is additive
+    // and cannot alter latG/longG, so its default is the safe answer here the
+    // same way `false` is the safe answer for the flags that replace a
+    // field-proven path. An install from before this setting existed carries
+    // no key at all and likewise takes `DEFAULT_SETTINGS`' `true`.
+    if (typeof initial.imuGyroCaptureEnabled !== 'boolean') {
+      initial = { ...initial, imuGyroCaptureEnabled: DEFAULT_SETTINGS.imuGyroCaptureEnabled };
+197:| **Signal Finder export**, **DID Sweep export** | The respective diagnostic screens | The guided-observation or sweep record, including raw responses from your car |
+204:Exported reports and analyses **do not contain your VIN**. A raw session export contains your full
+205:position trace, which is precise location data — treat it as you would a photograph of where you
+210:## 6. How long the data is kept
+223:Uninstalling TRACE removes its private database along with it, in the normal way your operating
+224:system removes an app's data.
+226:**If you have exported files**, those files are yours and have their own life: this policy cannot
+233:Under GDPR Articles 15–22 you have the rights listed below. Because your data is on your own device
+237:### Right of access (Art. 15) — "give me a copy of my data"
+240:or **raw session export** for everything on disk without interpretation. The analysis screen's
+241:**Share report / Share the JSON file** gives you the corner-by-corner analysis. These exports are
+253:**In the app:** **Settings → DATA → "Delete all my data"**, then confirm. This permanently removes
+258:It also removes the stored VIN, a vehicle profile the app selected from the VIN, confirmed
+264:What it keeps are your **preferences**: units, language, adapter address and port, coaching, voice
+272:   cannot race a live recording and leave data behind.
+282:### Right to data portability (Art. 20) — "give it to me in a usable format"
+284:**In the app:** the same exports as under access. They are JSON — open, documented, machine-readable
+302:copy of your data**, so we cannot send you an export, and we cannot delete anything from your phone.
+314:> Email: anspdcp@dataprotection.ro
+315:> Web: https://www.dataprotection.ro/
+323:- The database lives in the app's **private sandbox directory**, which the operating system protects
+328:- **We do not encrypt the database separately** with a key of the app's own. If someone has your
+335:- Files you export sit in the app's cache and then wherever you send them. The share sheet's
+338:**There is no backup.** If you lose or reset your phone, your sessions are gone unless you exported
+345:None. No data is transferred outside your device, and therefore none is transferred outside the
+264:  it('Codex P18-REV1 H3: delete-all is refused while a Test Loop is learning, and runs once the driver leaves it', async () => {
+274:    expect(refused.errorText).toMatch(/test loop/i);
+281:  it('Codex P18-REV2 M3: delete-all clears a failed learn phase instead of keeping where the driver drove', async () => {
+294:  it('Codex P18-REV2 M3: delete-all clears a learned loop once its session has ended', async () => {
+
+exec
+"C:\\Users\\dobri\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe" -Command '$s=Get-Content apps/mobile/src/session/composition.ts; $s[1640..1678]; $s[2910..2922]; rg -n '"'async persist|JSON.stringify|this.persist' apps/mobile/src/persistence/sqlSettingsStore.ts; rg -n 'gateSqlTransactions|gate.run' apps/mobile/src/persistence/*.ts; git diff --name-only; "'$s=Get-Content docs/legal/privacy-policy.en.md; $s[250..280]; $s=Get-Content apps/mobile/src/session/composition.ts; $s[2114..2168]' in D:\CODE\APLICTIE_Circuit
+ succeeded in 101ms:
+ * (`openAppDatabase`'s own doc comment) -- this never interleaves with a
+ * concurrent `SqlSessionRepository` transaction or a `TelemetryRecorder`
+ * batch either.
+ */
+async function setActiveSession(
+  database: SqlDatabase,
+  session: { sessionId: string; circuitId: string; startedAtUtc?: string } | null,
+): Promise<void> {
+  // Ticket P10B H5-B: statements go through the transaction-scoped `tx`
+  // handle, never through the (gated) outer `database` handle.
+  await database.withTransactionAsync(async (tx) => {
+    if (session === null) {
+      await tx.runAsync('DELETE FROM settings WHERE key = ?', [ACTIVE_SESSION_SETTINGS_KEY]);
+      await tx.runAsync('DELETE FROM settings WHERE key = ?', [ACTIVE_SESSION_CIRCUIT_SETTINGS_KEY]);
+      await tx.runAsync('DELETE FROM settings WHERE key = ?', [ACTIVE_SESSION_STARTED_SETTINGS_KEY]);
+    } else {
+      await tx.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+        ACTIVE_SESSION_SETTINGS_KEY,
+        session.sessionId,
+      ]);
+      await tx.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+        ACTIVE_SESSION_CIRCUIT_SETTINGS_KEY,
+        session.circuitId,
+      ]);
+      if (session.startedAtUtc !== undefined) {
+        await tx.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+          ACTIVE_SESSION_STARTED_SETTINGS_KEY,
+          session.startedAtUtc,
+        ]);
+      }
+    }
+  });
+}
+
+function midSessionState(snapshot: SessionMachineSnapshot): boolean {
+  const midStates = new Set(['outLap', 'timing', 'inPit']);
+  if (midStates.has(snapshot.state)) return true;
+  const priorState = snapshot.context.priorState;
+  return snapshot.state === 'paused' && typeof priorState === 'string' && midStates.has(priorState);
+    // rebuild takes the ORDINARY provider-cleanup path again.
+    testLoopProvider = null;
+    testLoopHandoverActive = false;
+    adoptionProgress = null;
+    // The adoption is complete: nothing is left for a later launch to repair.
+    await clearOwnAdoptionJournal();
+  });
+}
+
+/**
+ * P5d-FIX1 item 10: a plain INSERT, with a fresh id on the (vanishingly
+ * unlikely) collision, instead of an INSERT OR REPLACE that would silently
+ * overwrite an existing learned circuit -- along with the sessions recorded
+193:    void this.persist();
+196:  private async persist(): Promise<void> {
+200:        JSON.stringify(this.settings),
+292:      JSON.stringify(next),
+rg: apps/mobile/src/persistence/*.ts: IO error for operation on apps/mobile/src/persistence/*.ts: The filename, directory name, or volume label syntax is incorrect. (os error 123)
+hardware/kicad/trace-dongle/trace-dongle.kicad_prl
+hardware/kicad/trace-dongle/trace-dongle.kicad_pro
+### Right to erasure (Art. 17) â€” "delete it"
+
+**In the app:** **Settings â†’ DATA â†’ "Delete all my data"**, then confirm. This permanently removes
+every session, lap, checkpoint, GNSS trace, vehicle and motion sample, lap verdict, calibration
+attempt and your personal-best reference lap â€” for every circuit, not just the one selected â€” and
+verifies the deletion actually landed before reporting success. It cannot be undone.
+
+It also removes the stored VIN, a vehicle profile the app selected from the VIN, confirmed
+per-vehicle signal bindings, ruled-out signals, diagnostic sweep records, custom signal channel
+definitions (whether tagged from a sweep with "Tag as channel" or typed in Settings), the record of
+which vehicle profile each session used, the note of an interrupted Test Loop, a track the Test Loop
+learned but could not save, and the geometry of circuits you taught the app.
+
+What it keeps are your **preferences**: units, language, adapter address and port, coaching, voice
+and suggestion toggles, the selected circuit, and a vehicle profile you chose yourself. None of these
+identify you or your car. Uninstalling the app removes them too.
+
+Two honest caveats:
+
+1. The control is **refused while a session is running, or while a Test Loop is learning a track or
+   saving one**; end the session or stop the Test Loop first. This exists so the deletion
+   cannot race a live recording and leave data behind.
+2. If any part of the deletion fails, the app says so instead of reporting success. In that case a
+   learned circuit that a surviving session still uses is kept, so that session can still be
+   analysed; run the deletion again.
+
+### Right to restriction (Art. 18) â€” "stop using it for now"
+
+**In the app:** turn off telemetry, coaching and suggestions in Settings; do not start a session. The
+app records nothing when no session is active.
+
+  settingsStore.update({ selectedCircuitId: entry.profile.circuitId });
+}
+
+/** Rebuilds/refreshes `SqlSessionHistoryStore` for `entry` and swaps it into `historyWrapper` -- the same no-op-if-bootstrap-incomplete guard `runBootstrap()`'s own initial build and `selectCircuit()` share. Split out from `applySelectedCircuit()` (rather than always paired) so `runBootstrap()`'s recovery block can call both in sequence exactly once, without a second, redundant history rebuild layered on top via a full `selectCircuit()` call. */
+async function rebuildHistoryForSelection(entry: BundledCircuit): Promise<void> {
+  if (repository === null) return;
+  const history = new SqlSessionHistoryStore(
+    repository,
+    LOCAL_USER_ID,
+    entry.profile.circuitId,
+    entry.profile.layoutId,
+    entry.profile.layoutVersion,
+  );
+  await history.refresh();
+  historyWrapper.setInner(history);
+  historyStore = history;
+}
+
+/**
+ * The selection change itself -- settings + history store, in that order.
+ * MUST be called with `lifecycleLock` held (M1 fix's ordering guarantee now
+ * comes from the lock, which every other lifecycle operation shares, rather
+ * than from a selection-only chain). Callers are the locked `selectCircuit()`
+ * below, `resumeRecovery()`'s recovery-circuit switch, and
+ * `runDevReplayScenario()`.
+ */
+async function unlockedApplySelection(entry: BundledCircuit): Promise<void> {
+  applySelectedCircuit(entry);
+  await rebuildHistoryForSelection(entry);
+  // N3 fix (lifecycle lock amendment, binding, ticket CN-FIX3): the
+  // production controller is rebuilt for the new circuit HERE, in the same
+  // critical section as the settings/history writes, so the invariant "an
+  // IDLE production controller is always built for the resolved selection"
+  // holds continuously. Previously the rebuild happened lazily, in the
+  // preflight gate only -- and `RealSessionFacade.startPreflight()` is a
+  // no-op controller-side (the state machine first moves at
+  // `beginCalibration()`), so a selection committed after the gate had
+  // already run left the NEXT session starting on the previous circuit's
+  // geometry while settings/history said otherwise. Restricted to `idle`
+  // exactly like the gate's own circuit-change trigger: a terminal
+  // (`sessionComplete`/`error`) controller is still the gate's to replace,
+  // and a mid-session one is unreachable here (the selection would have been
+  // refused before this point).
+  if (
+    controller !== null &&
+    activeController === controller &&
+    currentControllerState(controller) === 'idle' &&
+    productionControllerCircuitId !== resolveSelectedCircuit(settingsStore.getSettings()).profile.circuitId
+  ) {
+    await unlockedRebuildProductionController();
+  }
+}
+
+/** Shared refusal check for every locked selection change -- `null` when the change may proceed. */
+function refuseSelectionIfSessionActive(): SelectCircuitResult | null {
+
+codex
+FAIL
+
+Reviewed `d2b26f6..1dee7b2` and the cumulative rework `6d6f90b..1dee7b2`; HEAD matches `1dee7b2`. No files changed; no agents used.
+
+**REV2 dispositions**
+
+Paths below are relative to `apps/mobile/` unless otherwise stated.
+
+| REV2 finding | Status | Evidence |
+|---|---|---|
+| HIGH 1 — VIN read after second reset survives verification | **CLOSED** | `src/session/composition.ts:3746` holds the fence through the operation; `:1021` blocks new detection and `:1056` rejects obsolete completions. No surviving success-path VIN resurrection found in these paths. |
+| MEDIUM 2 — `error` refusal gives an impossible UI remedy | **CLOSED** | `composition.ts:3798` refuses only learning/adopting; `:3814` resets and abandons terminal states, including `error`. A genuinely running session still correctly refuses first. |
+| MEDIUM 3 — terminal Test Loop retains geometry/coordinates | **CLOSED** | `composition.ts:3815` calls `reset()`; `src/session/testLoopController.ts:241` clears samples, both coordinate anchors, learned metadata and `pendingCircuit`. |
+| MEDIUM 4 — Settings channel draft survives | **PARTIAL** | `src/ui/screens/SettingsScreen.tsx:468` resets draft, committed ref and validation state after **resolved** success/failure/refusal. Rejected operations bypass this cleanup at `:478`; failing sequence below. |
+
+The previously closed REV1 items remain closed: persisted channels (`src/persistence/deviceDataWipe.ts:45`), stale adoption retry (`composition.ts:3815`), learned-refresh failure reporting (`:3689`), and journal/log failure reporting (`:3939`, `:3952`). Detection rearming now has a new refusal-path regression.
+
+**New and residual findings**
+
+1. **MEDIUM — A refused deletion can permanently strand VIN detection at `attempting`.**
+
+   Locations: [composition.ts:3746](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3746), [composition.ts:1056](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:1056), [composition.ts:3764](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3764).
+
+   Sequence:
+
+   - VIN detection starts and reaches its awaited transport close.
+   - Delete-all acquires the lifecycle lock and sets `deviceWipeInProgress = true`.
+   - While deletion awaits `ready()`, detection finishes. Its generation still matches, but the fence makes it return before changing `vinDetectionState`.
+   - Deletion refuses because a session is active. Neither identity reset runs.
+   - `finally` releases the fence, but detection remains `attempting`. Every subsequent trigger returns the cached null without attempting another read.
+
+   **Observed evidence:** A read-only, in-memory reproduction used the source-extracted detection, delete wrapper, delete body and `ready()` functions, plus the actual lifecycle lock. Transport and surrounding dependencies were stubbed:
+
+   ```text
+   read: null
+   deletion.reason: SESSION_ACTIVE
+   state: attempting
+   fence: false
+   generation: 0
+   nextTrigger: null
+   state after next trigger: attempting
+   ```
+
+   This reproduces with an already-resolved bootstrap promise; no prolonged bootstrap is required. Restart or a later deletion reaching the identity reset recovers detection. The fence itself releases correctly; the detection state does not.
+
+2. **LOW — Settings draft cleanup misses rejected deletion failures.**
+
+   Locations: [SettingsScreen.tsx:468](D:/CODE/APLICTIE_Circuit/apps/mobile/src/ui/screens/SettingsScreen.tsx:468), [SettingsScreen.tsx:478](D:/CODE/APLICTIE_Circuit/apps/mobile/src/ui/screens/SettingsScreen.tsx:478), [composition.ts:3945](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3945).
+
+   Sequence: stored channel JSON is empty → enter invalid VIN-bearing JSON → delete-all clears the database → active-pointer clearing throws, or the final history refresh rejects → `confirmDelete()` enters `catch`.
+
+   The draft/ref/error cleanup is skipped. Because the stored channel field stayed empty, its field-change effect does not clear the draft either. It remains editable and can subsequently be corrected and persisted.
+
+   This is **not false success**: the UI reports failure. It does mean “draft reset after both success and failure” is incomplete. Cleanup should also cover rejection, using the current store value.
+
+**REV2 qualifications**
+
+| Qualification | Status | Assessment |
+|---|---|---|
+| FIFO protects already-submitted writes, not future writes | **CLOSED for the reported VIN race** | `src/persistence/sqlSettingsStore.ts:196` submits the serialized blob; `composition.ts:3701` verifies it. The new detection fence closes the previously identified future-writer window. FIFO alone still provides no such guarantee. |
+| Active-profile subscription/bindings generation | **CLOSED** | `composition.ts:729`, `:3659`, `:3680`: earlier reads are invalidated; post-wipe refresh uses the new generation. |
+| Generation mismatch does not strand detection | **OPEN — regression** | The added fence-only return at `composition.ts:1056` can strand detection without a generation change. See finding 1. |
+| Abandoned ledger and bootstrap repair | **CLOSED within one runtime** | `composition.ts:3815` removes retryable geometry before clearing its ledger; `:3151` repairs during bootstrap, before `ready()` permits deletion. A retained journal describes surviving disk state after failure. |
+| Cross-runtime journal ownership | **OPEN, unchanged qualification** | `composition.ts:3729` still deletes by key unconditionally. Another runtime claiming/writing that key during deletion is outside this lifecycle lock’s protection. |
+| Failure reporting | **CLOSED for the named cases** | Learned refresh, identity verification, journal deletion and log deletion prevent success (`composition.ts:3689`, `:3704`, `:3939`, `:3952`). Other awaited failures can reject rather than return the aggregate; Settings reports an error. |
+| History skipped after log failure | **CLOSED** | `composition.ts:3958` now refreshes when `sessionDataOk`, even if journal/log cleanup fails. |
+| Broader history freshness on failure | **PARTIAL** | `sessionDataOk` still includes device-data success (`composition.ts:3935`). Sessions can be deleted, identity verification can fail, and history refresh is then skipped. An active-pointer rejection also bypasses it. |
+| Tests omit important paths | **PARTIAL** | Successful rearming and failed/learned abandonment now have coverage; refusal-time completion, rejection cleanup, late deferred VIN completion and several injected storage failures remain uncovered. |
+| Policy alignment | **PARTIAL** | Changed EN/RO wording fixes the cited channel scope, terminal adoption and adapter-availability descriptions. Remaining qualifications below. |
+| Unmentioned behavior changes | **CLOSED for custom-channel scope; diagnostic rename remains** | Policies now explicitly include typed definitions. The cumulative diff still changes the diagnostic key to `vehicle_identity_settings` (`deviceDataWipe.ts:134`). |
+
+**Test assessment**
+
+- `test/session/composition.deleteAllVinFence.test.ts:116` asserts that settings-change triggers start no reads during deletion. That is a valid, stronger property of this chosen fence implementation. It is not the only possible implementation of the privacy requirement.
+- The test seeds a real VIN and checks the actual settings row after deletion (`:110`, `:127`), so its memory/disk assertions are meaningful.
+- It does **not** directly schedule a read after the second reset and complete it after final verification. Reads resolve immediately, and triggers occur only on settings notifications. It also does not inspect private `cachedDetectedVin` or exercise refusal-time completion.
+- The Test Loop tests at `test/session/composition.testLoop.test.ts:281` and `:294` reject the old terminal-state behavior. They pin invocation of abandonment through observable snapshots. They do not directly inspect private anchors/geometry, test `error` abandonment, verify restart after deletion, or exercise queued auto-teardown ordering.
+- The SQL double still gates transactions only; standalone operations bypass that queue (`test/support/sqlJsDatabase.ts:35`). Production FIFO ordering is not fully represented.
+- Attempted both changed composition test files with configuration/cache writing disabled. Vitest failed before collection because temporary-directory creation returned `EPERM`. **No suite pass claimed.**
+
+**Clean list**
+
+- No demonstrated `ok: true` VIN resurrection through the reviewed detection paths.
+- Live sessions are refused before Test Loop teardown. Just-ended session commands and deletion share the lifecycle lock; teardown awaits the existing telemetry shutdown.
+- Failed auto-teardown cannot overlap the new teardown under that lock. Incrementing `teardownGeneration` invalidates an older queued teardown.
+- Reset publishes `idle`; `TestLoopScreen` subscribes to snapshots and exposes Start for idle. No newly introduced unrecoverable screen state found.
+- Retaining the journal after an unsuccessful wipe is appropriate for bootstrap repair. Repair uses surviving disk geometry or removes orphaned state; it does not reconstruct erased geometry from the cleared in-memory ledger.
+- Settings’ explicit committed-ref update handles the original unchanged-empty-store case correctly on resolved operations. No stale-ref resurrection demonstrated there.
+- EN/RO agree on the changed scope. One pre-existing overclaim remains: §7 says the selected circuit is kept, but deleting the selected learned circuit selects the fallback (`composition.ts:3693`). The adopting-phase instruction to “stop” is also imprecise: that phase offers no Stop control and must settle.
+- Additional behavior: even an outright refusal now discards an uncommitted Settings draft, and terminal Test Loop abandonment occurs before deletion success is known. Neither is a false-success bug, but both are observable consequences of this patch.
+tokens used
+82,388
+FAIL
+
+Reviewed `d2b26f6..1dee7b2` and the cumulative rework `6d6f90b..1dee7b2`; HEAD matches `1dee7b2`. No files changed; no agents used.
+
+**REV2 dispositions**
+
+Paths below are relative to `apps/mobile/` unless otherwise stated.
+
+| REV2 finding | Status | Evidence |
+|---|---|---|
+| HIGH 1 — VIN read after second reset survives verification | **CLOSED** | `src/session/composition.ts:3746` holds the fence through the operation; `:1021` blocks new detection and `:1056` rejects obsolete completions. No surviving success-path VIN resurrection found in these paths. |
+| MEDIUM 2 — `error` refusal gives an impossible UI remedy | **CLOSED** | `composition.ts:3798` refuses only learning/adopting; `:3814` resets and abandons terminal states, including `error`. A genuinely running session still correctly refuses first. |
+| MEDIUM 3 — terminal Test Loop retains geometry/coordinates | **CLOSED** | `composition.ts:3815` calls `reset()`; `src/session/testLoopController.ts:241` clears samples, both coordinate anchors, learned metadata and `pendingCircuit`. |
+| MEDIUM 4 — Settings channel draft survives | **PARTIAL** | `src/ui/screens/SettingsScreen.tsx:468` resets draft, committed ref and validation state after **resolved** success/failure/refusal. Rejected operations bypass this cleanup at `:478`; failing sequence below. |
+
+The previously closed REV1 items remain closed: persisted channels (`src/persistence/deviceDataWipe.ts:45`), stale adoption retry (`composition.ts:3815`), learned-refresh failure reporting (`:3689`), and journal/log failure reporting (`:3939`, `:3952`). Detection rearming now has a new refusal-path regression.
+
+**New and residual findings**
+
+1. **MEDIUM — A refused deletion can permanently strand VIN detection at `attempting`.**
+
+   Locations: [composition.ts:3746](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3746), [composition.ts:1056](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:1056), [composition.ts:3764](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3764).
+
+   Sequence:
+
+   - VIN detection starts and reaches its awaited transport close.
+   - Delete-all acquires the lifecycle lock and sets `deviceWipeInProgress = true`.
+   - While deletion awaits `ready()`, detection finishes. Its generation still matches, but the fence makes it return before changing `vinDetectionState`.
+   - Deletion refuses because a session is active. Neither identity reset runs.
+   - `finally` releases the fence, but detection remains `attempting`. Every subsequent trigger returns the cached null without attempting another read.
+
+   **Observed evidence:** A read-only, in-memory reproduction used the source-extracted detection, delete wrapper, delete body and `ready()` functions, plus the actual lifecycle lock. Transport and surrounding dependencies were stubbed:
+
+   ```text
+   read: null
+   deletion.reason: SESSION_ACTIVE
+   state: attempting
+   fence: false
+   generation: 0
+   nextTrigger: null
+   state after next trigger: attempting
+   ```
+
+   This reproduces with an already-resolved bootstrap promise; no prolonged bootstrap is required. Restart or a later deletion reaching the identity reset recovers detection. The fence itself releases correctly; the detection state does not.
+
+2. **LOW — Settings draft cleanup misses rejected deletion failures.**
+
+   Locations: [SettingsScreen.tsx:468](D:/CODE/APLICTIE_Circuit/apps/mobile/src/ui/screens/SettingsScreen.tsx:468), [SettingsScreen.tsx:478](D:/CODE/APLICTIE_Circuit/apps/mobile/src/ui/screens/SettingsScreen.tsx:478), [composition.ts:3945](D:/CODE/APLICTIE_Circuit/apps/mobile/src/session/composition.ts:3945).
+
+   Sequence: stored channel JSON is empty → enter invalid VIN-bearing JSON → delete-all clears the database → active-pointer clearing throws, or the final history refresh rejects → `confirmDelete()` enters `catch`.
+
+   The draft/ref/error cleanup is skipped. Because the stored channel field stayed empty, its field-change effect does not clear the draft either. It remains editable and can subsequently be corrected and persisted.
+
+   This is **not false success**: the UI reports failure. It does mean “draft reset after both success and failure” is incomplete. Cleanup should also cover rejection, using the current store value.
+
+**REV2 qualifications**
+
+| Qualification | Status | Assessment |
+|---|---|---|
+| FIFO protects already-submitted writes, not future writes | **CLOSED for the reported VIN race** | `src/persistence/sqlSettingsStore.ts:196` submits the serialized blob; `composition.ts:3701` verifies it. The new detection fence closes the previously identified future-writer window. FIFO alone still provides no such guarantee. |
+| Active-profile subscription/bindings generation | **CLOSED** | `composition.ts:729`, `:3659`, `:3680`: earlier reads are invalidated; post-wipe refresh uses the new generation. |
+| Generation mismatch does not strand detection | **OPEN — regression** | The added fence-only return at `composition.ts:1056` can strand detection without a generation change. See finding 1. |
+| Abandoned ledger and bootstrap repair | **CLOSED within one runtime** | `composition.ts:3815` removes retryable geometry before clearing its ledger; `:3151` repairs during bootstrap, before `ready()` permits deletion. A retained journal describes surviving disk state after failure. |
+| Cross-runtime journal ownership | **OPEN, unchanged qualification** | `composition.ts:3729` still deletes by key unconditionally. Another runtime claiming/writing that key during deletion is outside this lifecycle lock’s protection. |
+| Failure reporting | **CLOSED for the named cases** | Learned refresh, identity verification, journal deletion and log deletion prevent success (`composition.ts:3689`, `:3704`, `:3939`, `:3952`). Other awaited failures can reject rather than return the aggregate; Settings reports an error. |
+| History skipped after log failure | **CLOSED** | `composition.ts:3958` now refreshes when `sessionDataOk`, even if journal/log cleanup fails. |
+| Broader history freshness on failure | **PARTIAL** | `sessionDataOk` still includes device-data success (`composition.ts:3935`). Sessions can be deleted, identity verification can fail, and history refresh is then skipped. An active-pointer rejection also bypasses it. |
+| Tests omit important paths | **PARTIAL** | Successful rearming and failed/learned abandonment now have coverage; refusal-time completion, rejection cleanup, late deferred VIN completion and several injected storage failures remain uncovered. |
+| Policy alignment | **PARTIAL** | Changed EN/RO wording fixes the cited channel scope, terminal adoption and adapter-availability descriptions. Remaining qualifications below. |
+| Unmentioned behavior changes | **CLOSED for custom-channel scope; diagnostic rename remains** | Policies now explicitly include typed definitions. The cumulative diff still changes the diagnostic key to `vehicle_identity_settings` (`deviceDataWipe.ts:134`). |
+
+**Test assessment**
+
+- `test/session/composition.deleteAllVinFence.test.ts:116` asserts that settings-change triggers start no reads during deletion. That is a valid, stronger property of this chosen fence implementation. It is not the only possible implementation of the privacy requirement.
+- The test seeds a real VIN and checks the actual settings row after deletion (`:110`, `:127`), so its memory/disk assertions are meaningful.
+- It does **not** directly schedule a read after the second reset and complete it after final verification. Reads resolve immediately, and triggers occur only on settings notifications. It also does not inspect private `cachedDetectedVin` or exercise refusal-time completion.
+- The Test Loop tests at `test/session/composition.testLoop.test.ts:281` and `:294` reject the old terminal-state behavior. They pin invocation of abandonment through observable snapshots. They do not directly inspect private anchors/geometry, test `error` abandonment, verify restart after deletion, or exercise queued auto-teardown ordering.
+- The SQL double still gates transactions only; standalone operations bypass that queue (`test/support/sqlJsDatabase.ts:35`). Production FIFO ordering is not fully represented.
+- Attempted both changed composition test files with configuration/cache writing disabled. Vitest failed before collection because temporary-directory creation returned `EPERM`. **No suite pass claimed.**
+
+**Clean list**
+
+- No demonstrated `ok: true` VIN resurrection through the reviewed detection paths.
+- Live sessions are refused before Test Loop teardown. Just-ended session commands and deletion share the lifecycle lock; teardown awaits the existing telemetry shutdown.
+- Failed auto-teardown cannot overlap the new teardown under that lock. Incrementing `teardownGeneration` invalidates an older queued teardown.
+- Reset publishes `idle`; `TestLoopScreen` subscribes to snapshots and exposes Start for idle. No newly introduced unrecoverable screen state found.
+- Retaining the journal after an unsuccessful wipe is appropriate for bootstrap repair. Repair uses surviving disk geometry or removes orphaned state; it does not reconstruct erased geometry from the cleared in-memory ledger.
+- Settings’ explicit committed-ref update handles the original unchanged-empty-store case correctly on resolved operations. No stale-ref resurrection demonstrated there.
+- EN/RO agree on the changed scope. One pre-existing overclaim remains: §7 says the selected circuit is kept, but deleting the selected learned circuit selects the fallback (`composition.ts:3693`). The adopting-phase instruction to “stop” is also imprecise: that phase offers no Stop control and must settle.
+- Additional behavior: even an outright refusal now discards an uncommitted Settings draft, and terminal Test Loop abandonment occurs before deletion success is known. Neither is a false-success bug, but both are observable consequences of this patch.
