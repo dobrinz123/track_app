@@ -11,6 +11,7 @@ import {
 } from '@circuit/core';
 import { createSqlJsDatabase } from '../support/sqlJsDatabase';
 import { migrateTelemetrySchema } from '../../src/persistence/telemetrySchema';
+import { migrateDidSweepSchema } from '../../src/persistence/didSweepSchema';
 
 /**
  * ticket CN-W3 -- composition-level tests for contracts.md's Multi-circuit
@@ -108,6 +109,7 @@ function feed(provider: StubLocationProviderInstance, samples: readonly Location
 async function bootFresh(): Promise<typeof import('../../src/session/composition')> {
   const db = await createSqlJsDatabase();
   await migrateTelemetrySchema(db);
+  await migrateDidSweepSchema(db);
   const repository = await SqlSessionRepository.create(db);
   seeded.db = db;
   seeded.repository = repository;
@@ -215,6 +217,7 @@ describe('composition.ts preflight-gate circuit-change rebuild (ticket CN-W3)', 
   it('H1 fix (ticket CN-FIX2): a selection made DURING bootstrap is not lost -- settings, history, and (once startPreflight runs) the controller all end up on the selected circuit', async () => {
     const db = await createSqlJsDatabase();
     await migrateTelemetrySchema(db);
+    await migrateDidSweepSchema(db);
     const repository = await SqlSessionRepository.create(db);
     seeded.db = db;
     seeded.repository = repository;
@@ -418,6 +421,55 @@ describe('composition.ts deleteAllStoredUserData spans every bundled circuit (ti
     expect(idRows.length).toBe(0);
     expect(circuitRows.length).toBe(0);
   });
+
+  it('HANDOFF release blocker: delete-all forgets the VIN, the vehicle bindings and sweep records, and unreferenced learned circuits -- on disk and in memory', async () => {
+    const composition = await bootFresh();
+    const db = seeded.db as SqlDatabase;
+    composition.settingsStore.update({
+      lastSeenVin: 'WZ1DB0C04LW000001',
+      activeVehicleProfileSource: 'vin',
+      units: 'mph',
+    });
+    await flushBootstrap();
+    await db.runAsync(
+      "INSERT INTO vehicle_profile_bindings (profile_id, channel, ecu, did, decode, status, updated_at_utc) VALUES ('generic', 'brake', 18, 1, 'u8', 'field-confirmed', '2026-09-20T10:00:00Z')",
+    );
+    await db.runAsync(
+      "INSERT INTO did_sweep_runs (run_id, adapter_type, range_from, range_to, started_at_utc, updated_at_utc, status) VALUES ('run-1', 'enet', 0, 65535, '2026-09-20T10:00:00Z', '2026-09-20T10:00:00Z', 'complete')",
+    );
+    await db.runAsync(
+      "INSERT INTO learned_circuits (circuit_id, display_name, payload, length_m, corner_count, created_at_utc, saved) VALUES ('learned-orphan', 'Home loop', '{}', 1200, 4, '2026-09-20T10:00:00Z', 1)",
+    );
+    await db.runAsync('INSERT INTO settings (key, value) VALUES (?, ?)', [
+      'vehicle-profile-snapshot:driver-1--old',
+      '{}',
+    ]);
+
+    const result = await composition.deleteAllStoredUserData();
+    await flushBootstrap();
+
+    expect(result.ok).toBe(true);
+    expect(result.errorText).toBeNull();
+    const live = composition.settingsStore.getSettings();
+    expect(live.lastSeenVin).toBeNull();
+    expect(live.activeVehicleProfileSource).toBe('default');
+    expect(live.units).toBe('mph');
+    const stored = await db.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
+      'app-settings',
+    ]);
+    const storedSettings = JSON.parse(stored[0]?.value ?? '{}') as { lastSeenVin?: unknown; units?: unknown };
+    expect(storedSettings.lastSeenVin).toBeNull();
+    expect(storedSettings.units).toBe('mph');
+    for (const table of ['vehicle_profile_bindings', 'did_sweep_runs', 'learned_circuits']) {
+      const rows = await db.getAllAsync<{ count: number }>(`SELECT COUNT(*) AS count FROM ${table}`);
+      expect(rows[0]?.count, table).toBe(0);
+    }
+    const snapshots = await db.getAllAsync<{ key: string }>(
+      "SELECT key FROM settings WHERE key LIKE 'vehicle-profile-snapshot:%'",
+    );
+    expect(snapshots).toEqual([]);
+    expect(composition.getVehicleProfileBindingsCache()).toEqual([]);
+  });
 });
 
 describe("composition.ts recovery's circuit resolution via listSessions (ticket CN-W3)", () => {
@@ -428,6 +480,7 @@ describe("composition.ts recovery's circuit resolution via listSessions (ticket 
   it('a recovered checkpoint whose session already has a COMPLETED row under a DIFFERENT circuit switches the selection to it before recovery is offered', async () => {
     const db = await createSqlJsDatabase();
     await migrateTelemetrySchema(db);
+    await migrateDidSweepSchema(db);
     const repository = await SqlSessionRepository.create(db);
     const sessionId = 'driver-1--cross-circuit';
 
@@ -480,6 +533,7 @@ describe("composition.ts recovery's circuit resolution via listSessions (ticket 
     // pre-existing TMR recovery behavior is unchanged by this ticket.
     const db = await createSqlJsDatabase();
     await migrateTelemetrySchema(db);
+    await migrateDidSweepSchema(db);
     const repository = await SqlSessionRepository.create(db);
     const sessionId = 'driver-1--in-progress-no-row';
     await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [ACTIVE_SESSION_KEY, sessionId]);
@@ -512,6 +566,7 @@ describe('composition.ts M4 fix (ticket CN-FIX2) -- activeSessionCircuitId recov
   it('a first-crash checkpoint (NO sessions-table row) resolves its circuit from the persisted activeSessionCircuitId -- even while a DIFFERENT circuit is currently selected -- and resumeRecovery() reasserts BOTH keys', async () => {
     const db = await createSqlJsDatabase();
     await migrateTelemetrySchema(db);
+    await migrateDidSweepSchema(db);
     const repository = await SqlSessionRepository.create(db);
     const sessionId = 'driver-1--crash-motorpark';
 
@@ -563,6 +618,7 @@ describe('composition.ts M4 fix (ticket CN-FIX2) -- activeSessionCircuitId recov
   it('a persisted activeSessionCircuitId naming a circuit OUTSIDE the bundled catalog discards the checkpoint (with a warning) instead of offering an unresolvable recovery', async () => {
     const db = await createSqlJsDatabase();
     await migrateTelemetrySchema(db);
+    await migrateDidSweepSchema(db);
     const repository = await SqlSessionRepository.create(db);
     const sessionId = 'driver-1--crash-unbundled';
     await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [ACTIVE_SESSION_KEY, sessionId]);
@@ -602,6 +658,7 @@ describe('composition.ts M4 fix (ticket CN-FIX2) -- activeSessionCircuitId recov
   it('discardRecovery() clears BOTH keys together', async () => {
     const db = await createSqlJsDatabase();
     await migrateTelemetrySchema(db);
+    await migrateDidSweepSchema(db);
     const repository = await SqlSessionRepository.create(db);
     const sessionId = 'driver-1--discard-both';
     await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [ACTIVE_SESSION_KEY, sessionId]);

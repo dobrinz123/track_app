@@ -55,8 +55,10 @@ export interface SessionVehicleSnapshot {
  * `vehicle-profile-snapshot:<sessionId>`. One row per session, WRITTEN ONCE
  * -- see {@link writeSessionVehicleSnapshot}.
  */
+export const SESSION_VEHICLE_SNAPSHOT_KEY_PREFIX = 'vehicle-profile-snapshot:';
+
 export function sessionVehicleSnapshotKey(sessionId: string): string {
-  return `vehicle-profile-snapshot:${sessionId}`;
+  return `${SESSION_VEHICLE_SNAPSHOT_KEY_PREFIX}${sessionId}`;
 }
 
 function isSnapshot(value: unknown): value is SessionVehicleSnapshot {

@@ -51,19 +51,12 @@ These are the owner's, learned the hard way. Breaking them is how this app lost 
 
 ## Open work, in the order I would take it
 
-### 1. `deleteUserData` does not delete the VIN — RELEASE BLOCKER
+### 1. ~~`deleteUserData` does not delete the VIN~~ — fixed
 
-`packages/core/src/persistence-sql/sqlSessionRepository.ts` `deleteUserData` clears `sessions`, `laps`,
-`checkpoints`, `telemetry`, `lap_verdicts`, `calibration_attempts`, reference laps and the active-session
-pointer. **It does not touch `settings`**, where `lastSeenVin` lives (`apps/mobile/src/persistence/sqlSettingsStore.ts`),
-along with vehicle bindings, ruled-out signals, DID sweep records and learned-circuit geometry.
-
-So "Delete all my data" in Settings leaves the vehicle's VIN on the device. In the EU a VIN is personal
-data. The drafted privacy policy states this gap plainly rather than papering over it — fix the code and
-then correct `docs/legal/privacy-policy.*.md`.
-
-Decide deliberately what a full delete should keep: user *preferences* are arguably not user *data*, but
-the VIN, the bindings and learned geometry clearly are.
+"Delete all my data" now also clears the VIN, a VIN-selected vehicle profile, vehicle bindings,
+ruled-out signals, DID sweep records, per-session vehicle snapshots and learned-circuit geometry
+(`apps/mobile/src/persistence/deviceDataWipe.ts`). Preferences are kept. The privacy policies and
+compliance checklist item 3.5 are updated.
 
 ### 2. MotorPark's corner segmentation reads wrong
 

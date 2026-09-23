@@ -10,6 +10,7 @@ import {
 import { createSqlJsDatabase } from '../support/sqlJsDatabase';
 import { createSqlWriteGate, gateSqlTransactions } from '../../src/persistence/sqlWriteGate';
 import { migrateTelemetrySchema } from '../../src/persistence/telemetrySchema';
+import { migrateDidSweepSchema } from '../../src/persistence/didSweepSchema';
 
 /**
  * ticket CN-FIX4 (Codex CN-REV4) -- contracts.md's "Multi-circuit selection —
@@ -146,6 +147,7 @@ function lap(lapNumber: number, durationMs: number): LapRecord {
 async function seedDatabase(): Promise<{ db: SqlDatabase; repository: SqlSessionRepository }> {
   const db = await createSqlJsDatabase();
   await migrateTelemetrySchema(db);
+  await migrateDidSweepSchema(db);
   const writeGate = createSqlWriteGate();
   const gatedDb = gateSqlTransactions(db, writeGate);
   const repository = await SqlSessionRepository.create(gatedDb);

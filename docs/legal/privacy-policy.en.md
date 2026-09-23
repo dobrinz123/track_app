@@ -114,11 +114,8 @@ such:
   characters only, e.g. `WBA************12`.
 - It is shown in full on the Signal Finder screen, which is where you would need to read it.
 
-> **Known limitation, stated honestly.** In the current build, "Delete all my data" does **not**
-> clear the stored VIN, because that value lives in the app's settings table and the delete routine
-> covers the session tables. Until this is fixed, the only way to remove a stored VIN is to
-> uninstall the app. This is recorded as a release blocker in
-> `docs/legal/compliance-checklist.md` and this policy must be updated the moment it is fixed.
+- "Delete all my data" (§7) removes the stored VIN, and with it a vehicle profile the app selected
+  from the VIN. The app reads the VIN again the next time a BMW-ENET-type adapter is connected.
 
 ### 3.4 Device motion sensors
 
@@ -257,15 +254,21 @@ every session, lap, checkpoint, GNSS trace, vehicle and motion sample, lap verdi
 attempt and your personal-best reference lap — for every circuit, not just the one selected — and
 verifies the deletion actually landed before reporting success. It cannot be undone.
 
+It also removes the stored VIN, a vehicle profile the app selected from the VIN, confirmed
+per-vehicle signal bindings, ruled-out signals, diagnostic sweep records, the record of which
+vehicle profile each session used, and the geometry of circuits you taught the app.
+
+What it keeps are your **preferences**: units, language, adapter address and port, coaching, voice
+and suggestion toggles, the selected circuit, and a vehicle profile you chose yourself. None of these
+identify you or your car. Uninstalling the app removes them too.
+
 Two honest caveats:
 
 1. The control is **refused while a session is running**; end the session first. This exists so the
    deletion cannot race a live recording and leave data behind.
-2. In this version the wipe **does not clear** app settings (including the stored VIN), confirmed
-   per-vehicle signal bindings, diagnostic sweep records, or the geometry of circuits you taught the
-   app. Learned circuits can be deleted one at a time from that circuit's detail screen. For
-   everything else, **uninstalling the app** removes the entire database. Fixing this is a release
-   blocker recorded in `docs/legal/compliance-checklist.md`.
+2. If any part of the deletion fails, the app says so instead of reporting success. In that case a
+   learned circuit that a surviving session still uses is kept, so that session can still be
+   analysed; run the deletion again.
 
 ### Right to restriction (Art. 18) — "stop using it for now"
 

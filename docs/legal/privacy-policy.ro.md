@@ -121,11 +121,9 @@ tratează ca atare:
   și ultimele două caractere, de exemplu `WBA************12`.
 - Este afișat integral pe ecranul Signal Finder, adică exact acolo unde ai avea nevoie să îl citești.
 
-> **Limitare cunoscută, spusă cinstit.** În versiunea actuală, „Delete all my data" **nu** șterge
-> VIN-ul stocat, pentru că acea valoare se află în tabelul de setări al aplicației, iar rutina de
-> ștergere acoperă tabelele de sesiune. Până la remediere, singura cale de a elimina un VIN stocat
-> este dezinstalarea aplicației. Acest lucru este consemnat ca blocant de lansare în
-> `docs/legal/compliance-checklist.md`, iar politica trebuie actualizată în momentul remedierii.
+- „Delete all my data" (§7) șterge VIN-ul stocat și, odată cu el, un profil de vehicul pe care
+  aplicația l-a ales pe baza VIN-ului. Aplicația citește din nou VIN-ul data viitoare când este
+  conectat un adaptor de tip BMW ENET.
 
 ### 3.4 Senzorii de mișcare ai dispozitivului
 
@@ -270,17 +268,24 @@ verdict de tur, încercare de calibrare și turul tău de referință — pentru
 pentru cel selectat — și verifică efectiv că ștergerea a avut loc înainte de a raporta succes. Este
 ireversibilă.
 
+Șterge de asemenea VIN-ul stocat, un profil de vehicul ales de aplicație pe baza VIN-ului,
+legăturile de semnal confirmate pentru vehicul, semnalele excluse, înregistrările de baleiaj din
+diagnosticare, evidența profilului de vehicul folosit în fiecare sesiune și geometria circuitelor pe
+care le-ai învățat aplicației.
+
+Păstrează doar **preferințele** tale: unitățile de măsură, limba, adresa și portul adaptorului,
+comutatoarele pentru coaching, voce și sugestii, circuitul selectat și un profil de vehicul ales chiar
+de tine. Niciuna dintre ele nu te identifică pe tine sau mașina ta. Dezinstalarea aplicației le
+elimină și pe acestea.
+
 Două precizări oneste:
 
 1. Comanda este **refuzată cât timp o sesiune este în desfășurare**; încheie mai întâi sesiunea.
    Această regulă există ca ștergerea să nu se poată suprapune peste o înregistrare vie și să lase
    date în urmă.
-2. În această versiune, ștergerea **nu elimină** setările aplicației (inclusiv VIN-ul stocat),
-   legăturile de semnal confirmate pentru vehicul, înregistrările de baleiaj din diagnosticare și
-   geometria circuitelor pe care le-ai învățat aplicației. Circuitele învățate pot fi șterse
-   individual din ecranul de detaliu al circuitului respectiv. Pentru restul, **dezinstalarea
-   aplicației** elimină întreaga bază de date. Remedierea este un blocant de lansare consemnat în
-   `docs/legal/compliance-checklist.md`.
+2. Dacă o parte a ștergerii eșuează, aplicația spune asta în loc să raporteze succes. În acest caz,
+   un circuit învățat pe care îl folosește încă o sesiune rămasă este păstrat, ca sesiunea să poată fi
+   analizată în continuare; rulează din nou ștergerea.
 
 ### Dreptul la restricționare (art. 18) — „opriți-vă deocamdată"
 
