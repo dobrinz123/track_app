@@ -8,7 +8,7 @@ import {
 } from '../session/settingsStore';
 import { repairPersistedEnetSettings } from '../session/enetSettingsValidation';
 
-const SETTINGS_KEY = 'app-settings';
+export const SETTINGS_KEY = 'app-settings';
 
 function isPartialAppSettings(value: unknown): value is Partial<AppSettings> {
   return typeof value === 'object' && value !== null;

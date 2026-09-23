@@ -9,6 +9,7 @@ import {
 } from '@circuit/core';
 import { createSqlJsDatabase } from '../support/sqlJsDatabase';
 import { migrateTelemetrySchema } from '../../src/persistence/telemetrySchema';
+import { migrateDidSweepSchema } from '../../src/persistence/didSweepSchema';
 
 /**
  * WPT3 fixes that need PRECISE, deterministic control over exactly which
@@ -156,6 +157,7 @@ async function bootFresh(): Promise<typeof import('../../src/session/composition
   const db = await createSqlJsDatabase();
   const repository = await SqlSessionRepository.create(db);
   await migrateTelemetrySchema(db);
+  await migrateDidSweepSchema(db);
   seeded.db = db;
   seeded.repository = repository;
   tracked.gnssProviders.length = 0;

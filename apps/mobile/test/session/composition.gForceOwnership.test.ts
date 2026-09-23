@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SqlSessionRepository, cleanRecognitionLap, multiLapSession, type LocationSample } from '@circuit/core';
 import { createSqlJsDatabase } from '../support/sqlJsDatabase';
 import { migrateTelemetrySchema } from '../../src/persistence/telemetrySchema';
+import { migrateDidSweepSchema } from '../../src/persistence/didSweepSchema';
 
 /**
  * P4h-FIX1 H6 (after Codex P4h-REV1 HIGH, `TelemetryScreen.tsx:224-238`;
@@ -153,6 +154,7 @@ async function bootFresh(): Promise<typeof import('../../src/session/composition
   const db = await createSqlJsDatabase();
   const repository = await SqlSessionRepository.create(db);
   await migrateTelemetrySchema(db);
+  await migrateDidSweepSchema(db);
   seeded.db = db;
   seeded.repository = repository;
   tracked.gnssProviders.length = 0;

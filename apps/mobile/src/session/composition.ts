@@ -127,6 +127,7 @@ import {
   writeSessionVehicleSnapshot,
   type SessionVehicleSnapshot,
 } from '../persistence/sessionVehicleSnapshot';
+import { vehicleIdentityResetPatch, wipeDeviceUserData } from '../persistence/deviceDataWipe';
 import { createRawUdsChannel } from './didSweepController';
 import { EnetTcpTransport } from './enetTcpTransport';
 import { enetAdapterReservation as sharedEnetAdapterReservation } from './enetAdapterReservation';
@@ -3615,6 +3616,38 @@ export interface AggregatedDeleteUserDataResult extends DeleteUserDataResult {
   reason?: 'SESSION_ACTIVE' | 'DEV_REPLAY_ACTIVE';
 }
 
+/**
+ * The in-memory mirror of {@link wipeDeviceUserData}: drops every cached copy
+ * of what that wipe deleted, so nothing on screen or in the next session
+ * start still carries it. Runs whether or not the on-disk wipe verified clean
+ * -- a cache must never outlive the rows it was read from.
+ */
+async function forgetDeviceUserDataInMemory(): Promise<void> {
+  settingsStore.update(vehicleIdentityResetPatch(settingsStore.getSettings()));
+  cachedDetectedVin = null;
+  vehicleProfileBindingsCache = [];
+  sessionVehicleSnapshots.clear();
+  memoryLearnedCircuits = [];
+  if (learnedCircuitStore !== null) {
+    try {
+      await learnedCircuitStore.refresh();
+    } catch (error) {
+      console.warn('[composition] could not refresh learned circuits after delete-all', error);
+    }
+  }
+  publishLearnedCircuits();
+  const selectedCircuitId = settingsStore.getSettings().selectedCircuitId;
+  if (circuitCatalog.get(selectedCircuitId) === null) {
+    const fallback = circuitCatalog.get(TMR_CIRCUIT_PROFILE.circuitId);
+    try {
+      if (fallback !== null) await unlockedApplySelection(fallback);
+    } catch (error) {
+      console.warn('[composition] could not fall back to the default circuit after delete-all', error);
+    }
+  }
+  await refreshVehicleProfileBindingsCache();
+}
+
 export async function deleteAllStoredUserData(): Promise<AggregatedDeleteUserDataResult> {
   // Lifecycle lock amendment (binding): delete-all wipes the very data the
   // recovery/selection/rebuild operations read and write, so it runs as one
@@ -3753,7 +3786,25 @@ async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDa
       telemetryOk = false;
     }
   }
-  const finalResult: DeleteUserDataResult = { ...result, ok: result.ok && telemetryOk };
+  // HANDOFF release blocker: the VIN, the vehicle bindings and sweep
+  // records, and the learned circuits live outside every table the steps
+  // above touch. Always attempted, like the telemetry step; a learned circuit
+  // a surviving session still needs is kept and reported as remaining.
+  let deviceDataOk = true;
+  if (db !== null) {
+    try {
+      const wipe = await wipeDeviceUserData(db);
+      deviceDataOk = wipe.ok;
+      if (!wipe.ok) {
+        console.warn('[composition] deleteAllStoredUserData: device data remained', wipe.remaining);
+      }
+    } catch (error) {
+      console.warn('[composition] deleteAllStoredUserData: device data deletion failed', error);
+      deviceDataOk = false;
+    }
+  }
+  await forgetDeviceUserDataInMemory();
+  const finalResult: DeleteUserDataResult = { ...result, ok: result.ok && telemetryOk && deviceDataOk };
   // M4 fix (binding): a leftover active-session pointer is meaningless once
   // all stored data is gone -- cleared together, the SAME way session
   // end/discard/vanished-checkpoint do (`setActiveSession(db, null)`).
@@ -3777,6 +3828,7 @@ async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDa
         failedCircuitIds.length > 0 ? `circuits rejected: ${failedCircuitIds.join(', ')}` : null,
         !perCircuitOk && failedCircuitIds.length === 0 ? 'one or more circuits did not verify empty' : null,
         !telemetryOk ? 'telemetry rows remained or could not be deleted' : null,
+        !deviceDataOk ? 'vehicle or learned-circuit data remained or could not be deleted' : null,
       ]
         .filter((part): part is string => part !== null)
         .join('; ') || 'delete-all failed';
