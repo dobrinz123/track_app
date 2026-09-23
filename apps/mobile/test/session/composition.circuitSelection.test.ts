@@ -428,9 +428,15 @@ describe('composition.ts deleteAllStoredUserData spans every bundled circuit (ti
     composition.settingsStore.update({
       lastSeenVin: 'WZ1DB0C04LW000001',
       activeVehicleProfileSource: 'vin',
+      enetChannelSpecsJson: JSON.stringify([{ channel: 'transOilC', provenance: 'Measured on VIN WZ1DB0C04LW000001' }]),
       units: 'mph',
     });
     await flushBootstrap();
+    // An adoption journal left by a Test Loop the driver walked away from.
+    await db.runAsync('INSERT INTO settings (key, value) VALUES (?, ?)', [
+      'testLoopAdoption',
+      JSON.stringify({ id: 'j-1', attempts: 0, circuitId: 'learned-orphan', stage: 'selected' }),
+    ]);
     await db.runAsync(
       "INSERT INTO vehicle_profile_bindings (profile_id, channel, ecu, did, decode, status, updated_at_utc) VALUES ('generic', 'brake', 18, 1, 'u8', 'field-confirmed', '2026-09-20T10:00:00Z')",
     );
@@ -452,6 +458,7 @@ describe('composition.ts deleteAllStoredUserData spans every bundled circuit (ti
     expect(result.errorText).toBeNull();
     const live = composition.settingsStore.getSettings();
     expect(live.lastSeenVin).toBeNull();
+    expect(live.enetChannelSpecsJson).toBe('');
     expect(live.activeVehicleProfileSource).toBe('default');
     expect(live.units).toBe('mph');
     const stored = await db.getAllAsync<{ value: string }>('SELECT value FROM settings WHERE key = ?', [
@@ -468,8 +475,12 @@ describe('composition.ts deleteAllStoredUserData spans every bundled circuit (ti
       "SELECT key FROM settings WHERE key LIKE 'vehicle-profile-snapshot:%'",
     );
     expect(snapshots).toEqual([]);
+    const journal = await db.getAllAsync('SELECT key FROM settings WHERE key = ?', ['testLoopAdoption']);
+    expect(journal).toEqual([]);
+    expect(JSON.stringify(await db.getAllAsync('SELECT value FROM settings'))).not.toContain('WZ1DB0C04LW000001');
     expect(composition.getVehicleProfileBindingsCache()).toEqual([]);
   });
+
 });
 
 describe("composition.ts recovery's circuit resolution via listSessions (ticket CN-W3)", () => {

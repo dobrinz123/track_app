@@ -270,8 +270,9 @@ ireversibilă.
 
 Șterge de asemenea VIN-ul stocat, un profil de vehicul ales de aplicație pe baza VIN-ului,
 legăturile de semnal confirmate pentru vehicul, semnalele excluse, înregistrările de baleiaj din
-diagnosticare, evidența profilului de vehicul folosit în fiecare sesiune și geometria circuitelor pe
-care le-ai învățat aplicației.
+diagnosticare, canalele de semnal personalizate pe care le-ai etichetat dintr-un baleiaj („Tag as
+channel"), evidența profilului de vehicul folosit în fiecare sesiune, nota unui Test Loop întrerupt și
+geometria circuitelor pe care le-ai învățat aplicației.
 
 Păstrează doar **preferințele** tale: unitățile de măsură, limba, adresa și portul adaptorului,
 comutatoarele pentru coaching, voce și sugestii, circuitul selectat și un profil de vehicul ales chiar
@@ -280,9 +281,9 @@ elimină și pe acestea.
 
 Două precizări oneste:
 
-1. Comanda este **refuzată cât timp o sesiune este în desfășurare**; încheie mai întâi sesiunea.
-   Această regulă există ca ștergerea să nu se poată suprapune peste o înregistrare vie și să lase
-   date în urmă.
+1. Comanda este **refuzată cât timp o sesiune este în desfășurare sau cât timp un Test Loop învață
+   ori salvează un traseu**; încheie mai întâi sesiunea sau ieși din ecranul Test Loop. Această regulă
+   există ca ștergerea să nu se poată suprapune peste o înregistrare vie și să lase date în urmă.
 2. Dacă o parte a ștergerii eșuează, aplicația spune asta în loc să raporteze succes. În acest caz,
    un circuit învățat pe care îl folosește încă o sesiune rămasă este păstrat, ca sesiunea să poată fi
    analizată în continuare; rulează din nou ștergerea.

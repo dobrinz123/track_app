@@ -3,6 +3,7 @@ import { SqlSessionRepository, type LocationSample, type SqlDatabase } from '@ci
 
 import { createSqlJsDatabase } from '../support/sqlJsDatabase';
 import { migrateTelemetrySchema } from '../../src/persistence/telemetrySchema';
+import { migrateDidSweepSchema } from '../../src/persistence/didSweepSchema';
 import { rectangleLoopSamples, uTurnSamples } from '../support/testLoopTraces';
 
 /**
@@ -258,6 +259,23 @@ describe('composition -- Test Loop mode (P5d T2, T4, T6)', () => {
     expect(composition.listLearnedCircuits()).toHaveLength(0);
     const { circuitCatalog } = await import('../../src/session/circuitCatalog');
     expect(circuitCatalog.list().some((circuit) => circuit.circuitId === circuitId)).toBe(false);
+  });
+
+  it('Codex P18-REV1 H3: delete-all is refused while a Test Loop is learning, and runs once the driver leaves it', async () => {
+    await migrateDidSweepSchema(db);
+    const composition = await boot(db);
+    const started = await composition.startTestLoop();
+    expect(started.ok).toBe(true);
+    expect(composition.testLoopSnapshot().phase).toBe('learning');
+
+    const refused = await composition.deleteAllStoredUserData();
+    expect(refused.ok).toBe(false);
+    expect(refused.reason).toBe('TEST_LOOP_ACTIVE');
+    expect(refused.errorText).toMatch(/Test Loop/);
+
+    await composition.resetTestLoop();
+    const deleted = await composition.deleteAllStoredUserData();
+    expect(deleted.ok).toBe(true);
   });
 
   it('ends a loop that never closed with an honest failure, and learns nothing (T5)', async () => {
