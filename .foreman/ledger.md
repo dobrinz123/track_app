@@ -954,3 +954,11 @@ ACCEPTED RESIDUALS (all LOW or scope, none report false success):
   - untested: Settings rejection cleanup, injected storage failures in the wipe tail; sql.js double does not model the production FIFO gate for standalone ops.
   - pre-existing, not delete-all: after leaving a Test Loop in 'error', a NEW learn phase can reuse the stale adoptionProgress ledger (adoptionProgress ??= ...).
 NOT DONE: device check of delete-all (handoff step 4); no build made.
+
+## *** BUILD 14 DELIVERED — 2026-09-23 ***
+Run 35892924777 on 3c6c342 (variant release) -> builds/ipa/TRACE-v14-delete-all-release-2026-09-23.ipa
+14,457,445 bytes | md5 84127f5234393defbd7168093a984ad0
+CHAIN: gates (typecheck 0, lint 0 errors, 3413 tests = 1787 core + 1626 mobile, expo export 0) -> Codex P18-REV4 PASS_WITH_NOTES 0 HIGH -> preview E2E (agent-browser headless, 360x640: TMR PB-improvement replay calibrate 90% -> timed laps + live delta + coaching -> hold-to-end -> Results NEW PB 1:17.287 -> History; Settings delete-all with a VIN-bearing invalid channel draft -> "All stored data deleted", 0 sessions, draft cleared, preferences kept, history empty; no page errors) -> artifact forensics.
+FORENSICS: main.jsbundle contains TEST_LOOP_ACTIVE, "let it finish saving", vehicle_identity_settings, "session records remained", "could not verify the vehicle identity", "could not clear the test-loop adoption journal", "All stored data deleted".
+CONTAINS vs build 13: cloud session work (delete-all wipes VIN + vehicle data + learned circuits; Signal Finder early-wake fix; prompt audit) + P18 fix waves.
+E2E LIMITS: web preview has no SQLite and no GPS -- on-disk wipe and the Test Loop refusal are covered only by tests; device check (handoff step 4) still owed.
