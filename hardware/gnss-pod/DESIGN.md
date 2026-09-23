@@ -47,16 +47,16 @@ trees and grandstands. Where TRACE can honestly be better:
    (§3), so RPM/throttle/speed samples carry pod timestamps, not
    phone-reception timestamps. Whether dragy fuses on the phone or in the
    GPS unit is not published; we do it in the pod, against the GNSS PPS.
-5. **Rate parity on OBD needs our own adapter, not a clone.** A generic
-   ELM327 clone cannot approach "200 Hz" (§6). The competitive tier is the
-   TRACE CAN dongle (rev A4, `hardware/DESIGN.md`) speaking raw CAN to the
-   ECU with no ELM327 ASCII layer, reached over BLE by the pod. The V03H4
-   stays as the cheap entry tier.
 4. **Dual-band later without redesigning the product.** u-blox F11
    (dual-band L1/L5, up to 25 Hz single-GNSS / 10 Hz three-GNSS) has a
    MAX-F11N module expected Q4 2026 (CNX, 2026-07-06). Rev B can take it if
    its footprint and rates hold up — **VERIFY** pin/footprint compatibility
    with MAX-M10S before promising a drop-in.
+5. **Rate parity on OBD needs our own adapter, not a clone.** A generic
+   ELM327 clone cannot approach "200 Hz" (§6). The competitive tier is the
+   TRACE CAN dongle (rev A4, `hardware/DESIGN.md`) speaking raw CAN to the
+   ECU with no ELM327 ASCII layer, reached over BLE by the pod. The V03H4
+   stays as the cheap entry tier.
 
 ## 2. Why a separate pod, not GNSS inside the OBD dongle
 
@@ -112,9 +112,10 @@ clock" true rather than approximately true.
 
 - GNSS: 25 Hz × ~100 B (UBX-NAV-PVT) ≈ 2.5 kB/s raw; ~1 kB/s packed.
 - IMU: 400 Hz × 12 B ≈ 4.8 kB/s raw in the pod; streamed at 100 Hz ≈ 1.2 kB/s.
-- OBD: <20 samples/s × ~8 B ≈ negligible.
-- Stream to phone ≈ 2.5–3.5 kB/s: fine over BLE (2M PHY gives tens of kB/s).
-- Log ≈ 3.5 kB/s ≈ 12.6 MB/h.
+- OBD: entry tier <20 samples/s (negligible); competitive tier up to ~200
+  samples/s × ~8 B ≈ 1.6 kB/s.
+- Stream to phone ≈ 2.5–5 kB/s: fine over BLE (2M PHY gives tens of kB/s).
+- Log ≈ 3.5–5 kB/s ≈ 12.6–18 MB/h.
 
 ## 6. The cheap OBD adapter: what to expect honestly
 
