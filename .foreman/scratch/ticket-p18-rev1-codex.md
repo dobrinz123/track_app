@@ -1,7 +1,8 @@
 # Review ticket P18-REV1 — Codex read-only cross-review: delete-all device wipe (PR #2) + Signal Finder early wake (PR #3)
-Adversarial READ-ONLY reviewer. `git fetch origin` first. Two diffs, both against `main` at `dd84864`:
-- A: `git diff dd84864..origin/claude/api-prompt-audit-j5cmxo` (PR #2, head `ae12a10`)
-- B: `git diff dd84864..origin/claude/signal-finder-early-wake` (PR #3, head `8c495b6`)
+Adversarial READ-ONLY reviewer. Both changes are merged on `main`; `git pull` first. Full diff: `git diff dd84864..edb7bd5`. The two parts separately:
+- A (delete-all device wipe, PR #2): `git diff dd84864..ae12a10`
+- B (Signal Finder early wake, PR #3): `git diff dd84864..8c495b6`
+Context: `docs/HANDOFF-2026-09-23-cloud.md` explains both changes and the tests added.
 Binding: HANDOFF.md item 1 (a VIN is personal data; delete-all must remove it), docs/legal/privacy-policy.*.md §3.3 and §7 as changed in A, compliance-checklist 3.5. Read-only Node/Git path if spawning is denied.
 Attack list (file:line + concrete failing scenario):
 1. Completeness (A): list every table and every `settings` key the app writes (grep `INSERT`, `INSERT OR REPLACE`, `INSERT OR IGNORE`, `runAsync` under `apps/mobile/src` and `packages/core/src`). Name each one that holds driver- or vehicle-identifying data and survives `deleteAllStoredUserData()`. Check whether the policy text in A claims more than the code deletes, or less.
