@@ -7,8 +7,8 @@ broke in the real world.
 
 ## 0. How to work in this repo (non-negotiable process)
 
-- **Use the fable-foreman skill** (`/fable-foreman`): the lead model plans, writes
-  delegation tickets, and verifies; Sonnet-class workers implement; Codex (if
+- **Lead / worker / cross-reviewer split**: the lead session plans, writes
+  delegation tickets, and verifies; worker sessions implement; Codex (if
   consented/available) cross-reviews. History shows why: cross-family review found
   25+ real defects across campaigns that same-family testing missed, including a
   destructive-OBD-command HIGH and a fab-killing pin-map error.

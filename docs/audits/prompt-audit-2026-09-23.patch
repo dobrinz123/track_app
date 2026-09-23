@@ -1,0 +1,53 @@
+diff --git a/apps/mobile/AGENTS.md b/apps/mobile/AGENTS.md
+index 0e6bc80..ec6b7f8 100644
+--- a/apps/mobile/AGENTS.md
++++ b/apps/mobile/AGENTS.md
+@@ -1,3 +1,3 @@
+-# Expo HAS CHANGED
++# Expo SDK 57
+ 
+-Read the exact versioned docs at https://docs.expo.dev/versions/v57.0.0/ before writing any code.
++This app is on Expo SDK 57 (`expo` in `package.json`), which is newer than most training data, so recalled Expo and React Native APIs may be out of date. When a change touches an Expo or React Native API, check it against the versioned docs at https://docs.expo.dev/versions/v57.0.0/ instead of relying on memory.
+diff --git a/docs/HANDOFF.md b/docs/HANDOFF.md
+index 2e47f71..c9a0ace 100644
+--- a/docs/HANDOFF.md
++++ b/docs/HANDOFF.md
+@@ -33,7 +33,6 @@ State at this commit: **3397 tests green**, typecheck 0, lint 0 errors (6 pre-ex
+ These are the owner's, learned the hard way. Breaking them is how this app lost him a track day.
+ 
+ 1. **No build without the full chain.** Gates → independent review at **zero HIGH findings** → then build.
+-   The owner states this repeatedly and means it.
+ 2. **Never report success you did not observe.** Weeks of work went into making a failed read surface as
+    FAILED rather than as "there was nothing". If you cannot verify something, say so.
+ 3. **Field facts come from the owner, never guessed.** What happened at the track, how the phone is
+diff --git a/docs/NEXT-CIRCUIT-PLAYBOOK.md b/docs/NEXT-CIRCUIT-PLAYBOOK.md
+index d8a53b9..68c0eee 100644
+--- a/docs/NEXT-CIRCUIT-PLAYBOOK.md
++++ b/docs/NEXT-CIRCUIT-PLAYBOOK.md
+@@ -7,8 +7,8 @@ broke in the real world.
+ 
+ ## 0. How to work in this repo (non-negotiable process)
+ 
+-- **Use the fable-foreman skill** (`/fable-foreman`): the lead model plans, writes
+-  delegation tickets, and verifies; Sonnet-class workers implement; Codex (if
++- **Lead / worker / cross-reviewer split**: the lead session plans, writes
++  delegation tickets, and verifies; worker sessions implement; Codex (if
+   consented/available) cross-reviews. History shows why: cross-family review found
+   25+ real defects across campaigns that same-family testing missed, including a
+   destructive-OBD-command HIGH and a fab-killing pin-map error.
+diff --git a/docs/roadmap/phase-5-llm-corner-analysis.md b/docs/roadmap/phase-5-llm-corner-analysis.md
+index c4d2032..bb77ae2 100644
+--- a/docs/roadmap/phase-5-llm-corner-analysis.md
++++ b/docs/roadmap/phase-5-llm-corner-analysis.md
+@@ -4,6 +4,11 @@ Written 2026-08-27 by the LEAD after the user's directive. **Read this before to
+ coaching, or session export.** It records WHY the telemetry data exists, WHAT must be built on top
+ of it, and in WHICH ORDER — so an agent in a fresh session can pick it up without the conversation.
+ 
++> **Status:** §3 step 4 and "Decision: no user API keys" are superseded. Corner analysis is a deterministic
++> on-device engine, not an LLM (see "REVISION 2026-08-28 01:30" at the end, and
++> `docs/architecture/analysis-engine.md` for what shipped). Read §§0–2 and §4 as data requirements; do not
++> build an LLM call, backend, or prompt from §3 step 4 without a new decision from the owner.
++
+ ## 0. The goal, in the user's words
+ 
+ > "Scopul datelor ăstea e ca pe viitor să introducem un LLM care analizează limitele mașinii și ne
