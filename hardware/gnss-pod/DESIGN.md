@@ -1,4 +1,4 @@
-# TRACE GNSS Pod — Design proposal (rev 0, 2026-09-23)
+# TRACE GNSS Pod — Design proposal (rev 0.1, 2026-09-23)
 
 A windscreen-mounted GNSS + IMU unit that gives TRACE the position, speed and
 G-forces a phone cannot, and that pairs with a cheap BLE OBD adapter so engine
@@ -13,7 +13,17 @@ board that gets ordered.
 Benchmark: **dragy Pro** (godragy.com, USD 249): u-blox 10th-gen GNSS, "up to
 25 Hz", GPS/GLONASS/Galileo/BeiDou L1, 6-axis IMU, 128 MB storage, BLE,
 magnetic windscreen mount, 12 h battery at 25 Hz (30 h at 10 Hz). It talks to
-RaceChrono and others; it does **not** read the car.
+RaceChrono and others.
+
+It is sold with a companion **dragy OBD II adapter** (godragy.com/dragy-obd,
+the "dragy Motorsport" pairing): Bluetooth 5.0, marketed as "up to 200 Hz"
+ECU data ("all channels up to 200 times per second", Amazon listing; the
+conditions — per channel or total, which protocols — are not published).
+Pre-order USD 49 (list 119). Its own page states it **requires a dragy GPS
+unit**, that its Ultra-Fast and Fast modes work **only inside the dragy app**
+(third-party apps get standard BLE OBD modes), that custom PIDs are a future
+update, and that it is optimised for CAN cars. So the competitor is a
+GPS + fast-OBD pair, not a GPS alone.
 
 The "25 Hz" has a condition the box does not print. u-blox's own note
 UBX-23006557 gives the M10 platform's maximum navigation rate:
@@ -35,7 +45,13 @@ trees and grandstands. Where TRACE can honestly be better:
    the same idea core's `imu/` Madgwick path already uses on the phone.
 3. **Car data on the same clock.** The pod reads the OBD adapter itself
    (§3), so RPM/throttle/speed samples carry pod timestamps, not
-   phone-reception timestamps. Dragy has no car data at all.
+   phone-reception timestamps. Whether dragy fuses on the phone or in the
+   GPS unit is not published; we do it in the pod, against the GNSS PPS.
+5. **Rate parity on OBD needs our own adapter, not a clone.** A generic
+   ELM327 clone cannot approach "200 Hz" (§6). The competitive tier is the
+   TRACE CAN dongle (rev A4, `hardware/DESIGN.md`) speaking raw CAN to the
+   ECU with no ELM327 ASCII layer, reached over BLE by the pod. The V03H4
+   stays as the cheap entry tier.
 4. **Dual-band later without redesigning the product.** u-blox F11
    (dual-band L1/L5, up to 25 Hz single-GNSS / 10 Hz three-GNSS) has a
    MAX-F11N module expected Q4 2026 (CNX, 2026-07-06). Rev B can take it if
@@ -105,10 +121,21 @@ clock" true rather than approximately true.
 The **iKiKin V03H4** (ELM327 v1.5, Bluetooth 4.0, "no master chip") is a
 clone. Clones commonly manage only a handful of standard-PID round trips per
 second in total, so RPM/throttle/vehicle speed/coolant would each arrive at a
-few Hz. Brake pressure and steering angle are not standard PIDs at all. This
-is the tier-1 product (any car, cheap). The high-rate tier stays the TRACE CAN
-dongle (rev A4, `hardware/DESIGN.md`) or a brand adapter. **Measure the V03H4's
-real PID/s in P0 before designing anything around a number.**
+few Hz. Brake pressure and steering angle are not standard PIDs at all.
+
+Two OBD tiers, therefore:
+
+| Tier | Adapter | Expected rate | Role |
+|---|---|---|---|
+| Entry | iKiKin V03H4 (any BLE ELM327) | a few Hz per channel — MEASURE | Cheapest bundle; any car |
+| Competitive | TRACE CAN dongle, BLE variant | raw CAN request/response, no ELM layer; target ≥100 Hz total on CAN cars — MEASURE | Answer to dragy OBD's "200 Hz" |
+
+The dongle's rev A4 speaks WiFi (SoftAP + ELM327 subset). For the pod
+pairing it needs a BLE link instead: the ESP32-C3 already has BLE, so this is
+a firmware change plus a native binary protocol, not a new board — **VERIFY**
+that the rev-A4 antenna/layout is fine for BLE use (same 2.4 GHz radio).
+**Measure the V03H4's real PID/s in P0 before designing anything around a
+number**, and benchmark against a dragy OBD if one can be borrowed.
 
 BLE ELM327 clones usually expose a UART-like GATT service (often FFE0/FFE1)
 — **VERIFY on the actual unit**, service UUIDs vary between clones.
@@ -132,6 +159,7 @@ BLE ELM327 clones usually expose a UART-like GATT service (often FFE0/FFE1)
 | Phase | What | Exit criterion |
 |---|---|---|
 | **P0 spike** (no PCB) | Buy: V03H4, MAX-M10S breakout, LSM6DSV16X breakout, ESP32-S3 devkit, patch antenna. App: BLE transport. Measure V03H4 PID/s phone-direct; stream breadboard pod at 20/25 Hz; one driveway + one circuit session vs phone GPS | Real numbers for PID/s, BLE rate, lap-time repeatability 25 Hz vs phone |
+| P0b CAN rate | Rev-A4 dongle firmware: BLE + raw CAN polling (read-only guard unchanged). Measure req/s on the Supra (CAN) | A measured number to put next to dragy's "200 Hz" |
 | P1 PCB rev A | Schematic + 4-layer board (GNSS RF needs a solid ground), JLCPCB assembly | ERC/DRC clean, Codex hardware review 0 HIGH (same bar as the dongle) |
 | P2 enclosure | Slim shell + magnetic mount, antenna window | Fits, rigid, no GNSS gain loss vs breadboard |
 | P3 firmware | Hub, PPS time base, fusion, logging, OTA | Field session: fused stream, OBD on pod clock |
@@ -150,3 +178,8 @@ phone GNSS as planned.
 - Quectel LG290P product page (quad-band RTK, up to 20 Hz, 12.2×16 mm):
   considered and parked — RTK needs a correction source, overkill for rev A
 - iKiKin V03H4 listing (owner-supplied specs: ELM327 v1.5, Bluetooth 4.0)
+- dragy OBD II page: https://www.godragy.com/dragy-obd/ (BT 5.0, USD 49
+  pre-order / 119 list, requires dragy GPS, fast modes dragy-app-only,
+  custom PIDs future)
+- dragy OBD II Amazon listing (the "200 Hz ... all channels" claim):
+  https://www.amazon.com/Dragy-dragy-OBD-High-Performance-II/dp/B0DSV31WRQ
