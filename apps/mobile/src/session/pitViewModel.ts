@@ -2,6 +2,7 @@ import {
   cueUpdateLine,
   pitSuggestionLine,
   type AppliedCueUpdate,
+  type GeometryProvenance,
   type PitSuggestion,
   type SuggestionResult,
 } from '@circuit/core';
@@ -113,11 +114,18 @@ function statusLine(
   suggestions: SuggestionResult,
   shown: number,
   strings: PitScreenStrings,
+  geometry: GeometryProvenance,
 ): string {
   if (suggestions.gate === 'disabled') return strings.suggestionsOff;
   if (suggestions.gate === 'insufficient-clean-laps') return strings.insufficientCleanLaps;
+  if (suggestions.gate === 'geometry-unvalidated') return strings.geometryUnstated;
   if (shown === 0) return strings.nothingToSuggest;
-  return strings.suggestionsShown(shown);
+  // P17: on a line the driver reads FIRST, say in one clause how far this
+  // circuit's geometry lets the advice go. `scope` -- not the geometry alone --
+  // because that is the field the engine actually acted on.
+  return suggestions.scope === 'self-referential'
+    ? strings.suggestionsShownSelfReferential(shown, geometry)
+    : strings.suggestionsShown(shown);
 }
 
 /** Worst first; a corner with no measured loss ranks last, then by id. */
@@ -185,7 +193,13 @@ export function buildPitViewState(input: PitViewInput): PitViewState {
       shownSuggestions.push(...forCorner);
       return {
         ...corner,
-        suggestions: forCorner.map((suggestion) => pitSuggestionLine(suggestion, input.language)),
+        // P17: the corner's number is qualified in the sentence itself when
+        // it is OUR numbering. The pit view shows one suggestion at a time to
+        // a driver with thirty seconds, so the qualifier has to travel with
+        // the sentence rather than sit in a footer they will not read.
+        suggestions: forCorner.map((suggestion) =>
+          pitSuggestionLine(suggestion, input.language, analysis.insights.geometryProvenance),
+        ),
         cueUpdates: (updatesByCorner.get(corner.cornerId) ?? []).map((update) =>
           cueUpdateLine(update, input.language),
         ),
@@ -209,7 +223,12 @@ export function buildPitViewState(input: PitViewInput): PitViewState {
         strings.cleanLapsChip(analysis.insights.cleanLapCount),
       ],
       focusHeading: strings.focusHeading,
-      statusLine: statusLine(input.suggestions, suggestionCount, strings),
+      statusLine: statusLine(
+        input.suggestions,
+        suggestionCount,
+        strings,
+        analysis.insights.geometryProvenance,
+      ),
       corners,
       suggestionCount,
       cueUpdatesHeading: strings.cueUpdatesHeading,

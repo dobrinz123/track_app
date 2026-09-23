@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { computeSuggestions, type AppliedCueUpdate } from '@circuit/core';
+import { computeSuggestions, suggestionsFromInsights, type AppliedCueUpdate } from '@circuit/core';
 
 import {
   PIT_FOCUS_CORNER_LIMIT,
@@ -57,6 +57,7 @@ function input(
     insights === null
       ? {
           gate: 'insufficient-clean-laps' as const,
+          scope: 'closed' as const,
           cleanLapCount: 0,
           cueUpdates: [],
           pitSuggestions: [],
@@ -171,6 +172,7 @@ describe('pit view — honesty (D5)', () => {
       run: { status: 'unavailable', reason: 'no-laps' },
       suggestions: {
         gate: 'insufficient-clean-laps',
+        scope: 'closed',
         cleanLapCount: 0,
         cueUpdates: [],
         pitSuggestions: [],
@@ -182,6 +184,43 @@ describe('pit view — honesty (D5)', () => {
     expect(state.status).toBe('unavailable');
     if (state.status !== 'unavailable') throw new Error('expected unavailable');
     expect(state.message).toBe(PIT_SCREEN_STRINGS.en.noLaps);
+  });
+});
+
+/**
+ * Ticket P17 — the pit view on the geometry the app actually ships.
+ *
+ * Every bundled circuit is `community-derived`, so this is the state a real
+ * driver sees: bounded advice, and a status line that says in one clause how
+ * much authority the corner numbers carry.
+ */
+describe('pit view — P17, advice on mapped geometry', () => {
+  it('shows the suggestions and says whose numbering they use, in both languages', async () => {
+    const result = await run(4);
+    if (result.status !== 'ready') throw new Error('expected a ready run');
+    const suggestions = suggestionsFromInsights(result.analysis.insights, [], { enabled: true });
+    expect(suggestions.scope).toBe('self-referential');
+    expect(suggestions.pitSuggestions.length).toBeGreaterThan(0);
+
+    for (const language of ['en', 'ro'] as const) {
+      const state = buildPitViewState({
+        run: result,
+        suggestions,
+        cueUpdates: [],
+        language,
+      });
+      if (state.status !== 'ready') throw new Error('expected a ready view');
+      const lines = state.view.corners.flatMap((corner) => corner.suggestions);
+      expect(lines.length).toBeGreaterThan(0);
+      for (const line of lines) {
+        expect(line).toContain(language === 'ro' ? '(numerotarea noastră)' : '(our numbering)');
+      }
+      expect(state.view.statusLine).toContain(
+        language === 'ro' ? 'Numerele virajelor sunt ale noastre' : 'The corner numbers are ours',
+      );
+      // No cue may have moved on this geometry, so the view has none to show.
+      expect(state.view.cueUpdateLines).toEqual([]);
+    }
   });
 });
 

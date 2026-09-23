@@ -1,3 +1,5 @@
+import type { GeometryProvenance } from '@circuit/core';
+
 import type { AnalysisUiLanguage } from './analysisStrings';
 
 /**
@@ -42,6 +44,18 @@ export interface PitScreenStrings {
   insufficientCleanLaps: string;
   nothingToSuggest: string;
   suggestionsShown: (count: number) => string;
+  /**
+   * Ticket P17: the same line when the circuit's geometry is `'mapped'` or
+   * `'learned'` — the suggestions stand (they are bounded by the driver's own
+   * laps through the same windows), but the corner NUMBERS are the app's.
+   */
+  suggestionsShownSelfReferential: (count: number, geometry: GeometryProvenance) => string;
+  /**
+   * Ticket P17: the engine was handed no statement at all about where this
+   * circuit's geometry came from, so it produced nothing. A bug, not a state
+   * the driver can fix — but silence with a reason beats silence.
+   */
+  geometryUnstated: string;
   /** Interaction. */
   expandCornerA11y: (corner: string) => string;
   collapseCornerA11y: (corner: string) => string;
@@ -85,6 +99,13 @@ const EN: PitScreenStrings = {
     'Nothing to suggest: on these corners your typical lap is already at what you have demonstrated.',
   suggestionsShown: (count) =>
     `${count} suggestions, every one inside what your own clean laps have already done.`,
+  suggestionsShownSelfReferential: (count, geometry) =>
+    `${count} suggestions, every one inside what your own clean laps have already done. ` +
+    `The corner numbers are ours: this track was ${
+      geometry === 'learned' ? 'learned from one lap you drove' : 'traced from a map'
+    }, not surveyed, so compare yourself with yourself — not with a corner sign.`,
+  geometryUnstated:
+    "Nothing is suggested: the app could not establish where this circuit's geometry came from.",
   expandCornerA11y: (corner) => `Show the numbers for ${corner}`,
   collapseCornerA11y: (corner) => `Hide the numbers for ${corner}`,
   disclaimer:
@@ -120,6 +141,13 @@ const RO: PitScreenStrings = {
     'Nimic de sugerat: pe aceste viraje turul tău obișnuit este deja la ce ai demonstrat.',
   suggestionsShown: (count) =>
     `${count} sugestii, toate în limita a ce au făcut deja tururile tale curate.`,
+  suggestionsShownSelfReferential: (count, geometry) =>
+    `${count} sugestii, toate în limita a ce au făcut deja tururile tale curate. ` +
+    `Numerele virajelor sunt ale noastre: traseul ${
+      geometry === 'learned' ? 'a fost învățat dintr-un tur condus de tine' : 'e trasat de pe hartă'
+    }, nu măsurat, așa că te compari cu tine — nu cu un indicator de pe circuit.`,
+  geometryUnstated:
+    'Nu sugerăm nimic: aplicația n-a putut stabili de unde vine geometria acestui circuit.',
   expandCornerA11y: (corner) => `Arată cifrele pentru ${corner}`,
   collapseCornerA11y: (corner) => `Ascunde cifrele pentru ${corner}`,
   disclaimer:

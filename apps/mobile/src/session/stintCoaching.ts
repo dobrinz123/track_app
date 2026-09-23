@@ -692,6 +692,8 @@ export function createStintCoach(deps: StintCoachDeps): StintCoach {
           ? suggestionsFromInsights(run.analysis.insights, deps.activeCues(), { enabled })
           : {
               gate: enabled ? 'insufficient-clean-laps' : 'disabled',
+              // Nothing ran, so nothing was scoped (P17).
+              scope: 'closed',
               cleanLapCount: 0,
               cueUpdates: [],
               pitSuggestions: [],

@@ -3,6 +3,7 @@ import {
   analyzeSession,
   joinTelemetryChannels,
   polylineLength,
+  geometryProvenanceOf,
   projectLapSamples,
   savitzkyGolay,
   type ClassifiableLap,
@@ -549,6 +550,11 @@ function createAssemblyPass(
         // Data, not a per-circuit constant: `geometryStatus` is the catalog's own
         // statement about whether the geometry has been validated on track.
         geometryValidated: circuit.profile.geometryStatus === 'official',
+        // Ticket P17: the SAME field, read for the other question -- not "was
+        // it surveyed?" but "where did this line come from?", which is what
+        // decides how far the report and the suggestion engine may go. One
+        // mapping, owned by core, so the app cannot drift from the analysis.
+        geometryProvenance: geometryProvenanceOf(circuit.profile.geometryStatus),
       };
 
       return {

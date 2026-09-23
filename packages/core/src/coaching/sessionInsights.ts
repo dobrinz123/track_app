@@ -1,4 +1,4 @@
-import { CORNER_ANALYSIS_VERSION, type Corner } from '../contracts';
+import { CORNER_ANALYSIS_VERSION, type CircuitProfile, type Corner } from '../contracts';
 
 import { classifyLap, type ClassifyLapOptions } from './cleanLap';
 import {
@@ -52,6 +52,79 @@ export const CONSISTENCY_LAP_SPREAD_MS = 4_000;
 /** Minimum clean laps before any lap-to-lap comparison is reported. */
 export const MIN_CLEAN_LAPS_FOR_COMPARISON = 2;
 
+// --- geometry provenance (ticket P17) ---------------------------------------
+
+/**
+ * WHERE the centreline this analysis is measured against came from. Ticket
+ * P17 replaced a binary "validated / not validated" with this, because the
+ * binary one answered the wrong question.
+ *
+ * The question that matters is not "is the geometry right?" but "**which
+ * claims does this geometry support?**", and the answer splits cleanly in two:
+ *
+ *  - A **self-referential** claim compares the driver's own laps against each
+ *    other through the SAME distance window ("on your best lap you carried
+ *    4 km/h more minimum speed here than you typically do"). Every lap of a
+ *    session is projected onto the same centreline and every corner window is
+ *    derived once from the same corner list (`cornerWindows`), so a centreline
+ *    that sits fifteen metres from the real apex moves EVERY lap by the same
+ *    fifteen metres. The comparison is invariant to a consistent offset; only
+ *    the window's NAME is wrong, never the difference it measures.
+ *  - An **absolute** claim asserts something about the circuit itself -- that
+ *    this corner is the circuit's Turn 7, that its apex is 1 290 m from the
+ *    line, that the 100 m board is where to brake. Nothing but a survey can
+ *    support one, so nothing but `'surveyed'` unlocks one.
+ *
+ * The three values are what the catalog can actually distinguish
+ * ({@link geometryProvenanceOf}), not a quality score:
+ *
+ *  - `'surveyed'` -- validated on track (`geometryStatus: 'official'`). The
+ *    only value that carries authority about the circuit itself.
+ *  - `'mapped'`   -- traced from aerial imagery / OSM and never field-checked
+ *    (`'community-derived'`, and `'dev-only'` fixtures). Both circuits shipped
+ *    today are this.
+ *  - `'learned'`  -- the centreline IS one lap the driver drove
+ *    (`'ad-hoc'`, `buildTestLoopCircuit`). It has no circuit identity at all:
+ *    its corners were found in that lap, so they are the app's reading of the
+ *    driver's own line.
+ *
+ * `'mapped'` and `'learned'` permit exactly the same claims. They differ only
+ * in what the report must SAY about where the line came from, which is why
+ * they are two values rather than one "not surveyed".
+ */
+export type GeometryProvenance = 'surveyed' | 'mapped' | 'learned';
+
+/**
+ * The catalog's `geometryStatus` as a provenance. The single mapping, so the
+ * app, the analysis and the tests cannot disagree about which tier a circuit
+ * is in.
+ */
+export function geometryProvenanceOf(
+  geometryStatus: CircuitProfile['geometryStatus'],
+): GeometryProvenance {
+  if (geometryStatus === 'official') return 'surveyed';
+  if (geometryStatus === 'ad-hoc') return 'learned';
+  return 'mapped';
+}
+
+/**
+ * The provenance a caller actually established, never more.
+ *
+ * `'surveyed'` requires BOTH statements to agree: a caller that says
+ * `geometryProvenance: 'surveyed'` while `geometryValidated` is `false` has
+ * contradicted itself, and the narrower of the two claims wins. There is no
+ * input to this function that can turn a `geometryValidated: false` session
+ * into a surveyed one -- ticket P16 C2's property, unchanged.
+ */
+export function resolveGeometryProvenance(
+  geometryValidated: boolean,
+  stated: GeometryProvenance | undefined,
+): GeometryProvenance {
+  if (stated === undefined) return geometryValidated ? 'surveyed' : 'mapped';
+  if (stated === 'surveyed' && !geometryValidated) return 'mapped';
+  return stated;
+}
+
 /** Difference in a brake/lift/throttle point that is worth naming, metres. */
 const CAUSE_DISTANCE_M = 5;
 /** Difference in a corner speed that is worth naming, km/h. */
@@ -89,6 +162,18 @@ export interface SessionAnalysisContext {
    * app is `analysisAssembly`'s `profile.geometryStatus === 'official'`.
    */
   geometryValidated: boolean;
+  /**
+   * Ticket P17 -- WHERE the centreline came from, which is a different and
+   * more useful question than whether it was surveyed (see
+   * {@link GeometryProvenance}). Optional, and its default cannot over-claim:
+   * omitted, it resolves to `'surveyed'` when {@link geometryValidated} is
+   * true and `'mapped'` otherwise, and `'mapped'` permits exactly what
+   * `'learned'` permits. A caller that omits it therefore never gets a claim
+   * it did not earn -- at worst its report says "traced from a map" about a
+   * track that was learned from a lap. `analysisAssembly` states it from
+   * `geometryProvenanceOf(profile.geometryStatus)`.
+   */
+  geometryProvenance?: GeometryProvenance;
   cornerMetrics?: Omit<Partial<CornerMetricsOptions>, 'totalLengthM' | 'unsupportedChannels'>;
   cleanLap?: Omit<Partial<ClassifyLapOptions>, 'totalLengthM'>;
   /** Distance-grid step for the delta curve, metres. Default 1. */
@@ -258,6 +343,14 @@ export interface Limitation {
    * on any lap, milliseconds (`TIME_INTEGRATION_DRIFT`).
    */
   driftMs?: number;
+  /**
+   * Where the centreline came from (`GEOMETRY_UNVALIDATED`, ticket P17). The
+   * limitation is raised for anything that is not `'surveyed'`, and the
+   * sentence the report writes depends on which of the two it is: "traced
+   * from a map" and "learned from one lap you drove" are different facts
+   * about how much the numbers know, and a driver is owed the right one.
+   */
+  geometry?: GeometryProvenance;
 }
 
 export interface LapTimeConsistency {
@@ -278,6 +371,12 @@ export interface SessionInsights {
   layoutId: string | null;
   totalLengthM: number;
   geometryValidated: boolean;
+  /**
+   * Ticket P17 -- which claims this session's geometry supports. `'surveyed'`
+   * exactly when {@link geometryValidated} is true; see
+   * {@link GeometryProvenance} for why the other two are distinguished.
+   */
+  geometryProvenance: GeometryProvenance;
   /** V1 states observations only -- no suggestions are produced. */
   observationsOnly: true;
   lapCount: number;
@@ -780,8 +879,12 @@ export function analyzeSession(
   if (poorGnssLaps.length > 0) {
     limitations.push({ code: 'GNSS_QUALITY', lapNumbers: poorGnssLaps, count: poorGnssLaps.length });
   }
-  if (!context.geometryValidated) {
-    limitations.push({ code: 'GEOMETRY_UNVALIDATED' });
+  const geometryProvenance = resolveGeometryProvenance(
+    context.geometryValidated,
+    context.geometryProvenance,
+  );
+  if (geometryProvenance !== 'surveyed') {
+    limitations.push({ code: 'GEOMETRY_UNVALIDATED', geometry: geometryProvenance });
   }
   const uncovered = cornerInsights
     .filter((corner) => corner.perLap.every((row) => !row.qualityOk))
@@ -799,6 +902,9 @@ export function analyzeSession(
     // Ticket P16 C2: carried through exactly as the caller stated it. No
     // `?? true` -- see `SessionAnalysisContext.geometryValidated`.
     geometryValidated: context.geometryValidated,
+    // P17: `'surveyed'` if and only if the line above is `true`
+    // (`resolveGeometryProvenance` cannot widen the caller's claim).
+    geometryProvenance,
     observationsOnly: true,
     lapCount: lapInsights.length,
     cleanLapCount: cleanLaps.length,

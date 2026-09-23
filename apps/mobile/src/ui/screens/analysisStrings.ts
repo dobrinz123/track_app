@@ -39,8 +39,12 @@ export interface AnalysisScreenStrings {
   /**
    * Ticket P5d T3 (wording P5d-FIX6): this session was driven on a circuit
    * this phone LEARNED from a recognition lap, not on a catalog circuit.
-   * The badge names it; the note says the geometry was learned from one lap
-   * and is therefore never advised on.
+   * The badge names it; the note says where the line came from.
+   *
+   * P17 rewrote the note. It used to end "no advice is derived from them",
+   * which stopped being true the moment the graduated gate let a learned
+   * circuit carry self-referential advice — and a false reassurance is worse
+   * than none. It now says what the learned line does and does not support.
    */
   testLoopBadge: string;
   testLoopGeometryNote: string;
@@ -75,6 +79,12 @@ export interface AnalysisScreenStrings {
   bestLapChip: (time: string, lapNumber: number) => string;
   /** One short chip per engine limitation code; the sentence stays in the export. */
   limitationChips: Readonly<Record<LimitationCode, string>>;
+  /**
+   * Ticket P17: the `GEOMETRY_UNVALIDATED` chip for a LEARNED track. The code
+   * is the same; the fact is not, and "map geometry" would be a lie about a
+   * loop this phone traced from a single driven lap.
+   */
+  learnedGeometryChip: string;
   /** The expandable per-corner detail (R2-2). */
   detailColumns: Readonly<{
     lap: string;
@@ -139,7 +149,7 @@ const EN: AnalysisScreenStrings = {
   loadingHint: 'Everything runs on this phone; nothing is sent anywhere.',
   testLoopBadge: 'Learned circuit',
   testLoopGeometryNote:
-    'Ad-hoc geometry: this track was learned from a single lap on this phone, not surveyed. The numbers are what you did; no advice is derived from them.',
+    "Ad-hoc geometry: this track was learned from a single lap on this phone, not surveyed. The corner numbers and positions are ours, not the circuit's — everything below compares your own laps with each other, which holds whatever the line is called.",
   sessionNotFound: 'That session is no longer stored on this phone.',
   circuitNotInCatalog: 'This session was recorded on a circuit that is not in the catalog, so its corners are unknown.',
   layoutIncompatible:
@@ -173,6 +183,7 @@ const EN: AnalysisScreenStrings = {
     CORNER_COVERAGE: 'corner coverage',
     TIME_INTEGRATION_DRIFT: 'time drift',
   },
+  learnedGeometryChip: 'learned track',
   detailColumns: {
     lap: 'Lap',
     brake: 'Brake',
@@ -240,7 +251,7 @@ const RO: AnalysisScreenStrings = {
   loadingHint: 'Totul rulează pe acest telefon; nu se trimite nimic nicăieri.',
   testLoopBadge: 'Circuit învățat',
   testLoopGeometryNote:
-    'Geometrie ad-hoc: traseul a fost învățat dintr-un singur tur pe acest telefon, nu măsurat. Cifrele arată ce ai făcut; din ele nu se derivă niciun sfat.',
+    'Geometrie ad-hoc: traseul a fost învățat dintr-un singur tur pe acest telefon, nu măsurat. Numerele și pozițiile virajelor sunt ale noastre, nu ale circuitului — tot ce urmează compară tururile tale între ele, ceea ce rămâne valabil oricum s-ar numi linia.',
   sessionNotFound: 'Sesiunea nu mai este salvată pe acest telefon.',
   circuitNotInCatalog: 'Sesiunea a fost înregistrată pe un circuit care nu este în catalog, așa că virajele lui nu sunt cunoscute.',
   layoutIncompatible:
@@ -274,6 +285,7 @@ const RO: AnalysisScreenStrings = {
     CORNER_COVERAGE: 'acoperire viraje',
     TIME_INTEGRATION_DRIFT: 'derivă de timp',
   },
+  learnedGeometryChip: 'traseu învățat',
   detailColumns: {
     lap: 'Tur',
     brake: 'Frână',

@@ -57,8 +57,14 @@ describe('P5b B3 -- the analysis screen state', () => {
         expect(en.view.corners.map((row) => row.cornerId)).toEqual(
           [...source.circuit.corners].map((corner) => corner.id).sort((a, b) => a - b),
         );
-        expect(en.view.corners[0]!.heading).toMatch(/^Corner 1 \((left|right)\)$/);
-        expect(ro.view.corners[0]!.heading).toMatch(/^Virajul 1 \((stânga|dreapta)\)$/);
+        // P17: both bundled circuits are `community-derived`, so the corner
+        // NUMBER is the app's own and the heading has to say so. A TIGHTENING:
+        // the old regex would have accepted an unqualified "Corner 1" on a
+        // circuit nobody has surveyed, which is exactly the claim P17 removes.
+        expect(en.view.corners[0]!.heading).toMatch(/^Corner 1 \((left|right), our numbering\)$/);
+        expect(ro.view.corners[0]!.heading).toMatch(
+          /^Virajul 1 \((stânga|dreapta), numerotarea noastră\)$/,
+        );
         for (const row of en.view.corners) {
           expect(row.detail.observations.length).toBeGreaterThan(0);
         }

@@ -86,11 +86,11 @@ async function readyState(language: 'ro' | 'en') {
 }
 
 describe('analysis export — the trackday record (D4)', () => {
-  it('is schemaVersion 6 and omits the trackday block entirely when nothing was suggested', async () => {
+  it('is schemaVersion 7 and omits the trackday block entirely when nothing was suggested', async () => {
     const state = await readyState('en');
     const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, calibrationStatus: 'validated' as const });
-    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(6);
-    expect(doc.schemaVersion).toBe(6);
+    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(7);
+    expect(doc.schemaVersion).toBe(7);
     expect(doc.trackday).toBeUndefined();
     expect(doc.observationsOnly).toBe(true);
     expect(JSON.stringify(doc)).not.toMatch(/suggest/i);

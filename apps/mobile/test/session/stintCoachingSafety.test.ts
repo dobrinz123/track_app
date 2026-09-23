@@ -14,6 +14,7 @@ import {
   createSuggestionJournal,
   type StintSource,
 } from '../../src/session/stintCoaching';
+import { buildPitViewState } from '../../src/session/pitViewModel';
 import {
   bundled,
   driveSession,
@@ -220,23 +221,46 @@ describe('E1 — the session and the controller are re-checked at APPLY time', (
  * the honesty gate as it stands on the SHIPPED catalog.
  */
 describe('E12 — MotorPark, and the shipped catalog', () => {
-  it('MotorPark: a lap boundary suggests nothing and moves nothing', async () => {
+  /**
+   * P17: the claim this test defends is now the one that survives scrutiny --
+   * not "MotorPark says nothing" but "MotorPark MOVES nothing". The lap
+   * boundary is the live-cue path, and a cue is the one output the app acts on
+   * in the world, so it still waits for a survey. It is a TIGHTER assertion
+   * than before: the old one was satisfied by a closed gate, which any
+   * unrelated breakage also produces; this one requires the engine to have run
+   * to completion (`open`) and still queued and applied nothing.
+   */
+  it('MotorPark: a lap boundary moves nothing, on a gate that actually ran', async () => {
     const state = rig({ circuitId: MOTORPARK_CIRCUIT_ID, laps: 4, validated: false });
     const first = await boundary(state, 4);
-    expect(first.status).toBe('insufficient');
-    expect(first.suggestions?.gate).toBe('geometry-unvalidated');
+    expect(first.suggestions?.gate).toBe('open');
+    expect(first.suggestions?.scope).toBe('self-referential');
+    expect(first.suggestions?.cueUpdates).toEqual([]);
     expect(first.queued).toEqual([]);
     const second = await boundary(state, 5);
     expect(second.applied).toEqual([]);
     expect(state.applied).toEqual([]);
   });
 
-  it('MotorPark: the pit view is observations only', async () => {
+  /**
+   * P17: the pit view DOES carry advice on mapped geometry now -- bounded by
+   * the driver's own clean laps, as it always was -- and every sentence it
+   * shows qualifies the corner number as the app's own.
+   */
+  it('MotorPark: the pit view advises, and every sentence says whose numbering it is', async () => {
     const state = rig({ circuitId: MOTORPARK_CIRCUIT_ID, laps: 4, validated: false });
     const pit = await state.coach.openPitView(SESSION_ID, 4);
     expect(pit.run.status).toBe('ready');
-    expect(pit.suggestions.gate).toBe('geometry-unvalidated');
-    expect(pit.suggestions.pitSuggestions).toEqual([]);
+    expect(pit.suggestions.gate).toBe('open');
+    expect(pit.suggestions.scope).toBe('self-referential');
+    expect(pit.suggestions.cueUpdates).toEqual([]);
+    expect(pit.suggestions.pitSuggestions.length).toBeGreaterThan(0);
+    const view = buildPitViewState({ ...pit, language: 'en' });
+    if (view.status !== 'ready') throw new Error('expected a ready pit view');
+    const sentences = view.view.corners.flatMap((corner) => corner.suggestions);
+    expect(sentences.length).toBeGreaterThan(0);
+    for (const sentence of sentences) expect(sentence).toContain('(our numbering)');
+    expect(view.view.statusLine).toContain('traced from a map');
   });
 
   it('MotorPark: corner ids come from the catalog, and every one of them is analysed', async () => {
@@ -250,17 +274,21 @@ describe('E12 — MotorPark, and the shipped catalog', () => {
   });
 
   it.each([TMR_CIRCUIT_ID, MOTORPARK_CIRCUIT_ID])(
-    'the shipped catalog entry for %s is not field-validated, so the stage suggests nothing',
+    'the shipped catalog entry for %s is not field-validated, so no cue moves on it',
     async (circuitId) => {
-      // Both bundled assets are `community-derived` today. The gate is the
-      // contract's (safety rule 5), and this test exists so that flipping an
-      // asset to `official` is a deliberate, visible decision rather than a
-      // silent one.
+      // Both bundled assets are `community-derived` today. This test exists so
+      // that flipping an asset to `official` is a deliberate, visible decision
+      // rather than a silent one -- and P17 made it stricter, not looser: the
+      // stage now RUNS on these circuits, so "nothing was queued" is a real
+      // statement about the cue path instead of a by-product of a shut gate.
       expect(bundled(circuitId).profile.geometryStatus).not.toBe('official');
       const state = rig({ circuitId, laps: 4, validated: false });
       const outcome = await boundary(state, 4);
-      expect(outcome.suggestions?.gate).toBe('geometry-unvalidated');
+      expect(outcome.suggestions?.gate).toBe('open');
+      expect(outcome.suggestions?.scope).toBe('self-referential');
+      expect(outcome.suggestions?.cueUpdates).toEqual([]);
       expect(outcome.queued).toEqual([]);
+      expect(state.applied).toEqual([]);
     },
   );
 });

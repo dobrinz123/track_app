@@ -11,6 +11,7 @@ import type {
   CornerInsight,
   CornerLapRow,
   DemonstratedEnvelope,
+  GeometryProvenance,
   LapCheckId,
   LapInsight,
   LapStatus,
@@ -70,6 +71,15 @@ import { resolveAnalysisScreenStrings } from '../ui/screens/analysisStrings';
  * before this change (schemaVersion < 5) simply has no such claim to make;
  * the version bump is what makes that distinction legible to any reader.
  *
+ * Schema 7 (ticket P17) adds `session.geometryProvenance` -- REQUIRED. The
+ * document already carried `geometryValidated`, which only ever answered
+ * "was this circuit surveyed?" (no, for every asset that has ever shipped).
+ * The graduated honesty gate turns on the finer question -- map trace, or a
+ * loop this phone learned from one lap? -- and a document that states advice
+ * bounded by that geometry has to state the geometry too. A document written
+ * before this change (schemaVersion < 7) makes no such claim; the bump is what
+ * makes that legible.
+ *
  * Nothing in the summary is written by this module about the DRIVING -- every
  * observation line comes from the engine's own localised report, carried here
  * through the screen's view model. What this module owns is the frame: table
@@ -84,7 +94,7 @@ import { resolveAnalysisScreenStrings } from '../ui/screens/analysisStrings';
  */
 type LapLabel = LapInsight['labels'][number];
 
-export const ANALYSIS_EXPORT_SCHEMA_VERSION = 6;
+export const ANALYSIS_EXPORT_SCHEMA_VERSION = 7;
 export const ANALYSIS_EXPORT_KIND = 'trace-analysis-report';
 
 export interface AnalysisExportChannelCoverage {
@@ -330,6 +340,15 @@ export interface AnalysisExportDocument {
     layoutId: string | null;
     totalLengthM: number;
     geometryValidated: boolean;
+    /**
+     * Ticket P17 (schema 7) -- WHERE the centreline came from: `'surveyed'`,
+     * `'mapped'` or `'learned'`. REQUIRED, and strictly more informative than
+     * `geometryValidated` (which stays, and stays exactly `provenance ===
+     * 'surveyed'`): a reader of this document can now tell a map trace from a
+     * track one phone learned in a single lap, which is the difference between
+     * two very different reasons to distrust a corner's number.
+     */
+    geometryProvenance: GeometryProvenance;
     analysisVersion: number;
     lapCount: number;
     cleanLapCount: number;
@@ -542,6 +561,7 @@ export interface AnalysisExportOptions {
 function mapTrackday(
   record: AnalysisExportOptions['trackday'],
   language: AnalysisUiLanguage,
+  geometry: GeometryProvenance,
 ): AnalysisExportTrackday | null {
   if (record === undefined) return null;
   // E9: the setting decides, at export time. A journal left over from when
@@ -577,7 +597,10 @@ function mapTrackday(
       evidenceLapNumber: suggestion.evidenceLapNumber,
       timeLossMs: suggestion.timeLossMs,
       shown: true,
-      text: pitSuggestionLine(suggestion, language),
+      // P17: the exported sentence is the sentence the driver was shown --
+      // corner qualifier included, so a shared report cannot read as more
+      // authoritative than the screen it came from.
+      text: pitSuggestionLine(suggestion, language, geometry),
     })),
   };
 }
@@ -758,6 +781,10 @@ function mapAnalysis(insights: SessionInsights): AnalysisExportAnalysis {
         ? {}
         : { coveragePercent: limitation.coveragePercent }),
       ...(limitation.driftMs === undefined ? {} : { driftMs: limitation.driftMs }),
+      // P17 (schema 7): `GEOMETRY_UNVALIDATED` now names which unsurveyed line
+      // it is. Dropping it here would leave the JSON less specific than the
+      // prose beside it.
+      ...(limitation.geometry === undefined ? {} : { geometry: limitation.geometry }),
     })),
   };
 }
@@ -768,7 +795,7 @@ export function buildAnalysisExportDocument(
   options: AnalysisExportOptions,
 ): AnalysisExportDocument {
   const { insights, assembled, source, report, view } = state;
-  const trackday = mapTrackday(options.trackday, view.language);
+  const trackday = mapTrackday(options.trackday, view.language, insights.geometryProvenance);
   return {
     kind: ANALYSIS_EXPORT_KIND,
     schemaVersion: ANALYSIS_EXPORT_SCHEMA_VERSION,
@@ -783,6 +810,7 @@ export function buildAnalysisExportDocument(
       layoutId: insights.layoutId,
       totalLengthM: insights.totalLengthM,
       geometryValidated: insights.geometryValidated,
+      geometryProvenance: insights.geometryProvenance,
       analysisVersion: insights.analysisVersion,
       lapCount: insights.lapCount,
       cleanLapCount: insights.cleanLapCount,

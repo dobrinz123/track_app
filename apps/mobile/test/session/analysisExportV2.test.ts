@@ -67,12 +67,12 @@ async function readyState(circuitIndex: number, language: 'ro' | 'en') {
 }
 
 describe('P5b-FIX1 C7 -- a standalone, versioned export DTO', () => {
-  it('is the current schema version (6 as of P10A H6) and pins its own key shape', async () => {
+  it('is the current schema version (7 as of P17) and pins its own key shape', async () => {
     const state = await readyState(0, 'en');
     const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, calibrationStatus: 'validated' as const });
 
-    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(6);
-    expect(doc.schemaVersion).toBe(6);
+    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(7);
+    expect(doc.schemaVersion).toBe(7);
     expect(Object.keys(doc).sort()).toEqual(
       [
         'analysis',

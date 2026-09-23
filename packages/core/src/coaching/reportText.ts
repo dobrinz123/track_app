@@ -1,6 +1,7 @@
 import type {
   CornerInsight,
   CornerLapRow,
+  GeometryProvenance,
   LapInsight,
   Limitation,
   SessionInsights,
@@ -237,6 +238,40 @@ const CAUSE_LABELS: Record<ReportLanguage, Record<TimeLossCause, string>> = {
   },
 };
 
+/**
+ * Ticket P17 — how the report refers to a corner it DERIVED rather than one a
+ * survey named.
+ *
+ * The problem is small and unavoidable: the engine numbers corners in the order
+ * they are met from the start/finish line, and on `'mapped'` or `'learned'`
+ * geometry that numbering is the app's own. Writing "Corner 7" without
+ * qualification claims it is the circuit's Turn 7, which nobody has checked;
+ * writing something like "the derived section at 1 290 m" every time makes the
+ * report unreadable and buries the numbers that matter.
+ *
+ * So the number stays (it is the only short handle a driver can use) and it
+ * carries a three-word qualifier the first time it appears in each heading and
+ * in each suggestion — the two places a corner is NAMED rather than discussed.
+ * The full statement of what the numbering is worth lives once in the
+ * limitations section and once at the foot of each corner, where there is room
+ * to say it properly. A driver who reads one corner section in isolation still
+ * gets the whole truth about it.
+ */
+const NUMBERING_QUALIFIER: Record<ReportLanguage, string> = {
+  ro: 'numerotarea noastră',
+  en: 'our numbering',
+};
+
+/** The corner's short name, qualified when the numbering is the app's own. */
+function cornerName(
+  id: number,
+  language: ReportLanguage,
+  geometry: GeometryProvenance,
+): string {
+  const base = language === 'ro' ? `Virajul ${id}` : `Corner ${id}`;
+  return geometry === 'surveyed' ? base : `${base} (${NUMBERING_QUALIFIER[language]})`;
+}
+
 const TEXT: Record<
   ReportLanguage,
   {
@@ -244,7 +279,18 @@ const TEXT: Record<
     subtitle: (circuit: string, laps: number, clean: number) => string;
     disclaimer: string;
     headings: Record<string, string>;
-    cornerHeading: (id: number, direction: string) => string;
+    cornerHeading: (id: number, direction: string, geometry: GeometryProvenance) => string;
+    /** The corner's position on the lap, framed by whose line it is measured on. */
+    cornerPosition: (
+      entry: string,
+      apex: string,
+      exit: string,
+      geometry: GeometryProvenance,
+    ) => string;
+    /** The per-corner footer: what the number and the position are worth here. */
+    cornerGeometryNote: (id: number, geometry: Exclude<GeometryProvenance, 'surveyed'>) => string;
+    /** The limitations-section sentence for `GEOMETRY_UNVALIDATED`. */
+    geometryLimitation: (geometry: Exclude<GeometryProvenance, 'surveyed'>) => string;
     directions: { left: string; right: string };
   }
 > = {
@@ -263,7 +309,39 @@ const TEXT: Record<
       sectors: 'Sectoare',
       corners: 'Viraj cu viraj',
     },
-    cornerHeading: (id, direction) => `Virajul ${id} (${direction})`,
+    cornerHeading: (id, direction, geometry) =>
+      geometry === 'surveyed'
+        ? `Virajul ${id} (${direction})`
+        : `Virajul ${id} (${direction}, ${NUMBERING_QUALIFIER.ro})`,
+    cornerPosition: (entry, apex, exit, geometry) => {
+      const where =
+        geometry === 'surveyed'
+          ? 'Poziție pe tur'
+          : geometry === 'mapped'
+            ? 'Poziția pe linia trasată de noi'
+            : 'Poziția pe linia învățată din turul tău';
+      const caveat =
+        geometry === 'surveyed'
+          ? ''
+          : geometry === 'mapped'
+            ? ' Linia e trasată de pe hartă, deci sunt distanțele noastre, nu ale circuitului.'
+            : ' Linia e chiar turul tău, deci sunt distanțele noastre, nu ale circuitului.';
+      return `${where}: intrare la ${entry}, apex la ${apex}, ieșire la ${exit} de la linia de start/finish.${caveat}`;
+    },
+    cornerGeometryNote: (id, geometry) =>
+      `Virajul ${id} e citirea noastră ${
+        geometry === 'mapped'
+          ? 'a unei trasări de pe hartă, nu a unui circuit măsurat'
+          : 'a singurului tur pe care l-ai condus ca să învățăm traseul'
+      }: numărul și poziția lui sunt ale noastre. Tot ce scrie mai sus compară tururile tale ` +
+      'între ele prin aceeași fereastră, așa că diferențele rămân valabile chiar dacă fereastra ' +
+      'e cu câțiva metri lângă virajul real.',
+    geometryLimitation: (geometry) =>
+      (geometry === 'mapped'
+        ? 'Circuitul e trasat de pe hartă și n-a fost verificat niciodată pe teren. Numerele și pozițiile virajelor sunt ale noastre, nu ale circuitului'
+        : 'Traseul a fost învățat dintr-un singur tur condus de tine, nu măsurat. Numerele și pozițiile virajelor vin din turul acela, nu de la circuit') +
+      ', și nimic de aici nu-ți poate spune unde e apexul real sau unde e un panou de frânare. ' +
+      'Comparațiile între tururile tale nu sunt afectate: toate tururile sunt măsurate prin aceleași ferestre.',
     directions: { left: 'stânga', right: 'dreapta' },
   },
   en: {
@@ -281,7 +359,39 @@ const TEXT: Record<
       sectors: 'Sectors',
       corners: 'Corner by corner',
     },
-    cornerHeading: (id, direction) => `Corner ${id} (${direction})`,
+    cornerHeading: (id, direction, geometry) =>
+      geometry === 'surveyed'
+        ? `Corner ${id} (${direction})`
+        : `Corner ${id} (${direction}, ${NUMBERING_QUALIFIER.en})`,
+    cornerPosition: (entry, apex, exit, geometry) => {
+      const where =
+        geometry === 'surveyed'
+          ? 'Position on the lap'
+          : geometry === 'mapped'
+            ? 'Position on the line we traced'
+            : 'Position on the line learned from your own lap';
+      const caveat =
+        geometry === 'surveyed'
+          ? ''
+          : geometry === 'mapped'
+            ? ' That line was traced from a map, so these are our distances, not the circuit\'s.'
+            : ' That line is your own lap, so these are our distances, not the circuit\'s.';
+      return `${where}: entry at ${entry}, apex at ${apex}, exit at ${exit} from the start/finish line.${caveat}`;
+    },
+    cornerGeometryNote: (id, geometry) =>
+      `Corner ${id} is our reading of ${
+        geometry === 'mapped'
+          ? 'a map trace, not of a surveyed circuit'
+          : 'the single lap you drove to learn this track'
+      }: its number and its position are ours. Everything above compares your own laps with ` +
+      'each other through the same window, so the differences hold even if that window sits a ' +
+      'few metres away from the real corner.',
+    geometryLimitation: (geometry) =>
+      (geometry === 'mapped'
+        ? "This circuit was traced from a map and has never been checked on track. Corner numbers and positions are ours, not the circuit's"
+        : "This track was learned from one lap you drove, not surveyed. Corner numbers and positions come from that lap, not from the circuit") +
+      ', and nothing here can tell you where the real apex is or where a braking board stands. ' +
+      'Comparisons between your own laps are unaffected: every lap is measured through the same windows.',
     directions: { left: 'left', right: 'right' },
   },
 };
@@ -463,10 +573,14 @@ function limitationLine(limitation: Limitation, language: ReportLanguage): strin
         ? `În ${one ? 'turul' : 'tururile'} ${lapList(laps, language)} viteza înregistrată și ceasul nu sunt de acord (${gap} pe tur), așa că timpii pe distanță de acolo sunt la fel de buni ca semnalul de viteză.`
         : `On ${one ? 'lap' : 'laps'} ${lapList(laps, language)} the recorded speed and the clock disagree (${gap} over the lap), so the time-at-distance there is only as good as the speed signal.`;
     }
-    case 'GEOMETRY_UNVALIDATED':
-      return ro
-        ? 'Geometria circuitului nu este validată pe teren, deci pozițiile virajelor (și distanțele față de ele) sunt aproximative.'
-        : 'This circuit geometry has not been validated on track, so corner positions (and the distances to them) are approximate.';
+    case 'GEOMETRY_UNVALIDATED': {
+      // P17: the limitation now names WHICH kind of unsurveyed line this is.
+      // A limitation recorded before P17 carries no `geometry`, and 'mapped'
+      // is the right reading of it: it was raised for a circuit that was not
+      // `'official'`, which for every asset that ever shipped meant a trace.
+      const geometry = limitation.geometry === 'learned' ? 'learned' : 'mapped';
+      return TEXT[language].geometryLimitation(geometry);
+    }
     case 'CORNER_COVERAGE': {
       const cornerIds = limitation.cornerIds ?? [];
       const one = cornerIds.length === 1;
@@ -479,7 +593,17 @@ function limitationLine(limitation: Limitation, language: ReportLanguage): strin
   }
 }
 
-function timeLossLine(finding: TimeLossFinding, language: ReportLanguage): string | null {
+/**
+ * `label` is the corner's name as the CALLER wants it here. Inside a corner
+ * section the heading two lines up already carries the numbering qualifier, so
+ * it passes the bare name; in the ranked sections, where a line is read (and
+ * screenshotted) on its own, it passes the qualified one (P17).
+ */
+function timeLossLine(
+  finding: TimeLossFinding,
+  language: ReportLanguage,
+  label: string,
+): string | null {
   const ro = language === 'ro';
   const parts: string[] = [];
   if (finding.deltaMs !== null) {
@@ -512,8 +636,7 @@ function timeLossLine(finding: TimeLossFinding, language: ReportLanguage): strin
       : ro
         ? ` Acolo ${finding.causes.map((cause) => CAUSE_LABELS.ro[cause]).join(', ')}.`
         : ` There ${finding.causes.map((cause) => CAUSE_LABELS.en[cause]).join(', ')}.`;
-  const prefix = ro ? `Virajul ${finding.cornerId}` : `Corner ${finding.cornerId}`;
-  return `${prefix}: ${parts.join('; ')}.${causes}`;
+  return `${label}: ${parts.join('; ')}.${causes}`;
 }
 
 function brakeLine(corner: CornerInsight, row: CornerLapRow, language: ReportLanguage): string | null {
@@ -644,11 +767,15 @@ function cornerSection(
 ): ReportSection {
   const ro = language === 'ro';
   const vocabulary = TEXT[language];
+  const geometry = insights.geometryProvenance;
   const lines: string[] = [];
   lines.push(
-    ro
-      ? `Poziție pe tur: intrare la ${metres(corner.entryDistanceM, language)}, apex la ${metres(corner.apexDistanceM, language)}, ieșire la ${metres(corner.exitDistanceM, language)} de la linia de start/finish.`
-      : `Position on the lap: entry at ${metres(corner.entryDistanceM, language)}, apex at ${metres(corner.apexDistanceM, language)}, exit at ${metres(corner.exitDistanceM, language)} from the start/finish line.`,
+    vocabulary.cornerPosition(
+      metres(corner.entryDistanceM, language),
+      metres(corner.apexDistanceM, language),
+      metres(corner.exitDistanceM, language),
+      geometry,
+    ),
   );
   if (corner.bestSectorMs !== null && corner.bestSectorLapNumber !== null) {
     const worst =
@@ -672,19 +799,21 @@ function cornerSection(
   const consistency = consistencyLine(corner, language);
   if (consistency !== null) lines.push(consistency);
   if (corner.timeLoss !== null) {
-    const loss = timeLossLine(corner.timeLoss, language);
+    // Bare name: this corner's own heading and footer already say whose
+    // numbering it is, and repeating it inside the section would be noise.
+    const loss = timeLossLine(corner.timeLoss, language, cornerName(corner.cornerId, language, 'surveyed'));
     if (loss !== null) lines.push(loss);
   }
-  if (!insights.geometryValidated) {
-    lines.push(
-      ro
-        ? 'Geometria acestui viraj vine din hartă, nevalidată pe teren — distanțele sunt aproximative.'
-        : 'This corner geometry comes from the map and is not field-validated — the distances are approximate.',
-    );
+  if (geometry !== 'surveyed') {
+    lines.push(vocabulary.cornerGeometryNote(corner.cornerId, geometry));
   }
   return {
     id: `corner-${corner.cornerId}`,
-    heading: vocabulary.cornerHeading(corner.cornerId, vocabulary.directions[corner.direction]),
+    heading: vocabulary.cornerHeading(
+      corner.cornerId,
+      vocabulary.directions[corner.direction],
+      geometry,
+    ),
     lines,
   };
 }
@@ -715,9 +844,10 @@ export function buildReport(insights: SessionInsights, language: ReportLanguage)
     });
   }
 
+  const geometry = insights.geometryProvenance;
   const ranked = insights.timeLossRanking
     .slice(0, RANKED_LIMIT)
-    .map((finding) => timeLossLine(finding, language))
+    .map((finding) => timeLossLine(finding, language, cornerName(finding.cornerId, language, geometry)))
     .filter((line): line is string => line !== null);
   if (ranked.length > 0) {
     sections.push({
@@ -733,7 +863,7 @@ export function buildReport(insights: SessionInsights, language: ReportLanguage)
       const corner = insights.corners.find((entry) => entry.cornerId === finding.cornerId);
       const line = corner === undefined ? null : consistencyLine(corner, language);
       if (line === null) return null;
-      return ro ? `Virajul ${finding.cornerId}: ${line}` : `Corner ${finding.cornerId}: ${line}`;
+      return `${cornerName(finding.cornerId, language, geometry)}: ${line}`;
     })
     .filter((line): line is string => line !== null);
   if (consistencyLines.length > 0) {
@@ -793,7 +923,6 @@ export function renderReport(insights: SessionInsights, language: ReportLanguage
 const SUGGESTION_TEXT: Record<
   ReportLanguage,
   {
-    corner: (id: number) => string;
     brakeLater: (typical: string, target: string, demonstrated: string, lap: number) => string;
     liftLater: (typical: string, target: string, demonstrated: string, lap: number) => string;
     carryMoreMinSpeed: (typical: string, target: string, demonstrated: string, lap: number) => string;
@@ -809,7 +938,7 @@ const SUGGESTION_TEXT: Record<
   }
 > = {
   ro: {
-    corner: (id) => `Virajul ${id}`,
+
     brakeLater: (typical, target, demonstrated, lap) =>
       `frânează mai târziu: de obicei frânezi la ${typical} înainte de viraj, iar în turul ${lap} ai frânat deja la ${demonstrated} — țintește ${target}.`,
     liftLater: (typical, target, demonstrated, lap) =>
@@ -821,7 +950,7 @@ const SUGGESTION_TEXT: Record<
     cuePoints: { brake: 'Reperul de frânare', lift: 'Reperul de ridicat piciorul' },
   },
   en: {
-    corner: (id) => `Corner ${id}`,
+
     brakeLater: (typical, target, demonstrated, lap) =>
       `brake later: you usually brake ${typical} before the corner, and on lap ${lap} you already braked at ${demonstrated} — aim for ${target}.`,
     liftLater: (typical, target, demonstrated, lap) =>
@@ -838,8 +967,21 @@ const SUGGESTION_TEXT: Record<
  * One pit suggestion as a sentence, with its numbers and the lap that proves
  * it. Never rendered while driving (R2-3a) and never for a suggestion the
  * engine did not generate — this function only formats what it is given.
+ *
+ * `geometry` (P17) qualifies the corner's NAME, nothing else: a pit suggestion
+ * on `'mapped'` or `'learned'` geometry reads "Corner 7 (our numbering) —
+ * brake later: …", because the sentence is read on its own in the pit view and
+ * has to carry its own honesty with it. The advice itself is unchanged — it was
+ * always bounded by a lap the driver actually drove. It defaults to
+ * `'surveyed'` so a caller that has not been told the provenance renders
+ * exactly what it rendered before; real callers pass
+ * `insights.geometryProvenance`.
  */
-export function pitSuggestionLine(suggestion: PitSuggestion, language: ReportLanguage): string {
+export function pitSuggestionLine(
+  suggestion: PitSuggestion,
+  language: ReportLanguage,
+  geometry: GeometryProvenance = 'surveyed',
+): string {
   const vocabulary = SUGGESTION_TEXT[language];
   const format = (value: number): string =>
     suggestion.unit === 'm' ? metres(value, language) : kph(value, language);
@@ -857,7 +999,7 @@ export function pitSuggestionLine(suggestion: PitSuggestion, language: ReportLan
             demonstrated,
             suggestion.evidenceLapNumber,
           );
-  return `${vocabulary.corner(suggestion.cornerId)} — ${body}`;
+  return `${cornerName(suggestion.cornerId, language, geometry)} — ${body}`;
 }
 
 /**
@@ -867,7 +1009,10 @@ export function pitSuggestionLine(suggestion: PitSuggestion, language: ReportLan
  */
 export function cueUpdateLine(update: CueUpdate, language: ReportLanguage): string {
   const vocabulary = SUGGESTION_TEXT[language];
-  return `${vocabulary.corner(update.cornerId)} — ${vocabulary.cueUpdate(
+  // Unqualified by construction: a `CueUpdate` only exists when the scope was
+  // `'surveyed'` (P17 — `computeSuggestions` emits none otherwise), so this
+  // corner number IS the circuit's.
+  return `${cornerName(update.cornerId, language, 'surveyed')} — ${vocabulary.cueUpdate(
     vocabulary.cuePoints[update.point],
     metres(update.movedLaterM, language),
     metres(update.fromM, language),

@@ -1053,6 +1053,12 @@ function limitationChips(insights: SessionInsights, strings: AnalysisScreenStrin
   for (const limitation of insights.limitations) {
     if (seen.has(limitation.code)) continue;
     seen.add(limitation.code);
+    // P17: "map geometry" is the wrong chip for a track this phone learned
+    // from one lap. The code alone no longer identifies the fact.
+    if (limitation.code === 'GEOMETRY_UNVALIDATED' && limitation.geometry === 'learned') {
+      chips.push(strings.learnedGeometryChip);
+      continue;
+    }
     chips.push(strings.limitationChips[limitation.code]);
   }
   return chips;

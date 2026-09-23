@@ -3,6 +3,7 @@ import {
   buildDemonstratedEnvelope,
   buildTestLoopCircuit,
   computeSuggestions,
+  geometryProvenanceOf,
   isLearnedGeometry,
   type LapRecord,
   type TestLoopCircuit,
@@ -63,7 +64,13 @@ describe('Test Loop guards (P5d T5)', () => {
     expect(assembled.context.geometryValidated).toBe(false);
   });
 
-  it('the suggestion stage stays inert on unvalidated geometry, and says why', () => {
+  /**
+   * P17 renamed what this proves. The stage is not inert because geometry is
+   * unvalidated -- a learned circuit now carries self-referential advice. It is
+   * inert because this caller stated NOTHING about where the line came from,
+   * and silence has never been a licence (P16 C2).
+   */
+  it('the suggestion stage stays inert when nothing is STATED about the geometry', () => {
     const envelope = buildDemonstratedEnvelope([]);
     const result = computeSuggestions({
       enabled: true,
@@ -73,8 +80,31 @@ describe('Test Loop guards (P5d T5)', () => {
     });
 
     expect(result.gate).toBe('geometry-unvalidated');
+    expect(result.scope).toBe('closed');
     expect(result.cueUpdates).toEqual([]);
     expect(result.pitSuggestions).toEqual([]);
+  });
+
+  /**
+   * P17: a learned circuit stated as such reaches the self-referential tier --
+   * and still moves no live cue. The assembly is what states it, so this goes
+   * through `geometryProvenanceOf` rather than a literal.
+   */
+  it('a learned circuit reaches the self-referential tier and still moves no cue', () => {
+    const circuit = learn();
+    expect(geometryProvenanceOf(circuit.profile.geometryStatus)).toBe('learned');
+    const result = computeSuggestions({
+      enabled: true,
+      envelope: buildDemonstratedEnvelope([]),
+      cues: [],
+      geometryValidated: false,
+      geometry: geometryProvenanceOf(circuit.profile.geometryStatus),
+    });
+    // The geometry no longer shuts the gate -- the EVIDENCE gate does, because
+    // this envelope holds no clean laps. That is the whole change: a learned
+    // circuit now fails for want of laps, not for want of a survey.
+    expect(result.gate).toBe('insufficient-clean-laps');
+    expect(result.cueUpdates).toEqual([]);
   });
 
   it('live cues (and so voice) are OFF on a learned circuit even when coaching is on', () => {

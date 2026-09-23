@@ -10,11 +10,17 @@ import { isLearnedGeometry, type CircuitProfile } from '@circuit/core';
  * disabled"). Switching the cues off switches the voice off with them, which
  * is why that is the only switch here.
  *
- * The analysis-side guard needs no code at all: `analysisAssembly` sets
- * `geometryValidated: profile.geometryStatus === 'official'`, and a learned
+ * The analysis-side guard still needs no code, but ticket P17 changed what it
+ * guards. `analysisAssembly` states BOTH `geometryValidated` (still
+ * `geometryStatus === 'official'`) and `geometryProvenance`, and a learned
  * circuit is `'ad-hoc'` by construction (`buildTestLoopCircuit` writes that
- * value as a constant), so the whole suggestion stage is inert on a learned
- * circuit for the same reason it is inert on MotorPark.
+ * value as a constant), which resolves to the `'learned'` tier. So on a
+ * learned circuit the suggestion stage is no longer inert: it produces the
+ * PIT suggestions, which are bounded by the driver's own clean laps of the
+ * same outing and are valid on any consistent line, and it moves no live cue
+ * at all -- the same line P17 draws on MotorPark. On a learned circuit the cue
+ * guard below is what makes that doubly true: with `coaching.enabled: false`
+ * there is no cue to move in the first place.
  */
 
 /**

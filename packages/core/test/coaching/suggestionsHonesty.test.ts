@@ -56,21 +56,81 @@ function earlyCues(insights: SessionInsights): ActiveCue[] {
   }));
 }
 
-describe('the geometry gate (E4) — an unvalidated circuit suggests NOTHING', () => {
-  it('MotorPark: zero suggestions and zero cue updates, on real catalog geometry', () => {
+describe('the geometry gate (E4/P17) — an unsurveyed circuit moves NO CUE', () => {
+  /**
+   * P17 replaced "MotorPark suggests nothing" with a claim this test can
+   * actually defend. The old one rested on "no corner reference point is
+   * trustworthy", which is false for a self-comparison: every lap of the
+   * outing is projected onto the same centreline and measured through the same
+   * `cornerWindows`, so a displaced line moves every lap together and cancels.
+   * What genuinely needs a survey is a claim the app ACTS on in the world —
+   * a live cue fired at a point it believes it knows. So that is what this
+   * test now pins, and it pins it harder: not "the gate was shut" (which any
+   * unrelated failure would also satisfy) but "the engine ran, produced
+   * evidence-carrying suggestions, and still moved nothing".
+   */
+  it('MotorPark: pit suggestions ARE produced, and not one cue moves', () => {
     const circuit = motorpark();
     expect(circuit.profile.geometryStatus).not.toBe('official');
     const insights = analyse(circuit);
-    // The analysis itself still runs and still measures the outing...
     expect(insights.cleanLapCount).toBeGreaterThanOrEqual(2);
     expect(insights.limitations.map((entry) => entry.code)).toContain('GEOMETRY_UNVALIDATED');
+    expect(insights.geometryProvenance).toBe('mapped');
 
     const result = suggestionsFromInsights(insights, earlyCues(insights), { enabled: true });
-    // ...and says nothing at all about what to do next.
-    expect(result.gate).toBe('geometry-unvalidated');
+    expect(result.gate).toBe('open');
+    expect(result.scope).toBe('self-referential');
+    // The cue path: shut, and visibly so. Every corner that HAS a cue is
+    // named as skipped with the reason, so silence is legible rather than
+    // indistinguishable from "we found nothing".
     expect(result.cueUpdates).toEqual([]);
+    expect(result.skipped.length).toBe(insights.corners.length);
+    expect(new Set(result.skipped.map((entry) => entry.reason))).toEqual(
+      new Set(['geometry-self-referential']),
+    );
+    // The pit path: open, and every suggestion is still bounded by a lap the
+    // driver actually drove -- the invariant that was never about geometry.
+    expect(result.pitSuggestions.length).toBeGreaterThan(0);
+    for (const suggestion of result.pitSuggestions) {
+      expect(suggestion.evidenceLapNumber).toBeGreaterThan(0);
+      if (suggestion.unit === 'm') {
+        expect(suggestion.targetValue).toBeGreaterThanOrEqual(suggestion.demonstratedValue);
+      } else {
+        expect(suggestion.targetValue).toBeLessThanOrEqual(suggestion.demonstratedValue);
+      }
+    }
+  });
+
+  /**
+   * P17: the unlock needs an explicit statement about the circuit. A caller
+   * that describes nothing still gets nothing — P16 C2's property, unchanged
+   * and now load-bearing for a wider surface.
+   */
+  it('a caller that states no provenance at all still gets a closed gate', () => {
+    const insights = analyse(motorpark());
+    const result = computeSuggestions({
+      enabled: true,
+      envelope: insights.envelope,
+      cues: earlyCues(insights),
+    });
+    expect(result.gate).toBe('geometry-unvalidated');
+    expect(result.scope).toBe('closed');
     expect(result.pitSuggestions).toEqual([]);
-    expect(result.skipped).toEqual([]);
+    expect(result.cueUpdates).toEqual([]);
+  });
+
+  /** P17: a `'surveyed'` claim can never overrule an explicit `false`. */
+  it('refuses to be talked into "surveyed" by a contradictory input', () => {
+    const insights = analyse(motorpark());
+    const result = computeSuggestions({
+      enabled: true,
+      envelope: insights.envelope,
+      cues: earlyCues(insights),
+      geometryValidated: false,
+      geometry: 'surveyed',
+    });
+    expect(result.scope).toBe('self-referential');
+    expect(result.cueUpdates).toEqual([]);
   });
 
   it('MotorPark: the sealed evidence is empty too, so no cue can be moved on it', () => {

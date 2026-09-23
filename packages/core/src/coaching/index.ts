@@ -46,12 +46,15 @@ export {
   CONSISTENCY_SECTOR_SPREAD_MS,
   MIN_CLEAN_LAPS_FOR_COMPARISON,
   analyzeSession,
+  geometryProvenanceOf,
+  resolveGeometryProvenance,
 } from './sessionInsights';
 export type {
   ConsistencyComponent,
   ConsistencyFinding,
   CornerInsight,
   CornerLapRow,
+  GeometryProvenance,
   LapInsight,
   LapTimeConsistency,
   Limitation,
@@ -93,6 +96,7 @@ export type {
   SuggestionGate,
   SuggestionInput,
   SuggestionResult,
+  SuggestionScope,
   SuggestionSkip,
   SuggestionSkipReason,
 } from './suggestions';

@@ -1,5 +1,10 @@
 import type { CornerEnvelope, DemonstratedEnvelope } from './envelope';
-import type { LimitationCode, SessionInsights } from './sessionInsights';
+import {
+  resolveGeometryProvenance,
+  type GeometryProvenance,
+  type LimitationCode,
+  type SessionInsights,
+} from './sessionInsights';
 
 /**
  * The bounded suggestion engine — `contracts.md` "Phase 5 REVISION 2" R2-3
@@ -16,6 +21,14 @@ import type { LimitationCode, SessionInsights } from './sessionInsights';
  *    bounds. Nothing beyond the demonstrated envelope is ever generated: the
  *    ceiling of every suggestion is the driver's own best clean lap, so
  *    "brake later than you ever have" is impossible by construction.
+ *
+ * Ticket P17 made that rule GRADUATED rather than binary. Both outputs rest on
+ * the same evidence — the driver's own clean laps of this outing, measured
+ * through the same distance windows — so both survive a centreline that sits a
+ * few metres off the real one. What they do NOT share is how they reach the
+ * driver, and that is where the new line falls: a pit suggestion hands over its
+ * own evidence and ships on any STATED geometry; a cue move is acted on in the
+ * world at speed and still waits for `'surveyed'`. See {@link SuggestionScope}.
  *
  * Everything here is pure and deterministic: same inputs, byte-identical
  * output, in ascending corner id. `enabled` is the whole stage's gate (the
@@ -83,7 +96,14 @@ export type SuggestionSkipReason =
    * laps that would prove it could not be verified. Nothing is suggested on
    * evidence the engine itself does not trust.
    */
-  | 'honesty-gate';
+  | 'honesty-gate'
+  /**
+   * Ticket P17: the geometry is `'mapped'` or `'learned'`, so this outing's
+   * PIT suggestions were produced (they are self-referential) but no live cue
+   * was moved. See {@link SuggestionResult.scope} for the line between the
+   * two and why it falls where it does.
+   */
+  | 'geometry-self-referential';
 
 export interface SuggestionSkip {
   cornerId: number;
@@ -124,9 +144,10 @@ export interface PitSuggestion {
 /**
  * `disabled` — the driver has not opted in; `insufficient-clean-laps` — the
  * outing has not produced the evidence yet; `geometry-unvalidated` — the
- * circuit's own geometry has never been validated on track (MotorPark today),
- * so no corner reference point is trustworthy enough to advise on (safety
- * contract rule 5, ticket P5c-FIX1 E4); `open` — the engine ran.
+ * caller stated NOTHING about where this circuit's geometry came from, so the
+ * engine has no ground to stand on at all (ticket P16 C2: an absent claim is
+ * not a licence); `open` — the engine ran. How FAR it ran is
+ * {@link SuggestionResult.scope}, not this field.
  */
 export type SuggestionGate =
   | 'disabled'
@@ -134,8 +155,36 @@ export type SuggestionGate =
   | 'geometry-unvalidated'
   | 'open';
 
+/**
+ * Ticket P17 — how far the circuit's own geometry lets an OPEN result go.
+ *
+ *  - `'surveyed'` — everything: pit suggestions AND live cue moves.
+ *  - `'self-referential'` — pit suggestions only. The geometry is `'mapped'`
+ *    or `'learned'`, every corner is recorded in `skipped` with
+ *    `'geometry-self-referential'`, and `cueUpdates` is empty.
+ *  - `'closed'` — nothing ran; `gate` says why.
+ *
+ * **Why the line falls there.** Epistemically a pit suggestion and a cue move
+ * are the same claim: both are bounded by a point the driver themselves
+ * reached on a clean lap of THIS outing, measured on the same centreline every
+ * other lap was measured on, so both survive a consistent geometric offset.
+ * What differs is how the claim reaches the driver. A pit suggestion arrives
+ * stationary, carrying its own evidence in the same sentence ("you usually
+ * brake 70 m before, on lap 3 you braked at 58 m"), and the driver decides. A
+ * cue is a bare imperative spoken at speed: it carries no evidence at the
+ * moment it fires, and its correctness depends on the app placing a point in
+ * the WORLD -- the projection distance→position has to round-trip at that
+ * exact spot. That round-trip is precisely what an unsurveyed centreline has
+ * never had checked. So a claim that hands the driver its evidence is
+ * self-referential and ships on any stated geometry; a claim the app acts on
+ * in the world is absolute and waits for a survey.
+ */
+export type SuggestionScope = 'surveyed' | 'self-referential' | 'closed';
+
 export interface SuggestionResult {
   gate: SuggestionGate;
+  /** Ticket P17 — how far the geometry let an open gate go. */
+  scope: SuggestionScope;
   cleanLapCount: number;
   /** Bounded cue moves, ascending by corner id. At most one per corner. */
   cueUpdates: CueUpdate[];
@@ -181,6 +230,23 @@ export interface SuggestionInput {
    */
   geometryValidated?: boolean;
   /**
+   * Ticket P17 — WHERE the centreline came from. This is what opens the
+   * graduated gate:
+   *
+   *  - `'surveyed'` (and {@link geometryValidated} not explicitly `false`) —
+   *    the full result.
+   *  - `'mapped'` / `'learned'` — pit suggestions only
+   *    (`scope: 'self-referential'`).
+   *  - omitted, with `geometryValidated === true` — `'surveyed'`, so every
+   *    existing caller behaves exactly as before.
+   *  - omitted otherwise — NOTHING, through the same `'geometry-unvalidated'`
+   *    gate as before. P16 C2 stands: silence is not a statement, and a caller
+   *    that never described its circuit still gets silence it can see. The
+   *    unlock needs an explicit `'mapped'` / `'learned'`, which is a claim
+   *    about the circuit that only a caller holding the profile can make.
+   */
+  geometry?: GeometryProvenance;
+  /**
    * Corners whose own evidence failed an honesty gate — the channels did not
    * cover them, or the laps that would prove them could not be verified. They
    * get no suggestion and no cue update (ticket P5c-FIX1 E4).
@@ -188,14 +254,36 @@ export interface SuggestionInput {
   blockedCornerIds?: readonly number[];
 }
 
-const EMPTY: Omit<SuggestionResult, 'gate' | 'cleanLapCount'> = Object.freeze({
+const EMPTY: Omit<SuggestionResult, 'gate' | 'scope' | 'cleanLapCount'> = Object.freeze({
   cueUpdates: [],
   pitSuggestions: [],
   skipped: [],
 });
 
 function empty(gate: SuggestionGate, cleanLapCount: number): SuggestionResult {
-  return { gate, cleanLapCount, ...EMPTY, cueUpdates: [], pitSuggestions: [], skipped: [] };
+  return {
+    gate,
+    scope: 'closed',
+    cleanLapCount,
+    ...EMPTY,
+    cueUpdates: [],
+    pitSuggestions: [],
+    skipped: [],
+  };
+}
+
+/**
+ * Ticket P17 — what this input actually established about the geometry, or
+ * `null` when it established nothing and the gate stays shut.
+ */
+function statedGeometry(input: SuggestionInput): GeometryProvenance | null {
+  if (input.geometry !== undefined) {
+    // The same narrowing `analyzeSession` applies: an explicit
+    // `geometryValidated: false` can never be overruled by a `'surveyed'`
+    // claim sitting next to it.
+    return resolveGeometryProvenance(input.geometryValidated !== false, input.geometry);
+  }
+  return input.geometryValidated === true ? 'surveyed' : null;
 }
 
 function finite(value: number | null | undefined): value is number {
@@ -300,12 +388,14 @@ export function computeSuggestions(input: SuggestionInput): SuggestionResult {
   // The opt-in gate comes FIRST: with suggestions off, this function is
   // indistinguishable from not existing (ticket P5c-B D5).
   if (!input.enabled) return empty('disabled', cleanLapCount);
-  // E4: the honesty gates come before the evidence, not after it. Unvalidated
-  // geometry means every corner reference point is a guess, so there is
-  // nothing here that may be suggested on -- not even for a corner whose own
-  // laps look immaculate.
-  // P16 C2: `!== true`, not `=== false`. An absent flag is not a licence.
-  if (input.geometryValidated !== true) return empty('geometry-unvalidated', cleanLapCount);
+  // E4/P16 C2/P17: the honesty gates come before the evidence, not after it.
+  // A caller that said NOTHING about this circuit's geometry still gets
+  // nothing back -- silence is not a licence. A caller that DID say where the
+  // line came from gets as much as that line supports, and no more.
+  const geometry = statedGeometry(input);
+  if (geometry === null) return empty('geometry-unvalidated', cleanLapCount);
+  const scope: Exclude<SuggestionScope, 'closed'> =
+    geometry === 'surveyed' ? 'surveyed' : 'self-referential';
   if (cleanLapCount < MIN_CLEAN_LAPS_FOR_SUGGESTIONS) {
     return empty('insufficient-clean-laps', cleanLapCount);
   }
@@ -328,6 +418,14 @@ export function computeSuggestions(input: SuggestionInput): SuggestionResult {
   for (const cornerId of [...cueByCorner.keys()].sort((a, b) => a - b)) {
     const cue = cueByCorner.get(cornerId) as ActiveCue;
     const corner = cornersById.get(cornerId);
+    // P17: a cue is the one output the app acts on in the WORLD, so it is the
+    // one that waits for a survey. Recorded per corner rather than returned as
+    // a closed gate, so the caller can see that the corner was considered and
+    // why nothing moved -- and so the pit suggestions below still run.
+    if (scope === 'self-referential') {
+      skipped.push({ cornerId, point: 'brake', reason: 'geometry-self-referential' });
+      continue;
+    }
     if (blocked.has(cornerId)) {
       skipped.push({ cornerId, point: 'brake', reason: 'honesty-gate' });
       continue;
@@ -412,7 +510,7 @@ export function computeSuggestions(input: SuggestionInput): SuggestionResult {
     }
   }
 
-  return { gate: 'open', cleanLapCount, cueUpdates, pitSuggestions, skipped };
+  return { gate: 'open', scope, cleanLapCount, cueUpdates, pitSuggestions, skipped };
 }
 
 /**
@@ -437,6 +535,9 @@ export function suggestionsFromInsights(
       : { updatedCornerIds: options.updatedCornerIds }),
     timeLossMsByCorner,
     geometryValidated: insights.geometryValidated,
+    // P17: the analysis already resolved this; restating it here would be a
+    // second source of truth for the same fact.
+    geometry: insights.geometryProvenance,
     blockedCornerIds: blockedCornersFromInsights(insights),
   });
 }
@@ -593,9 +694,12 @@ export function cueEvidenceFromInsights(
 ): CueUpdateEvidence {
   const entries: CueEvidenceEntry[] = [];
   const cleanLapCount = insights.envelope.cleanLapCount;
-  // E4 again, at the layer that actually moves a cue: unvalidated geometry
+  // E4 again, at the layer that actually moves a cue: unsurveyed geometry
   // seals an EMPTY evidence set, so even a caller that skipped
   // `computeSuggestions` entirely has nothing the cue source will accept.
+  // P17 did NOT widen this: `geometryValidated` is still the whole test here,
+  // because this is the cue path, and a cue is the claim the app acts on in
+  // the world rather than one it shows the driver with its evidence attached.
   const blocked = new Set(
     insights.geometryValidated
       ? blockedCornersFromInsights(insights)

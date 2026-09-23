@@ -95,6 +95,18 @@ Rescrie-o: de ce are nevoie aplicația de giroscop și accelerometru, în aceia�
 
 ## 3. Decizia de produs care decide dacă merită publicată
 
+> **Actualizare 2026-09-23 (ticket P17): varianta 3 e implementată.** Poarta binară a fost
+> înlocuită cu una graduată, pe trei trepte (`surveyed` / `mapped` / `learned`), după ce s-a
+> verificat — și s-a pus într-un test — că analiza e **auto-referențială**: toate tururile sunt
+> proiectate pe aceeași linie și măsurate prin aceleași ferestre, deci o linie deplasată mută
+> fiecare tur la fel și diferența se anulează. Ce cere într-adevăr o măsurătoare pe teren e
+> numerotarea autoritativă a virajelor, pozițiile absolute și repere de genul „panoul de 100 m" —
+> lucruri pe care motorul nu le-a spus niciodată. Azi: sugestiile din boxă merg pe orice geometrie
+> **declarată**, cu numerotarea marcată explicit ca fiind a noastră în RO și EN; mutarea reperelor
+> de coaching **live** rămâne pe `'official'`, fiindcă un reper vocal e singura afirmație pe care
+> aplicația o execută în lume, la viteză, fără să-și arate dovada. Textul de mai jos rămâne ca
+> înregistrare a deciziei; el descrie starea de dinainte de P17.
+
 **Poarta de onestitate ține coaching-ul stins pe ambele circuite.** `geometryValidated` acceptă doar
 `geometryStatus: 'official'`, iar TMR și MotorPark sunt amândouă `community-derived`, trasate din imagini
 aeriene. Deci un utilizator care descarcă azi aplicația primește cronometraj și analiză, **dar niciodată un

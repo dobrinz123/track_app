@@ -190,8 +190,45 @@ describe('geometry honesty per circuit', () => {
     const tmr = analyze(transilvania(), 2).insights;
     expect(mp.limitations.map((entry) => entry.code)).toContain('GEOMETRY_UNVALIDATED');
     expect(tmr.limitations.map((entry) => entry.code)).not.toContain('GEOMETRY_UNVALIDATED');
-    expect(renderReport(mp, 'ro')).toContain('nu este validată pe teren');
-    expect(renderReport(tmr, 'ro')).not.toContain('nu este validată pe teren');
+    // P17: the limitation now names WHICH unsurveyed line this is, and the
+    // rendered sentence says so. TIGHTER than the old assertion, which only
+    // demanded the phrase "not validated on track" appear somewhere: the
+    // report must now state the provenance AND the fact that a self-comparison
+    // survives it, so a driver is told what still holds rather than only what
+    // does not.
+    expect(mp.geometryProvenance).toBe('mapped');
+    expect(tmr.geometryProvenance).toBe('surveyed');
+    expect(mp.limitations.find((entry) => entry.code === 'GEOMETRY_UNVALIDATED')?.geometry).toBe(
+      'mapped',
+    );
+    const mpRo = renderReport(mp, 'ro');
+    expect(mpRo).toContain('trasat de pe hartă');
+    expect(mpRo).toContain('Comparațiile între tururile tale nu sunt afectate');
+    expect(mpRo).toContain('numerotarea noastră');
+    const tmrRo = renderReport(tmr, 'ro');
+    expect(tmrRo).not.toContain('trasat de pe hartă');
+    expect(tmrRo).not.toContain('numerotarea noastră');
+  });
+
+  /**
+   * P17: the same session analysed as `'learned'` says the OTHER thing — a
+   * track learned from one lap is not a map trace, and a driver is owed the
+   * right reason. Nothing about what is PERMITTED changes between the two.
+   */
+  it('says "learned from one lap" rather than "traced from a map" on ad-hoc geometry', () => {
+    const circuit = motorpark();
+    const session = driveCircuitSession(circuit, { laps: 2 });
+    const learned = analyzeSession(session, circuit.corners, {
+      totalLengthM: circuit.totalLengthM,
+      circuitId: circuit.profile.circuitId,
+      geometryValidated: false,
+      geometryProvenance: 'learned',
+    });
+    expect(learned.geometryProvenance).toBe('learned');
+    const en = renderReport(learned, 'en');
+    expect(en).toContain('learned from one lap you drove');
+    expect(en).not.toContain('traced from a map');
+    expect(en).toContain('our numbering');
   });
 
   it('reports the same missing OBD channels on both circuits (car-agnostic tier 0)', () => {

@@ -60,8 +60,8 @@ describe('P5-FIX2 W3 -- export schema 4 pins the structured facts', () => {
     const state = await readyState();
     const doc = buildAnalysisExportDocument(state, { generatedAtUtc: GENERATED_AT, calibrationStatus: 'validated' as const });
 
-    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(6);
-    expect(doc.schemaVersion).toBe(6);
+    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(7);
+    expect(doc.schemaVersion).toBe(7);
     expect(Object.keys(doc.analysis.laps[0]!).sort()).toEqual(
       [
         'absOscillationDetected',

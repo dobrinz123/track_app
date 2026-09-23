@@ -80,7 +80,7 @@ describe('P5b B4 -- the exported analysis report', () => {
     expect(ANALYSIS_EXPORT_KIND).toBe('trace-analysis-report');
     expect(doc.schemaVersion).toBe(ANALYSIS_EXPORT_SCHEMA_VERSION);
     // P5b-FIX1 C7: the standalone DTO (see `analysisExportV2.test.ts`).
-    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(6);
+    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(7);
     expect(doc.observationsOnly).toBe(true);
     expect(doc.generatedAtUtc).toBe(GENERATED_AT);
 
@@ -195,11 +195,11 @@ describe('P5b B4 -- the exported analysis report', () => {
  * it is true, and the field must be impossible to omit by accident.
  */
 describe('P7R E2 -- the escape-hatch label reaches the analysis export', () => {
-  it('is schema 6, and REQUIRES calibrationStatus (no optional/defaulted value)', async () => {
+  it('is schema 7, and REQUIRES calibrationStatus (no optional/defaulted value)', async () => {
     const state = await readyState(0, 'en');
     // Ticket P10A H6: schema 6 -- `session.calibrationStatus` joins the
     // boolean, which stays exactly `calibrationStatus === 'unvalidated'`.
-    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(6);
+    expect(ANALYSIS_EXPORT_SCHEMA_VERSION).toBe(7);
     // @ts-expect-error -- calibrationStatus is required; omitting it must
     // not compile. This is the "impossible to get wrong" requirement: a
     // caller cannot silently ship a document that claims calibration for free.

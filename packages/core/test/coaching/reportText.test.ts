@@ -97,9 +97,19 @@ describe('renderReport', () => {
     const ro = renderReport(single, 'ro');
     const en = renderReport(single, 'en');
     expect(ro).toContain('Doar 1 tur curat');
-    expect(ro).toContain('nu este validată pe teren');
     expect(en).toContain('Only 1 clean lap');
-    expect(en).toContain('has not been validated on track');
+    // P17: TIGHTER than "the words 'not validated on track' appear". The
+    // geometry sentence must now state three things, because the driver now
+    // gets advice on this geometry and has to know its exact worth: where the
+    // line came from, that the corner numbers are the app's, and that a
+    // comparison of the driver's own laps is unaffected. A report that says
+    // only "unvalidated" would pass the old assertion and fail this one.
+    expect(ro).toContain('trasat de pe hartă');
+    expect(ro).toContain('Numerele și pozițiile virajelor sunt ale noastre');
+    expect(ro).toContain('Comparațiile între tururile tale nu sunt afectate');
+    expect(en).toContain('traced from a map');
+    expect(en).toContain('Corner numbers and positions are ours');
+    expect(en).toContain('Comparisons between your own laps are unaffected');
     expect(ro).not.toMatch(FORBIDDEN);
     expect(en).not.toMatch(FORBIDDEN);
   });

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ANALYSIS_CHANNELS } from '@circuit/core';
+import { ANALYSIS_CHANNELS, geometryProvenanceOf } from '@circuit/core';
 
 import {
   ANALYSIS_MIN_CHANNEL_COVERAGE,
@@ -51,6 +51,14 @@ describe('P5b B2 -- assembling the analysis input from a stored session', () => 
         // Derived from the profile's own `geometryStatus`, so a circuit that is
         // one day field-validated flips this without a code change.
         expect(assembled.context.geometryValidated).toBe(circuit.profile.geometryStatus === 'official');
+        // P17: the assembly must STATE the provenance, not leave the engine to
+        // guess it. The default in `analyzeSession` cannot over-claim, but it
+        // would describe a learned track as a map trace, and a driver is owed
+        // the right reason -- so the statement is required here by test.
+        expect(assembled.context.geometryProvenance).toBe(
+          geometryProvenanceOf(circuit.profile.geometryStatus),
+        );
+        expect(assembled.context.geometryProvenance).not.toBeUndefined();
       });
 
       it('M15 (Codex P5c-REV2 finding 15): an in-place mutation attempt on the bundled profile does not open the gate', () => {
@@ -65,6 +73,8 @@ describe('P5b B2 -- assembling the analysis input from a stored session', () => 
         const session = driveSession(circuit, { laps: 2 });
         const assembled = assembleSessionAnalysis(circuit, session.recordings);
         expect(assembled.context.geometryValidated).toBe(false);
+        // P17: and the frozen profile cannot buy the surveyed tier either.
+        expect(assembled.context.geometryProvenance).not.toBe('surveyed');
       });
 
       it('reports the channels the recording carries, and only those', () => {
