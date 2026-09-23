@@ -262,13 +262,14 @@ which vehicle profile each session used, the note of an interrupted Test Loop, a
 learned but could not save, and the geometry of circuits you taught the app.
 
 What it keeps are your **preferences**: units, language, adapter address and port, coaching, voice
-and suggestion toggles, the selected circuit, and a vehicle profile you chose yourself. None of these
-identify you or your car. Uninstalling the app removes them too.
+and suggestion toggles, the selected circuit (unless it was a learned circuit that was deleted; then
+the default circuit is selected), and a vehicle profile you chose yourself. None of these identify
+you or your car. Uninstalling the app removes them too.
 
 Two honest caveats:
 
 1. The control is **refused while a session is running, or while a Test Loop is learning a track or
-   saving one**; end the session or stop the Test Loop first. This exists so the deletion
+   saving one**; end the session, or stop the Test Loop (or let it finish saving) first. This exists so the deletion
    cannot race a live recording and leave data behind.
 2. If any part of the deletion fails, the app says so instead of reporting success. In that case a
    learned circuit that a surviving session still uses is kept, so that session can still be

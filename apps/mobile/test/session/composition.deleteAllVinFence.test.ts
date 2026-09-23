@@ -19,6 +19,8 @@ const seeded = vi.hoisted(() => ({
   db: undefined as unknown,
   repository: undefined as unknown,
   vinReads: 0,
+  /** When set, the stub transport's close() waits on it -- holds a VIN read open across a delete-all. */
+  closeGate: null as Promise<void> | null,
 }));
 
 vi.mock('expo-constants', () => ({
@@ -66,7 +68,9 @@ vi.mock('../../src/persistence/expoSqlDatabase', () => ({
 vi.mock('../../src/session/enetTcpTransport', () => ({
   EnetTcpTransport: class {
     async connect(): Promise<void> {}
-    async close(): Promise<void> {}
+    async close(): Promise<void> {
+      if (seeded.closeGate !== null) await seeded.closeGate;
+    }
     onData(): () => void {
       return () => {};
     }
@@ -102,6 +106,7 @@ describe('composition.ts delete-all -- VIN detection fence (Codex P18-REV2 H1)',
     seeded.db = db;
     seeded.repository = await SqlSessionRepository.create(db);
     seeded.vinReads = 0;
+    seeded.closeGate = null;
     vi.resetModules();
     const composition = await import('../../src/session/composition');
     await flush();
@@ -130,5 +135,37 @@ describe('composition.ts delete-all -- VIN detection fence (Codex P18-REV2 H1)',
 
     // And detection is re-armed: the next connection after delete-all reads again.
     expect(await composition.maybeDetectVehicleFromVin()).toBe(VIN);
+  });
+
+  it('Codex P18-REV3 M1: a VIN read that completes into a REFUSED delete-all leaves detection re-armed', async () => {
+    const db = await createSqlJsDatabase();
+    await migrateTelemetrySchema(db);
+    await migrateDidSweepSchema(db);
+    seeded.db = db;
+    seeded.repository = await SqlSessionRepository.create(db);
+    seeded.vinReads = 0;
+    let openGate: () => void = () => {};
+    seeded.closeGate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    vi.resetModules();
+    const composition = await import('../../src/session/composition');
+    await flush();
+    composition.settingsStore.update({ adapterType: 'enet', enetHost: '192.168.16.254' });
+
+    // A learning Test Loop makes delete-all refuse.
+    expect((await composition.startTestLoop()).ok).toBe(true);
+    const detection = composition.maybeDetectVehicleFromVin();
+    await flush();
+    const deletion = composition.deleteAllStoredUserData();
+    openGate();
+    const [detected, refused] = await Promise.all([detection, deletion]);
+    seeded.closeGate = null;
+
+    expect(refused.reason).toBe('TEST_LOOP_ACTIVE');
+    expect(detected).toBeNull();
+    // Not stuck: the next trigger reads again.
+    expect(await composition.maybeDetectVehicleFromVin()).toBe(VIN);
+    await composition.resetTestLoop();
   });
 });

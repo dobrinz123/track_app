@@ -1051,9 +1051,16 @@ export async function maybeDetectVehicleFromVin(): Promise<string | null> {
     sharedEnetAdapterReservation.release(token);
   }
 
-  // Delete-all ran (or is running) while this read was in flight: it has
-  // already put detection back to 'idle', so the next connection reads again.
-  if (generation !== deviceDataGeneration || deviceWipeInProgress) return null;
+  // Delete-all ran while this read was in flight: it has already put
+  // detection back to 'idle', so the next connection reads again.
+  if (generation !== deviceDataGeneration) return null;
+  // Delete-all is running and has not reset anything yet -- it may still be
+  // refused. Drop the result, and re-arm here rather than rely on a reset
+  // that a refusal never reaches.
+  if (deviceWipeInProgress) {
+    vinDetectionState = 'idle';
+    return null;
+  }
   vinDetectionState = 'done';
   cachedDetectedVin = vin;
   if (vin !== null) {
@@ -3955,7 +3962,9 @@ async function runDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDataRes
       finalResult.ok = false;
     }
   }
-  if (sessionDataOk && historyStore !== null) await historyStore.refresh();
+  // The history list follows the sessions: refreshed whenever they verified
+  // gone, even if a later half of the wipe failed.
+  if (result.ok && historyStore !== null) await historyStore.refresh();
 
   const errorText = finalResult.ok
     ? null
