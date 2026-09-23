@@ -877,6 +877,13 @@ let cachedDetectedVin: string | null = null;
  * than cached, persisted or used for auto-select.
  */
 let deviceDataGeneration = 0;
+/**
+ * True for the whole of delete-all, from the first identity reset to the
+ * result. No VIN read starts inside it and none that was running completes
+ * into it: a read that finished between the final check and the result
+ * would otherwise put the VIN back behind a success banner.
+ */
+let deviceWipeInProgress = false;
 
 /**
  * Codex R2 fix (ticket P4q follow-up, binding, MEDIUM): "the explicit-choice
@@ -1011,6 +1018,7 @@ export function maskVin(vin: string): string {
  * already returned by then.
  */
 export async function maybeDetectVehicleFromVin(): Promise<string | null> {
+  if (deviceWipeInProgress) return null; // not marked done: the next trigger after delete-all reads again.
   if (vinDetectionState !== 'idle') return cachedDetectedVin;
   const settings = settingsStore.getSettings();
   // Q1 (binding): ENET only -- the ELM327 session has no mode-09 support.
@@ -1043,9 +1051,9 @@ export async function maybeDetectVehicleFromVin(): Promise<string | null> {
     sharedEnetAdapterReservation.release(token);
   }
 
-  // Delete-all ran while this read was in flight: it has already put
-  // detection back to 'idle', so the next connection reads again.
-  if (generation !== deviceDataGeneration) return null;
+  // Delete-all ran (or is running) while this read was in flight: it has
+  // already put detection back to 'idle', so the next connection reads again.
+  if (generation !== deviceDataGeneration || deviceWipeInProgress) return null;
   vinDetectionState = 'done';
   cachedDetectedVin = vin;
   if (vin !== null) {
@@ -2480,17 +2488,22 @@ function tearDownLearnPhase(): Promise<void> {
   const run = lifecycleLock
     .run(async () => {
       if (generation !== teardownGeneration) return;
-      detachTestLoopRecording();
-      testLoopTelemetryBuffer = [];
-      await releaseTestLoopGForce();
-      await stopTelemetryRecording();
-      await disposeTestLoopProvider();
+      await unlockedTearDownLearnPhase();
     })
     .finally(() => {
       if (teardownInFlight === run) teardownInFlight = null;
     });
   teardownInFlight = run;
   return run;
+}
+
+/** The body of {@link tearDownLearnPhase}, for a caller that already holds `lifecycleLock`. */
+async function unlockedTearDownLearnPhase(): Promise<void> {
+  detachTestLoopRecording();
+  testLoopTelemetryBuffer = [];
+  await releaseTestLoopGForce();
+  await stopTelemetryRecording();
+  await disposeTestLoopProvider();
 }
 
 /**
@@ -3631,8 +3644,7 @@ export interface AggregatedDeleteUserDataResult extends DeleteUserDataResult {
    * verified on those paths. `'SESSION_ACTIVE'`: a session is genuinely
    * mid-drive (CN-FIX4, facade boundary amendment). `'DEV_REPLAY_ACTIVE'`: a
    * `__DEV__` replay controller is installed (CN-FIX5, closing amendment).
-   * `'TEST_LOOP_ACTIVE'`: a Test Loop is learning, adopting, or waiting for a
-   * retry of its adoption.
+   * `'TEST_LOOP_ACTIVE'`: a Test Loop is learning a track or saving one.
    */
   reason?: 'SESSION_ACTIVE' | 'DEV_REPLAY_ACTIVE' | 'TEST_LOOP_ACTIVE';
 }
@@ -3731,6 +3743,15 @@ export async function deleteAllStoredUserData(): Promise<AggregatedDeleteUserDat
 }
 
 async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDataResult> {
+  deviceWipeInProgress = true;
+  try {
+    return await runDeleteAllStoredUserData();
+  } finally {
+    deviceWipeInProgress = false;
+  }
+}
+
+async function runDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDataResult> {
   const { repository: repo } = await ready();
   // C fix (contracts.md's facade boundary amendment, binding, ticket
   // CN-FIX4): durability. Two things had to change for "delete-all means
@@ -3768,22 +3789,38 @@ async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDa
       errorText: 'a developer replay or mock session is active -- leave the Dev Replay screen before deleting all data',
     };
   }
-  // 1c. REFUSE while a Test Loop is learning, adopting, or holding a failed
-  //    adoption for retry. Its geometry and its adoption ledger live in
-  //    memory: a wipe underneath would let the adoption (or its retry) store
-  //    the circuit again, or resume onto the fallback circuit's controller
-  //    while writing the out-lap for the one just deleted. Leaving the Test
-  //    Loop screen ends all three.
+  // 1c. REFUSE while a Test Loop is learning or saving a track: a wipe
+  //    underneath would let the adoption store the circuit again, or resume
+  //    onto the fallback circuit's controller while writing the out-lap for
+  //    the one just deleted. Stopping the learn phase on the Test Loop screen
+  //    ends the first; the second finishes on its own.
   const testLoopPhase = testLoopController.snapshot().phase;
-  if (testLoopPhase === 'learning' || testLoopPhase === 'adopting' || testLoopPhase === 'error') {
+  if (testLoopPhase === 'learning' || testLoopPhase === 'adopting') {
     return {
       ok: false,
       remainingSessionCount: 0,
       referenceLapCleared: false,
       failedCircuitIds: [],
       reason: 'TEST_LOOP_ACTIVE',
-      errorText: 'a test loop is in progress -- leave the Test Loop screen before deleting all data',
+      errorText: 'a test loop is learning or saving a track -- stop it before deleting all data',
     };
+  }
+  // 1d. Every other Test Loop phase is ABANDONED instead. `error` holds a
+  //    learned track waiting for a Retry that must not run onto a circuit
+  //    this wipe deletes; `learned` and `failed` still hold the traced
+  //    geometry and coordinates of where the driver drove. The learn phase is
+  //    torn down before step 2 rebuilds the controller, so the new controller
+  //    is never built on a provider that is about to stop.
+  if (testLoopPhase !== 'idle') {
+    testLoopController.reset();
+    teardownGeneration += 1;
+    await unlockedTearDownLearnPhase();
+    // Its learned track is gone, so its ledger can never be resumed. The
+    // journal row stays until the wipe succeeds: until then it is what lets
+    // the next launch repair the half-adopted state.
+    adoptionProgress = null;
+    adoptionJournalId = null;
+    adoptionJournalOwned = null;
   }
   // 2. Otherwise: drop any pending recovery and REPLACE the production
   //    controller with a fresh, idle one BEFORE deleting anything. A
@@ -3918,7 +3955,7 @@ async function unlockedDeleteAllStoredUserData(): Promise<AggregatedDeleteUserDa
       finalResult.ok = false;
     }
   }
-  if (finalResult.ok && historyStore !== null) await historyStore.refresh();
+  if (sessionDataOk && historyStore !== null) await historyStore.refresh();
 
   const errorText = finalResult.ok
     ? null

@@ -465,6 +465,13 @@ export function SettingsScreen({ navigation }: Props): React.JSX.Element {
     setDeleting(true);
     try {
       const result = await deleteAllStoredUserData();
+      // An uncommitted channel draft can hold VIN-bearing provenance and is
+      // not in the settings store, so delete-all cannot reach it from there.
+      const channelSpecs = settingsStore.getSettings().enetChannelSpecsJson;
+      lastCommittedEnetChannelSpecs.current = channelSpecs;
+      setEnetChannelSpecsDraft(channelSpecs);
+      setEnetChannelSpecsError(null);
+      setEnetChannelSpecsWarnings([]);
       setDeleteBanner(result.ok ? 'success' : 'error');
       setDeleteErrorText(result.ok ? null : result.errorText);
       setDeleteRefused(!result.ok && result.reason !== undefined);
