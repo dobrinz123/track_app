@@ -972,3 +972,4 @@ FIX: Platform from expo-modules-core (__esModule, initialised by Expo at start).
 CHAIN: gates on the exact release tree (LF worktree checkout: typecheck 0, lint 0 errors, 3414 tests = 1787 + 1627, expo export 0) -> Codex GYRO-CRASH-REV1 PASS_WITH_NOTES 0 HIGH -> web E2E (TMR clean-lap replay with gyro capture ON: calibration accepted 95 %, no page errors; web cannot reproduce the crash) -> artifact: build SHA carries the fix (Hermes references modules by id, so strings cannot show it).
 OWNER RETEST: gyro capture ON -> Start session -> Continue anyway -> Start Calibration at home must not close.
 NOTE: a fresh Windows worktree checks files out CRLF and breaks 4 byte-exact tests (circuit assets, voice-pack .mjs shebang) — gates must run on an LF checkout (`git -c core.autocrlf=false checkout -- .`).
+OWNER RETEST 2026-09-24: PASSED on the iPhone — build 15, gyro capture AND IMU fusion both ON, Start Calibration no longer crashes. Root cause confirmed in the field.
