@@ -44,7 +44,23 @@ void test_classify_expected_reply_is_set(void) {
   TEST_ASSERT_EQUAL_INT(HP_STATE_SET, hp_otp_classify_reply(r + 6, ubx_u2(r + 4)));
 }
 
-void test_classify_default_clock_is_not_set(void) {
+/* NOT_SET only when EVERY key differs (virgin state); 1..3 differing = UNKNOWN */
+void test_classify_mixes_are_unknown_all_differ_is_not_set(void) {
+  for (int mask = 0; mask < 16; mask++) { /* bit i set: key i differs */
+    uint8_t pl[36];
+    memcpy(pl, HP_OTP_VERIFY_EXPECTED_REPLY + 6, 36);
+    int differ = 0;
+    for (int i = 0; i < 4; i++)
+      if (mask & (1 << i)) {
+        pl[8 + 8 * i] ^= 0x01; /* low byte of value i */
+        differ++;
+      }
+    hp_state_t want = differ == 0 ? HP_STATE_SET : (differ == 4 ? HP_STATE_NOT_SET : HP_STATE_UNKNOWN);
+    TEST_ASSERT_EQUAL_INT(want, hp_otp_classify_reply(pl, 36));
+  }
+}
+
+void test_classify_one_key_changed_is_unknown(void) {
   uint8_t pl[36];
   memcpy(pl, HP_OTP_VERIFY_EXPECTED_REPLY + 6, 36);
   /* change the first 192 MHz value (0x0B71B000) to 96 MHz (0x05B8D800) */
@@ -52,7 +68,7 @@ void test_classify_default_clock_is_not_set(void) {
   pl[9] = 0xD8;
   pl[10] = 0xB8;
   pl[11] = 0x05;
-  TEST_ASSERT_EQUAL_INT(HP_STATE_NOT_SET, hp_otp_classify_reply(pl, 36));
+  TEST_ASSERT_EQUAL_INT(HP_STATE_UNKNOWN, hp_otp_classify_reply(pl, 36));
 }
 
 /* Codex POD-FW REV1 HIGH 2 counter-example: a checksum-valid reply with ONE
@@ -98,8 +114,8 @@ void test_truncated_oversized_duplicate_extra_are_unknown(void) {
 void test_complete_reply_differences_and_order(void) {
   uint8_t pl[36];
   expected_payload(pl);
-  pl[35] ^= 0x01; /* only the last key differs: all keys evaluated -> NOT_SET */
-  TEST_ASSERT_EQUAL_INT(HP_STATE_NOT_SET, hp_otp_classify_reply(pl, 36));
+  pl[35] ^= 0x01; /* only the last key differs: a mix -> UNKNOWN (refuse) */
+  TEST_ASSERT_EQUAL_INT(HP_STATE_UNKNOWN, hp_otp_classify_reply(pl, 36));
   expected_payload(pl);
   for (int i = 0; i < 4; i++) pl[8 + 8 * i] ^= 0x55;
   TEST_ASSERT_EQUAL_INT(HP_STATE_NOT_SET, hp_otp_classify_reply(pl, 36));
@@ -145,7 +161,8 @@ int main(void) {
   RUN_TEST(test_verify_frames_are_valid);
   RUN_TEST(test_first_bytes_quoted_from_im_table3);
   RUN_TEST(test_classify_expected_reply_is_set);
-  RUN_TEST(test_classify_default_clock_is_not_set);
+  RUN_TEST(test_classify_one_key_changed_is_unknown);
+  RUN_TEST(test_classify_mixes_are_unknown_all_differ_is_not_set);
   RUN_TEST(test_classify_missing_key_is_unknown);
   RUN_TEST(test_codex_counter_example_is_unknown);
   RUN_TEST(test_wrong_layer_version_position_are_unknown);

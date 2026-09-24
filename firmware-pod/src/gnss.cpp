@@ -10,6 +10,7 @@
 #include "board_pins.h"
 #include "bridge_filter.h"
 #include "gnss_config.h"
+#include "gnss_tx_guard.h"
 #include "pod_protocol.h"
 #include "pod_state.h"
 #include "timebase.h"
@@ -52,8 +53,41 @@ static void print_hex(const uint8_t *p, size_t n) {
   if (n % 24) con_println();
 }
 
-static void send_bytes(const uint8_t *p, size_t n) {
+/* ---- the ONLY two functions that write to the GNSS UART ----------------
+ * uart_tx(): every firmware frame and every bridge chunk. Passes through the
+ * wire-level guard (gnss_tx_guard.h): a byte that would complete
+ * B5 62 06 41 on the wire is refused together with the rest of its chunk.
+ * otp_raw_write_confirmed(): static, called ONLY from gnss_otp_confirm()
+ * after preflight + CONFIRM + a NOT_SET re-check. README §4 gives the grep
+ * that must show exactly its definition and that one call. */
+static txg_t s_txg;
+static bool s_txg_init = false;
+
+static void uart_tx(const uint8_t *p, size_t n) {
+  if (!s_txg_init) {
+    txg_init(&s_txg);
+    s_txg_init = true;
+  }
+  uint32_t before = s_txg.refused_chunks;
+  size_t ok = txg_allow(&s_txg, p, n);
+  if (ok) GnssSerial.write(p, ok);
+  if (s_txg.refused_chunks != before)
+    con_printf("[gnss] WIRE GUARD: refused %u byte(s) that would put B5 62 06 41 (OTP write) on "
+               "the GNSS UART (refused chunks so far %lu)\n",
+               (unsigned)(n - ok), (unsigned long)s_txg.refused_chunks);
+}
+
+static void otp_raw_write_confirmed(const uint8_t *p, size_t n) {
+  if (!s_txg_init) {
+    txg_init(&s_txg);
+    s_txg_init = true;
+  }
   GnssSerial.write(p, n);
+  txg_note_raw(&s_txg, p, n); /* keep the wire history true */
+}
+
+static void send_bytes(const uint8_t *p, size_t n) {
+  uart_tx(p, n);
   GnssSerial.flush(); /* wait until shifted out */
 }
 
@@ -340,7 +374,8 @@ bool gnss_init() {
   return ok;
 }
 
-static void bridge_to_gnss(const uint8_t *p, size_t n, void *) { GnssSerial.write(p, n); }
+/* each callback = one allowed frame or one plain run = one guard chunk */
+static void bridge_to_gnss(const uint8_t *p, size_t n, void *) { uart_tx(p, n); }
 
 void gnss_tick() { hp_auth_tick(&s_auth, millis()); /* expiry clears the authorisation */ }
 
@@ -531,7 +566,8 @@ void gnss_otp_confirm() {
   }
   con_println("[otp] IM step 3: sending Table 3 configuration string ...");
   s_otp_acks = 0;
-  send_bytes(HP_OTP_WRITE_SEQUENCE, sizeof HP_OTP_WRITE_SEQUENCE);
+  otp_raw_write_confirmed(HP_OTP_WRITE_SEQUENCE, sizeof HP_OTP_WRITE_SEQUENCE);
+  GnssSerial.flush();
   wait_for([] { return s_otp_acks >= HP_OTP_EXPECTED_ACK_COUNT; }, 3000);
   con_printf("[otp] received %d of %d expected ACK-ACK (B5 62 05 01 02 00 06 41 4F 78)\n",
                 s_otp_acks, HP_OTP_EXPECTED_ACK_COUNT);

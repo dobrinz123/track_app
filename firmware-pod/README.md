@@ -40,6 +40,7 @@ firmware-pod/
     console_parse.{h,c}     framework-free: USB console command parser
     console_line.{h,c}      framework-free: console line assembler (a line runs exactly as typed or is rejected whole)
     bridge_filter.{h,c}     framework-free: `gnss bridge` host->GNSS filter that blocks every OTP-writing UBX frame
+    gnss_tx_guard.{h,c}     framework-free: wire-level guard, no byte may complete B5 62 06 41 on the GNSS UART
     power_policy.{h,c}      framework-free: low-battery cutoff (inert on rev A), charging never allowed on rev A
     board_pins.h            every GPIO, with the DESIGN-REV-A rule it follows
     pod_state.h             shared runtime state, firmware version
@@ -82,8 +83,8 @@ pio run  -e pod         # cross-compile the firmware
 
 Results on 2026-09-24:
 
-- `pio test -e native`: **88 test cases: 88 succeeded** (after the Codex POD-FW REV1 fix wave).
-- `pio run -e pod`: SUCCESS with 0 warnings (-Wall -Wextra). RAM 20.0 % (65,504 B), flash 28.1 % (940,789 B of the 3.3 MB app slot).
+- `pio test -e native`: **97 test cases: 97 succeeded** (after the Codex POD-FW REV1 fix wave and the wire-guard wave).
+- `pio run -e pod`: SUCCESS with 0 warnings (-Wall -Wextra). RAM 20.0 % (65,520 B), flash 28.2 % (941,237 B of the 3.3 MB app slot).
 
 ### Board definition (checked)
 
@@ -142,7 +143,7 @@ Type `help` for the full list. All commands:
 | `gnss raw on\|off` | Prints every received UBX frame (class, id, length and the first 32 payload bytes). |
 | `gnss sat` | Shows the last UBX-NAV-SAT: constellation, SV, C/N0, elevation, used. |
 | `gnss reset` | Holds RESET_N (GPIO40, open-drain) low for 10 ms, then reconfigures. **Clears BBR**, so expect a cold start. |
-| `gnss bridge` | USB ↔ GNSS UART bridge at 460800 for u-center. Press **BOOT** to leave; the receiver is then reconfigured. Do not change the receiver baud from u-center. **The host→GNSS direction is filtered** (`bridge_filter.h`): UBX frames that could write OTP (class 0x06 id 0x41; VALSET to a layer other than RAM/BBR/Flash; any frame carrying `B5 62 06 41` in its payload) are dropped with a console warning. A `0xB5` byte only passes as the start of a complete, checksum-valid, allowed frame. NMEA passes; frames with more than 1016 payload bytes are dropped. GNSS→USB bytes that do not fit the USB buffer are dropped and counted. |
+| `gnss bridge` | USB ↔ GNSS UART bridge at 460800 for u-center. Press **BOOT** to leave; the receiver is then reconfigured. Do not change the receiver baud from u-center. **The host→GNSS direction is filtered** (`bridge_filter.h`): UBX frames that could write OTP (class 0x06 id 0x41; VALSET to a layer other than RAM/BBR/Flash; any frame carrying `B5 62 06 41` in its payload) are dropped with a console warning. A `0xB5` byte only passes as the start of a complete, checksum-valid, allowed frame. NMEA passes; frames with more than 1016 payload bytes are dropped. Behind that filter, **every byte to the GNSS UART** (bridge and firmware alike) passes the wire-level guard (`gnss_tx_guard.h`). The guard refuses any byte that would complete `B5 62 06 41` on the wire, even when the pieces come from different frames, for example a checksum ending in 0xB5 followed by `62 06 41`. GNSS→USB bytes that do not fit the USB buffer are dropped and counted. |
 | `gnss otp-status` | Sends the IM §2.1.5 step-5 verification poll and reports SET / NOT SET / UNKNOWN. |
 | `gnss otp-highperf` | **Preflight** for the irreversible OTP write: MON-VER, current state, the exact 60 bytes and their source. It refuses if the state is already SET or is UNKNOWN. |
 | `gnss otp-highperf CONFIRM` | **Writes the OTP.** Only works within 60 s of a successful preflight, once; `CONFIRM` is case-sensitive. The authorisation is cleared on expiry, on `gnss reset`, on any receiver re-init and on bridge entry. It then runs the rest of IM §2.1.5: two ACK-ACKs, UBX-CFG-RST hardware reset, re-init, verification. |
@@ -179,10 +180,28 @@ spin forever on a host that is connected but not reading (details in `console_io
 - SET / NOT SET is decided only from a complete, structurally valid VALGET
   reply that matches the poll: version 1, layer 4, position 0, each of the 4
   polled keys exactly once, nothing else, correct sizes. It is captured only
-  while that poll is outstanding. All keys are evaluated before deciding.
-  Anything else is UNKNOWN.
-- `gnss bridge` cannot be used to bypass this: the bridge drops OTP-writing
-  frames (above).
+  while that poll is outstanding. All keys are evaluated before deciding:
+  - **SET** only if every key equals the IM step-5 value;
+  - **NOT SET** only if every key differs (the virgin state);
+  - any mix, and anything malformed, is **UNKNOWN**, and the write is refused.
+  A mix would mean a partially programmed module or unexpected values; check
+  it with u-center before deciding anything.
+- `gnss bridge` cannot be used to bypass this. The bridge drops OTP-writing
+  frames (above), and the wire guard refuses any byte that would complete
+  `B5 62 06 41` on the UART, however it is assembled.
+- Exactly one code path may put `B5 62 06 41` on the wire:
+  `otp_raw_write_confirmed()`. It is `static` in `gnss.cpp` and called only
+  from `gnss_otp_confirm()`. Every other UART write goes through the guarded
+  `uart_tx()`. Check:
+
+  ```sh
+  grep -rn "otp_raw_write_confirmed" src/   # gnss.cpp only: 1 doc comment, 1 static definition, 1 call inside gnss_otp_confirm()
+  grep -rn "GnssSerial.write(" src/         # exactly 2: in uart_tx() and in otp_raw_write_confirmed()
+  grep -rln "Serial1\|GnssSerial" src/     # gnss.cpp only
+  ```
+
+  The native test `test_tx_guard/test_raw_writer_and_uart_writes_are_confined`
+  runs the same checks, so the build is red if another caller appears.
 - The bytes are quoted verbatim from u-blox SAM-M10Q Integration manual
   UBX-22020019 R02, §2.1.5, Table 3. The tests check their UBX checksums.
 
@@ -356,13 +375,20 @@ board first)**
 | Suite | Covers |
 |---|---|
 | `test_ubx` | Fletcher checksum against frames printed by u-blox. Parser: whole frames, byte-by-byte fragmentation, NMEA/noise skipping, corrupted checksum then recovery, a good frame hidden inside a corrupt length span, oversize length, bad sync. NAV-PVT decode of a 100-byte vector with every field asserted. NAV-SAT decode. VALSET layout and value-range refusal. VALGET builder reproducing the IM poll byte for byte. Strict VALGET validation (layer, version, position, truncation, missing, extra, duplicate). CFG-RST. |
-| `test_hp_otp` | The IM Table 3 frames (valid UBX, class 0x06/0x41, head and tail quoted) and the ACK/poll/reply frames. Strict classifier: the Codex counter-example payload; wrong layer, version or position; every truncation; trailing byte; extra key; duplicate key; one or all values differing; reordered keys. The one-shot 60 s authorisation, including expiry across the `millis()` wrap. |
+| `test_hp_otp` | The IM Table 3 frames (valid UBX, class 0x06/0x41, head and tail quoted) and the ACK/poll/reply frames. Strict classifier: the Codex counter-example payload; wrong layer, version or position; every truncation; trailing byte; extra key; duplicate key; one or all values differing; reordered keys. All 16 equal/different combinations of the 4 keys: SET only if all are equal, NOT SET only if all differ, UNKNOWN otherwise. The one-shot 60 s authorisation, including expiry across the `millis()` wrap. |
 | `test_gnss_config` | Rate policy (20/25 only with OTP SET); rate/signal/base VALSETs decoded back; RAM-only layer on every frame; the mode as ONE VALSET (constellations + rate); strict readback (the Codex 25 Hz + Galileo mismatch, every single corrupted value, truncation, wrong layer). |
 | `test_timebase` | Civil→Unix against Python-computed dates; lock and mapping within 2 µs at 20 ppm drift; 0.9 s latency plus missed pulses; a PVT older than the latest edge; glitch rejection; holdover and re-lock; IMU clock map convergence under ±100 µs noise; the FREQ_FINE formula; 32-bit wrap. |
 | `test_imu_fifo` | Tag bit fields; timestamp interpolation over slots; timestamp word before or after data; dropping before the first timestamp; slots split across bursts; incomplete slots; empty and unknown tags; resync after overrun; decimator rounding and time averaging. |
 | `test_pod_protocol` | CRC check value; GNSS golden byte offsets; round trips for GNSS, IMU, STATUS and CONTROL/RESULT; the PROTOCOL.md example frames byte for byte; every single-bit corruption detected; sequence-gap arithmetic; MTU sizing. |
 | `test_misc` | Top-8 median C/N0; the full test-4 verdict (TX never ran, setup failure, too few frames, stalls, outages during TX, < 8 SVs, missing epochs, bad baseline → INCONCLUSIVE, 3 dB drop); console parsing (including the exact `CONFIRM`); power policy inert on rev A and correct with a cell. |
 | `test_bridge_filter` | The exact Table-3 OTP bytes pushed in every chunk size 1..60: nothing forwarded. OTP between allowed traffic; VALSET to an undocumented layer; OTP embedded in an allowed payload; OTP hidden in a corrupt candidate; splice attempt; stray 0xB5; allowed UBX and NMEA pass byte-exact. |
+| `test_tx_guard` | The blind-verifier splices, all rejected at the wire:
+  - an allowed valid frame with CK_B = 0xB5 followed by `62 06 41 …`;
+  - CK_A = 0xB5 with CK_B = 0x62;
+  - a payload tail `B5`, and a frame ending `B5 62 06 41` inside its own checksum;
+  - a firmware frame ending in 0xB5 followed by host bytes at bridge entry.
+
+  Plus two fuzzers asserting the wire never contains `B5 62 06 41`: 400 rounds of random chunking of mixed allowed, OTP, crafted-checksum and garbage input, with interleaved firmware writes and bridge re-entries; and the guard alone on arbitrary bytes. Also the source-confinement check of the raw OTP writer. A mutation run with the guard disabled fails all 7 wire tests. |
 | `test_console_line` | CRLF handling; `CONFIRM` + 102 spaces + `CANCEL` rejected whole; ESC and non-ASCII bytes reject the line; visible backspace editing; exact-maximum length accepted. |
 
 About the NAV-PVT vector: the u-blox documents contain **no captured NAV-PVT

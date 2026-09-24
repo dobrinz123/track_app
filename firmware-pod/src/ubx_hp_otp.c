@@ -53,7 +53,9 @@ hp_state_t hp_otp_classify_reply(const uint8_t *payload, uint16_t len) {
   int equal = 0;
   for (int i = 0; i < 4; i++)
     if (got[i] == want[i]) equal++;
-  return equal == 4 ? HP_STATE_SET : HP_STATE_NOT_SET;
+  if (equal == 4) return HP_STATE_SET;     /* every key has the high-clock value */
+  if (equal == 0) return HP_STATE_NOT_SET; /* every key differs: the virgin state */
+  return HP_STATE_UNKNOWN;                 /* any mix: refuse (partially programmed or unexpected) */
 }
 
 void hp_auth_arm(hp_auth_t *a, uint32_t now_ms) {

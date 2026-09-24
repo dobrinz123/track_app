@@ -62,8 +62,9 @@ typedef enum {
  * correlate with HP_OTP_VERIFY_POLL (ubx_valget_parse_strict: version 1,
  * the polled layer 4, position 0, each of the 4 polled keys exactly once,
  * nothing else, no trailing bytes). Only then, after evaluating ALL keys:
- *   every value equal to the step-5 expected reply -> HP_STATE_SET
- *   otherwise                                      -> HP_STATE_NOT_SET
+ *   every value EQUAL to the step-5 expected reply   -> HP_STATE_SET
+ *   every value DIFFERENT from the expected reply    -> HP_STATE_NOT_SET
+ *   any mix of equal and different values            -> HP_STATE_UNKNOWN
  * Anything malformed, truncated, oversized or uncorrelated -> UNKNOWN
  * (and the firmware never writes OTP from UNKNOWN).
  */

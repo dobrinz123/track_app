@@ -204,7 +204,7 @@ the value of the INFO characteristic.
 | 8 | u8 ×3 | fw major, minor, patch | 0.1.0 for this firmware |
 | 11 | u8 | hw_rev | 1 = rev A |
 | 12 | u8 | rate_hz | current GNSS rate, verified by readback. 0 = unverified (see SET_RATE) |
-| 13 | u8 | hp_state | 0 unknown, 1 not set, 2 set (high-performance OTP) |
+| 13 | u8 | hp_state | 0 unknown, 1 not set, 2 set (high-performance OTP). 2 only if all four verification keys hold the high-clock value; 1 only if all four differ; any mix reads 0 |
 | 14 | u8 | pps_state | 0 none, 1 acquiring, 2 locked, 3 holdover |
 | 15 | u8 | flags | bit 0 USB power present (PGOOD), 1 GNSS talking, 2 IMU ok, 3 GNSS stream on, 4 IMU stream on, 5 WiFi on, 6 charging enabled (always 0 on rev A) |
 | 16 | u64 | tb_anchor_pod_us | timebase anchor: pod time of a PPS edge (0 if none) |
