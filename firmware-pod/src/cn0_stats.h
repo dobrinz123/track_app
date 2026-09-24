@@ -96,6 +96,12 @@ bool cn0_test4_pass(int off_cn0_x10, int on_cn0_x10, int off_used, int on_used);
 #define CN0_MIN_TX_FPS 30
 #define CN0_MIN_AVAIL_PCT 90
 #define CN0_AVAIL_TOL_PCT 2
+/* Valid-fix fraction (valid-fix NAV-PVT / all NAV-PVT) with TX on: at least
+ * CN0_MIN_FIX_PCT_X10, and at most CN0_FIX_TOL_PCT_X10 below the TX-off
+ * baseline (Codex PODFW-REV3: one invalid fix in ten every second kept
+ * every second "good" at the 90 % per-second threshold). */
+#define CN0_MIN_FIX_PCT_X10 990
+#define CN0_FIX_TOL_PCT_X10 5
 #define CN0_MAX_GAP_MS 2000
 typedef enum { CN0_PASS = 0, CN0_FAIL = 1, CN0_INCONCLUSIVE = 2 } cn0_verdict_t;
 typedef struct {

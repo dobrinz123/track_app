@@ -16,6 +16,16 @@
 #include "timebase.h"
 #include "wifi_test.h"
 
+/* A delay that keeps PPS/IMU/LEDs/BLE snapshot publishing alive (Codex
+ * PODFW-REV3 L1): used for the long receiver-reboot waits. */
+static void wait_servicing(uint32_t ms) {
+  uint32_t t0 = millis();
+  while ((uint32_t)(millis() - t0) < ms) {
+    pod_yield();
+    delay(5);
+  }
+}
+
 static HardwareSerial &GnssSerial = Serial1;
 
 static ubx_parser_t s_parser;
@@ -495,7 +505,7 @@ void gnss_hw_reset() {
   pinMode(PIN_GNSS_RESET_N, OUTPUT_OPEN_DRAIN);
   delay(10);
   pinMode(PIN_GNSS_RESET_N, INPUT); /* release: the module's pull-up takes it high */
-  delay(1000);
+  wait_servicing(1000);
   gnss_init();
 }
 
@@ -575,7 +585,7 @@ void gnss_otp_confirm() {
   uint8_t f[16];
   size_t n = ubx_cfg_rst_frame(UBX_RST_BBR_HOT, UBX_RST_MODE_HW_WATCHDOG_NOW, f, sizeof f);
   send_bytes(f, n);
-  delay(1500); /* receiver reboots at 9600 baud with RAM config lost */
+  wait_servicing(1500); /* receiver reboots at 9600 baud with RAM config lost */
   gnss_init();
   con_println("[otp] IM step 5: verification poll");
   g.hp = gnss_poll_hp_state();

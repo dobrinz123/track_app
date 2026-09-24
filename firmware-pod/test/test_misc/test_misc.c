@@ -143,6 +143,17 @@ void test_test4_verdict_rules(void) {
   cn0_tx_info_t noshut = {true, 60000, 0, false}; /* M4: shutdown unverified */
   TEST_ASSERT_EQUAL_INT(CN0_FAIL, cn0_test4_verdict(&off, &on, S, &noshut, &why));
 
+  /* Codex PODFW-REV3: ten PVTs every second, every tenth fix invalid with TX
+   * on: every second still counts as good, but the valid-fix fraction drops
+   * from 100 % to 90 % -> FAIL */
+  fill(&on, S, 10, 39, CLEAN);
+  on.pvt_fix_ok = on.pvt_epochs - on.pvt_epochs / 10u;
+  TEST_ASSERT_EQUAL_INT(CN0_FAIL, cn0_test4_verdict(&off, &on, S, &tx, &why));
+  /* 99.6 % valid fixes with a 100 % baseline: within tolerance -> PASS */
+  fill(&on, S, 10, 39, CLEAN);
+  on.pvt_fix_ok = on.pvt_epochs - on.pvt_epochs / 250u;
+  TEST_ASSERT_EQUAL_INT(CN0_PASS, cn0_test4_verdict(&off, &on, S, &tx, &why));
+
   /* Codex PODFW-REV2 M3: 540 good seconds, then 60 s of silence at 10 Hz */
   sim_t tail = {540, 60, 0, 0, 0, 0};
   fill(&on, S, 10, 39, tail);

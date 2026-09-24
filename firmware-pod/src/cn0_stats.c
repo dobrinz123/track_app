@@ -187,6 +187,15 @@ cn0_verdict_t cn0_test4_verdict(const cn0_phase_t *off, const cn0_phase_t *on, u
   } else if (aon.pct_x10 + CN0_AVAIL_TOL_PCT * 10u < aoff.pct_x10) {
     why = "availability with TX on below the TX-off baseline minus 2 %";
     v = CN0_FAIL;
+  } else if (on->pvt_epochs == 0 ||
+             (uint64_t)on->pvt_fix_ok * 1000u < (uint64_t)on->pvt_epochs * CN0_MIN_FIX_PCT_X10) {
+    why = "valid-fix fraction with TX on below 99 %";
+    v = CN0_FAIL;
+  } else if (off->pvt_epochs > 0 &&
+             (uint64_t)on->pvt_fix_ok * 1000u * off->pvt_epochs + (uint64_t)CN0_FIX_TOL_PCT_X10 * on->pvt_epochs * off->pvt_epochs <
+                 (uint64_t)off->pvt_fix_ok * 1000u * on->pvt_epochs) {
+    why = "valid-fix fraction with TX on more than 0.5 % below the TX-off baseline";
+    v = CN0_FAIL;
   } else if (!cn0_phase_result(off, &off_c, &off_u) || !cn0_phase_result(on, &on_c, &on_u)) {
     why = "no C/N0 epochs";
     v = CN0_INCONCLUSIVE;

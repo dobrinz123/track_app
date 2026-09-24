@@ -522,3 +522,19 @@ includes it yet). The plan:
     receiver in safeboot mode (TP12 procedure, DESIGN-REV-A §4).
 11. **No OTA, no logging to flash** (that is rev B's NAND), and no power
     management (modem sleep).
+
+
+## Review status (2026-09-25)
+
+Codex read-only reviews: PODFW-REV1 FAIL (3 HIGH) -> fixed; blind verifier found the
+OTP splice -> wire-level guard; PODFW-REV2 0 HIGH; PODFW-REV3 **PASS_WITH_NOTES, 0 HIGH**.
+After REV3: test 4 also requires a valid-fix fraction >= 99 % with TX on and within
+0.5 % of the TX-off baseline; the receiver-reboot waits (1 s reset, 1.5 s after OTP)
+keep servicing PPS/IMU/LEDs and the INFO snapshot.
+
+Accepted residual (documented, not fixed): a BLE control already dequeued can still
+execute if the phone disconnects and reconnects in the few milliseconds between the
+session check and the call, and a notification can in principle reach a new connection
+that reused the same handle in that window. Holding a lock across NimBLE calls would
+be required to close it; the effect is limited to a GNSS rate / IMU decimation change
+on the device (its result is suppressed).
