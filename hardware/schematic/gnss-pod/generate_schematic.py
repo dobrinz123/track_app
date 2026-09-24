@@ -41,13 +41,13 @@ PART = {
     "J2": "JST B3B-PH-K-S  C131339 (hand-solder, pack with NTC)", "J3": "1x8 2.54 pad row (DNP)",
     "SW1": "BOOT  TS-1187A C318884", "SW2": "RESET  TS-1187A C318884",
     "SW3": "POWER  SS-12D00-G3 C22355741 (hand-solder)",
-    "RT1": "DNP 10k NTC C13564 (fallback, pack w/o NTC)", "LED1": "yellow C2287", "LED2": "red C2286", "LED3": "red C2286 (CHG)",
+    "Q1": "2N7002  C8545 (charge enable)", "LED1": "yellow C2287", "LED2": "red C2286", "LED3": "red C2286 (CHG)",
     "C1": "1u 50V 0603", "C2": "22u 25V 0805", "C3": "22u 25V 0805", "C4": "1u 0402", "C5": "10u 0603",
     "C6": "22u 0805", "C7": "100n", "C8": "1u", "C9": "4.7u", "C10": "100n", "C11": "100n", "C12": "1u",
     "C13": "1u", "C14": "100n", "C15": "100n", "C16": "100n", "C17": "DNP", "C18": "DNP",
     "R1": "5.1k", "R2": "5.1k", "R3": "22R", "R4": "22R", "R5": "10k", "R6": "10k", "R7": "4.7k", "R8": "4.7k",
     "R9": "3.3k", "R10": "1.5k", "R11": "1.5k", "R12": "100k", "R13": "1M", "R14": "1M", "R15": "1k",
-    "R16": "1k", "R17": "0R",
+    "R16": "1k", "R17": "0R", "R18": "100k", "R19": "10k",
 }
 
 # IC pin functions (spec sec 5). (pin, function, side)
@@ -55,7 +55,7 @@ IC_PINS = {
     "U1": [("3", "3V3", "L"), ("45", "EN", "L"), ("4", "IO0/BOOT", "L"), ("5", "IO1/ADC1_0", "L"),
            ("6", "IO2", "L"), ("12", "IO8", "L"), ("13", "IO9/SDA", "L"), ("14", "IO10/SCL", "L"),
            ("16", "IO12", "L"), ("17", "IO13", "L"), ("28", "IO33", "L"),
-           ("29", "IO34", "L"), ("31", "IO35", "L"), ("32", "IO36", "L"), ("33", "IO37", "L"),
+           ("29", "IO34", "L"), ("31", "IO35", "L"), ("32", "IO36", "L"), ("33", "IO37/CHG_EN", "L"), ("10", "IO6/TS_ADC", "L"),
            ("23", "IO19/D-", "R"), ("24", "IO20/D+", "R"), ("25", "IO21", "R"), ("34", "IO38/U1TX", "R"),
            ("35", "IO39/U1RX", "R"), ("36", "IO40", "R"), ("37", "IO41", "R"), ("39", "TXD0", "R"),
            ("40", "RXD0", "R"), ("27", "IO47", "R"), ("7", "IO3 strap", "R"),
@@ -72,6 +72,7 @@ IC_PINS = {
            ("14", "TMR", "L"), ("16", "ISET", "L"), ("12", "ILIM", "L"),
            ("10,11", "OUT", "R"), ("2,3", "BAT", "R"), ("1", "TS", "R"), ("9", "CHG_N", "R"), ("7", "PGOOD_N", "R"),
            ("8,17", "VSS+PAD", "B")],
+    "Q1": [("1", "G", "L"), ("3", "D", "R"), ("2", "S", "B")],
     "U5": [("1", "IN", "L"), ("3", "EN", "L"), ("5", "OUT", "R"), ("4", "NC", "R"), ("2,6", "GND+PAD", "B")],
     "U6": [("3", "VIN", "L"), ("2", "VOUT", "R"), ("1", "VSS", "B")],
     "U7": [("1,6", "I/O1", "L"), ("3,4", "I/O2", "L"), ("5", "VBUS", "R"), ("2", "GND", "B")],
@@ -202,10 +203,12 @@ def main():
     d += elm.Label().at((25, 0.8)).label("(2) CHARGER BQ24073 (USB500, ISET 3.3k ~270 mA) + BATTERY + POWER SWITCH",
                                           fontsize=10, halign="left")
     draw_ic(d, "U4", 29, -7.5, width=3.4)
-    for i, r in enumerate(["C2", "C3", "R9", "R10", "RT1", "R11", "LED3", "R12"]):
+    for i, r in enumerate(["C2", "C3", "R9", "R10", "R18", "R11", "LED3", "R12"]):
         draw_two(d, r, 37.5 + i * 2.3, -1.5)
     draw_ic(d, "J2", 38.5, -8.5, width=2.2)
     draw_ic(d, "SW3", 46.5, -8.5, width=2.2)
+    draw_ic(d, "Q1", 52.0, -8.5, width=1.6)
+    draw_two(d, "R19", 55.0, -8.0)
 
     d += elm.Label().at((58, 0.8)).label("(3) 3V3 LDO TLV75733P + GNSS BACKUP XC6206", fontsize=10, halign="left")
     draw_ic(d, "U5", 60.5, -3.5, width=2.6)

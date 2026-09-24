@@ -49,8 +49,11 @@ FAILS unless POD_NOFAIL is set):
     bottom keep-out (USB_SHADOW) so the reference GND is unbroken.
   * LSM6DSV16X: rule-area keep-out over the land-pattern interior; GND pads
     reach GND through symmetric stubs outside the body (ST TN0018).
-  * J2 is a 3-pin JST-PH (BAT+, BAT-, NTC); TS goes to the pack NTC, RT1 is
-    a DNP fallback.
+  * J2 is a 3-pin JST-PH (BAT+, BAT-, NTC); TS goes to the pack NTC and to
+    IO6 (ADC1_CH5). Review rev2: no board NTC (RT1 removed); charging is
+    disabled by default (R18 pulls CE to VSYS) and enabled only through Q1
+    while IO37 (CHG_EN) is high (R19 gate pull-down). CHG_CE runs on the
+    bottom along U1's north edge (y 7.1) to Q1 in the NE corner.
   * Supply taps are widened to 0.5/0.4/0.3 mm where clearance allows
     (widen_power_taps); the U1 fan-out (TRUNK_3V3, FANOUT) is hand-routed.
 
@@ -248,7 +251,7 @@ PLACEMENTS = [
     ("C9", *C0402, 37.58, 26.0, 0, "F"),         # on the VCC lane (x 37.1), GND pad east
     # -- east Z2: SW3 top right, V_BCKP LDO chain, EN RC / BOOT pull-up, battery
     ("U6", lib("Package_TO_SOT_SMD"), "SOT-23", 38.4, 8.6, 0, "F"),
-    ("R17", *R0402, 37.2, 6.1, 180, "F"),        # V_BCKP lane ends on R17.2 (west pad)
+    ("R17", *R0402, 35.85, 6.55, 90, "F"),     # V_BCKP link: pad 2 (north) on the lane end, pad 1 (south) VBCKP_SRC
     ("C11", *C0402, 39.2, 6.1, 0, "F"),          # V_BCKP cap (u-blox 10 mm rule: not at the pin)
     ("C13", *C0402, 36.3, 11.0, 0, "F"),
     ("C12", *C0402, 38.3, 11.0, 0, "F"),
@@ -257,7 +260,11 @@ PLACEMENTS = [
     ("R6", *R0402, 46.9, 47.5, 180, "F"),       # BOOT pull-up, on the BOOT lane east of J3
     # J2 on the east edge (3-pin, pins north->south 3, 2, 1 = NTC, BAT-, BAT+)
     ("J2", lib("Connector_JST"), "JST_PH_B3B-PH-K_1x03_P2.00mm_Vertical", 46.64, 21.0, 90, "F"),
-    ("RT1", *R0603, 44.0, 5.9, 0, "F"),        # DNP fallback (pack without NTC)
+    # charge-enable supervision (review rev2): Q1 pulls CE low only while the
+    # MCU drives CHG_EN (IO37) high; R19 holds the gate low, R18 pulls CE up
+    ("Q1", lib("Package_TO_SOT_SMD"), "SOT-23", 43.0, 7.6, 180, "F"),   # D west, G/S east
+    ("R19", *R0402, 45.6, 7.6, 90, "F"),
+    ("R18", *R0402, 14.4, 7.83, 90, "F"),
     # -- status LEDs on the west edge for light pipes (review fix wave: frees
     #    the east corridor), series resistors next to them
     ("LED1", *LED0603, 1.75, 15.3, 0, "F"),
@@ -272,12 +279,12 @@ PLACEMENTS = [
     ("SW1", *TACT, 46.3, 53.8, 90, "F"),
     ("SW2", *TACT, 46.3, 61.6, 90, "F"),
     # -- bottom test pads (spec: bottom, electronics zone only -> y < 22) ----------
-    ("TP1", *TP, 38.0, 12.3, 0, "B"),
+    ("TP1", *TP, 37.1, 12.95, 0, "B"),
     ("TP17", *TP, 43.5, 15.7, 0, "B"),
     ("TP10", *TP, 9.9, 18.8, 0, "B"),
     ("TP11", *TP, 9.9, 20.95, 0, "B"),
     ("TP19", *TP, 12.0, 21.0, 0, "B"),
-    ("TP16", *TP, 40.0, 6.5, 0, "B"),
+    ("TP16", *TP, 46.0, 7.35, 0, "B"),
     ("TP14", *TP, 29.4, 11.3, 0, "B"),
     ("TP13", *TP, 29.4, 13.4, 0, "B"),
     ("TP2", *TP, 9.4, 16.3, 0, "B"),
@@ -299,7 +306,7 @@ VALUES = {
     "U5": "TLV75733PDYDR", "U6": "XC6206P332MR-G", "U7": "USBLC6-2SC6",
     "J1": "TYPE-C-31-M-12", "J2": "B3B-PH-K-S(LF)(SN)", "J3": "DNP 1x8 spare pads",
     "SW1": "TS-1187A-B-A-B BOOT", "SW2": "TS-1187A-B-A-B RESET", "SW3": "SS-12D00-G3 POWER",
-    "RT1": "DNP NCP18XH103F03RB 10k NTC (fallback)", "LED1": "KT-0603Y yellow", "LED2": "KT-0603R red",
+    "Q1": "2N7002", "R18": "100k 1%", "R19": "10k 1%", "LED1": "KT-0603Y yellow", "LED2": "KT-0603R red",
     "LED3": "KT-0603R red CHG",
     "C1": "1uF 50V X5R 0603", "C2": "22uF 25V X5R 0805", "C3": "22uF 25V X5R 0805",
     "C6": "22uF 25V X5R 0805", "C4": "1uF 25V X5R 0402", "C8": "1uF 25V X5R 0402",
@@ -321,7 +328,8 @@ for i in range(1, 5):
 LCSC = {
     "U1": "C2913206", "U2": "C5443880", "U3": "C5267406", "U4": "C15220", "U5": "C22399950",
     "U6": "C5446", "U7": "C7519", "J1": "C165948", "J2": "C131339",
-    "SW1": "C318884", "SW2": "C318884", "SW3": "C22355741", "RT1": "C13564",
+    "SW1": "C318884", "SW2": "C318884", "SW3": "C22355741",
+    "Q1": "C8545", "R18": "C25741", "R19": "C25744",
     "LED1": "C2287", "LED2": "C2286", "LED3": "C2286",
     "C1": "C15849", "C2": "C45783", "C3": "C45783", "C6": "C45783",
     "C4": "C52923", "C8": "C52923", "C12": "C52923", "C13": "C52923",
@@ -332,7 +340,7 @@ LCSC = {
     "R12": "C25741", "R13": "C26083", "R14": "C26083", "R15": "C11702", "R16": "C11702",
     "R17": "C17168",
 }
-DNP = {"C17", "C18", "J3", "RT1"}              # footprint only, never assembled
+DNP = {"C17", "C18", "J3"}              # footprint only, never assembled
 HAND_SOLDER = {"J2", "SW3"}              # bought loose, hand-soldered by the owner (spec sec 9)
 NOT_A_PART = {f"TP{i}" for i in range(1, 20)} | {f"MH{i}" for i in range(1, 5)}
 
@@ -579,7 +587,7 @@ U2_ESCAPES = [
     ("PPS", 0.2, [(23.1, 53.6), (23.1, 56.1), (15.7, 56.1), (15.7, 29.0), (32.9, 29.0),
                   (32.9, 20.7), (26.7, 20.7), (26.7, 19.8)]),                        # -> U1.25
     ("VBCKP", 0.2, [(18.4, 47.0), (16.2, 47.0), (16.2, 29.5), (33.5, 29.5), (33.5, 6.2),
-                    (36.72, 6.2), (36.72, 6.1)]),                                    # -> R17.2
+                    (35.85, 6.2), (35.85, 6.04)]),                                    # -> R17.2
     ("3V3", 0.5, [(18.4, 45.1), (16.8, 45.1), (16.8, 30.1), (34.2, 30.1), (34.2, 20.0)]),  # V_IO, passes C10.1
 ]
 # 3V3 trunk (hand-routed, 0.5 mm): U1.3 -> via under U1 -> bottom along U1's
@@ -587,14 +595,14 @@ U2_ESCAPES = [
 # bottom link to the VCC lane's via. All its vias are >= 20 mm from U2.
 TRUNK_3V3 = [
     ("TRUNK", "3V3", 0.5, 0, [(18.0, 8.55), (17.3, 8.55), (16.9, 9.4)]),
-    ("TRUNK", "3V3", 0.5, 1, [(16.9, 9.4), (16.9, 7.65), (35.0, 7.65)]),
-    ("TRUNK", "3V3", 0.5, 0, [(35.0, 7.65), (35.0, 20.0), (34.2, 20.0)]),
+    ("TRUNK", "3V3", 0.5, 1, [(16.9, 9.4), (16.9, 7.7), (35.0, 7.7)]),
+    ("TRUNK", "3V3", 0.5, 0, [(35.0, 7.7), (35.0, 20.0), (34.2, 20.0)]),
     ("TRUNK", "3V3", 0.5, 1, [(35.0, 19.25), (37.1, 19.25), (40.0, 19.25)]),
     # 3V3 tap for the east strip (J3.1, EN/BOOT pull-ups), through TP1
-    ("TRUNK", "3V3", 0.3, 1, [(35.0, 12.3), (38.0, 12.3)]),
+    ("TRUNK", "3V3", 0.3, 1, [(35.0, 12.95), (37.1, 12.95)]),
 ]
-TRUNK_VIAS = [("3V3", 16.9, 9.4), ("3V3", 35.0, 7.65), ("3V3", 35.0, 19.25), ("3V3", 37.1, 19.25),
-              ("3V3", 35.0, 12.3), ("3V3", 40.0, 19.25)]
+TRUNK_VIAS = [("3V3", 16.9, 9.4), ("3V3", 35.0, 7.7), ("3V3", 35.0, 19.25), ("3V3", 37.1, 19.25),
+              ("3V3", 35.0, 12.95), ("3V3", 40.0, 19.25)]
 
 # U1 fan-out and the lines that must cross from U1's west side / the charger
 # to the east (hand-routed, review fix wave). Everything that changes layer
@@ -610,6 +618,8 @@ FANOUT = [
                                (46.64, 21.0)]),
     # TS: U4.1 -> via -> bottom -> J2.3 (pack NTC)
     ("F_TS", "TS", 0.2, 0, [(13.55, 14.0), (13.9, 14.0), (14.2, 14.8)]),
+    ("F_TS", "TS", 0.2, 1, [(18.4, 14.5), (19.25, 14.5)]),          # -> ADC (IO6)
+    ("F_TS", "TS", 0.2, 0, [(19.25, 14.5), (18.0, 14.5)]),
     ("F_TS", "TS", 0.2, 1, [(14.2, 14.8), (18.4, 14.8), (18.4, 9.15), (45.0, 9.15), (45.0, 15.6),
                            (46.64, 17.0)]),
     # BOOT (U1.4) -> SW1 side (via + TP17 in the east corridor)
@@ -619,8 +629,20 @@ FANOUT = [
     ("F_VSNS", "VBAT_SENSE", 0.2, 0, [(18.0, 10.25), (19.3, 10.45)]),
     ("F_VSNS", "VBAT_SENSE", 0.2, 1, [(19.3, 10.45), (40.3, 10.45)]),
     # EN (U1.45) -> TP16 -> SW2 / EN RC in the east strip
-    ("F_EN", "EN", 0.2, 0, [(32.0, 6.85), (30.6, 6.9)]),
-    ("F_EN", "EN", 0.2, 1, [(30.6, 6.9), (31.0, 6.5), (40.0, 6.5), (49.3, 6.5), (49.3, 16.0)]),
+    ("F_EN", "EN", 0.2, 0, [(32.0, 6.85), (32.9, 6.45)]),
+    ("F_EN", "EN", 0.2, 1, [(32.9, 6.45), (33.0, 6.5), (46.0, 6.5), (49.3, 6.5), (49.3, 16.0)]),
+    ("F_EN", "EN", 0.2, 1, [(46.0, 6.5), (46.0, 7.35)]),                        # TP16
+    # CHG_CE (U4.4) -> R18 -> via -> bottom along U1's north edge -> Q1 drain
+    ("F_CE", "CHG_CE", 0.2, 0, [(13.55, 12.5), (14.2, 12.5), (14.2, 11.2), (14.9, 10.9), (14.9, 8.31),
+                               (14.4, 8.31)]),
+    ("F_CE", "CHG_CE", 0.2, 0, [(14.9, 8.31), (15.4, 7.8)]),
+    ("F_CE", "CHG_CE", 0.2, 1, [(15.4, 7.8), (16.1, 7.1), (40.9, 7.1)]),
+    ("F_CE", "CHG_CE", 0.2, 0, [(40.9, 7.1), (41.4, 7.6), (42.06, 7.6)]),        # -> Q1.3 drain
+    # V_BCKP: R17.2 -> C11.1 along the north edge (R17 stands vertical so
+    # VBCKP_SRC reaches R17.1 from the south; the bottom there is the GND spine)
+    ("VBCKP", "VBCKP", 0.2, 0, [(35.85, 6.1), (38.72, 6.1)]),
+    ("F_CHGEN", "CHG_EN", 0.2, 0, [(42.7, 16.65), (42.7, 9.4), (43.93, 9.4), (43.93, 8.55)]),
+    ("F_CHGEN", "CHG_EN", 0.2, 0, [(43.93, 8.55), (45.6, 8.55), (45.6, 8.11)]),
     # GNSS UART / RESET_N / EXTINT: lane via -> bottom -> via inside the pad ring
     ("F_EXT", "GNSS_EXTINT", 0.2, 1, [(35.9, 13.65), (30.75, 13.65)]),
     ("F_EXT", "GNSS_EXTINT", 0.2, 0, [(30.75, 13.65), (32.0, 13.65)]),
@@ -648,8 +670,8 @@ FANOUT = [
     ("F_IO35", "IO35", 0.2, 1, [(30.75, 18.75), (31.3, 18.2), (43.0, 18.2), (43.0, 19.3)]),
     ("F_IO36", "IO36", 0.2, 0, [(32.0, 17.9), (30.75, 17.9)]),
     ("F_IO36", "IO36", 0.2, 1, [(30.75, 17.9), (31.05, 17.6), (43.75, 17.6), (43.75, 19.3)]),
-    ("F_IO37", "IO37", 0.2, 0, [(32.0, 17.05), (30.75, 17.05)]),
-    ("F_IO37", "IO37", 0.2, 1, [(30.75, 17.05), (44.5, 17.05), (44.5, 19.3)]),
+    ("F_IO37", "CHG_EN", 0.2, 0, [(32.0, 17.05), (30.75, 17.05)]),
+    ("F_IO37", "CHG_EN", 0.2, 1, [(30.75, 17.05), (42.3, 17.05), (42.7, 16.65)]),
     # east strip (Z1, top only): the vias above sit in one row (y 19.3, 0.75 mm
     # pitch, >= 20 mm from U2); each line drops 0.3 mm, runs 45 deg SW into a
     # 0.5 mm-pitch bus west of J3 and turns east into its pad (east-most line
@@ -660,7 +682,6 @@ FANOUT = [
     ("F_IO47", "IO47", 0.2, 0, [(42.25, 19.3), (42.25, 19.6), (41.2, 20.65), (41.2, 38.63), (44.35, 38.63)]),
     ("F_IO35", "IO35", 0.2, 0, [(43.0, 19.3), (43.0, 19.6), (41.7, 20.9), (41.7, 36.09), (44.35, 36.09)]),
     ("F_IO36", "IO36", 0.2, 0, [(43.75, 19.3), (43.75, 19.6), (42.2, 21.15), (42.2, 33.55), (44.35, 33.55)]),
-    ("F_IO37", "IO37", 0.2, 0, [(44.5, 19.3), (44.5, 19.6), (42.7, 21.4), (42.7, 31.01), (44.35, 31.01)]),
     ("TRUNK", "3V3", 0.3, 0, [(40.0, 19.25), (40.0, 19.6), (39.7, 19.9), (39.7, 66.8), (42.49, 66.8)]),
     ("TRUNK", "3V3", 0.3, 0, [(39.7, 46.25), (44.35, 46.25), (46.39, 46.25), (46.39, 47.5)]),
     ("F_BOOT", "BOOT", 0.2, 0, [(43.5, 15.7), (44.6, 15.7), (45.35, 16.45), (45.35, 22.3), (47.41, 24.36),
@@ -670,7 +691,8 @@ FANOUT = [
 ]
 FANOUT_VIAS = [
     ("VBAT", 16.5, 14.05), ("TS", 14.2, 14.8), ("BOOT", 19.9, 9.9), ("BOOT", 43.5, 15.7),
-    ("VBAT_SENSE", 19.3, 10.45), ("VBAT_SENSE", 40.3, 10.45), ("EN", 30.6, 6.9), ("EN", 49.3, 16.0),
+    ("VBAT_SENSE", 19.3, 10.45), ("VBAT_SENSE", 40.3, 10.45), ("EN", 32.9, 6.45), ("EN", 49.3, 16.0),
+    ("CHG_CE", 15.4, 7.8), ("CHG_CE", 40.9, 7.1), ("TS", 19.25, 14.5),
     ("GNSS_EXTINT", 35.9, 13.65), ("GNSS_EXTINT", 30.75, 13.65),
     ("GNSS_RESET_N", 37.0, 14.5), ("GNSS_RESET_N", 30.75, 14.5),
     ("GNSS_TXD", 39.2, 15.35), ("GNSS_TXD", 30.75, 15.35),
@@ -679,7 +701,7 @@ FANOUT_VIAS = [
     ("U0TXD", 30.75, 11.95), ("U0RXD", 30.75, 11.1),
     ("IO47", 28.4, 18.3), ("IO47", 42.25, 19.3), ("IO33", 29.25, 18.3), ("IO33", 41.5, 19.3),
     ("IO34", 30.1, 18.3), ("IO34", 40.75, 19.3), ("IO35", 30.75, 18.75), ("IO35", 43.0, 19.3),
-    ("IO36", 30.75, 17.9), ("IO36", 43.75, 19.3), ("IO37", 30.75, 17.05), ("IO37", 44.5, 19.3),
+    ("IO36", 30.75, 17.9), ("IO36", 43.75, 19.3), ("CHG_EN", 30.75, 17.05), ("CHG_EN", 42.7, 16.65),
 ]
 
 # Hand-routed USB (group, net, width, layer 0=F/1=B, points): one coupled
@@ -750,10 +772,24 @@ GND_RESERVE_TRACKS = [
     (0.25, 0, [(35.16, 26.0), (35.16, 26.8)]),                                       # C10.2
     (0.25, 0, [(38.06, 26.0), (38.06, 26.8)]),                                       # C9.2
     (0.25, 0, [(10.36, 24.0), (9.55, 24.0)]),                                        # U7.2 (between D+/D-)
+    # review rev2: the bottom under U1's north edge is all W-E lines (EN, CHG_CE,
+    # 3V3, VBAT, TS, BOOT, VBAT_SENSE), so the NE top pockets get a GND spine
+    # on the bottom along the north edge (from U5's thermal vias) plus drops
+    (0.3, 1, [(11.7, 5.65), (11.95, 5.75), (48.5, 5.75)]),                          # spine
+    (0.25, 1, [(15.4, 6.9), (15.4, 5.75)]),                                          # C5/C7 drop
+    (0.25, 0, [(15.4, 6.9), (15.0, 6.3)]),                                           # C5.2
+    (0.25, 0, [(43.93, 6.65), (44.6, 5.98), (44.6, 5.75)]),                          # Q1.2 source
+    (0.25, 0, [(45.6, 7.09), (45.6, 6.25), (45.1, 5.75), (44.6, 5.75)]),             # R19.2
+    (0.25, 0, [(37.47, 7.65), (38.6, 7.65), (39.68, 6.6), (39.68, 6.1)]),          # U6.1 -> C11.2
+    (0.25, 0, [(39.68, 6.1), (40.9, 6.1), (41.5, 5.75)]),                             # C11.2 -> spine via
+    (0.25, 0, [(36.78, 11.0), (36.78, 11.9)]),                                       # C13.2
+    (0.25, 0, [(38.78, 11.0), (39.3, 11.6)]),                                        # C12.2
+    (0.25, 0, [(42.11, 11.3), (42.08, 12.4), (42.1, 13.2)]),                         # R14.2, C16.2
 ]
 GND_RESERVE_VIAS = [(19.95, 24.55), (22.55, 26.45), (17.5, 22.75), (27.8, 21.35),
                     (35.16, 26.8), (38.06, 26.8), (9.55, 24.0),
-                    (41.5, 5.8)]     # U6/C11 top pocket -> bottom strip north of the EN line
+                    (41.5, 5.75), (44.6, 5.75), (15.4, 6.9),       # on the north-edge GND spine
+                    (36.78, 11.9), (39.3, 11.6), (42.1, 13.2)]     # U6/C12/C13/R14/C16 pockets
 
 
 def pad_shape(p):
@@ -2101,7 +2137,7 @@ def post_checks(board, pr):
 SES_PATH = os.path.join(HERE, "routing", "gnss-pod.ses")
 # local, crossing-heavy nets around U1's bottom edge and the IMU also go in phase 1
 PHASE1_EXTRA = {"USB_DP", "USB_DN", "USB_DP_C", "USB_DN_C", "I2C_SDA", "I2C_SCL", "IMU_INT1", "IMU_INT2",
-                "IO33", "IO34", "IO35", "IO36", "IO37", "IO47"} | set(filter(None, os.environ.get("POD_P1_MORE", "LED1,LED2").split(",")))
+                "IO33", "IO34", "IO35", "IO36", "IO47"} | set(filter(None, os.environ.get("POD_P1_MORE", "LED1,LED2").split(",")))
 DSN_PATH = os.path.join(HERE, "routing", "gnss-pod.dsn")
 
 
