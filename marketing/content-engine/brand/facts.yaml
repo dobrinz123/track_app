@@ -27,6 +27,7 @@ coaching:             # the three moments; this is what videos should sell
     - The voice is opt-in (you switch it on in settings).
   pits:
     - Between sessions the Pit view shows "where you are losing the most" - your top three corners by time lost.
+    - The Pit view is part of the opt-in trackday suggestions (switched on in settings) and opens once the car is stopped in the pits.
     - For each of them you see your brake and lift points lap by lap; the header counts your laps and how many were clean.
     - Optional suggestions (opt-in, after at least two clean laps) never go beyond what your own clean laps already did.
   after:
