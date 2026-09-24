@@ -149,6 +149,7 @@ const linearSamples = (rig: Rig): TelemetrySample[] =>
 
 afterEach(() => {
   vi.doUnmock('expo-modules-core');
+  vi.doUnmock('react-native');
   vi.resetModules();
 });
 
@@ -278,6 +279,5 @@ describe('BUILD-14 CRASH -- the resolver never imports react-native wholesale', 
     expect(yawSamples(rig)).toHaveLength(1);
     expect(yawSamples(rig)[0]!.value).toBeCloseTo(90, 2);
     rig.provider.stop();
-    vi.doUnmock('react-native');
   });
 });
