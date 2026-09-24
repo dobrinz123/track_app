@@ -111,7 +111,7 @@ interface Rig {
 
 /**
  * Builds a provider from a FRESH module instance so the mocked
- * `react-native` below is the one its dynamic import sees, and crucially with
+ * `expo-modules-core` below is the one its dynamic import sees, and crucially with
  * NO `accelerometerRestVector` -- the omission is what puts the lazy resolver
  * on the code path at all.
  */
@@ -148,7 +148,7 @@ const linearSamples = (rig: Rig): TelemetrySample[] =>
   rig.samples.filter((s) => s.channel === 'latG' || s.channel === 'longG');
 
 afterEach(() => {
-  vi.doUnmock('react-native');
+  vi.doUnmock('expo-modules-core');
   vi.resetModules();
 });
 
@@ -156,7 +156,7 @@ describe('P7D R5 -- SUCCESSFUL resolution: the platform decides the sign, and bo
   for (const platform of ['ios', 'android'] as const) {
     it(`Platform.OS === '${platform}' resolves a convention and a right turn reads +90 deg/s`, async () => {
       vi.resetModules();
-      vi.doMock('react-native', () => ({ Platform: { OS: platform } }));
+      vi.doMock('expo-modules-core', () => ({ Platform: { OS: platform } }));
       const rig = await startRig();
       // The resolution completes BEFORE the subscription -- that ordering is
       // what stops a sample ever being emitted under an unknown convention.
@@ -179,9 +179,9 @@ describe('P7D R5 -- SUCCESSFUL resolution: the platform decides the sign, and bo
 });
 
 describe('P7D R4/R5 -- REJECTED resolution suppresses yawRateDps instead of guessing', () => {
-  it('a throwing react-native module leaves the convention unresolved and the channel silent', async () => {
+  it('a throwing expo-modules-core module leaves the convention unresolved and the channel silent', async () => {
     vi.resetModules();
-    vi.doMock('react-native', () => {
+    vi.doMock('expo-modules-core', () => {
       throw new Error('Flow-typed source cannot be parsed');
     });
     const rig = await startRig();
@@ -202,12 +202,12 @@ describe('P7D R4/R5 -- REJECTED resolution suppresses yawRateDps instead of gues
     await rig.provider.stop();
   });
 
-  it('a react-native whose Platform.OS is not a string is unresolved too, not "not android"', async () => {
+  it('an expo-modules-core whose Platform.OS is not a string is unresolved too, not "not android"', async () => {
     // The guard matters because `Platform?.OS === 'android'` is false for
     // `undefined` as readily as it is for `'ios'`, and the old code turned
     // that false into the iOS convention.
     vi.resetModules();
-    vi.doMock('react-native', () => ({ Platform: {} }));
+    vi.doMock('expo-modules-core', () => ({ Platform: {} }));
     const rig = await startRig();
     expect(await waitForGyroSubscription(rig)).toBe(true);
 
@@ -228,7 +228,7 @@ describe('P7D R5 -- DELAYED resolution: nothing is emitted while the answer is i
       release = resolve;
     });
     vi.resetModules();
-    vi.doMock('react-native', async () => {
+    vi.doMock('expo-modules-core', async () => {
       await gate;
       return { Platform: { OS: 'android' } };
     });
@@ -256,5 +256,28 @@ describe('P7D R5 -- DELAYED resolution: nothing is emitted while the answer is i
     expect(yaw).toHaveLength(1);
     expect(yaw[0]!.value).toBeCloseTo(90, 2);
     await rig.provider.stop();
+  });
+});
+
+describe('BUILD-14 CRASH -- the resolver never imports react-native wholesale', () => {
+  it('resolves through expo-modules-core and never touches react-native (whose importAll aborted the iOS release build)', async () => {
+    vi.resetModules();
+    let reactNativeLoaded = false;
+    vi.doMock('react-native', () => {
+      reactNativeLoaded = true;
+      throw new Error('react-native must not be imported by the gyroscope path');
+    });
+    vi.doMock('expo-modules-core', () => ({ Platform: { OS: 'ios' } }));
+    const rig = await startRig();
+    expect(await waitForGyroSubscription(rig)).toBe(true);
+    settle(rig, 'ios');
+    rig.samples.length = 0;
+    rig.advance(40);
+    rig.gyro.emit(RIGHT_TURN);
+    expect(reactNativeLoaded).toBe(false);
+    expect(yawSamples(rig)).toHaveLength(1);
+    expect(yawSamples(rig)[0]!.value).toBeCloseTo(90, 2);
+    rig.provider.stop();
+    vi.doUnmock('react-native');
   });
 });
