@@ -9,6 +9,8 @@
  */
 #include <Arduino.h>
 
+#include "console_io.h"
+
 #include "ble_link.h"
 #include "console.h"
 #include "gnss.h"
@@ -21,9 +23,14 @@
 
 PodState g_pod;
 
+/* Called from every blocking wait (GNSS ACK/readback, OTP procedure): keeps
+ * PPS, IMU FIFO, LEDs and the WiFi-test deadlines serviced (review fix
+ * MEDIUM 10). Console, BOOT and BLE controls are NOT re-entered here; they
+ * resume in loop(), which executes at most one BLE control per pass. */
 void pod_yield() {
   pps_service();
   imu_service();
+  wifi_test_service(); /* has its own reentrancy guard */
   leds_service();
 }
 
@@ -33,9 +40,9 @@ void setup() {
   leds_init();
   console_init();
   delay(300); /* give a host a moment to open the CDC port; logs are not buffered */
-  Serial.printf("\nTRACE GNSS Pod rev A, firmware %s (%s %s)\n", FW_VERSION_STRING, __DATE__,
+  con_printf("\nTRACE GNSS Pod rev A, firmware %s (%s %s)\n", FW_VERSION_STRING, __DATE__,
                 __TIME__);
-  Serial.println("WiFi is OFF (only `wifi tx-test` starts it). Type `help`.");
+  con_println("WiFi is OFF (only `wifi tx-test` starts it). Type `help`.");
   tb_init(&g_pod.tb);
   power_init();
   pps_init();
@@ -43,7 +50,7 @@ void setup() {
   gnss_init();
   ble_link_init();
   console_print_status();
-  Serial.print("> ");
+  con_print("> ");
 }
 
 void loop() {
@@ -55,6 +62,7 @@ void loop() {
   wifi_test_service();
   power_service();
   leds_service();
+  gnss_tick();
   if (boot_button_pressed()) {
     if (gnss_bridge_active())
       gnss_bridge_stop();

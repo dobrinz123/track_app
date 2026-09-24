@@ -57,6 +57,53 @@ void test_phase_and_verdict(void) {
   TEST_ASSERT_FALSE(cn0_phase_result(&empty, &mo, &uo));
 }
 
+/* seconds of 1 Hz NAV-SAT + 10 Hz NAV-PVT; the first fix_ok_pct % of PVTs have
+ * a valid fix, the first ge8_pct % of NAV-SAT epochs have 10 SVs (else 6) */
+static void fill_phase(cn0_phase_t *p, int seconds, int cno_base, int fix_ok_pct, int ge8_pct) {
+  cn0_phase_init(p);
+  ubx_nav_sat_t s;
+  for (int e = 0; e < seconds; e++) {
+    uint8_t c[10];
+    int nsv = (e * 100 / seconds) < ge8_pct ? 10 : 6;
+    for (int i = 0; i < 10; i++) c[i] = i < nsv ? (uint8_t)(cno_base + i % 5) : 0;
+    mksat(&s, c, 10, nsv);
+    cn0_phase_add(p, &s);
+    for (int k = 0; k < 10; k++) cn0_phase_add_pvt(p, (e * 10 + k) * 100 / (seconds * 10) < fix_ok_pct);
+  }
+}
+
+void test_test4_verdict_rules(void) {
+  static cn0_phase_t off, on;
+  const char *why;
+  cn0_tx_info_t tx = {true, 60u * 100u, 0};
+  fill_phase(&off, 60, 40, 100, 100);
+  fill_phase(&on, 60, 39, 100, 100);
+  TEST_ASSERT_EQUAL_INT(CN0_PASS, cn0_test4_verdict(&off, &on, 60, &tx, &why));
+  cn0_tx_info_t none = {true, 0, 0}; /* TX never ran */
+  TEST_ASSERT_EQUAL_INT(CN0_FAIL, cn0_test4_verdict(&off, &on, 60, &none, &why));
+  cn0_tx_info_t bad = {false, 6000, 0}; /* a setup call failed */
+  TEST_ASSERT_EQUAL_INT(CN0_FAIL, cn0_test4_verdict(&off, &on, 60, &bad, &why));
+  cn0_tx_info_t few = {true, 30u * 60u - 1u, 0};
+  TEST_ASSERT_EQUAL_INT(CN0_FAIL, cn0_test4_verdict(&off, &on, 60, &few, &why));
+  cn0_tx_info_t stall = {true, 6000, 1};
+  TEST_ASSERT_EQUAL_INT(CN0_FAIL, cn0_test4_verdict(&off, &on, 60, &stall, &why));
+  /* Codex case: outages during TX with a few surviving good epochs */
+  fill_phase(&on, 60, 45, 50, 100);
+  TEST_ASSERT_EQUAL_INT(CN0_FAIL, cn0_test4_verdict(&off, &on, 60, &tx, &why));
+  fill_phase(&on, 60, 45, 100, 20);
+  TEST_ASSERT_EQUAL_INT(CN0_FAIL, cn0_test4_verdict(&off, &on, 60, &tx, &why));
+  fill_phase(&on, 5, 45, 100, 100); /* only 5 of 60 epochs */
+  TEST_ASSERT_EQUAL_INT(CN0_FAIL, cn0_test4_verdict(&off, &on, 60, &tx, &why));
+  /* bad baseline sky */
+  fill_phase(&on, 60, 39, 100, 100);
+  fill_phase(&off, 60, 40, 90, 100);
+  TEST_ASSERT_EQUAL_INT(CN0_INCONCLUSIVE, cn0_test4_verdict(&off, &on, 60, &tx, &why));
+  /* 3 dB C/N0 drop */
+  fill_phase(&off, 60, 42, 100, 100);
+  fill_phase(&on, 60, 39, 100, 100);
+  TEST_ASSERT_EQUAL_INT(CN0_FAIL, cn0_test4_verdict(&off, &on, 60, &tx, &why));
+}
+
 static console_parsed_t P(const char *s) {
   static char buf[128];
   strncpy(buf, s, sizeof buf - 1);
@@ -135,6 +182,7 @@ int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_top8_median);
   RUN_TEST(test_phase_and_verdict);
+  RUN_TEST(test_test4_verdict_rules);
   RUN_TEST(test_console_commands);
   RUN_TEST(test_console_otp_needs_exact_confirm);
   RUN_TEST(test_power_policy_inert_on_rev_a);

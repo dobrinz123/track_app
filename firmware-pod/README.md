@@ -38,6 +38,8 @@ firmware-pod/
     pod_protocol.{h,c}      framework-free: BLE frame encoder AND decoder, CRC-16/CCITT-FALSE
     cn0_stats.{h,c}         framework-free: DESIGN-REV-A §10A test 4 statistics (median C/N0 of the 8 strongest SVs)
     console_parse.{h,c}     framework-free: USB console command parser
+    console_line.{h,c}      framework-free: console line assembler (a line runs exactly as typed or is rejected whole)
+    bridge_filter.{h,c}     framework-free: `gnss bridge` host->GNSS filter that blocks every OTP-writing UBX frame
     power_policy.{h,c}      framework-free: low-battery cutoff (inert on rev A), charging never allowed on rev A
     board_pins.h            every GPIO, with the DESIGN-REV-A rule it follows
     pod_state.h             shared runtime state, firmware version
@@ -50,6 +52,8 @@ firmware-pod/
     power.{h,cpp}           ESP32: CHG_EN held low, PGOOD_N, VBAT ADC
     leds.{h,cpp}            ESP32: LED patterns, BOOT button (read after boot only)
     console.{h,cpp}         ESP32: USB-CDC console
+    con.{h,cpp}             ESP32: non-blocking console output (drop + count, never stall the loop)
+    isr_gpio.{h,cpp}        ESP32: IRAM-safe GPIO interrupts (PPS, IMU INT1) via the ESP-IDF driver
     obd_central.h           PHASE 2 boundary (not implemented, §10)
   test/                     Unity tests run by `pio test -e native`
 ```
@@ -78,8 +82,8 @@ pio run  -e pod         # cross-compile the firmware
 
 Results on 2026-09-24:
 
-- `pio test -e native`: **65 test cases: 65 succeeded**.
-- `pio run -e pod`: SUCCESS with 0 warnings (-Wall -Wextra). RAM 19.8 % (64,744 B), flash 28.0 % (935,509 B of the 3.3 MB app slot).
+- `pio test -e native`: **88 test cases: 88 succeeded** (after the Codex POD-FW REV1 fix wave).
+- `pio run -e pod`: SUCCESS with 0 warnings (-Wall -Wextra). RAM 20.0 % (65,504 B), flash 28.1 % (940,789 B of the 3.3 MB app slot).
 
 ### Board definition (checked)
 
@@ -134,14 +138,14 @@ Type `help` for the full list. All commands:
 | Command | What it does |
 |---|---|
 | `status` | Everything at once: power (PGOOD, CHG_EN, VBAT), GNSS, PPS/timebase, IMU, BLE, WiFi. |
-| `gnss rate <10\|20\|25>` | Sets the nav rate. 10 Hz = GPS+Galileo (+SBAS+QZSS), no OTP needed. 20 Hz = GPS+Galileo and 25 Hz = GPS (+SBAS+QZSS) are **refused unless the high-performance OTP reads back SET**. |
+| `gnss rate <10\|20\|25>` | Sets the nav rate. 10 Hz = GPS+Galileo (+SBAS+QZSS), no OTP needed. 20 Hz = GPS+Galileo and 25 Hz = GPS (+SBAS+QZSS) are **refused unless the high-performance OTP reads back SET**. Constellations and rate go to the receiver in one all-or-nothing VALSET and are read back. On a mismatch the previous mode is restored and re-verified; `status` shows `verified` / `UNVERIFIED`. Refused (BUSY) while `wifi tx-test` runs. |
 | `gnss raw on\|off` | Prints every received UBX frame (class, id, length and the first 32 payload bytes). |
 | `gnss sat` | Shows the last UBX-NAV-SAT: constellation, SV, C/N0, elevation, used. |
 | `gnss reset` | Holds RESET_N (GPIO40, open-drain) low for 10 ms, then reconfigures. **Clears BBR**, so expect a cold start. |
-| `gnss bridge` | Transparent USB ↔ GNSS UART bridge at 460800 for u-center. Press **BOOT** to leave; the receiver is then reconfigured. Do not change the receiver baud from u-center. |
+| `gnss bridge` | USB ↔ GNSS UART bridge at 460800 for u-center. Press **BOOT** to leave; the receiver is then reconfigured. Do not change the receiver baud from u-center. **The host→GNSS direction is filtered** (`bridge_filter.h`): UBX frames that could write OTP (class 0x06 id 0x41; VALSET to a layer other than RAM/BBR/Flash; any frame carrying `B5 62 06 41` in its payload) are dropped with a console warning. A `0xB5` byte only passes as the start of a complete, checksum-valid, allowed frame. NMEA passes; frames with more than 1016 payload bytes are dropped. GNSS→USB bytes that do not fit the USB buffer are dropped and counted. |
 | `gnss otp-status` | Sends the IM §2.1.5 step-5 verification poll and reports SET / NOT SET / UNKNOWN. |
 | `gnss otp-highperf` | **Preflight** for the irreversible OTP write: MON-VER, current state, the exact 60 bytes and their source. It refuses if the state is already SET or is UNKNOWN. |
-| `gnss otp-highperf CONFIRM` | **Writes the OTP.** Only works within 60 s of a successful preflight; `CONFIRM` is case-sensitive. It then runs the rest of IM §2.1.5: two ACK-ACKs, UBX-CFG-RST hardware reset, re-init, verification. |
+| `gnss otp-highperf CONFIRM` | **Writes the OTP.** Only works within 60 s of a successful preflight, once; `CONFIRM` is case-sensitive. The authorisation is cleared on expiry, on `gnss reset`, on any receiver re-init and on bridge entry. It then runs the rest of IM §2.1.5: two ACK-ACKs, UBX-CFG-RST hardware reset, re-init, verification. |
 | `imu dump [n]` | IMU status, then n decoded samples in g and deg/s, with pod timestamps. |
 | `pps` | Timebase state, edge count, rejects, rate (ppb), current UTC. |
 | `ble info` | Address, connection, MTU, PHY, streams, sequence, drops. |
@@ -151,6 +155,19 @@ Type `help` for the full list. All commands:
 WiFi is otherwise **never** started. The product does not use the MHD adapter
 (DESIGN.md §3, owner decision 2026-09-24).
 
+**Line rules.** A line runs exactly as typed or not at all:
+
+- It is limited to 120 printable ASCII characters (TAB allowed); backspace/DEL edit it visibly.
+- A longer line, or one with any control or non-ASCII byte, is **rejected
+  whole** up to its terminator, with an error message.
+- So `gnss otp-highperf CONFIRM` followed by 102 spaces and `CANCEL` does
+  nothing.
+
+**Output never blocks.** Console output is written only if it fits the USB TX
+buffer (4 KB). Otherwise the message is dropped and counted, and `status` shows
+the drops. Reason: with a zero TX timeout, the installed `HWCDC::write` could
+spin forever on a host that is connected but not reading (details in `console_io.h`).
+
 ### High-performance OTP: rules
 
 - The OTP write is **irreversible**. It uses 18 of the receiver's 69 OTP bytes.
@@ -159,6 +176,13 @@ WiFi is otherwise **never** started. The product does not use the MHD adapter
 - The firmware refuses to write when the verification poll already reports
   SET, so OTP space is never spent twice.
 - It also refuses when the state is UNKNOWN, so it never writes blind.
+- SET / NOT SET is decided only from a complete, structurally valid VALGET
+  reply that matches the poll: version 1, layer 4, position 0, each of the 4
+  polled keys exactly once, nothing else, correct sizes. It is captured only
+  while that poll is outstanding. All keys are evaluated before deciding.
+  Anything else is UNKNOWN.
+- `gnss bridge` cannot be used to bypass this: the bridge drops OTP-writing
+  frames (above).
 - The bytes are quoted verbatim from u-blox SAM-M10Q Integration manual
   UBX-22020019 R02, §2.1.5, Table 3. The tests check their UBX checksums.
 
@@ -242,9 +266,23 @@ CHG_CE by hand with the MCU unpowered) is an owner decision. It is left open
    10 minutes.
 2. Run `wifi tx-test 600`: 10 min TX off, then 10 min continuous TX at the
    13 dBm cap (BLE is capped at +9 dBm the whole time, §10.3).
-3. The firmware prints, per phase, the median over epochs of the per-epoch
-   median C/N0 of the 8 strongest satellites, the median number of used SVs,
-   and **PASS/FAIL** (drop ≤ 2.0 dB and the used-SV median does not drop).
+3. The firmware prints, per phase:
+   - the median over epochs of the per-epoch median C/N0 of the 8 strongest
+     satellites;
+   - the median number of used SVs;
+   - the NAV-SAT and NAV-PVT epoch counts and valid-fix count;
+   - the TX frame count.
+
+   The verdict is **PASS** only if all of these hold:
+   - every WiFi setup call succeeded, with channel and TX power read back;
+   - at least 30 successful frames/s on average, and no second without a frame;
+   - in both phases, NAV-SAT and NAV-PVT arrived for ≥ 90 % of the seconds;
+   - ≥ 90 % of the NAV-SAT epochs had ≥ 8 satellites;
+   - ≥ 99 % of the PVT epochs had a valid 3-D fix;
+   - C/N0 dropped ≤ 2.0 dB and the used-SV median did not drop.
+
+   The result is INCONCLUSIVE if the TX-off baseline itself misses the
+   availability bars. GNSS rate changes are refused while the test runs.
 4. For an independent cross-check, log the same run in u-center through
    `gnss bridge` (then start the TX test on the second board, or after leaving
    the bridge).
@@ -273,6 +311,11 @@ board first)**
     therefore a GNSS-locked second.
   - GPIO21 is input-only with no pulls (SAFEBOOT_N shares the net).
   - The ISR stamps each edge with `esp_timer_get_time()`.
+  - The ISR is registered IRAM-safe: `gpio_install_isr_service(ESP_INTR_FLAG_IRAM)`
+    and `gpio_isr_handler_add`, with the handler in IRAM. Arduino's
+    `attachInterrupt` is not used anywhere, because this core is built without
+    `CONFIG_ARDUINO_ISR_IRAM` and dispatches from flash. The link map shows the
+    PPS and IMU handlers at 0x403755xx (IRAM). Rationale in `isr_gpio.h`.
   - `timebase.c` does the rest:
     - rejects edges that are not an integer number of seconds apart (±300 µs + 200 ppm);
     - estimates the pod clock rate (EMA);
@@ -296,6 +339,11 @@ board first)**
   - One frame per notification. Every generated frame takes a sequence number,
     so drops show as gaps.
   - Control writes are queued from the NimBLE task to the main loop.
+  - Each control is tagged with the connection generation. A disconnect clears
+    the queue; stale controls are dropped unexecuted.
+  - One control runs per loop pass. A full queue is answered BUSY.
+  - All pod state is owned by the loop task. INFO reads return a snapshot
+    published under a spinlock every 100 ms.
 - **Charger (binding).**
   - `power_early_init()` drives GPIO37 LOW as the first action in `setup()` and
     re-asserts it every second. No code path can set it high.
@@ -307,13 +355,15 @@ board first)**
 
 | Suite | Covers |
 |---|---|
-| `test_ubx` | Fletcher checksum against frames printed by u-blox. Parser: whole frames, byte-by-byte fragmentation, NMEA/noise skipping, corrupted checksum then recovery, a good frame hidden inside a corrupt length span, oversize length, bad sync. NAV-PVT decode of a 100-byte vector with every field asserted. NAV-SAT decode. VALSET layout and value-range refusal. VALGET builder reproducing the IM poll byte for byte. CFG-RST. |
-| `test_hp_otp` | The IM Table 3 frames (valid UBX, class 0x06/0x41, head and tail quoted), the ACK/poll/reply frames, and the SET / NOT SET / UNKNOWN classifier. |
-| `test_gnss_config` | Rate policy (20/25 only with OTP SET), rate/signal/base VALSETs decoded back, RAM-only layer on every frame. |
+| `test_ubx` | Fletcher checksum against frames printed by u-blox. Parser: whole frames, byte-by-byte fragmentation, NMEA/noise skipping, corrupted checksum then recovery, a good frame hidden inside a corrupt length span, oversize length, bad sync. NAV-PVT decode of a 100-byte vector with every field asserted. NAV-SAT decode. VALSET layout and value-range refusal. VALGET builder reproducing the IM poll byte for byte. Strict VALGET validation (layer, version, position, truncation, missing, extra, duplicate). CFG-RST. |
+| `test_hp_otp` | The IM Table 3 frames (valid UBX, class 0x06/0x41, head and tail quoted) and the ACK/poll/reply frames. Strict classifier: the Codex counter-example payload; wrong layer, version or position; every truncation; trailing byte; extra key; duplicate key; one or all values differing; reordered keys. The one-shot 60 s authorisation, including expiry across the `millis()` wrap. |
+| `test_gnss_config` | Rate policy (20/25 only with OTP SET); rate/signal/base VALSETs decoded back; RAM-only layer on every frame; the mode as ONE VALSET (constellations + rate); strict readback (the Codex 25 Hz + Galileo mismatch, every single corrupted value, truncation, wrong layer). |
 | `test_timebase` | Civil→Unix against Python-computed dates; lock and mapping within 2 µs at 20 ppm drift; 0.9 s latency plus missed pulses; a PVT older than the latest edge; glitch rejection; holdover and re-lock; IMU clock map convergence under ±100 µs noise; the FREQ_FINE formula; 32-bit wrap. |
 | `test_imu_fifo` | Tag bit fields; timestamp interpolation over slots; timestamp word before or after data; dropping before the first timestamp; slots split across bursts; incomplete slots; empty and unknown tags; resync after overrun; decimator rounding and time averaging. |
 | `test_pod_protocol` | CRC check value; GNSS golden byte offsets; round trips for GNSS, IMU, STATUS and CONTROL/RESULT; the PROTOCOL.md example frames byte for byte; every single-bit corruption detected; sequence-gap arithmetic; MTU sizing. |
-| `test_misc` | Top-8 median C/N0 and the test 4 verdict; console parsing (including the exact `CONFIRM`); power policy inert on rev A and correct with a cell. |
+| `test_misc` | Top-8 median C/N0; the full test-4 verdict (TX never ran, setup failure, too few frames, stalls, outages during TX, < 8 SVs, missing epochs, bad baseline → INCONCLUSIVE, 3 dB drop); console parsing (including the exact `CONFIRM`); power policy inert on rev A and correct with a cell. |
+| `test_bridge_filter` | The exact Table-3 OTP bytes pushed in every chunk size 1..60: nothing forwarded. OTP between allowed traffic; VALSET to an undocumented layer; OTP embedded in an allowed payload; OTP hidden in a corrupt candidate; splice attempt; stray 0xB5; allowed UBX and NMEA pass byte-exact. |
+| `test_console_line` | CRLF handling; `CONFIRM` + 102 spaces + `CANCEL` rejected whole; ESC and non-ASCII bytes reject the line; visible backspace editing; exact-maximum length accepted. |
 
 About the NAV-PVT vector: the u-blox documents contain **no captured NAV-PVT
 frame**. The vector was generated independently of this code (Python
@@ -386,10 +436,13 @@ includes it yet). The plan:
 5. **GNSS frames before PPS lock** are stamped at receive time (latency not
    compensated). Flag bit 6 tells the app which kind a frame is.
 6. **Blocking waits.**
-   - A GNSS reconfiguration (rate change, reset, OTP) blocks the main loop for
-     up to ~2.5 s. PPS and IMU keep being serviced during it, but BLE control
-     writes wait.
+   - A GNSS reconfiguration blocks the main loop: up to ~5 s for a rate change
+     with rollback, longer for reset or OTP. PPS, the IMU FIFO, LEDs and the
+     WiFi-test deadlines keep being serviced during it. Console, BOOT and
+     further BLE controls wait for it.
    - `gnss reset` and bridge exit re-run the full init.
+   - Console and bridge output are **dropped** (and counted), never waited for,
+     when the USB host does not drain them.
 7. **No BLE security.** There is no pairing or bonding, and one phone at a time.
 8. **§10A test 3 is not supported** (CHG_EN is held low by design; see §6).
    How to run it is an open owner decision.

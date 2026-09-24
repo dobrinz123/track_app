@@ -11,6 +11,60 @@ bool gnss_rate_allowed(gnss_rate_mode_t mode, hp_state_t hp) {
 
 uint16_t gnss_rate_meas_ms(gnss_rate_mode_t mode) { return (uint16_t)(1000 / (int)mode); }
 
+size_t gnss_cfg_mode_items(gnss_rate_mode_t mode, uint32_t *keys, uint64_t *vals, size_t cap) {
+  if (!gnss_rate_mode_valid((int)mode) || cap < 14) return 0;
+  const uint64_t gal = mode != GNSS_RATE_25HZ_GPS ? 1 : 0;
+  const struct {
+    uint32_t k;
+    uint64_t v;
+  } items[14] = {
+      {CFG_SIGNAL_GPS_ENA, 1},       {CFG_SIGNAL_GPS_L1CA_ENA, 1},
+      {CFG_SIGNAL_SBAS_ENA, 1},      {CFG_SIGNAL_SBAS_L1CA_ENA, 1},
+      {CFG_SIGNAL_QZSS_ENA, 1},      {CFG_SIGNAL_QZSS_L1CA_ENA, 1},
+      {CFG_SIGNAL_GAL_ENA, gal},     {CFG_SIGNAL_GAL_E1_ENA, gal},
+      {CFG_SIGNAL_BDS_ENA, 0},       {CFG_SIGNAL_GLO_ENA, 0},
+      {CFG_RATE_MEAS, gnss_rate_meas_ms(mode)},
+      {CFG_RATE_NAV, 1},
+      {CFG_RATE_TIMEREF, 1},
+      {CFG_MSGOUT_UBX_NAV_SAT_UART1, (uint64_t)(int)mode},
+  };
+  for (size_t i = 0; i < 14; i++) {
+    keys[i] = items[i].k;
+    vals[i] = items[i].v;
+  }
+  return 14;
+}
+
+size_t gnss_cfg_build_mode(gnss_rate_mode_t mode, uint8_t *out, size_t cap) {
+  uint32_t keys[GNSS_MODE_MAX_ITEMS];
+  uint64_t vals[GNSS_MODE_MAX_ITEMS];
+  size_t n = gnss_cfg_mode_items(mode, keys, vals, GNSS_MODE_MAX_ITEMS);
+  if (n == 0) return 0;
+  ubx_valset_t v;
+  ubx_valset_init(&v, UBX_VALSET_LAYER_RAM);
+  for (size_t i = 0; i < n; i++) ubx_valset_add(&v, keys[i], vals[i]);
+  return ubx_valset_frame(&v, out, cap);
+}
+
+size_t gnss_cfg_build_mode_poll(gnss_rate_mode_t mode, uint8_t *out, size_t cap) {
+  uint32_t keys[GNSS_MODE_MAX_ITEMS];
+  uint64_t vals[GNSS_MODE_MAX_ITEMS];
+  size_t n = gnss_cfg_mode_items(mode, keys, vals, GNSS_MODE_MAX_ITEMS);
+  if (n == 0) return 0;
+  return ubx_valget_poll_frame(UBX_VALGET_LAYER_RAM, keys, n, out, cap);
+}
+
+bool gnss_cfg_verify_mode(const uint8_t *payload, uint16_t len, gnss_rate_mode_t mode) {
+  uint32_t keys[GNSS_MODE_MAX_ITEMS];
+  uint64_t want[GNSS_MODE_MAX_ITEMS], got[GNSS_MODE_MAX_ITEMS];
+  size_t n = gnss_cfg_mode_items(mode, keys, want, GNSS_MODE_MAX_ITEMS);
+  if (n == 0) return false;
+  if (!ubx_valget_parse_strict(payload, len, UBX_VALGET_LAYER_RAM, keys, n, got)) return false;
+  bool ok = true;
+  for (size_t i = 0; i < n; i++) ok &= got[i] == want[i];
+  return ok;
+}
+
 size_t gnss_cfg_build_baud(uint32_t baud, uint8_t *out, size_t cap) {
   ubx_valset_t v;
   ubx_valset_init(&v, UBX_VALSET_LAYER_RAM);

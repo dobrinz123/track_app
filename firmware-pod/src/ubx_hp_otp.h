@@ -58,10 +58,32 @@ typedef enum {
 
 /*
  * Classify a UBX-CFG-VALGET reply payload (class 0x06 id 0x8B) to the
- * verification poll. SET only when every key present in the expected reply
- * (0x40A40001, 0x40A40003, 0x40A40005, 0x40A4000A) has the expected value.
+ * verification poll. The reply must be COMPLETE and structurally valid and
+ * correlate with HP_OTP_VERIFY_POLL (ubx_valget_parse_strict: version 1,
+ * the polled layer 4, position 0, each of the 4 polled keys exactly once,
+ * nothing else, no trailing bytes). Only then, after evaluating ALL keys:
+ *   every value equal to the step-5 expected reply -> HP_STATE_SET
+ *   otherwise                                      -> HP_STATE_NOT_SET
+ * Anything malformed, truncated, oversized or uncorrelated -> UNKNOWN
+ * (and the firmware never writes OTP from UNKNOWN).
  */
 hp_state_t hp_otp_classify_reply(const uint8_t *payload, uint16_t len);
+
+/* One-shot, wrap-safe authorisation for `gnss otp-highperf CONFIRM`:
+ * armed by a successful preflight, valid HP_AUTH_WINDOW_MS, consumed by the
+ * first CONFIRM attempt, cleared on expiry (hp_auth_tick, called every main
+ * loop), on GNSS reset/re-init and on bridge entry. */
+#define HP_AUTH_WINDOW_MS 60000u
+typedef struct {
+  bool armed;
+  uint32_t armed_ms;
+} hp_auth_t;
+void hp_auth_arm(hp_auth_t *a, uint32_t now_ms);
+void hp_auth_clear(hp_auth_t *a);
+/* Clears the authorisation once the window has elapsed. */
+void hp_auth_tick(hp_auth_t *a, uint32_t now_ms);
+/* True if armed and inside the window; ALWAYS disarms. */
+bool hp_auth_consume(hp_auth_t *a, uint32_t now_ms);
 
 const char *hp_state_name(hp_state_t s);
 

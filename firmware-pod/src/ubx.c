@@ -196,6 +196,38 @@ bool ubx_valget_find(const uint8_t *payload, uint16_t len, uint32_t key, uint64_
   return false;
 }
 
+bool ubx_valget_parse_strict(const uint8_t *payload, uint16_t len, uint8_t layer,
+                             const uint32_t *keys, size_t nkeys, uint64_t *values) {
+  bool found[64] = {false};
+  if (payload == NULL || nkeys == 0 || nkeys > 64 || len < 4) return false;
+  if (payload[0] != 0x01) return false;     /* response message version */
+  if (payload[1] != layer) return false;    /* must be the layer we polled */
+  if (ubx_u2(payload + 2) != 0) return false; /* position: we always poll 0 */
+  size_t off = 4;
+  while (off < len) {
+    if (off + 4 > len) return false; /* truncated key */
+    uint32_t k = ubx_u4(payload + off);
+    size_t vs = ubx_cfg_key_value_size(k);
+    if (vs == 0 || off + 4 + vs > len) return false; /* bad size / truncated value */
+    size_t idx = nkeys;
+    for (size_t i = 0; i < nkeys; i++)
+      if (keys[i] == k) {
+        idx = i;
+        break;
+      }
+    if (idx == nkeys) return false; /* key we did not ask for */
+    if (found[idx]) return false;   /* duplicate */
+    found[idx] = true;
+    uint64_t v = 0;
+    for (size_t i = 0; i < vs; i++) v |= (uint64_t)payload[off + 4 + i] << (8 * i);
+    values[idx] = v;
+    off += 4 + vs;
+  }
+  for (size_t i = 0; i < nkeys; i++)
+    if (!found[i]) return false; /* missing */
+  return true;
+}
+
 size_t ubx_cfg_rst_frame(uint16_t nav_bbr_mask, uint8_t reset_mode, uint8_t *out, size_t cap) {
   uint8_t payload[4];
   payload[0] = (uint8_t)(nav_bbr_mask & 0xFF);

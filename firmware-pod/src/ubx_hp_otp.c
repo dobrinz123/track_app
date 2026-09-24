@@ -28,25 +28,52 @@ const uint8_t HP_OTP_VERIFY_EXPECTED_REPLY[44] = {
     0xB0, 0x71, 0x0B, 0x03, 0x00, 0xA4, 0x40, 0x00, 0xB0, 0x71, 0x0B, 0x05, 0x00, 0xA4, 0x40,
     0x00, 0xB0, 0x71, 0x0B, 0x0A, 0x00, 0xA4, 0x40, 0x00, 0xD8, 0xB8, 0x05, 0x76, 0x81};
 
+/* Poll layer and keys, taken from the IM poll bytes themselves so the
+ * classifier is correlated with exactly what was sent. */
+static bool poll_keys(uint8_t *layer, uint32_t keys[4]) {
+  const uint8_t *pl = HP_OTP_VERIFY_POLL + UBX_HEADER_LEN;
+  uint16_t len = ubx_u2(HP_OTP_VERIFY_POLL + 4);
+  if (len != 4 + 4 * 4) return false;
+  *layer = pl[1];
+  for (int i = 0; i < 4; i++) keys[i] = ubx_u4(pl + 4 + 4 * i);
+  return true;
+}
+
 hp_state_t hp_otp_classify_reply(const uint8_t *payload, uint16_t len) {
-  /* Walk the key/value pairs of the EXPECTED reply and demand each one in the
-   * actual reply. The expected payload starts after the 6-byte header. */
+  uint8_t layer;
+  uint32_t keys[4];
+  uint64_t want[4], got[4];
+  if (!poll_keys(&layer, keys)) return HP_STATE_UNKNOWN;
+  /* expected values: the IM step-5 reply, parsed with the same strict rules */
   const uint8_t *exp = HP_OTP_VERIFY_EXPECTED_REPLY + UBX_HEADER_LEN;
-  uint16_t exp_len = ubx_u2(HP_OTP_VERIFY_EXPECTED_REPLY + 4);
-  if (len < 4) return HP_STATE_UNKNOWN;
-  size_t off = 4;
-  int matched = 0;
-  while (off + 4 <= exp_len) {
-    uint32_t key = ubx_u4(exp + off);
-    size_t vs = ubx_cfg_key_value_size(key);
-    uint64_t want = 0, got = 0;
-    for (size_t i = 0; i < vs; i++) want |= (uint64_t)exp[off + 4 + i] << (8 * i);
-    if (!ubx_valget_find(payload, len, key, &got)) return HP_STATE_UNKNOWN;
-    if (got != want) return HP_STATE_NOT_SET;
-    matched++;
-    off += 4 + vs;
-  }
-  return matched == 4 ? HP_STATE_SET : HP_STATE_UNKNOWN;
+  if (!ubx_valget_parse_strict(exp, ubx_u2(HP_OTP_VERIFY_EXPECTED_REPLY + 4), layer, keys, 4, want))
+    return HP_STATE_UNKNOWN;
+  if (!ubx_valget_parse_strict(payload, len, layer, keys, 4, got)) return HP_STATE_UNKNOWN;
+  /* evaluate every key before deciding */
+  int equal = 0;
+  for (int i = 0; i < 4; i++)
+    if (got[i] == want[i]) equal++;
+  return equal == 4 ? HP_STATE_SET : HP_STATE_NOT_SET;
+}
+
+void hp_auth_arm(hp_auth_t *a, uint32_t now_ms) {
+  a->armed = true;
+  a->armed_ms = now_ms;
+}
+
+void hp_auth_clear(hp_auth_t *a) {
+  a->armed = false;
+  a->armed_ms = 0;
+}
+
+void hp_auth_tick(hp_auth_t *a, uint32_t now_ms) {
+  if (a->armed && (uint32_t)(now_ms - a->armed_ms) >= HP_AUTH_WINDOW_MS) hp_auth_clear(a);
+}
+
+bool hp_auth_consume(hp_auth_t *a, uint32_t now_ms) {
+  bool ok = a->armed && (uint32_t)(now_ms - a->armed_ms) < HP_AUTH_WINDOW_MS;
+  hp_auth_clear(a);
+  return ok;
 }
 
 const char *hp_state_name(hp_state_t s) {

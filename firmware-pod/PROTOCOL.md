@@ -16,7 +16,7 @@ complement. `f32` is IEEE-754 binary32.
 | Service "TRACE Pod" | `be030001-cb14-41a4-a6af-b14223e0a8cf` | primary, advertised | |
 | DATA | `be030002-cb14-41a4-a6af-b14223e0a8cf` | NOTIFY | one pod→app frame per notification |
 | CONTROL | `be030003-cb14-41a4-a6af-b14223e0a8cf` | WRITE, WRITE WITHOUT RESPONSE | one CONTROL frame per write |
-| INFO | `be030004-cb14-41a4-a6af-b14223e0a8cf` | READ | a STATUS frame (type 0x03) with `seq = 0xFFFF` |
+| INFO | `be030004-cb14-41a4-a6af-b14223e0a8cf` | READ | a STATUS frame (type 0x03) with `seq = 0xFFFF`: a consistent snapshot, at most ~100 ms old |
 
 Advertising name: `TRACE-Pod-XXXX` (the last two bytes of the BT MAC, in hex).
 The service UUID is in the advertising packet and the name is in the scan response.
@@ -104,7 +104,7 @@ R03 §3.15.11).
 | 74 | u8 | fix_type | enum | 0 none, 1 DR, 2 2-D, 3 3-D, 4 GNSS+DR, 5 time only |
 | 75 | u8 | num_sv | count | satellites used in the solution |
 | 76 | u8 | flags | bits | see below |
-| 77 | u8 | rate_hz | Hz | the pod's navigation rate at this epoch |
+| 77 | u8 | rate_hz | Hz | the pod's navigation rate at this epoch. **0 = the receiver's mode is unverified** (a readback after a rate change did not match); treat the rate as unknown |
 
 `flags`:
 
@@ -164,16 +164,29 @@ CONTROL payload: `u8 opcode` followed by its arguments.
 | Opcode | Name | Args | Effect |
 |---|---|---|---|
 | 0x01 | SET_STREAMS | u8 mask: bit 0 GNSS, bit 1 IMU, bit 2 STATUS at 1 Hz | replaces the stream mask |
-| 0x02 | SET_RATE | u8 hz: 10, 20 or 25 | GNSS nav rate. 10 Hz = GPS+Galileo(+SBAS+QZSS). 20 Hz = GPS+Galileo. 25 Hz = GPS(+SBAS+QZSS) only. 20 and 25 need the receiver's high-performance OTP (STATUS `hp_state` = 2); otherwise the result is 3. The pod may block up to ~2.5 s while it reconfigures. |
+| 0x02 | SET_RATE | u8 hz: 10, 20 or 25 | GNSS nav rate. 10 Hz = GPS+Galileo(+SBAS+QZSS). 20 Hz = GPS+Galileo. 25 Hz = GPS(+SBAS+QZSS) only. 20 and 25 need the receiver's high-performance OTP (STATUS `hp_state` = 2); otherwise the result is 3. The constellations and the rate go to the receiver in **one** configuration message (all or nothing) and are read back; OK only if the readback matches. On failure the pod restores and re-verifies the previous mode and answers 6 FAILED; if even that cannot be verified, `rate_hz` reads 0. The result is 4 BUSY while the WiFi coexistence test runs. The pod may take up to ~5 s. |
 | 0x03 | SET_IMU_DECIM | u8: 1, 2, 4 or 8 | IMU output rate = 480 / N |
 | 0x04 | GET_STATUS | none | a STATUS frame follows the result |
 
-The pod answers every CONTROL with one CONTROL_RESULT, payload 4 bytes:
+The pod answers every CONTROL with one CONTROL_RESULT, payload 4 bytes. Rules:
+
+- The pod queues up to 8 CONTROL writes and executes **one per main-loop
+  pass**, in order. A write that finds the queue full is **not executed** and
+  is answered 4 BUSY (resend it later). Only if the pod is flooded beyond a
+  second 8-entry overflow queue is a write dropped without any result
+  (counted on the console, `ble info`).
+- Controls belong to the connection they were written in. A disconnect
+  discards every queued control. A control whose connection ended while it
+  was executing gets no result, and a SET_STREAMS from it does not survive
+  into a new connection.
+- Wait for the result of a SET_RATE before sending the next control.
+
+Payload:
 
 | Offset | Type | Field |
 |---|---|---|
 | 0 | u8 | opcode (echo) |
-| 1 | u8 | result: 0 OK, 1 BAD_FRAME (CRC, length or version), 2 BAD_ARG, 3 REFUSED_HP_NOT_SET, 4 BUSY, 5 UNKNOWN_OPCODE, 6 FAILED |
+| 1 | u8 | result: 0 OK, 1 BAD_FRAME (CRC, length or version), 2 BAD_ARG, 3 REFUSED_HP_NOT_SET, 4 BUSY (queue full, or the pod is busy: no receiver, bridge or WiFi test active; not executed), 5 UNKNOWN_OPCODE, 6 FAILED (not applied or not verified) |
 | 2 | u16 | echo_seq: the `seq` of the CONTROL frame |
 
 The pod has no control command for the one-time-programmable high-performance
@@ -190,7 +203,7 @@ the value of the INFO characteristic.
 | 0 | u64 | pod_us | pod time when the frame was built |
 | 8 | u8 ×3 | fw major, minor, patch | 0.1.0 for this firmware |
 | 11 | u8 | hw_rev | 1 = rev A |
-| 12 | u8 | rate_hz | current GNSS rate |
+| 12 | u8 | rate_hz | current GNSS rate, verified by readback. 0 = unverified (see SET_RATE) |
 | 13 | u8 | hp_state | 0 unknown, 1 not set, 2 set (high-performance OTP) |
 | 14 | u8 | pps_state | 0 none, 1 acquiring, 2 locked, 3 holdover |
 | 15 | u8 | flags | bit 0 USB power present (PGOOD), 1 GNSS talking, 2 IMU ok, 3 GNSS stream on, 4 IMU stream on, 5 WiFi on, 6 charging enabled (always 0 on rev A) |

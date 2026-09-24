@@ -1,6 +1,8 @@
 #include "power.h"
 
 #include <Arduino.h>
+
+#include "console_io.h"
 #include <esp_sleep.h>
 
 #include "board_pins.h"
@@ -45,8 +47,8 @@ void power_service() {
                                              POWER_HAS_CELL ? g_pod.vbat_mv : -1);
   s_wifi_allowed = d.wifi_allowed;
   if (d.deep_sleep_now) {
-    Serial.println("[power] VBAT below cutoff on battery: deep sleep, radios off");
-    Serial.flush();
+    con_println("[power] VBAT below cutoff on battery: deep sleep, radios off");
+    Serial.flush(); /* bounded by CON_TX_TIMEOUT_MS; deep sleep follows */
     esp_deep_sleep_start(); /* no wake source: USB/switch cycle restarts */
   }
 }

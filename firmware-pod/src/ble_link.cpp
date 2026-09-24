@@ -6,40 +6,84 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
+#include "console_io.h"
 #include "gnss.h"
 #include "imu.h"
 #include "pod_state.h"
 #include "timebase.h"
 
+/*
+ * Threading (review fixes MEDIUM 4 / 5 / 10):
+ *  - NimBLE callbacks run in the NimBLE host task (core 0). They only touch:
+ *    s_connected / s_conn_handle / s_subscribed / s_mtu (single words),
+ *    s_conn_gen (incremented on every connect AND disconnect), the two
+ *    FreeRTOS queues, and the INFO snapshot under s_snap_mux.
+ *  - Everything else (g_pod, the timebase, the stream mask, the sequence
+ *    counter, all counters) is owned by the Arduino loop task. The loop
+ *    notices a new connection generation and resets streams and seq itself.
+ *  - Every queued control carries the generation it was written in; a
+ *    control from an older generation is dropped unexecuted, and a result is
+ *    only sent if the generation is still current after execution.
+ *  - The loop executes at most ONE queued item per iteration, so console,
+ *    BOOT, WiFi-test deadlines etc. run between controls.
+ *  - Control-queue overflow is answered with CONTROL_RESULT BUSY (via a
+ *    second small queue); only if that overflows too is it just counted.
+ */
+
 /* TX power cap: DESIGN-REV-A §10.3 mitigation 1, "BLE <= 9 dBm". */
 static constexpr esp_power_level_t kBleTxPower = ESP_PWR_LVL_P9;
 static constexpr uint16_t kPreferredMtu = 247;
+static constexpr uint32_t kSnapshotPeriodMs = 100;
 
 static NimBLEServer *s_server = nullptr;
 static NimBLECharacteristic *s_data = nullptr;
 static NimBLECharacteristic *s_info = nullptr;
+/* written by the NimBLE task */
 static volatile bool s_connected = false;
 static volatile uint16_t s_conn_handle = 0xFFFF;
 static volatile uint16_t s_mtu = 23;
 static volatile bool s_subscribed = false;
+static volatile uint32_t s_conn_gen = 0;
+static volatile uint32_t s_ctrl_lost = 0; /* overflowed both queues */
+/* loop-owned */
+static uint32_t s_loop_gen = 0;
 static uint16_t s_seq = 0;
 static uint32_t s_tx_ok = 0;
 static uint32_t s_tx_drops = 0;
 static uint32_t s_tx_too_big = 0;
 static uint32_t s_ctrl_rx = 0;
+static uint32_t s_ctrl_stale = 0;
+static uint32_t s_ctrl_busy = 0;
 static uint32_t s_last_status_ms = 0;
+static uint32_t s_last_snap_ms = 0;
 static QueueHandle_t s_ctrl_q = nullptr;
+static QueueHandle_t s_ovf_q = nullptr;
+/* INFO snapshot (loop writes, NimBLE task reads) */
+static portMUX_TYPE s_snap_mux = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t s_snap[POD_OVERHEAD + POD_STATUS_PAYLOAD_LEN];
+static size_t s_snap_len = 0;
 
 struct CtrlMsg {
+  uint32_t gen;
   uint8_t len;
   uint8_t data[64];
 };
 
+struct OvfMsg {
+  uint32_t gen;
+  uint16_t seq;
+  uint8_t opcode;
+};
+
+/* The loop has adopted the current connection and a peer is subscribed. */
+static bool link_ready() {
+  return s_connected && s_subscribed && s_data != nullptr && s_loop_gen == s_conn_gen;
+}
+
 /* ------------------------------------------------------------ send */
 
 static void send_frame(const uint8_t *buf, size_t len) {
-  if (!s_connected || !s_subscribed || s_data == nullptr) return;
-  if (len == 0) return;
+  if (!link_ready() || len == 0) return;
   if (len > (size_t)(s_mtu - 3)) { /* ATT notification payload = MTU - 3 */
     s_tx_too_big++;
     s_tx_drops++;
@@ -58,25 +102,26 @@ static void send_frame(const uint8_t *buf, size_t len) {
     s_tx_drops++;
 }
 
-/* The sequence number is taken for every frame the pod generates for the
- * connection, whether or not the stack accepts it: a local drop therefore
- * shows up as a gap on the phone (PROTOCOL.md "Loss detection"). */
+/* Taken for every frame generated for the connection, whether or not the
+ * stack accepts it: a local drop shows up as a gap (PROTOCOL.md §7.1). Only
+ * the loop task touches s_seq. */
 static uint16_t next_seq() { return s_seq++; }
 
 void ble_link_send_gnss(const pod_gnss_t *g) {
-  if (!s_connected || !s_subscribed || !(g_pod.streams & POD_STREAM_GNSS)) return;
+  if (!link_ready() || !(g_pod.streams & POD_STREAM_GNSS)) return;
   uint8_t buf[POD_OVERHEAD + POD_GNSS_PAYLOAD_LEN];
   size_t n = pod_encode_gnss(next_seq(), g, buf, sizeof buf);
   send_frame(buf, n);
 }
 
 void ble_link_send_imu(const pod_imu_batch_t *b) {
-  if (!s_connected || !s_subscribed || !(g_pod.streams & POD_STREAM_IMU)) return;
+  if (!link_ready() || !(g_pod.streams & POD_STREAM_IMU)) return;
   uint8_t buf[POD_OVERHEAD + POD_IMU_HDR_LEN + POD_IMU_MAX_SAMPLES * POD_IMU_SAMPLE_LEN];
   size_t n = pod_encode_imu(next_seq(), b, buf, sizeof buf);
   send_frame(buf, n);
 }
 
+/* Loop task only (reads g_pod and the timebase, which the loop owns). */
 void ble_link_fill_status(pod_status_t *s) {
   memset(s, 0, sizeof *s);
   int64_t now = esp_timer_get_time();
@@ -85,7 +130,7 @@ void ble_link_fill_status(pod_status_t *s) {
   s->fw_minor = FW_VERSION_MINOR;
   s->fw_patch = FW_VERSION_PATCH;
   s->hw_rev = FW_HW_REV;
-  s->rate_hz = (uint8_t)g_pod.gnss.rate;
+  s->rate_hz = g_pod.gnss.rate_verified ? (uint8_t)g_pod.gnss.rate : 0;
   s->hp_state = (uint8_t)g_pod.gnss.hp;
   s->pps_state = (uint8_t)tb_state(&g_pod.tb, now);
   uint8_t f = 0;
@@ -116,8 +161,21 @@ void ble_link_fill_status(pod_status_t *s) {
   s->ubx_errors = gnss_ubx_errors();
 }
 
+/* Publish a consistent STATUS snapshot for INFO reads (review fix MEDIUM 5):
+ * built entirely in the loop task, copied under a spinlock. */
+static void publish_snapshot() {
+  pod_status_t st;
+  ble_link_fill_status(&st);
+  uint8_t buf[sizeof s_snap];
+  size_t n = pod_encode_status(0xFFFF, &st, buf, sizeof buf); /* reads: seq 0xFFFF */
+  portENTER_CRITICAL(&s_snap_mux);
+  memcpy(s_snap, buf, n);
+  s_snap_len = n;
+  portEXIT_CRITICAL(&s_snap_mux);
+}
+
 void ble_link_send_status_now() {
-  if (!s_connected || !s_subscribed) return;
+  if (!link_ready()) return;
   pod_status_t st;
   ble_link_fill_status(&st);
   uint8_t buf[POD_OVERHEAD + POD_STATUS_PAYLOAD_LEN];
@@ -137,10 +195,10 @@ static void send_result(uint8_t opcode, uint8_t result, uint16_t echo_seq) {
 class ServerCb : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer *srv, ble_gap_conn_desc *desc) override {
     s_conn_handle = desc->conn_handle;
-    s_connected = true;
     s_subscribed = false;
     s_mtu = 23;
-    s_seq = 0;
+    s_conn_gen = s_conn_gen + 1; /* the loop resets streams + seq on this */
+    s_connected = true;
     /* request 2M PHY both ways (falls back to 1M if the phone refuses) and a
      * 7.5-15 ms connection interval, 4 s supervision timeout */
     ble_gap_set_prefered_le_phy(desc->conn_handle, BLE_GAP_LE_PHY_2M_MASK, BLE_GAP_LE_PHY_2M_MASK,
@@ -151,7 +209,9 @@ class ServerCb : public NimBLEServerCallbacks {
     s_connected = false;
     s_subscribed = false;
     s_conn_handle = 0xFFFF;
-    g_pod.streams = 0; /* streams are per connection */
+    s_conn_gen = s_conn_gen + 1; /* invalidates everything queued so far */
+    if (s_ctrl_q) xQueueReset(s_ctrl_q);
+    if (s_ovf_q) xQueueReset(s_ovf_q);
   }
   void onMTUChange(uint16_t mtu, ble_gap_conn_desc *) override { s_mtu = mtu; }
 };
@@ -164,22 +224,30 @@ class DataCb : public NimBLECharacteristicCallbacks {
 
 class ControlCb : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic *c) override {
-    /* runs in the NimBLE host task: hand over to the main loop */
+    /* NimBLE host task: tag with the connection generation, hand to the loop */
     NimBLEAttValue v = c->getValue();
     CtrlMsg m;
+    m.gen = s_conn_gen;
     m.len = (uint8_t)(v.length() > sizeof m.data ? sizeof m.data : v.length());
     memcpy(m.data, v.data(), m.len);
-    if (s_ctrl_q) xQueueSend(s_ctrl_q, &m, 0);
+    if (s_ctrl_q && xQueueSend(s_ctrl_q, &m, 0) == pdTRUE) return;
+    /* queue full: answer BUSY from the loop (seq/opcode from the raw bytes) */
+    OvfMsg o;
+    o.gen = m.gen;
+    o.seq = m.len >= 4 ? (uint16_t)(m.data[2] | (m.data[3] << 8)) : 0;
+    o.opcode = m.len >= 7 ? m.data[6] : 0;
+    if (!(s_ovf_q && xQueueSend(s_ovf_q, &o, 0) == pdTRUE)) s_ctrl_lost = s_ctrl_lost + 1;
   }
 };
 
 class InfoCb : public NimBLECharacteristicCallbacks {
   void onRead(NimBLECharacteristic *c) override {
-    pod_status_t st;
-    ble_link_fill_status(&st);
-    uint8_t buf[POD_OVERHEAD + POD_STATUS_PAYLOAD_LEN];
-    /* reads are not part of the notification sequence: seq = 0xFFFF */
-    size_t n = pod_encode_status(0xFFFF, &st, buf, sizeof buf);
+    uint8_t buf[sizeof s_snap];
+    size_t n;
+    portENTER_CRITICAL(&s_snap_mux);
+    n = s_snap_len;
+    memcpy(buf, s_snap, n);
+    portEXIT_CRITICAL(&s_snap_mux);
     c->setValue(buf, n);
   }
 };
@@ -191,6 +259,8 @@ static InfoCb s_info_cb;
 
 void ble_link_init() {
   s_ctrl_q = xQueueCreate(8, sizeof(CtrlMsg));
+  s_ovf_q = xQueueCreate(8, sizeof(OvfMsg));
+  publish_snapshot();
   uint8_t mac[6];
   esp_read_mac(mac, ESP_MAC_BT);
   char name[20];
@@ -217,8 +287,8 @@ void ble_link_init() {
   adv->addServiceUUID(POD_BLE_SVC_UUID);
   adv->setScanResponse(true);
   adv->start();
-  Serial.printf("[ble] advertising as %s (TX cap +9 dBm, preferred MTU %u, 2M PHY requested)\n",
-                name, kPreferredMtu);
+  con_printf("[ble] advertising as %s (TX cap +9 dBm, preferred MTU %u, 2M PHY requested)\n",
+             name, kPreferredMtu);
 }
 
 static void handle_control(const CtrlMsg &m) {
@@ -244,7 +314,7 @@ static void handle_control(const CtrlMsg &m) {
         res = POD_RES_BAD_ARG;
         break;
       }
-      res = gnss_set_rate(c.args[0]);
+      res = gnss_set_rate(c.args[0]); /* may block ~2.5 s (PPS/IMU still serviced) */
       break;
     case POD_OP_SET_IMU_DECIM:
       if (c.arg_len != 1 || !(c.args[0] == 1 || c.args[0] == 2 || c.args[0] == 4 || c.args[0] == 8)) {
@@ -260,17 +330,45 @@ static void handle_control(const CtrlMsg &m) {
       res = POD_RES_UNKNOWN_OPCODE;
       break;
   }
+  /* the peer may have gone (or a new one come) during a blocking operation:
+   * then no result, and the new connection starts clean */
+  if (m.gen != s_conn_gen) {
+    if (c.opcode == POD_OP_SET_STREAMS) g_pod.streams = 0;
+    s_ctrl_stale++;
+    return;
+  }
   send_result(c.opcode, res, c.seq);
   if (c.opcode == POD_OP_GET_STATUS && res == POD_RES_OK) ble_link_send_status_now();
 }
 
 void ble_link_service() {
+  /* adopt a new connection generation: streams off, seq from 0 */
+  uint32_t gen = s_conn_gen;
+  if (gen != s_loop_gen) {
+    s_loop_gen = gen;
+    g_pod.streams = 0;
+    s_seq = 0;
+  }
+  /* at most ONE queued item per loop iteration (review fix MEDIUM 10) */
+  OvfMsg o;
   CtrlMsg m;
-  while (s_ctrl_q && xQueueReceive(s_ctrl_q, &m, 0) == pdTRUE) handle_control(m);
+  if (s_ovf_q && xQueueReceive(s_ovf_q, &o, 0) == pdTRUE) {
+    s_ctrl_busy++;
+    if (o.gen == s_loop_gen) send_result(o.opcode, POD_RES_BUSY, o.seq);
+  } else if (s_ctrl_q && xQueueReceive(s_ctrl_q, &m, 0) == pdTRUE) {
+    if (m.gen == s_loop_gen && s_connected)
+      handle_control(m);
+    else
+      s_ctrl_stale++; /* written in an earlier connection: dropped unexecuted */
+  }
   uint32_t now = millis();
   if (now - s_last_status_ms >= 1000) {
     s_last_status_ms = now;
     if (g_pod.streams & POD_STREAM_STATUS) ble_link_send_status_now();
+  }
+  if (now - s_last_snap_ms >= kSnapshotPeriodMs) {
+    s_last_snap_ms = now;
+    publish_snapshot();
   }
 }
 
@@ -279,14 +377,17 @@ uint16_t ble_link_mtu() { return s_mtu; }
 uint32_t ble_link_tx_drops() { return s_tx_drops; }
 
 void ble_link_print_info() {
-  Serial.printf("ble: addr %s, %s", NimBLEDevice::getAddress().toString().c_str(),
-                s_connected ? "CONNECTED" : "advertising");
+  con_printf("ble: addr %s, %s", NimBLEDevice::getAddress().toString().c_str(),
+             s_connected ? "CONNECTED" : "advertising");
   if (s_connected) {
     uint8_t tx = 0, rx = 0;
     ble_gap_read_le_phy(s_conn_handle, &tx, &rx);
-    Serial.printf(", MTU %u, PHY tx %uM rx %uM, subscribed %d", s_mtu, tx, rx, s_subscribed);
+    con_printf(", MTU %u, PHY tx %uM rx %uM, subscribed %d", s_mtu, tx, rx, s_subscribed);
   }
-  Serial.printf("\n     streams 0x%02X, seq %u, notified %lu, drops %lu (too big %lu), control rx %lu\n",
-                g_pod.streams, s_seq, (unsigned long)s_tx_ok, (unsigned long)s_tx_drops,
-                (unsigned long)s_tx_too_big, (unsigned long)s_ctrl_rx);
+  con_printf("\n     streams 0x%02X, seq %u, notified %lu, drops %lu (too big %lu)\n", g_pod.streams,
+             s_seq, (unsigned long)s_tx_ok, (unsigned long)s_tx_drops,
+             (unsigned long)s_tx_too_big);
+  con_printf("     control rx %lu, stale dropped %lu, busy (queue full) %lu, lost %lu, gen %lu\n",
+             (unsigned long)s_ctrl_rx, (unsigned long)s_ctrl_stale, (unsigned long)s_ctrl_busy,
+             (unsigned long)s_ctrl_lost, (unsigned long)s_loop_gen);
 }

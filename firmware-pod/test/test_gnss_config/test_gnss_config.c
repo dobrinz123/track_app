@@ -118,6 +118,64 @@ void test_no_frame_writes_bbr_or_flash(void) {
   (void)n;
 }
 
+/* The VALGET reply a receiver would send for a mode poll; corrupt_index >= 0
+ * flips bit 0 of that item's value. */
+static size_t reply_for(gnss_rate_mode_t m, uint8_t *pl, size_t cap, int corrupt_index) {
+  uint32_t k[GNSS_MODE_MAX_ITEMS];
+  uint64_t v[GNSS_MODE_MAX_ITEMS];
+  size_t n = gnss_cfg_mode_items(m, k, v, GNSS_MODE_MAX_ITEMS);
+  size_t off = 4;
+  pl[0] = 0x01;
+  pl[1] = 0x00;
+  pl[2] = pl[3] = 0;
+  for (size_t i = 0; i < n; i++) {
+    size_t vs = ubx_cfg_key_value_size(k[i]);
+    TEST_ASSERT_TRUE(off + 4 + vs <= cap);
+    for (int b = 0; b < 4; b++) pl[off + b] = (uint8_t)(k[i] >> (8 * b));
+    uint64_t val = v[i] ^ ((int)i == corrupt_index ? 1u : 0u);
+    for (size_t b = 0; b < vs; b++) pl[off + 4 + b] = (uint8_t)(val >> (8 * b));
+    off += 4 + vs;
+  }
+  return off;
+}
+
+void test_mode_is_one_atomic_valset(void) {
+  uint8_t f[256];
+  uint64_t v;
+  size_t n = gnss_cfg_build_mode(GNSS_RATE_25HZ_GPS, f, sizeof f);
+  TEST_ASSERT_TRUE(n > 0);
+  TEST_ASSERT_TRUE(valset_get(f, n, CFG_SIGNAL_GAL_ENA, &v)); /* constellations ... */
+  TEST_ASSERT_EQUAL_UINT64(0, v);
+  TEST_ASSERT_TRUE(valset_get(f, n, CFG_RATE_MEAS, &v)); /* ... and rate together */
+  TEST_ASSERT_EQUAL_UINT64(40, v);
+  n = gnss_cfg_build_mode(GNSS_RATE_20HZ_GPS_GAL, f, sizeof f);
+  TEST_ASSERT_TRUE(valset_get(f, n, CFG_SIGNAL_GAL_ENA, &v));
+  TEST_ASSERT_EQUAL_UINT64(1, v);
+  TEST_ASSERT_TRUE(valset_get(f, n, CFG_RATE_MEAS, &v));
+  TEST_ASSERT_EQUAL_UINT64(50, v);
+  TEST_ASSERT_EQUAL_UINT(0, gnss_cfg_build_mode((gnss_rate_mode_t)15, f, sizeof f));
+}
+
+void test_mode_poll_and_readback_verification(void) {
+  uint8_t poll[128], pl[256];
+  size_t n = gnss_cfg_build_mode_poll(GNSS_RATE_20HZ_GPS_GAL, poll, sizeof poll);
+  TEST_ASSERT_TRUE(ubx_frame_is_valid(poll, n));
+  TEST_ASSERT_EQUAL_HEX8(0x8B, poll[3]);
+  TEST_ASSERT_EQUAL_HEX8(0x00, poll[7]); /* RAM layer */
+  size_t r = reply_for(GNSS_RATE_20HZ_GPS_GAL, pl, sizeof pl, -1);
+  TEST_ASSERT_TRUE(gnss_cfg_verify_mode(pl, (uint16_t)r, GNSS_RATE_20HZ_GPS_GAL));
+  /* Codex MEDIUM 9 scenario: receiver really runs GPS+GAL, firmware thinks 25 Hz */
+  TEST_ASSERT_FALSE(gnss_cfg_verify_mode(pl, (uint16_t)r, GNSS_RATE_25HZ_GPS));
+  for (int i = 0; i < 14; i++) {
+    r = reply_for(GNSS_RATE_20HZ_GPS_GAL, pl, sizeof pl, i);
+    TEST_ASSERT_FALSE(gnss_cfg_verify_mode(pl, (uint16_t)r, GNSS_RATE_20HZ_GPS_GAL));
+  }
+  r = reply_for(GNSS_RATE_10HZ_GPS_GAL, pl, sizeof pl, -1);
+  TEST_ASSERT_FALSE(gnss_cfg_verify_mode(pl, (uint16_t)(r - 1), GNSS_RATE_10HZ_GPS_GAL));
+  pl[1] = 0x07; /* default layer instead of RAM */
+  TEST_ASSERT_FALSE(gnss_cfg_verify_mode(pl, (uint16_t)r, GNSS_RATE_10HZ_GPS_GAL));
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_rate_policy);
@@ -126,5 +184,7 @@ int main(void) {
   RUN_TEST(test_base_config_timepulse_locked_only);
   RUN_TEST(test_baud_frame);
   RUN_TEST(test_no_frame_writes_bbr_or_flash);
+  RUN_TEST(test_mode_is_one_atomic_valset);
+  RUN_TEST(test_mode_poll_and_readback_verification);
   return UNITY_END();
 }

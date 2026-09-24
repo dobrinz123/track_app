@@ -11,7 +11,7 @@ const char *const CONSOLE_HELP_TEXT =
     "  gnss raw on|off           print every UBX frame received (class/id/len + hex)\n"
     "  gnss sat                  last UBX-NAV-SAT: C/N0 per satellite\n"
     "  gnss reset                pulse RESET_N (GPIO40) low 10 ms, then reconfigure\n"
-    "  gnss bridge               transparent USB<->GNSS UART bridge for u-center;\n"
+    "  gnss bridge               USB<->GNSS UART bridge for u-center (OTP-writing frames blocked);\n"
     "                            press BOOT (after boot) or power-cycle to leave\n"
     "  gnss otp-status           poll the high-performance OTP state (IM 2.1.5 step 5)\n"
     "  gnss otp-highperf         preflight for the IRREVERSIBLE OTP write\n"

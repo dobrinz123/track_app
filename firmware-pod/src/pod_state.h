@@ -23,6 +23,7 @@ struct GnssState {
   bool init_failed = false;
   uint32_t baud = 0;
   gnss_rate_mode_t rate = GNSS_RATE_10HZ_GPS_GAL;
+  bool rate_verified = false; /* receiver readback matched `rate` (review fix MEDIUM 9) */
   hp_state_t hp = HP_STATE_UNKNOWN;
   int64_t last_frame_us = 0;
   int64_t last_pvt_us = 0;

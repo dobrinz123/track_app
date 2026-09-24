@@ -11,6 +11,7 @@
 
 bool gnss_init();    /* autobaud, RAM-layer config, HP-OTP state poll */
 void gnss_service(); /* read UART, parse, dispatch; bridge mode */
+void gnss_tick();    /* housekeeping every loop pass (OTP authorisation expiry) */
 
 /* Returns a POD_RES_* code (pod_protocol.h). */
 uint8_t gnss_set_rate(int hz);
@@ -38,5 +39,7 @@ uint32_t gnss_ubx_errors();
 
 typedef void (*gnss_sat_listener_t)(const ubx_nav_sat_t *sat);
 void gnss_set_sat_listener(gnss_sat_listener_t fn);
+typedef void (*gnss_pvt_listener_t)(const ubx_nav_pvt_t *pvt);
+void gnss_set_pvt_listener(gnss_pvt_listener_t fn);
 
 #endif

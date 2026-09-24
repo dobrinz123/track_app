@@ -281,6 +281,31 @@ void test_valget_find(void) {
   TEST_ASSERT_FALSE(ubx_valget_find(pl, sizeof pl, 0x40A40002u, &v));
 }
 
+void test_valget_parse_strict(void) {
+  const uint32_t keys[2] = {0x30210001u, 0x10310021u};
+  uint64_t v[2];
+  /* version 1, layer 0, position 0, then U2 = 100 and L = 1 */
+  const uint8_t ok[] = {0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x21, 0x30, 0x64, 0x00,
+                        0x21, 0x00, 0x31, 0x10, 0x01};
+  TEST_ASSERT_TRUE(ubx_valget_parse_strict(ok, sizeof ok, 0, keys, 2, v));
+  TEST_ASSERT_EQUAL_UINT64(100, v[0]);
+  TEST_ASSERT_EQUAL_UINT64(1, v[1]);
+  TEST_ASSERT_FALSE(ubx_valget_parse_strict(ok, sizeof ok, 1, keys, 2, v));     /* layer */
+  TEST_ASSERT_FALSE(ubx_valget_parse_strict(ok, sizeof ok - 1, 0, keys, 2, v)); /* truncated */
+  TEST_ASSERT_FALSE(ubx_valget_parse_strict(ok, 10, 0, keys, 2, v));            /* missing */
+  TEST_ASSERT_FALSE(ubx_valget_parse_strict(ok, sizeof ok, 0, keys, 1, v));     /* extra */
+  uint8_t bad[sizeof ok];
+  memcpy(bad, ok, sizeof ok);
+  bad[0] = 0x00;
+  TEST_ASSERT_FALSE(ubx_valget_parse_strict(bad, sizeof bad, 0, keys, 2, v)); /* version */
+  memcpy(bad, ok, sizeof ok);
+  bad[3] = 0x01;
+  TEST_ASSERT_FALSE(ubx_valget_parse_strict(bad, sizeof bad, 0, keys, 2, v)); /* position */
+  const uint8_t dup[] = {0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x21, 0x30, 0x64, 0x00,
+                         0x01, 0x00, 0x21, 0x30, 0x64, 0x00};
+  TEST_ASSERT_FALSE(ubx_valget_parse_strict(dup, sizeof dup, 0, keys, 2, v)); /* duplicate */
+}
+
 void test_cfg_rst_frame(void) {
   uint8_t out[16];
   size_t n = ubx_cfg_rst_frame(UBX_RST_BBR_HOT, UBX_RST_MODE_HW_WATCHDOG_NOW, out, sizeof out);
@@ -321,6 +346,7 @@ int main(void) {
   RUN_TEST(test_key_sizes_from_key_id);
   RUN_TEST(test_valset_layout_and_value_range);
   RUN_TEST(test_valget_find);
+  RUN_TEST(test_valget_parse_strict);
   RUN_TEST(test_cfg_rst_frame);
   RUN_TEST(test_decode_ack);
   return UNITY_END();

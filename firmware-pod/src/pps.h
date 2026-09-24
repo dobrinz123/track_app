@@ -10,6 +10,5 @@ void pps_init();
 void pps_service();
 uint32_t pps_isr_count();
 uint32_t pps_overflow_count();
-int64_t pps_last_edge_us();
 
 #endif

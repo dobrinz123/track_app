@@ -1,6 +1,8 @@
 #include "imu.h"
 
 #include <Arduino.h>
+
+#include "console_io.h"
 #include <Wire.h>
 #include <esp_timer.h>
 #include <string.h>
@@ -8,6 +10,7 @@
 #include "ble_link.h"
 #include "board_pins.h"
 #include "clockmap.h"
+#include "isr_gpio.h"
 #include "imu_fifo.h"
 #include "lsm6dsv16x_regs.h"
 #include "pod_protocol.h"
@@ -36,7 +39,7 @@ static pod_imu_batch_t s_batch;
 static int64_t s_batch_t0 = 0;
 static int64_t s_batch_started_us = 0;
 
-static void IRAM_ATTR imu_isr() {
+static void IRAM_ATTR imu_isr(void *) {
   s_int_flag = true;
   s_int_count++;
 }
@@ -71,7 +74,7 @@ bool imu_init() {
   Wire.setTimeOut(10);
   uint8_t who = 0;
   if (!rd(LSM_REG_WHO_AM_I, &who, 1) || who != LSM_WHO_AM_I_VALUE) {
-    Serial.printf("[imu] WHO_AM_I = 0x%02X (expected 0x70): LSM6DSV16X not found at 0x6A\n", who);
+    con_printf("[imu] WHO_AM_I = 0x%02X (expected 0x70): LSM6DSV16X not found at 0x6A\n", who);
     g_pod.imu_ok = false;
     return false;
   }
@@ -107,10 +110,12 @@ bool imu_init() {
   imu_decim_init(&s_decim, g_pod.imu_decim);
   memset(&s_batch, 0, sizeof s_batch);
 
-  pinMode(PIN_IMU_INT1, INPUT); /* push-pull, active-high INT1 (IF_CFG = 0x00) */
-  attachInterrupt(digitalPinToInterrupt(PIN_IMU_INT1), imu_isr, RISING);
+  /* push-pull, active-high INT1 (IF_CFG = 0x00); IRAM-safe ISR service
+   * (isr_gpio.h). The 20 ms poll in imu_service() covers a missed edge. */
+  if (!isr_gpio_attach_rising(PIN_IMU_INT1, imu_isr, nullptr))
+    con_println("[imu] INT1 interrupt setup failed: polling every 20 ms only");
   g_pod.imu_ok = ok;
-  Serial.printf("[imu] LSM6DSV16X ok=%d, FREQ_FINE %d -> %.4f us/tick\n", ok, s_freq_fine,
+  con_printf("[imu] LSM6DSV16X ok=%d, FREQ_FINE %d -> %.4f us/tick\n", ok, s_freq_fine,
                 lsm6dsv16x_ts_us_per_tick(s_freq_fine));
   return ok;
 }
@@ -139,7 +144,7 @@ static void flush_batch() {
 static void on_output_sample(const imu_sample_t *s) {
   if (s_dump_remaining > 0) {
     s_dump_remaining--;
-    Serial.printf("imu t=%lld us  acc[g] %+.4f %+.4f %+.4f  gyr[dps] %+8.3f %+8.3f %+8.3f\n",
+    con_printf("imu t=%lld us  acc[g] %+.4f %+.4f %+.4f  gyr[dps] %+8.3f %+8.3f %+8.3f\n",
                   (long long)s->pod_us, s->acc[0] * LSM_ACC_G_PER_LSB_16G,
                   s->acc[1] * LSM_ACC_G_PER_LSB_16G, s->acc[2] * LSM_ACC_G_PER_LSB_16G,
                   s->gyr[0] * LSM_GYR_DPS_PER_LSB_2000, s->gyr[1] * LSM_GYR_DPS_PER_LSB_2000,
@@ -216,18 +221,18 @@ void imu_service() {
 void imu_print_status() {
   uint8_t regs[2] = {0};
   rd(LSM_REG_FIFO_STATUS1, regs, 2);
-  Serial.printf("imu: %s, 480 Hz, ±16 g / ±2000 dps, decim %u -> %u Hz, INT1 %lu, overruns %lu, "
+  con_printf("imu: %s, 480 Hz, ±16 g / ±2000 dps, decim %u -> %u Hz, INT1 %lu, overruns %lu, "
                 "i2c err %lu\n",
                 g_pod.imu_ok ? "ok" : "NOT OK", g_pod.imu_decim,
                 480u / (g_pod.imu_decim ? g_pod.imu_decim : 1), (unsigned long)s_int_count,
                 (unsigned long)s_overruns, (unsigned long)s_i2c_errors);
-  Serial.printf("     fifo words %lu, samples %lu, ts %lu, drop(unanchored %lu, incomplete %lu), "
+  con_printf("     fifo words %lu, samples %lu, ts %lu, drop(unanchored %lu, incomplete %lu), "
                 "slot skips %lu, fifo level %u, status2 0x%02X\n",
                 (unsigned long)s_dec.words, (unsigned long)s_dec.samples,
                 (unsigned long)s_dec.timestamps, (unsigned long)s_dec.dropped_unanchored,
                 (unsigned long)s_dec.dropped_incomplete, (unsigned long)s_dec.slot_skips,
                 (unsigned)(regs[0] | ((regs[1] & 1) << 8)), regs[1]);
-  Serial.printf("     clock map: %.5f us/tick (nominal %.5f), pairs %lu, resets %lu\n",
+  con_printf("     clock map: %.5f us/tick (nominal %.5f), pairs %lu, resets %lu\n",
                 s_map.us_per_tick, s_map.nominal_us_per_tick, (unsigned long)s_map.pairs,
                 (unsigned long)s_map.resets);
 }

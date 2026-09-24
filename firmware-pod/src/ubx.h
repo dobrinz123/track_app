@@ -141,6 +141,17 @@ size_t ubx_valget_poll_frame(uint8_t layer, const uint32_t *keys, size_t nkeys,
  * Returns true and writes *value if found. */
 bool ubx_valget_find(const uint8_t *payload, uint16_t len, uint32_t key, uint64_t *value);
 
+/* STRICT validation of a UBX-CFG-VALGET response payload against the poll
+ * that produced it ([IFD] 3.10.4.2): version == 0x01, layer == the polled
+ * layer, position == 0, the payload is exactly a sequence of key/value
+ * pairs (value size from the key-ID size bits, no trailing bytes), every
+ * key in keys[] appears EXACTLY ONCE, and no other key appears.
+ * On success writes values[i] for keys[i] and returns true; any deviation
+ * (truncation, extra/duplicate/missing key, wrong layer/version/position,
+ * nkeys > 64) returns false. */
+bool ubx_valget_parse_strict(const uint8_t *payload, uint16_t len, uint8_t layer,
+                             const uint32_t *keys, size_t nkeys, uint64_t *values);
+
 /* UBX-CFG-RST ([IFD] 3.10.2): navBbrMask X2, resetMode U1, reserved0 U1. */
 size_t ubx_cfg_rst_frame(uint16_t nav_bbr_mask, uint8_t reset_mode, uint8_t *out, size_t cap);
 

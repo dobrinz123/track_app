@@ -105,6 +105,23 @@ size_t gnss_cfg_build_signals(gnss_rate_mode_t mode, uint8_t *out, size_t cap);
  * ~1 Hz whatever the nav rate). */
 size_t gnss_cfg_build_rate(gnss_rate_mode_t mode, uint8_t *out, size_t cap);
 
+/* ---- atomic mode change (review fix MEDIUM 9) ----
+ * One mode = constellation/signal keys + CFG-RATE-* + NAV-SAT divider, sent
+ * as ONE transactionless VALSET: [IFD] 3.10.5.1 "This message returns a
+ * UBX-ACK-NAK and no configuration is applied" on any error, so the receiver
+ * either takes the whole mode or none of it. The firmware then reads the
+ * same keys back from the RAM layer (VALGET) and only reports the mode when
+ * the readback matches exactly. */
+#define GNSS_MODE_MAX_ITEMS 16
+/* Key/value list of a mode; returns the number of items (0 if invalid). */
+size_t gnss_cfg_mode_items(gnss_rate_mode_t mode, uint32_t *keys, uint64_t *vals, size_t cap);
+/* The single VALSET (RAM layer) carrying the whole mode. */
+size_t gnss_cfg_build_mode(gnss_rate_mode_t mode, uint8_t *out, size_t cap);
+/* VALGET poll (RAM layer, position 0) for exactly the mode's keys. */
+size_t gnss_cfg_build_mode_poll(gnss_rate_mode_t mode, uint8_t *out, size_t cap);
+/* Strict readback check of the VALGET reply payload for that poll. */
+bool gnss_cfg_verify_mode(const uint8_t *payload, uint16_t len, gnss_rate_mode_t mode);
+
 #ifdef __cplusplus
 }
 #endif

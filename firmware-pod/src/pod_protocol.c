@@ -296,7 +296,7 @@ pod_dec_result_t pod_decode_status(const pod_frame_t *f, pod_status_t *s) {
 
 pod_dec_result_t pod_decode_control(const pod_frame_t *f, pod_control_t *c) {
   if (f->type != POD_TYPE_CONTROL) return POD_DEC_BAD_TYPE;
-  if (f->len < 1 || f->len - 1 > sizeof(c->args)) return POD_DEC_BAD_PAYLOAD;
+  if (f->len < 1 || (size_t)(f->len - 1) > sizeof(c->args)) return POD_DEC_BAD_PAYLOAD;
   c->seq = f->seq;
   c->opcode = f->payload[0];
   c->arg_len = (uint8_t)(f->len - 1);
