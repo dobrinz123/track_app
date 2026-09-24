@@ -85,7 +85,7 @@ towards the phone at the same time. Alternatives considered:
 | **Pod is hub** | One clock, one pairing, pod logs even if phone sleeps, can also bridge WiFi adapters | Pod firmware speaks ELM327 | **Chosen** |
 | GNSS inside OBD dongle | One device | §2: no sky, no rigid mount | Rejected |
 
-**The MHD WiFi bridge is a rev A requirement.** The owner's car (Supra B58)
+**Owner decision 2026-09-24: the product will NOT use the MHD adapter.** The MHD WiFi bridge below is therefore a development convenience for the owner's own car only, not a product requirement; WiFi can stay off in product firmware (which also lowers the GNSS coexistence risk, DESIGN-REV-A §10A test 4). For rev B, weigh a BLE-only MCU (e.g. nRF52840) against the ESP32-S3 for battery life once rev A power is measured. Original rev-A note, kept for history: **The MHD WiFi bridge is a rev A requirement.** The owner's car (Supra B58)
 runs on the MHD WiFi adapter today (ENET/HSFZ, already supported by the app;
 the brake switch 0x29/0x500C and brake pressure 0x12/0x58B7 were found through
 it). Today the iPhone has to join the MHD WiFi and loses internet. With the
