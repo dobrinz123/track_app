@@ -393,8 +393,21 @@ async function defaultAccelerometerSource(): Promise<AccelerometerSource> {
 
 /**
  * Ticket P6a-FIX2 H1: the platform's accelerometer sign convention, loaded on
- * exactly the same terms as the sensors above -- a LAZY `import('react-native')`
- * inside `start()`, never a module-level import.
+ * exactly the same terms as the sensors above -- a LAZY import inside
+ * `start()`, never a module-level import.
+ *
+ * BUILD-14 CRASH (2026-09-24): IT MUST NEVER BE `import('react-native')`. A
+ * dynamic import of a CommonJS package becomes Metro's `importAll`, which
+ * copies EVERY enumerable export -- and React Native's index exports ~100 lazy
+ * getters, each `require`-ing a module the app may never have loaded. Metro
+ * loads a module the first time through `guardedLoadModule`, and a module
+ * that throws while loading goes straight to `ErrorUtils.reportFatalError`,
+ * NOT to the `catch` below: on the iOS release build that was a SIGABRT
+ * (`RCTExceptionsManager reportFatal`) the moment the gyroscope started,
+ * i.e. on "Start Calibration" whenever gyro capture or IMU fusion was on.
+ * `Platform` is read from `expo-modules-core` instead: an ES module (Metro
+ * returns its exports as-is, no getter walk) that `expo-sensors` has already
+ * loaded by the time this runs, so no module is initialised here at all.
  *
  * It has to be lazy for the same reason `expo-sensors` does, and for one more:
  * `composition.ts` imports this module and is itself imported directly by
@@ -419,7 +432,7 @@ async function defaultAccelerometerSource(): Promise<AccelerometerSource> {
  */
 async function defaultAccelerometerRestVector(): Promise<AccelerometerRestVector | null> {
   try {
-    const { Platform } = (await import('react-native')) as { Platform?: { OS?: string } };
+    const { Platform } = (await import('expo-modules-core')) as { Platform?: { OS?: string } };
     if (typeof Platform?.OS !== 'string') return null;
     return Platform.OS === 'android'
       ? ANDROID_ACCELEROMETER_REST_VECTOR
