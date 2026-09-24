@@ -29,6 +29,11 @@ int cn0_epoch_top8_median_x10(const ubx_nav_sat_t *sat);
 /* Number of SVs flagged svUsed. */
 int cn0_epoch_used(const ubx_nav_sat_t *sat);
 
+/* Per-phase record. Availability is TEMPORAL (review PODFW-REV2 M3):
+ * every NAV-SAT / NAV-PVT is put into a one-second bucket of GNSS time
+ * (floor(iTOW / 1000) relative to the phase start), so arrival jitter cannot
+ * move a message into the wrong second and a silent stretch shows up as
+ * empty seconds, whatever the total message count. */
 typedef struct {
   int16_t med_x10[CN0_MAX_EPOCHS];
   uint8_t used[CN0_MAX_EPOCHS];
@@ -37,39 +42,67 @@ typedef struct {
   uint32_t sat_epochs; /* all NAV-SAT epochs received in the phase */
   uint32_t pvt_epochs; /* all NAV-PVT epochs received in the phase */
   uint32_t pvt_fix_ok; /* of which gnssFixOK with a 3-D (or GNSS+DR) fix */
+  /* temporal buckets */
+  uint32_t start_ms;   /* local time the phase started */
+  uint16_t seconds;    /* phase length = number of buckets */
+  uint8_t rate_hz;     /* configured NAV-PVT rate (expected PVTs per second) */
+  bool have_base;
+  uint32_t base_sec;   /* GPS second (iTOW/1000) of bucket 0 */
+  uint32_t outside;    /* messages that fell outside the window */
+  uint32_t win_start;  /* GNSS ms of the phase start (iTOW domain) */
+  int64_t last_pvt_rel; /* ms into the window of the last valid-fix PVT, -1 none */
+  int64_t last_sat_rel; /* ms into the window of the last NAV-SAT with >= 8 SVs */
+  uint32_t max_gap_ms;  /* longest interval between them, minus the nominal period */
+  uint8_t b_sat_ok[CN0_MAX_EPOCHS]; /* NAV-SAT epochs with >= 8 SVs in the second */
+  uint8_t b_pvt_fix[CN0_MAX_EPOCHS]; /* valid-fix NAV-PVTs in the second */
 } cn0_phase_t;
 
-void cn0_phase_init(cn0_phase_t *p);
-void cn0_phase_add(cn0_phase_t *p, const ubx_nav_sat_t *sat);
-void cn0_phase_add_pvt(cn0_phase_t *p, bool fix_ok);
+/* Start a phase: seconds (<= CN0_MAX_EPOCHS) long, starting at local time
+ * start_ms, with NAV-PVT expected at rate_hz. */
+void cn0_phase_begin(cn0_phase_t *p, uint32_t start_ms, uint16_t seconds, uint8_t rate_hz);
+/* t_ms = local arrival time (used once, to align GNSS seconds to the phase). */
+void cn0_phase_add(cn0_phase_t *p, const ubx_nav_sat_t *sat, uint32_t t_ms);
+void cn0_phase_add_pvt(cn0_phase_t *p, bool fix_ok, uint32_t itow_ms, uint32_t t_ms);
 /* Median over epochs; returns false if no epoch was recorded. */
 bool cn0_phase_result(const cn0_phase_t *p, int *median_cn0_x10, int *median_used);
+
+/* Temporal availability of a phase. A second is GOOD when it holds >= 1
+ * NAV-SAT epoch with >= 8 satellites AND >= 90 % of the expected NAV-PVTs
+ * (ceil(0.9 * rate_hz)) with a valid fix. The first and the last bucket are
+ * partial (the phase does not start on a GPS second) and are not judged. */
+typedef struct {
+  uint32_t judged;      /* seconds judged (seconds - 2) */
+  uint32_t good;        /* good seconds */
+  uint32_t pct_x10;     /* good / judged, in 0.1 % */
+  uint32_t longest_gap_ms; /* longest time without a valid-fix NAV-PVT or without a
+                              NAV-SAT with >= 8 SVs, beyond the nominal period,
+                              including both window edges */
+} cn0_avail_t;
+void cn0_phase_availability(const cn0_phase_t *p, cn0_avail_t *a);
 
 /* C/N0 part of the §10A test 4 criterion: drop <= 2.0 dB and the used-SV
  * median does not drop. */
 bool cn0_test4_pass(int off_cn0_x10, int on_cn0_x10, int off_used, int on_used);
 
-/* Whole-test verdict (review fix MEDIUM 6). A PASS needs ALL of:
- *  - TX actually ran: every setup call succeeded, >= CN0_MIN_TX_FPS
- *    successful frames per second on average, and no whole second of the
- *    TX phase without a successful frame;
- *  - availability over the WHOLE window in both phases: NAV-SAT epochs
- *    >= 90 % of the seconds, epochs with >= 8 satellites >= 90 % of those,
- *    NAV-PVT epochs >= 90 % of the seconds and >= 99 % of them with a valid
- *    fix (gnssFixOK, fixType 3 or 4);
- *  - the C/N0 criterion (cn0_test4_pass).
- * If the TX-OFF baseline itself misses the availability bars the sky is not
- * good enough to judge: INCONCLUSIVE. TX failures or TX-ON availability
- * failures are FAIL. */
+/* Whole-test verdict. A PASS needs ALL of:
+ *  - TX really ran: every setup call succeeded, >= CN0_MIN_TX_FPS successful
+ *    frames per second on average, no whole second without a frame, and the
+ *    radio was verifiably switched off again (shutdown_ok);
+ *  - TX-OFF baseline: availability >= CN0_MIN_AVAIL_PCT and no gap longer
+ *    than CN0_MAX_GAP_S (else the sky is not good enough: INCONCLUSIVE);
+ *  - TX-ON: no gap longer than CN0_MAX_GAP_S and availability >= baseline
+ *    availability - CN0_AVAIL_TOL_PCT (else FAIL);
+ *  - the C/N0 criterion (cn0_test4_pass). */
 #define CN0_MIN_TX_FPS 30
-#define CN0_MIN_COVERAGE_PCT 90
-#define CN0_MIN_GE8_PCT 90
-#define CN0_MIN_FIX_PCT 99
+#define CN0_MIN_AVAIL_PCT 90
+#define CN0_AVAIL_TOL_PCT 2
+#define CN0_MAX_GAP_MS 2000
 typedef enum { CN0_PASS = 0, CN0_FAIL = 1, CN0_INCONCLUSIVE = 2 } cn0_verdict_t;
 typedef struct {
   bool setup_ok;
   uint32_t frames;       /* successful esp_wifi_80211_tx calls in the TX phase */
   uint32_t idle_seconds; /* seconds of the TX phase with zero successful frames */
+  bool shutdown_ok;      /* WiFi.mode(WIFI_OFF) succeeded and the TX task stopped */
 } cn0_tx_info_t;
 cn0_verdict_t cn0_test4_verdict(const cn0_phase_t *off, const cn0_phase_t *on, uint32_t seconds,
                                 const cn0_tx_info_t *tx, const char **reason);

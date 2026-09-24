@@ -22,6 +22,9 @@
 void ble_link_init();
 /* Process queued CONTROL writes, 1 Hz STATUS. Call from the main loop. */
 void ble_link_service();
+/* Refresh the INFO snapshot if it is >= 100 ms old (loop task; also called
+ * from pod_yield() during blocking waits). */
+void ble_link_publish_if_due();
 
 bool ble_link_connected();
 uint16_t ble_link_mtu();

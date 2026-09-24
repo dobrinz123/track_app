@@ -114,12 +114,12 @@ console_parsed_t console_parse_line(char *line) {
   if (eq(tok[0], "wifi")) {
     if (n >= 3 && eq(tok[1], "tx-test")) {
       int s;
-      if (!parse_int(tok[2], &s) || s < 10 || s > 1800)
-        return err("usage: wifi tx-test <10..1800 seconds> [max]");
+      if (!parse_int(tok[2], &s) || s < 10 || s > 1200)
+        return err("usage: wifi tx-test <10..1200 seconds> [max]");
       if (n == 3) return ok(CMD_WIFI_TX_TEST, s, false);
       if (n == 4 && eq(tok[3], "max")) return ok(CMD_WIFI_TX_TEST, s, true);
     }
-    return err("usage: wifi tx-test <10..1800 seconds> [max]");
+    return err("usage: wifi tx-test <10..1200 seconds> [max]");
   }
 
   return err("unknown command (try: help)");

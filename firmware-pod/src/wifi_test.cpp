@@ -41,14 +41,16 @@ static const char *s_setup_error = "";
 static bool s_in_service = false; /* reentrancy guard (called from pod_yield too) */
 
 static void on_sat(const ubx_nav_sat_t *sat) {
-  if (s_phase == OFF_PHASE) cn0_phase_add(&s_off, sat);
-  if (s_phase == ON_PHASE) cn0_phase_add(&s_on, sat);
+  uint32_t t = millis();
+  if (s_phase == OFF_PHASE) cn0_phase_add(&s_off, sat, t);
+  if (s_phase == ON_PHASE) cn0_phase_add(&s_on, sat, t);
 }
 
 static void on_pvt(const ubx_nav_pvt_t *p) {
   bool fix = (p->flags & UBX_PVT_FLAGS_GNSS_FIX_OK) && (p->fix_type == 3 || p->fix_type == 4);
-  if (s_phase == OFF_PHASE) cn0_phase_add_pvt(&s_off, fix);
-  if (s_phase == ON_PHASE) cn0_phase_add_pvt(&s_on, fix);
+  uint32_t t = millis();
+  if (s_phase == OFF_PHASE) cn0_phase_add_pvt(&s_off, fix, p->itow_ms, t);
+  if (s_phase == ON_PHASE) cn0_phase_add_pvt(&s_on, fix, p->itow_ms, t);
 }
 
 /* Continuous broadcast non-QoS data frames (allowed by esp_wifi_80211_tx).
@@ -89,13 +91,28 @@ static void fail_setup(const char *what) {
   con_printf("[wifi] SETUP FAILED: %s\n", what);
 }
 
-static void radio_off() {
+/* PODFW-REV2 M4: the shutdown is verified, not assumed. Returns false (and
+ * leaves g_pod.wifi_on = true, so `status`/STATUS keep showing WiFi ON and
+ * a new test is refused) if the TX task did not stop or the driver did not
+ * go to WIFI_OFF. */
+static bool s_shutdown_ok = true;
+
+static bool radio_off() {
   s_tx_run = false;
   for (int i = 0; i < 200 && !s_tx_exited; i++) delay(5);
-  if (!s_tx_exited) con_println("[wifi] WARNING: TX task did not stop within 1 s");
-  WiFi.mode(WIFI_OFF);
-  g_pod.wifi_on = false;
-  con_println("[wifi] radio OFF");
+  bool task_ok = s_tx_exited;
+  bool mode_ok = WiFi.mode(WIFI_OFF) && WiFi.getMode() == WIFI_OFF;
+  if (task_ok && mode_ok) {
+    g_pod.wifi_on = false;
+    con_println("[wifi] radio OFF (TX task stopped, driver WIFI_OFF verified)");
+    return true;
+  }
+  g_pod.wifi_on = true; /* state unknown: keep reporting it as on */
+  s_shutdown_ok = false;
+  con_printf("[wifi] WARNING: shutdown NOT verified (TX task stopped: %s, WIFI_OFF: %s). "
+             "Radio state unknown; `reset` the pod before any further test.\n",
+             task_ok ? "yes" : "NO", mode_ok ? "yes" : "NO");
+  return false;
 }
 
 /* Every call checked (review fix MEDIUM 6). Returns false and leaves the
@@ -108,6 +125,8 @@ static bool radio_on() {
   }
   if (!WiFi.mode(WIFI_STA)) { /* starts the driver; no association */
     fail_setup("WiFi.mode(WIFI_STA)");
+    g_pod.wifi_on = true; /* possibly half-started: verify the shutdown */
+    radio_off();
     return false;
   }
   g_pod.wifi_on = true;
@@ -162,14 +181,23 @@ void wifi_test_start(int seconds, bool max_power) {
     con_println("REFUSED: GNSS not communicating (the test needs NAV-SAT / NAV-PVT)");
     return;
   }
+  if (g_pod.wifi_on) {
+    con_println("REFUSED: WiFi is (or may still be) on after an unverified shutdown; `reset` first");
+    return;
+  }
+  if (!g_pod.gnss.rate_verified) {
+    con_println("REFUSED: GNSS rate unverified; the availability check needs the real rate");
+    return;
+  }
   s_seconds = (uint32_t)seconds;
   s_max = max_power;
   s_setup_ok = false;
   s_setup_error = "";
   s_idle_seconds = 0;
   s_frames = 0;
-  cn0_phase_init(&s_off);
-  cn0_phase_init(&s_on);
+  s_shutdown_ok = true;
+  cn0_phase_begin(&s_off, millis(), (uint16_t)s_seconds, (uint8_t)g_pod.gnss.rate);
+  cn0_phase_begin(&s_on, millis(), (uint16_t)s_seconds, (uint8_t)g_pod.gnss.rate);
   gnss_set_sat_listener(on_sat);
   gnss_set_pvt_listener(on_pvt);
   s_phase = OFF_PHASE;
@@ -189,7 +217,7 @@ static void report() {
   int off_c = 0, off_u = 0, on_c = 0, on_u = 0;
   bool a = cn0_phase_result(&s_off, &off_c, &off_u);
   bool b = cn0_phase_result(&s_on, &on_c, &on_u);
-  cn0_tx_info_t tx = {s_setup_ok, s_frames, s_idle_seconds};
+  cn0_tx_info_t tx = {s_setup_ok, s_frames, s_idle_seconds, s_shutdown_ok};
   const char *why = "";
   cn0_verdict_t v = cn0_test4_verdict(&s_off, &s_on, s_seconds, &tx, &why);
   con_println("=========== WiFi TX vs GNSS C/N0 (DESIGN-REV-A 10A test 4) ===========");
@@ -207,6 +235,17 @@ static void report() {
              (unsigned long)s_frames, (unsigned long)(CN0_MIN_TX_FPS * s_seconds),
              (unsigned long)s_idle_seconds, (unsigned long)s_nomem, s_max ? "20 dBm" : "13 dBm");
   if (a && b) con_printf("C/N0 drop %.1f dB (limit 2.0)\n", (off_c - on_c) / 10.0);
+  cn0_avail_t aoff, aon;
+  cn0_phase_availability(&s_off, &aoff);
+  cn0_phase_availability(&s_on, &aon);
+  con_printf("availability (GNSS seconds with >=8 SVs and >=90%% of the %u Hz fixes):\n",
+             (unsigned)s_on.rate_hz);
+  con_printf("  OFF %.1f %% (longest gap %.1f s), ON %.1f %% (longest gap %.1f s)\n",
+             aoff.pct_x10 / 10.0, aoff.longest_gap_ms / 1000.0, aon.pct_x10 / 10.0,
+             aon.longest_gap_ms / 1000.0);
+  con_printf("  limits: ON >= OFF - %d %%, no gap > %.1f s, OFF >= %d %%\n", CN0_AVAIL_TOL_PCT,
+             CN0_MAX_GAP_MS / 1000.0, CN0_MIN_AVAIL_PCT);
+  con_printf("WiFi shutdown: %s\n", s_shutdown_ok ? "verified" : "NOT VERIFIED");
   con_printf("VERDICT: %s (%s)\n",
              v == CN0_PASS ? "PASS" : (v == CN0_FAIL ? "FAIL" : "INCONCLUSIVE"), why);
   con_println("=====================================================================");
@@ -243,6 +282,7 @@ void wifi_test_service() {
       } else {
         s_phase = ON_PHASE;
         s_phase_start_ms = millis();
+        cn0_phase_begin(&s_on, s_phase_start_ms, (uint16_t)s_seconds, (uint8_t)g_pod.gnss.rate);
         s_phase_end_ms = s_phase_start_ms + s_seconds * 1000;
         s_sec_mark_ms = s_phase_start_ms;
         s_sec_mark_frames = s_frames;

@@ -83,8 +83,8 @@ pio run  -e pod         # cross-compile the firmware
 
 Results on 2026-09-24:
 
-- `pio test -e native`: **97 test cases: 97 succeeded** (after the Codex POD-FW REV1 fix wave and the wire-guard wave).
-- `pio run -e pod`: SUCCESS with 0 warnings (-Wall -Wextra). RAM 20.0 % (65,520 B), flash 28.2 % (941,237 B of the 3.3 MB app slot).
+- `pio test -e native`: **99 test cases: 99 succeeded** (after the Codex PODFW-REV1/REV2 fix waves and the wire-guard wave).
+- `pio run -e pod`: SUCCESS with 0 warnings (-Wall -Wextra). RAM 21.5 % (70,440 B), flash 28.2 % (943,425 B of the 3.3 MB app slot).
 
 ### Board definition (checked)
 
@@ -150,7 +150,7 @@ Type `help` for the full list. All commands:
 | `imu dump [n]` | IMU status, then n decoded samples in g and deg/s, with pod timestamps. |
 | `pps` | Timebase state, edge count, rejects, rate (ppb), current UTC. |
 | `ble info` | Address, connection, MTU, PHY, streams, sequence, drops. |
-| `wifi tx-test <s> [max]` | §10A test 4: s seconds with WiFi off, then s seconds of continuous TX at 13 dBm, then a C/N0 verdict. With `max`: 20 dBm (the load for §10A test 2). WiFi is turned off again afterwards. |
+| `wifi tx-test <s> [max]` | §10A test 4: s seconds (10–1200) with WiFi off, then s seconds of continuous TX at 13 dBm, then a C/N0 and availability verdict. With `max`: 20 dBm (the load for §10A test 2). WiFi is then turned off and the shutdown is verified. If it cannot be verified, WiFi stays reported ON and further tests are refused until `reset`. |
 | `reset` | Restarts the MCU. |
 
 WiFi is otherwise **never** started. The product does not use the MHD adapter
@@ -202,6 +202,26 @@ spin forever on a host that is connected but not reading (details in `console_io
 
   The native test `test_tx_guard/test_raw_writer_and_uart_writes_are_confined`
   runs the same checks, so the build is red if another caller appears.
+
+**OTP protection: what remains assumed (honest note, Codex PODFW-REV2)**
+
+- The wire guard's history holds the bytes the firmware *handed* to the
+  UART, not bytes verified on the pin. The installed arduino-esp32 2.0.17
+  `HardwareSerial::write` returns the requested size unconditionally (the
+  driver result is discarded in `esp32-hal-uart.c`). With the default
+  zero-size TX buffer, the IDF driver queues the whole request in order, so
+  no short-write path exists in normal operation.
+- The guarantee therefore assumes successful, ordered writes. It is not
+  proven against injected partial or failed writes, an MCU reset in the
+  middle of a frame, or bytes lost at the receiver. Those would need
+  explicit failure handling and hardware validation.
+- "All four keys differ" as the sign of a virgin module is **our**
+  heuristic. u-blox documents only the positive (SET) verification reply,
+  not a virgin-state or free-OTP-space test.
+- The VALGET capture correlates a reply with our poll by structure (first
+  reply while the poll is outstanding). It does not prove the reply is
+  fresh: an older matching reply already in the UART buffer would be
+  accepted.
 - The bytes are quoted verbatim from u-blox SAM-M10Q Integration manual
   UBX-22020019 R02, §2.1.5, Table 3. The tests check their UBX checksums.
 
@@ -292,16 +312,29 @@ CHG_CE by hand with the MCU unpowered) is an owner decision. It is left open
    - the NAV-SAT and NAV-PVT epoch counts and valid-fix count;
    - the TX frame count.
 
+   Availability is **temporal**. Every NAV-SAT and NAV-PVT goes into a
+   one-second bucket of GNSS time (iTOW). A second is *good* when it has a
+   NAV-SAT with ≥ 8 satellites and ≥ 90 % of the expected valid-fix NAV-PVTs
+   at the configured rate (9 of 10, 18 of 20, 23 of 25). The first and last,
+   partial, seconds are not judged.
+
+   The *longest gap* is the longest time without a valid-fix NAV-PVT, or
+   without a NAV-SAT with ≥ 8 satellites, beyond their nominal period. It
+   includes both window edges.
+
    The verdict is **PASS** only if all of these hold:
    - every WiFi setup call succeeded, with channel and TX power read back;
    - at least 30 successful frames/s on average, and no second without a frame;
-   - in both phases, NAV-SAT and NAV-PVT arrived for ≥ 90 % of the seconds;
-   - ≥ 90 % of the NAV-SAT epochs had ≥ 8 satellites;
-   - ≥ 99 % of the PVT epochs had a valid 3-D fix;
+   - the radio was verifiably switched off afterwards (TX task stopped,
+     `WIFI_OFF` read back);
+   - TX-OFF baseline: availability ≥ 90 % and no gap longer than 2 s (else
+     **INCONCLUSIVE**: the sky is not good enough to judge);
+   - TX-ON: no gap longer than 2 s, and availability ≥ baseline − 2 %;
    - C/N0 dropped ≤ 2.0 dB and the used-SV median did not drop.
 
-   The result is INCONCLUSIVE if the TX-off baseline itself misses the
-   availability bars. GNSS rate changes are refused while the test runs.
+   The report prints both phases' availability and longest gap. GNSS rate
+   changes are refused while the test runs, and the test is refused when the
+   rate is unverified.
 4. For an independent cross-check, log the same run in u-center through
    `gnss bridge` (then start the TX test on the second board, or after leaving
    the bridge).
@@ -360,9 +393,18 @@ board first)**
   - Control writes are queued from the NimBLE task to the main loop.
   - Each control is tagged with the connection generation. A disconnect clears
     the queue; stale controls are dropped unexecuted.
-  - One control runs per loop pass. A full queue is answered BUSY.
+  - Session state (connected, subscribed, handle, generation) changes only
+    under one spinlock in the BLE callbacks.
+  - The loop re-checks "current generation == the control's generation and
+    connected" from one locked snapshot immediately before executing.
+  - Every frame is sent only if the snapshot taken for that send still has
+    the frame's generation. Results carry the control's generation; streams
+    carry the adopted one.
+  - One item runs per loop pass. The control and BUSY-overflow queues are
+    served round-robin (`ctrl_sched.h`).
   - All pod state is owned by the loop task. INFO reads return a snapshot
-    published under a spinlock every 100 ms.
+    published under a spinlock every 100 ms, also from `pod_yield()` during
+    blocking GNSS operations.
 - **Charger (binding).**
   - `power_early_init()` drives GPIO37 LOW as the first action in `setup()` and
     re-asserts it every second. No code path can set it high.
@@ -380,7 +422,7 @@ board first)**
 | `test_timebase` | Civil→Unix against Python-computed dates; lock and mapping within 2 µs at 20 ppm drift; 0.9 s latency plus missed pulses; a PVT older than the latest edge; glitch rejection; holdover and re-lock; IMU clock map convergence under ±100 µs noise; the FREQ_FINE formula; 32-bit wrap. |
 | `test_imu_fifo` | Tag bit fields; timestamp interpolation over slots; timestamp word before or after data; dropping before the first timestamp; slots split across bursts; incomplete slots; empty and unknown tags; resync after overrun; decimator rounding and time averaging. |
 | `test_pod_protocol` | CRC check value; GNSS golden byte offsets; round trips for GNSS, IMU, STATUS and CONTROL/RESULT; the PROTOCOL.md example frames byte for byte; every single-bit corruption detected; sequence-gap arithmetic; MTU sizing. |
-| `test_misc` | Top-8 median C/N0; the full test-4 verdict (TX never ran, setup failure, too few frames, stalls, outages during TX, < 8 SVs, missing epochs, bad baseline → INCONCLUSIVE, 3 dB drop); console parsing (including the exact `CONFIRM`); power policy inert on rev A and correct with a cell. |
+| `test_misc` | Top-8 median C/N0. Temporal availability on simulated 10/20/25 Hz phases that start mid GPS second: 3 s gap = 3000 ms, touching 4 GNSS seconds; leading and trailing edge gaps. The full test-4 verdict: TX never ran, setup failure, too few frames, stall, unverified shutdown, Codex's "540 good s then 60 s silent", a single 3 s gap (FAIL), a 2 s gap (PASS), many 1 s outages (availability < baseline − 2 %), a 5 s silent tail, < 8 SVs, bad baseline → INCONCLUSIVE, 3 dB drop. Round-robin control scheduling with a permanently full overflow queue. Console parsing (including the exact `CONFIRM`). Power policy inert on rev A and correct with a cell. |
 | `test_bridge_filter` | The exact Table-3 OTP bytes pushed in every chunk size 1..60: nothing forwarded. OTP between allowed traffic; VALSET to an undocumented layer; OTP embedded in an allowed payload; OTP hidden in a corrupt candidate; splice attempt; stray 0xB5; allowed UBX and NMEA pass byte-exact. |
 | `test_tx_guard` | The blind-verifier splices, all rejected at the wire:
   - an allowed valid frame with CK_B = 0xB5 followed by `62 06 41 …`;

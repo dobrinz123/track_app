@@ -31,6 +31,7 @@ void pod_yield() {
   pps_service();
   imu_service();
   wifi_test_service(); /* has its own reentrancy guard */
+  ble_link_publish_if_due(); /* INFO snapshot freshness (PODFW-REV2 L1) */
   leds_service();
 }
 

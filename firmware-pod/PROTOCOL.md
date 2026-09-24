@@ -16,7 +16,7 @@ complement. `f32` is IEEE-754 binary32.
 | Service "TRACE Pod" | `be030001-cb14-41a4-a6af-b14223e0a8cf` | primary, advertised | |
 | DATA | `be030002-cb14-41a4-a6af-b14223e0a8cf` | NOTIFY | one pod→app frame per notification |
 | CONTROL | `be030003-cb14-41a4-a6af-b14223e0a8cf` | WRITE, WRITE WITHOUT RESPONSE | one CONTROL frame per write |
-| INFO | `be030004-cb14-41a4-a6af-b14223e0a8cf` | READ | a STATUS frame (type 0x03) with `seq = 0xFFFF`: a consistent snapshot, at most ~100 ms old |
+| INFO | `be030004-cb14-41a4-a6af-b14223e0a8cf` | READ | a STATUS frame (type 0x03) with `seq = 0xFFFF`: a consistent snapshot, at most ~100 ms old (also refreshed during the pod's blocking GNSS operations) |
 
 Advertising name: `TRACE-Pod-XXXX` (the last two bytes of the BT MAC, in hex).
 The service UUID is in the advertising packet and the name is in the scan response.
@@ -175,10 +175,18 @@ The pod answers every CONTROL with one CONTROL_RESULT, payload 4 bytes. Rules:
   is answered 4 BUSY (resend it later). Only if the pod is flooded beyond a
   second 8-entry overflow queue is a write dropped without any result
   (counted on the console, `ble info`).
-- Controls belong to the connection they were written in. A disconnect
-  discards every queued control. A control whose connection ended while it
-  was executing gets no result, and a SET_STREAMS from it does not survive
-  into a new connection.
+- Accepted controls and BUSY answers are served alternately, so a stream of
+  overflowing writes cannot stop accepted controls from running.
+- Controls belong to the connection they were written in.
+  - A disconnect discards every queued control.
+  - A control runs only if, at the moment of execution, its connection is
+    still the current, connected one.
+  - Its result is sent only on that same connection. A control whose
+    connection ended while it ran gets no result.
+  - A SET_STREAMS never takes effect in a later connection.
+  - The pod-wide effect of a SET_RATE that was already running when the
+    peer left (the receiver's rate) stays in place: it is device state, not
+    session state.
 - Wait for the result of a SET_RATE before sending the next control.
 
 Payload:

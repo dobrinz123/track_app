@@ -30,7 +30,7 @@ typedef enum {
   CMD_IMU_DUMP,           /* int_arg = samples (default 10, 1..200) */
   CMD_PPS,
   CMD_BLE_INFO,
-  CMD_WIFI_TX_TEST,       /* int_arg = seconds (10..1800), flag = "max" power */
+  CMD_WIFI_TX_TEST,       /* int_arg = seconds (10..1200), flag = "max" power */
   CMD_RESET
 } console_cmd_t;
 
