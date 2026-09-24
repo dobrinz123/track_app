@@ -40,6 +40,11 @@ KICAD_CLI = os.path.join(os.environ.get("LOCALAPPDATA", r"C:\Users\dobri\AppData
                          r"Programs\KiCad\10.0\bin\kicad-cli.exe")
 
 # Human-readable comments (value + JLCPCB handling notes)
+# Owner decision 2026-09-24: rev A runs from USB only. The battery connector
+# is NOT fitted on rev A units (the charger cannot guarantee a 45 C cutoff in
+# hardware -- DESIGN-REV-A.md sec 10.4); battery charging is exercised on the
+# bench only, under sec 10A test 3, before any rev B.
+REV_A_DO_NOT_FIT = {"J2": "DO NOT FIT ON REV A - USB-only units (owner decision 2026-09-24, spec sec 2)"}
 HAND_NOTE = "HAND-SOLDER by owner - NOT in CPL (bought loose, spec sec 9)"
 J1_NOTE = ("JLCPCB SMT; 4 shell tabs are plated slots (THT) - JLCPCB to hand/THT-solder "
            "or owner solders them (spec sec 9 item 3)")
@@ -112,6 +117,8 @@ def bom_cpl(board):
         comment = value
         if ref in HAND_SOLDER:
             comment = f"{value} ({HAND_NOTE})"
+            if ref in REV_A_DO_NOT_FIT:
+                comment = f"{value} ({REV_A_DO_NOT_FIT[ref]})"
         elif ref == "J1":
             comment = f"{value} ({J1_NOTE})"
         footprint = str(fp.GetFPID().GetLibItemName())

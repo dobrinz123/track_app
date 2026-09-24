@@ -6,7 +6,7 @@ Comment,Designator,Footprint,LCSC
 10uF 10V X5R 0603,C5,C_0603_1608Metric,C19702
 4.7uF 10V X5R 0402,C9,C_0402_1005Metric,C23733
 TYPE-C-31-M-12 (JLCPCB SMT; 4 shell tabs are plated slots (THT) - JLCPCB to hand/THT-solder or owner solders them (spec sec 9 item 3)),J1,USB_C_Receptacle_HRO_TYPE-C-31-M-12,C165948
-"B3B-PH-K-S(LF)(SN) (HAND-SOLDER by owner - NOT in CPL (bought loose, spec sec 9))",J2,JST_PH_B3B-PH-K_1x03_P2.00mm_Vertical,C131339
+"B3B-PH-K-S(LF)(SN) (DO NOT FIT ON REV A - USB-only units (owner decision 2026-09-24, spec sec 2))",J2,JST_PH_B3B-PH-K_1x03_P2.00mm_Vertical,C131339
 KT-0603Y yellow,LED1,LED_0603_1608Metric,C2287
 KT-0603R red,LED2,LED_0603_1608Metric,C2286
 KT-0603R red CHG,LED3,LED_0603_1608Metric,C2286
