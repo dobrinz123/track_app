@@ -1,0 +1,67 @@
+# TRACE — product truth for marketing. The writer may ONLY claim what is listed here.
+# Keep this file short: it is sent (compacted) with every writer call.
+# Update `launch_status` and `cta` the day the app reaches a store.
+# Coaching facts verified in code 2026-09-24 (settingsStore.ts defaults, suggestions.ts gates, PitViewScreen strings).
+
+product: TRACE
+one_liner:
+  ro: "Antrenor de circuit pentru începători, pe telefon: te ghidează în timp ce conduci, la boxe și după sesiune."
+  en: "A track coach for beginners on your phone: it guides you while you drive, in the pits, and after the session."
+
+launch_status: pre-launch   # pre-launch | beta | live  (guard blocks "download now" until live)
+cta:
+  ro: "Urmărește TRACE ca să afli primul când se lansează."
+  en: "Follow TRACE to be first when it launches."
+
+differentiator: >-
+  Most lap timers only give you numbers. TRACE coaches you at the three moments that matter:
+  WHILE DRIVING (what the next corner needs, spoken short), IN THE PITS between sessions (the three corners
+  where you are losing the most), and AFTER THE SESSION (a corner-by-corner report). Every number comes from
+  your own laps: no AI guessing, nothing invented.
+
+coaching:             # the three moments; this is what videos should sell
+  live:
+    - Before each corner a coaching strip shows the corner number, how tight it is (a 1-6 scale, 6 = hairpin), a target speed and a countdown in metres to the corner.
+    - The strip does not show brake or lift points; the voice says "Brake hard" (hairpins), "Brake" (hard corners) or "Lift" (easier corners and kinks).
+    - Optional short voice callouts built for beginners - "Brake hard", "Brake", "Lift" - so your eyes stay on the track.
+    - The voice is opt-in (you switch it on in settings).
+  pits:
+    - Between sessions the Pit view shows "where you are losing the most" - your top three corners by time lost.
+    - For each of them you see your brake and lift points lap by lap; the header counts your laps and how many were clean.
+    - Optional suggestions (opt-in, after at least two clean laps) never go beyond what your own clean laps already did.
+  after:
+    - After the session, a corner-by-corner analysis - brake point, lift point, minimum speed, exit speed and g-forces, lap by lap.
+    - Each corner is compared with your own best clean lap, and shows the best you have already demonstrated there.
+    - A one-page report you can share or export, in Romanian or English.
+
+features:             # the rest of the product; phrase freely, do not embellish
+  - Lap timing from the phone's GPS, with sectors S1/S2/S3, personal best and live delta vs your best lap.
+  - Works fully offline on track; your data stays on your phone.
+  - Works in any car with just the phone; an optional OBD adapter adds brake and pedal data for finer detail.
+  - Built-in circuits - Transilvania Motor Ring (3.7 km, clockwise) and MotorPark Romania (4.1 km, clockwise).
+  - Any other track can be learned by driving one lap and saved as your own circuit.
+
+never_claim:          # enforced by guard.py as well as the prompt
+  - official timing, race-grade or certified accuracy, any accuracy number
+  - that it is available in App Store / Google Play (until launch_status is live)
+  - testimonials, user counts, reviews, lap records, or a specific person's lap time
+  - driving fast or racing on public roads — track use only
+  - that it makes you safe, or replaces an instructor
+  - that it moves your braking points or changes cues by itself while you drive
+  - that it uses AI, machine learning or "knows" the perfect line; it compares you with yourself
+  - any number not listed in this file
+
+audience: "Track-day beginners and curious car people in Romania (RO) and Europe (EN)."
+tone: "Direct, calm, expert-friend. Short sentences. No hype words, no emojis in voice lines."
+
+pillars:              # every video must land on at least one coaching moment
+  - id: live-coaching
+    brief: "A beginner problem at the corner (braking too late, lifting at the wrong place, looking down) and how the live strip + short callouts help in the moment."
+  - id: pit-coaching
+    brief: "What to do between sessions: instead of guessing, look at the three corners where you are losing the most, and change one thing."
+  - id: after-session
+    brief: "What the corner-by-corner report shows after the day, and how to turn it into a plan for the next track day."
+  - id: lesson-to-coaching
+    brief: "One concrete beginner lesson (braking straight, looking through the exit, consistency first) and which coaching moment shows you whether you did it."
+  - id: coach-vs-timer
+    brief: "Why a lap timer that only shows numbers leaves beginners guessing, and what a coach at the three moments changes."

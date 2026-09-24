@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TRACE Studio</title>
+<style>
+  :root {
+    --bg: #0A0A0C; --panel: #121216; --panel2: #1A1A20; --line: #2C2C34;
+    --text: #F2F2F4; --muted: #9A9AA3; --amber: #FFB300; --green: #00E676; --red: #FF3B30;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 "Segoe UI", system-ui, sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; background: rgba(10,10,12,.92); backdrop-filter: blur(8px);
+           border-bottom: 1px solid var(--line); padding: 14px 20px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .brand { font-weight: 900; letter-spacing: .08em; font-size: 20px; }
+  .brand span { color: var(--amber); }
+  .stats { color: var(--muted); font-size: 13px; margin-left: auto; }
+  nav a { color: var(--muted); text-decoration: none; margin-right: 14px; font-weight: 600; }
+  nav a.on { color: var(--amber); }
+  main { max-width: 1320px; margin: 0 auto; padding: 20px; }
+
+  .gen { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 16px;
+         display: grid; grid-template-columns: 1fr auto; gap: 12px; }
+  .gen input { width: 100%; background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+               border-radius: 10px; padding: 12px 14px; font: inherit; }
+  .gen input:focus { outline: 2px solid var(--amber); border-color: transparent; }
+  button { font: inherit; cursor: pointer; border-radius: 10px; border: 1px solid var(--line);
+           background: var(--panel2); color: var(--text); padding: 10px 14px; }
+  button:hover { border-color: var(--muted); }
+  button:disabled { opacity: .5; cursor: wait; }
+  .primary { background: var(--amber); color: #111; border: 0; font-weight: 800; padding: 12px 20px; }
+  .primary:hover { filter: brightness(1.08); }
+  .job { grid-column: 1 / -1; color: var(--muted); font-size: 14px; display: none; }
+  .job.on { display: block; }
+  .job .err { color: var(--red); }
+  .job li { margin: 2px 0; }
+  .job li:last-child { color: var(--text); }
+  .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--amber); border-right-color: transparent;
+          border-radius: 50%; animation: s 0.8s linear infinite; vertical-align: -1px; margin-right: 6px; }
+  @keyframes s { to { transform: rotate(360deg); } }
+
+  .filters { display: flex; gap: 8px; margin: 20px 0 14px; flex-wrap: wrap; }
+  .filters button.on { border-color: var(--amber); color: var(--amber); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 600px), 1fr)); gap: 18px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; overflow: hidden;
+          display: grid; grid-template-columns: 240px 1fr; }
+  .card.novideo { grid-template-columns: 1fr; }
+  video { width: 100%; aspect-ratio: 9 / 16; background: #000; display: block; }
+  @media (max-width: 640px) { .card { grid-template-columns: 1fr; } video { max-height: 70vh; } }
+  .body { padding: 14px; display: flex; flex-direction: column; gap: 10px; flex: 1; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .title { font-weight: 700; font-size: 16px; }
+  .chip { font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 999px; border: 1px solid; text-transform: uppercase; letter-spacing: .04em; }
+  .chip.review { color: var(--amber); } .chip.approved { color: var(--green); }
+  .chip.posted, .chip.exported, .chip.published { color: var(--muted); } .chip.rejected { color: var(--red); }
+  .meta { color: var(--muted); font-size: 12px; }
+  .tabs { display: flex; background: var(--panel2); border-radius: 10px; padding: 3px; }
+  .tabs button { flex: 1; border: 0; background: transparent; padding: 7px; font-size: 13px; color: var(--muted); }
+  .tabs button.on { background: var(--bg); color: var(--text); }
+  textarea { width: 100%; min-height: 118px; resize: vertical; background: var(--bg); color: var(--text);
+             border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-family: inherit; font-size: 14px; line-height: 1.4; }
+  .copy { width: 100%; background: var(--amber); color: #111; border: 0; font-weight: 800; }
+  .copy.done { background: var(--green); }
+  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: auto; }
+  .actions a { text-decoration: none; }
+  .actions a button { width: 100%; }
+  .note { color: var(--red); font-size: 13px; }
+  .empty { color: var(--muted); padding: 60px 0; text-align: center; }
+  @media (max-width: 600px) { .gen { grid-template-columns: 1fr; } main { padding: 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">TRACE <span>STUDIO</span></div>
+  <nav><a href="/" class="on">Clipuri</a><a href="/voices">Voci</a></nav>
+  <div class="stats" id="stats"></div>
+</header>
+<main>
+  <section class="gen">
+    <input id="topic" placeholder="Subiect (opțional) — ex: de ce să privești ieșirea din viraj. Gol = următoarea idee din listă.">
+    <button class="primary" id="genBtn">Generează clip nou</button>
+    <div class="job" id="job"></div>
+  </section>
+
+  <div class="filters" id="filters"></div>
+  <div class="grid" id="grid"></div>
+</main>
+
+<script>
+const FILTERS = [["all","Toate"],["review","De revizuit"],["approved","Aprobate"],["posted","Postate"],["rejected","Respinse"]];
+const STATUS_RO = {review:"de revizuit", approved:"aprobat", posted:"postat", rejected:"respins", exported:"exportat", published:"publicat"};
+const PLATFORMS = [["tiktok","TikTok"],["instagram","Instagram"],["youtube","YouTube"]];
+let filter = "all", videos = [], platform = {}, polling = null;
+
+function esc(s){ return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+async function load(){
+  const r = await fetch("/api/videos"); const d = await r.json();
+  videos = d.videos;
+  const s = d.spend[0];
+  document.getElementById("stats").textContent =
+    `${videos.filter(v=>v.hasVideo).length} clipuri · ${d.backlog} idei în așteptare` + (s ? ` · LLM azi: $${s.usd} (${s.calls} apeluri)` : "");
+  render();
+}
+
+function render(){
+  const f = document.getElementById("filters");
+  f.innerHTML = FILTERS.map(([k,l]) => {
+    const n = k==="all" ? videos.length : videos.filter(v=>v.status===k).length;
+    return `<button class="${k===filter?"on":""}" data-f="${k}">${l} (${n})</button>`;
+  }).join("");
+  const list = videos.filter(v => filter==="all" || v.status===filter);
+  const g = document.getElementById("grid");
+  if (!list.length){ g.innerHTML = `<div class="empty">Niciun clip aici încă. Apasă „Generează clip nou".</div>`; return; }
+  g.innerHTML = list.map(card).join("");
+}
+
+function card(v){
+  const p = platform[v.id] || "tiktok";
+  const caption = v.captions[p] || "";
+  const player = v.hasVideo
+    ? `<video controls preload="none" playsinline poster="/media/${v.id}/thumbnail.jpg" src="/media/${v.id}/video.mp4"></video>` : "";
+  const tabs = v.hasVideo ? `<div class="tabs">${PLATFORMS.map(([k,l]) =>
+      `<button class="${k===p?"on":""}" data-tab="${v.id}:${k}">${l}</button>`).join("")}</div>
+    <textarea readonly rows="6" id="cap-${v.id}">${esc(caption)}</textarea>
+    <button class="copy" data-copy="${v.id}">Copiază descrierea</button>` : `<div class="note">${esc(v.note)}</div>`;
+  const acts = v.hasVideo ? `<div class="actions">
+      ${v.status!=="approved" ? `<button data-st="${v.id}:approved">✓ Aprobă</button>` : `<button data-st="${v.id}:review">↺ Înapoi la revizuire</button>`}
+      ${v.status!=="posted" ? `<button data-st="${v.id}:posted">Marchează postat</button>` : `<button data-st="${v.id}:approved">Nepostat</button>`}
+      <a href="/media/${v.id}/video.mp4" download="trace-${v.id}.mp4"><button>⬇ Descarcă MP4</button></a>
+      ${v.status!=="rejected" ? `<button data-st="${v.id}:rejected">✕ Respinge</button>` : `<button data-st="${v.id}:review">Restaurează</button>`}
+    </div>` : "";
+  return `<article class="card ${v.hasVideo ? "" : "novideo"}">${player}<div class="body">
+    <div class="row"><span class="chip ${v.status}">${STATUS_RO[v.status]||v.status}</span>
+      <span class="meta">#${v.id} · ${v.lang.toUpperCase()} · ${esc((v.created||"").replace("T"," ").slice(0,16))}</span></div>
+    ${v.voice ? `<div class="meta">🎙 ${esc(v.voice)}</div>` : ""}
+    <div class="title">${esc(v.title)}</div>${tabs}${acts}</div></article>`;
+}
+
+async function copyText(text){
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch { const t = document.createElement("textarea"); t.value = text; document.body.appendChild(t); t.select();
+          const ok = document.execCommand("copy"); t.remove(); return ok; }
+}
+
+document.addEventListener("click", async e => {
+  const b = e.target.closest("button"); if (!b) return;
+  if (b.dataset.f){ filter = b.dataset.f; render(); }
+  if (b.dataset.tab){
+    // Update in place so a playing video is not reloaded.
+    const [id,p] = b.dataset.tab.split(":"); platform[id] = p;
+    const v = videos.find(x => String(x.id) === id);
+    document.getElementById("cap-"+id).value = v.captions[p] || "";
+    b.parentElement.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+  }
+  if (b.dataset.copy){
+    const ok = await copyText(document.getElementById("cap-"+b.dataset.copy).value);
+    b.textContent = ok ? "Copiat ✓" : "Copierea a eșuat"; b.classList.toggle("done", ok);
+    setTimeout(()=>{ b.textContent = "Copiază descrierea"; b.classList.remove("done"); }, 1600);
+  }
+  if (b.dataset.st){
+    const [id,status] = b.dataset.st.split(":");
+    await fetch(`/api/videos/${id}/status`, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({status})});
+    load();
+  }
+});
+
+document.getElementById("genBtn").onclick = async () => {
+  const topic = document.getElementById("topic").value;
+  const r = await fetch("/api/generate", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({topic})});
+  if (!r.ok){ const d = await r.json(); showJob({running:false, steps:[], error:d.error}); return; }
+  document.getElementById("topic").value = "";
+  poll();
+};
+document.getElementById("topic").addEventListener("keydown", e => { if (e.key==="Enter") document.getElementById("genBtn").click(); });
+
+function showJob(j){
+  const el = document.getElementById("job"), btn = document.getElementById("genBtn");
+  el.classList.add("on"); btn.disabled = j.running;
+  btn.textContent = j.running ? "Se generează…" : "Generează clip nou";
+  el.innerHTML = `<ul style="margin:0;padding-left:18px">${j.steps.map(s=>`<li>${esc(s)}</li>`).join("")}</ul>` +
+    (j.running ? `<div><span class="spin"></span>Durează ~1 minut.</div>` : "") +
+    (j.error ? `<div class="err">Eroare: ${esc(j.error)}</div>` : "");
+}
+
+async function poll(){
+  clearInterval(polling);
+  const tick = async () => {
+    const j = await (await fetch("/api/job")).json(); showJob(j);
+    if (!j.running){ clearInterval(polling); load(); }
+  };
+  await tick(); polling = setInterval(tick, 1500);
+}
+
+(async () => {
+  await load();
+  const j = await (await fetch("/api/job")).json();
+  if (j.running) poll();
+})();
+</script>
+</body>
+</html>

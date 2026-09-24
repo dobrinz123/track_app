@@ -1,0 +1,41 @@
+# Content engine configuration. Every value here is safe to change.
+
+llm:
+  backend: claude-cli        # claude-cli (uses your Claude Code login, no key) | anthropic-api (needs ANTHROPIC_API_KEY)
+  research_model: haiku      # cheap: idea generation, source digestion
+  writer_model: haiku        # scripts; switch to "sonnet" (Sonnet 5, 2x Haiku list price) for better scripts
+  daily_budget_usd: 0.50     # hard stop: no LLM call is made once today's spend reaches this
+  cache_days: 14             # identical prompts are answered from disk for this long
+  thinking: false            # extended thinking off: ~50% fewer output tokens on these short JSON tasks
+
+languages: [en]               # voice-over language(s); one video per language per idea. Add "ro" to also make Romanian versions
+voices:
+  ro: { voice: ro-RO-EmilNeural, rate: "+8%" }
+  en: [{ engine: "kokoro", voice: "bm_lewis", name: "Kokoro — Lewis (UK)" }, { engine: "kokoro", voice: "af_heart", name: "Kokoro — Heart (US, female)" }, { engine: "kokoro", voice: "am_michael", name: "Kokoro — Michael (US)" }, { engine: "edge", voice: "en-US-AndrewNeural", rate: "+6%", name: "Andrew — CURRENT voice" }, { engine: "edge", voice: "en-GB-RyanNeural", rate: "+0%", name: "Ryan (UK)" }]   # rotation, chosen in Studio > Voci
+
+research:
+  ideas_per_call: 8          # one Haiku call returns a batch; batching amortises the fixed prompt overhead
+  min_backlog: 4             # `daily` tops the idea backlog up to this
+  dedup_threshold: 0.45      # trigram-Jaccard above this vs past titles = duplicate, dropped locally (0 tokens)
+  sources: []                # optional URLs (forums, articles) digested via trafilatura; e.g.
+  #  - https://www.reddit.com/r/trackdays/top/.rss?t=week
+  source_chars: 1200         # per source, after extraction + keyword filtering
+
+video:
+  width: 1080
+  height: 1920
+  fps: 30
+  crf: 20
+  music_dir: assets/music    # .mp3 beds + credits.json (8 Kevin MacLeod tracks, CC BY 4.0, from YOUTUBE_FARM's pool)
+  music_lufs: -31            # music loudness under the -16 LUFS voice; -28 = louder bed, -34 = quieter
+
+daily:
+  videos_per_run: 2          # ideas produced per run (x languages)
+
+publish:
+  auto_approve: false        # true = fully autonomous; false = videos wait in `review` for `run.py approve`
+  youtube:
+    enabled: false           # needs YT_CLIENT_ID / YT_CLIENT_SECRET / YT_REFRESH_TOKEN env vars
+    privacy: private         # private | unlisted | public
+  # TikTok / Instagram: their posting APIs need an audited app / business account.
+  # Until then the engine writes ready-to-upload packages (video + caption per platform) to out/ready/.

@@ -1,0 +1,12 @@
+{
+  "title": "Your lap timer tells you nothing",
+  "scenes": [
+    {"kind": "hook", "voice": "Your lap timer says you were slow. It never says where, or what to change.", "onscreen": "Numbers are not coaching"},
+    {"kind": "coach", "voice": "While you drive, TRACE shows the next corner, how tight it is, and a countdown. Switch on the voice, and it just says: brake hard.", "onscreen": "Coached at every corner"},
+    {"kind": "pit", "voice": "In the pits, it shows the three corners where you are losing the most. Change one thing, not ten.", "onscreen": "Fix one corner"},
+    {"kind": "report", "voice": "After the session, every corner, lap by lap, against your own best clean lap. No guessing.", "onscreen": "Your laps, your plan"},
+    {"kind": "cta", "voice": "Follow TRACE to be first when it launches.", "onscreen": "Follow for launch"}
+  ],
+  "caption": "Live, in the pits, and after the session. Track days only.",
+  "hashtags": ["trackday", "drivingcoach", "motorsport", "beginnerdriver"]
+}

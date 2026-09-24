@@ -1,0 +1,8 @@
+edge-tts>=7.2
+pillow>=11
+pyyaml>=6
+requests>=2.31
+trafilatura>=2.0
+faster-whisper>=1.1   # optional: word timings fallback
+anthropic            # optional: only for llm.backend=anthropic-api
+pytest               # tests

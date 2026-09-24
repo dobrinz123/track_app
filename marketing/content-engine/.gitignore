@@ -1,0 +1,12 @@
+out/
+__pycache__/
+.pytest_cache/
+assets/music/*.mp3
+voice-lab/.venv/
+voice-lab/models/
+voice-lab/_work/
+voice-lab/samples/
+voice-lab/clips/
+voice-lab/.venv-cb/
+voice-lab/.venv-ky/
+assets/music/.last_pick
