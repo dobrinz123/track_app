@@ -1122,7 +1122,7 @@
       (pins TP9-1 U2-7 U1-25)
     )
     (net TS
-      (pins J2-3 U4-1 U1-10)
+      (pins J2-3 U4-1)
     )
     (net U0RXD
       (pins TP14-1 U1-40)
@@ -1294,8 +1294,6 @@
     (wire (path B.Cu 200  18400 -9150  45000 -9150)(net TS)(type fix))
     (wire (path B.Cu 200  18400 -14800  18400 -9150)(net TS)(type fix))
     (wire (path B.Cu 200  14200 -14800  18400 -14800)(net TS)(type fix))
-    (wire (path F.Cu 200  19250 -14500  18000 -14500)(net TS)(type fix))
-    (wire (path B.Cu 200  18400 -14500  19250 -14500)(net TS)(type fix))
     (wire (path F.Cu 200  13900 -14000  14200 -14800)(net TS)(type fix))
     (wire (path F.Cu 200  13550 -14000  13900 -14000)(net TS)(type fix))
     (wire (path B.Cu 500  48300 -21000  46640 -21000)(net VBAT)(type fix))
@@ -1652,7 +1650,6 @@
     (via "Via[0-1]_500:300_um"  37000 -14500 (net GNSS_RESET_N)(type fix))
     (via "Via[0-1]_500:300_um"  30750 -13650 (net GNSS_EXTINT)(type fix))
     (via "Via[0-1]_500:300_um"  35900 -13650 (net GNSS_EXTINT)(type fix))
-    (via "Via[0-1]_500:300_um"  19250 -14500 (net TS)(type fix))
     (via "Via[0-1]_500:300_um"  40900 -7100 (net CHG_CE)(type fix))
     (via "Via[0-1]_500:300_um"  15400 -7800 (net CHG_CE)(type fix))
     (via "Via[0-1]_500:300_um"  49300 -16000 (net EN)(type fix))

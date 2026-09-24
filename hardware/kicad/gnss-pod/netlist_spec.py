@@ -61,10 +61,11 @@ NETS = {
     "ISET": [("U4", "16"), ("R9", "1")],
     "ILIM": [("U4", "12"), ("R10", "1")],
     # TS senses the CELL: J2 is a 3-pin JST-PH (1 = BAT+, 2 = BAT-, 3 = pack
-    # NTC). No board NTC (review rev2: RT1 removed). TS also goes straight to
-    # an ADC1 pin (IO6) so firmware measures the cell temperature itself; the
-    # BQ's TS source (<= 78 uA) is the only current into that pin.
-    "TS": [("U4", "1"), ("J2", "3"), ("U1", "10")],
+    # NTC). No board NTC (review rev2: RT1 removed). Review rev3: the direct
+    # TS -> IO6 ADC branch is removed (unprotected pin with no NTC / 3V3 off);
+    # firmware temperature supervision moves to rev B with a protected TS
+    # interface.
+    "TS": [("U4", "1"), ("J2", "3")],
     # Charge enable (review rev2): CE is active-low. R18 pulls it to VSYS
     # (charging DISABLED); Q1 (2N7002) pulls it low only while the MCU drives
     # CHG_EN (IO37) high. R19 holds the gate low through reset, boot, an
@@ -122,7 +123,7 @@ NETS = {
 # Pads that must stay unconnected (spec: "no connect"). Anything not listed in
 # NETS must be in here, or the self-check fails.
 NO_CONNECT = (
-    [("U1", str(n)) for n in (7, 8, 9, 11, 15, 18) + tuple(range(19, 23)) + (26, 30, 38, 41, 44)]
+    [("U1", str(n)) for n in (7, 8, 9, 10, 11, 15, 18) + tuple(range(19, 23)) + (26, 30, 38, 41, 44)]
     + [("U2", "9"), ("U2", "12"), ("U3", "9"), ("U3", "10"), ("U3", "11"), ("U4", "14"), ("U5", "4"),
        ("J1", "A8"), ("J1", "B8"), ("J3", "8")]
 )

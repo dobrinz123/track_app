@@ -25,7 +25,7 @@ VSYS ──► U5 TLV75733P 1 A LDO (EN ← SW3 slide switch) ──► 3V3 ─�
 U2 UART  ◄──► U1 UART1 (GPIO38 TX / GPIO39 RX)   U2 TIMEPULSE ──► U1 GPIO21 (PPS)
 U3 I2C 400 kHz ◄──► U1 (GPIO9 SDA / GPIO10 SCL)   U3 INT1 ──► U1 GPIO8 (INT2 NC)
 U1 USB (GPIO19 D- / GPIO20 D+) ──► USB-C: flashing, serial console, power
-U1 GPIO37 (CHG_EN) ──► Q1 ──► U4 CE (charging off unless the MCU enables it)   U4 TS ──► U1 GPIO6 (ADC)
+U1 GPIO37 (CHG_EN) ──► Q1 ──► U4 CE (charging off unless the MCU enables it; held off on rev A)
 ```
 
 There is no external NAND (that is rev B), no CAN and no USB-UART bridge.
@@ -68,7 +68,7 @@ Stock and unit price are **as seen on 2026-09-24** from JLCPCB's parts API (`jlc
 | SW1 | XKB TS-1187A-B-A-B 5.1 × 5.1 mm SMD tact (BOOT, GPIO0) | C318884 | **Basic** | 520,986 | 0.021 | Download-mode strap. |
 | SW2 | XKB TS-1187A-B-A-B (RESET, EN) | C318884 | **Basic** | (same) | 0.021 | Reset. |
 | SW3 | SOFNG SS-12D00-G3 SPDT slide, THT, **2.5 mm pitch** (drawing "P.C.B LAYOUT"; G3 = 3.0 mm handle length, not the pitch; the drawing is an image, so check a part in hand before soldering) | C22355741 | (hand) | 9,605 | 0.059 | Power switch on the LDO EN pin (§2). **Hand-soldered by owner.** |
-| Q1 | JCET 2N7002, N-MOSFET, SOT-23 (1 = G, 2 = S, 3 = D) | C8545 | **Basic** | 1,703,497 | 0.018 | Charge-enable switch (review rev2): pulls CE low only while the MCU drives CHG_EN high. V_GS(th) 1.0–1.6 V, R_DS(on) ≤ 7 Ω at 5 V (JCET datasheet). |
+| Q1 | JCET 2N7002, N-MOSFET, SOT-23 (1 = G, 2 = S, 3 = D) | C8545 | **Basic** | 1,703,497 | 0.018 | Charge-enable switch (review rev2): pulls CE low only while the MCU drives CHG_EN high. V_GS(th) **1.0 min / 1.6 typ / 2.5 V max** (JCET datasheet, 250 µA), R_DS(on) ≤ 7 Ω at V_GS = 5 V. Gate drive: GPIO37 high ≥ 0.8 × VDD = 2.64 V at 3.3 V (ESP32-S3 V_OH), i.e. ≥ 0.14 V over the 2.5 V worst-case threshold, and the load is only ≈ 44 µA (VSYS 4.4 V / R18); full-corner switching at the lowest 3V3 is not characterised and is checked in §10A (CE low with CHG_EN high). With R19 the undriven gate stays ≤ 0.6 V, below the 1.0 V minimum. |
 | LED1 | KENTO KT-0603Y yellow 0603 | C2287 | Extended | 85,024 | 0.011 | Status LED A (GPIO12). Yellow/red (AlGaInP) chosen because green/white InGaN parts need ~3.1 V Vf and barely light from 3.3 V. |
 | LED2 | KENTO KT-0603R red 0603 | C2286 | **Basic** | 4,108,067 | 0.008 | Status LED B (GPIO13). |
 | LED3 | KENTO KT-0603R red 0603 | C2286 | **Basic** | (same) | 0.008 | Charge indicator (BQ CHG). |
@@ -131,8 +131,10 @@ U4.14 TMR  -> no connect (TI: "Leave TMR unconnected to set the timers to the de
 ISET:       U4.16 -> R9 3.3k -> GND
 ILIM:       U4.12 -> R10 1.5k -> GND
 TS:         U4.1 -> J2.3 (pack NTC, 10k B3950 required, §4 notes; its other end is BAT-/GND
-            inside the pack); U4.1 -> U1.10 (IO6, ADC1_CH5) direct: firmware measures the cell
-            temperature itself (review rev2). No board NTC (RT1 removed), no Rs/Rp network (§10.4).
+            inside the pack). No board NTC (RT1 removed), no Rs/Rp network (§10.4). Review rev3:
+            the rev2 TS -> U1.10 (IO6) ADC branch is REMOVED (an unprotected GPIO on a node the
+            BQ can bias toward VIN with no NTC fitted, and back-fed with 3V3 off); U1.10 is NC.
+            Firmware temperature supervision moves to rev B with a protected TS interface.
 CHG_N:      U4.9 -> LED3 cathode           (LED3 lights while charging)
 PGOOD_N:    U4.7 -> R12 100k -> 3V3; U4.7 -> U1.6 (IO2)
 
@@ -249,7 +251,7 @@ Source: module DS v1.7 Table 3-1. Only the pins this design uses are listed.
 | 5 | IO1 (ADC1_CH0) | 27 | IO47 |
 | 6 | IO2 (ADC1_CH1) | 30 | IO48 (NC) |
 | 7 | IO3 (strap) | 34 | IO38 |
-| 9, 10, 11 | IO5 (NC), IO6 (→ TS_ADC), IO7 (NC) | 35 | IO39 (MTCK) |
+| 9, 10, 11 | IO5, IO6, IO7 (NC) | 35 | IO39 (MTCK) |
 | 12, 13 | IO8, IO9 | 36 | IO40 (MTDO) |
 | 14, 15 | IO10, IO11 | 37 | IO41 (MTDI) |
 | 16, 17 | IO12, IO13 | 39 / 40 | TXD0 (GPIO43) / RXD0 (GPIO44) |
@@ -318,7 +320,7 @@ Strapping pins from S3 DS / module DS §4: **GPIO0 (weak pull-up, boot mode), GP
 | 46 | 44 | **NC** | — | **yes** | no | WPD | Left at the default. GPIO0 low + GPIO46 low = download mode via SW1. |
 | 33, 34, 35, 36, 47 | 28, 29, 31, 32, 27 | spare → J3 | — | no | no | — | Free for experiments (e.g. an SPI NAND breakout). IO33–37 are the octal-PSRAM pins on -R8 variants; the -N8 has no PSRAM, so they are plain GPIOs. Not ADC-capable. |
 | 37 | 33 | **CHG_EN** → Q1 gate (review rev2) | out | no | **no** (not in DS Table 2-2) | IE | High = charging allowed. R19 10 kΩ holds it low whenever the pin is not driven (reset, boot, unflashed, 3V3 off). |
-| 6 | 10 | **TS_ADC** (ADC1_CH5, review rev2) | analog | no | yes (60 µs low) | IE | Reads V_TS = I_TS × R_NTC. The glitch is harmless on an input. The BQ's ≤ 78 µA TS source is the only current into the pin; with 3V3 off the pad clamps TS low, which the charger reads as "hot" (charging off, and CE is off anyway). |
+| 6 | 10 | **NC** (review rev3) | — | no | yes (60 µs low) | IE | The rev2 TS_ADC branch was removed: TS is not a 3.3 V-limited node (SLUS810N: TS-disable threshold V_DIS(TS) = VIN − 200 mV, so with no NTC the TS source can drive the node toward VIN) and the pin would rely on unspecified GPIO clamping. Rev B brings TS in through a divider/clamp. |
 | 5, 7, 14, 48 | 9, 11, 18, 30 | NC | — | no | — | — | Freed by the review fix wave (their pins face the power chain). |
 
 Firmware rules this implies (hand to the firmware ticket):
@@ -330,7 +332,7 @@ Firmware rules this implies (hand to the firmware ticket):
 - Write the SAM-M10Q high-performance OTP string once during bring-up (IM Table 3) before expecting 20/25 Hz.
 - IMU (review fix wave): I2C on GPIO9 (SDA) / GPIO10 (SCL), INT1 on GPIO8; INT2 is not connected, so map every LSM6DSV16X interrupt source to INT1.
 - J3 spares: GPIO34/33/47/35/36 on J3.3…7 (J3.1 GND, J3.2 3V3, J3.8 NC).
-- **Charge supervision (binding, review rev2).** Charging is enabled only by driving GPIO37 (CHG_EN) high, and only while all of these hold: (a) USB present (PGOOD_N low); (b) the cell temperature from TS is inside **5–40 °C**; (c) no TS/ADC fault. Measure V_TS on GPIO6 (ADC1_CH5, 12 dB attenuation, averaged, curve-fitted calibration) at ≥ 1 Hz while USB is present; R_NTC = V_TS / 75 µA; T from the B3950 β equation (R25 = 10 kΩ). Disable (GPIO37 low) when T > 40 °C or T < 5 °C, re-enable only after 3 °C of hysteresis (below 37 °C / above 8 °C). Treat V_TS < 0.15 V or > 2.4 V as a fault (shorted/open NTC): charging off. Keep the task watchdog enabled: every reset drops GPIO37 and stops charging. If bench test §10A-3 shows that the BQ does not bias TS while CE is high, enable for ≤ 200 ms to read TS and disable again if it is out of window.
+- **Charge enable (binding, review rev3).** On rev A (USB-only, no cell, J2 not fitted) firmware keeps **GPIO37 (CHG_EN) low at all times**, so CE stays high and the charger never charges; Q1/R18/R19 stay fitted only so CE can be driven on the bench. The rev2 firmware temperature supervision (read TS on an ADC, charge only inside 5–40 °C, 3 °C hysteresis, open/short-NTC fault, watchdog) moves to **rev B**, together with a protected TS interface (divider and clamp that is safe with no NTC, with 3V3 off and at VIN); it is not implementable on rev A because TS no longer reaches the MCU.
 
 ## 7. Power budget
 
@@ -353,7 +355,7 @@ Datasheet values are marked (DS). Everything else is an **estimate** until measu
 
 Bulk capacitance near U1 (review item, verified): the module datasheet's peripheral schematic puts **22 µF + 0.1 µF** on 3V3 at the module; that is C6 (22 µF 0805) + C7 (100 nF) at U1.3, plus C5 (10 µF) at the LDO output. Nothing more is called for, so nothing was added. On VSYS, C2 (22 µF) is BQ OUT's bulk (TI: 4.7–47 µF).
 
-**Firmware low-battery cutoff (requirement):** deep sleep with the radios off below VBAT = 3.5 V under load; no WiFi start below 3.6 V (§10.5). The board has no under-voltage cutoff of its own. These thresholds are **not proven** to keep 3V3 in spec during TX bursts; §10A test 2 validates them (and USB-only operation).
+**Firmware low-battery cutoff (requirement, battery operation only):** applies only while the pod runs from a cell with USB absent. Firmware knows input power from **PGOOD_N on GPIO2** (U4.7, open-drain, R12 pull-up to 3V3: low = valid VIN present); while PGOOD_N is low the cutoff is not applied. On battery (PGOOD_N high): deep sleep with the radios off below VBAT = 3.5 V under load, no WiFi start below 3.6 V (§10.5). On rev A units (USB-only, no cell, J2 not fitted) the cutoff is never applied: VBAT is not a supply indicator there. The board has no under-voltage cutoff of its own. These thresholds are **not proven** to keep 3V3 in spec during TX bursts; §10A test 2 validates them (and USB-only operation).
 
 Runtime estimate (VBAT current ≈ 3V3 current through an LDO):
 
@@ -470,14 +472,14 @@ A 1-cell LiPo is not included. Buy it locally: 600–1200 mAh, **protected (PCM)
      | 10k B3435 (103AT) | 0.5–50.8 °C | −1.8…2.9 °C | 46.1…55.9 °C | −1.8–55.9 °C |
 
      With the required B3950 the hardware cold corner is safe (≥ 1.4 °C); the **hot corner can reach 51.5 °C**, above a 45 °C cell rating. The hardware layer alone therefore does **not** meet the 0–45 °C target; it is the backstop for a firmware failure while CE is enabled.
-   - **Layer 2, firmware supervision (binding, §6).** CE is pulled high (charging disabled) by R18 and only Q1, driven by GPIO37, enables it; R19 keeps it disabled through reset, boot, an unflashed MCU and with 3V3 off. Firmware reads V_TS on GPIO6 and enables charging only inside **5–40 °C**. Error budget (B3950, I_NTC ±4 %, ADC ±15 mV after calibration (to be confirmed in §10A test 3), NTC ±1 %/±1 %): **±2.4 °C at 40 °C** and **±1.4 °C at 5 °C**, so the firmware window is at worst **3.6–42.4 °C**, inside 0–45 °C. A B3435 pack read with the B3950 equation shifts to ≈ 2.2–42.4 °C nominal, worst ≈ 0.8–44.8 °C: still inside 0–45 °C, with less margin; that is why B3950 is the named type.
-   - **What remains:** if firmware enables charging and then hangs without the watchdog resetting it, only layer 1 acts (≤ 51.5 °C). The pack NTC's thermal lag to the cell is not modelled. §10A test 3 measures the real trip points. A fully hardware-only 0–45 °C guarantee would need an extra window comparator on TS driving Q1's gate (not in rev A; proposed for rev B).
-5. **No reverse-polarity protection on J2.** A reversed LiPo destroys U4 and U6. Mitigations: silkscreen polarity, check every pack. The cell must also have its own protection PCM, because nothing on the board cuts off at under-voltage (the LDO simply drops out). **Firmware requirement (binding for the firmware ticket):** measure VBAT on ADC1 and enter deep sleep with the radios off below **3.5 V** under load, and do not start WiFi below **3.6 V**. These thresholds are an estimate, not a proven headroom (§2 LDO row); §10A test 2 decides whether they are high enough. The PCM stays the last-resort cutoff.
+   - **Layer 2, firmware supervision: rev B (review rev3).** Rev A keeps the CE hardware (R18 pulls CE high = charging disabled; Q1, driven by GPIO37, is the only way to enable it; R19 holds it off through reset, boot, an unflashed MCU and with 3V3 off) but has no TS measurement: the rev2 TS → GPIO6 branch was removed as an unprotected pin. For rev B the design target stays: firmware reads TS through a protected interface and enables charging only inside **5–40 °C**; with B3950, I_NTC ±4 %, ADC ±15 mV and NTC ±1 %/±1 % that is at worst **3.6–42.4 °C** (±2.4 °C at 40 °C, ±1.4 °C at 5 °C), and a B3435 pack read with the B3950 equation stays inside ≈ 0.8–44.8 °C.
+   - **What remains:** on rev A there is no cell, so nothing is charged. For rev B: if firmware enables charging and then hangs without the watchdog resetting it, only layer 1 acts (≤ 51.5 °C); the pack NTC's thermal lag is not modelled; a hardware-only 0–45 °C guarantee needs a window comparator on TS driving Q1's gate.
+5. **No reverse-polarity protection on J2.** A reversed LiPo destroys U4 and U6. Mitigations: silkscreen polarity, check every pack. The cell must also have its own protection PCM, because nothing on the board cuts off at under-voltage (the LDO simply drops out). **Firmware requirement (binding for the firmware ticket, battery operation only):** when PGOOD_N (GPIO2) is high (no USB input), measure VBAT on ADC1 and enter deep sleep with the radios off below **3.5 V** under load, and do not start WiFi below **3.6 V**; while PGOOD_N is low (USB present) the cutoff does not apply, and on USB-only rev A units it is never applied. These thresholds are an estimate, not a proven headroom (§2 LDO row); §10A test 2 decides whether they are high enough. The PCM stays the last-resort cutoff.
 6. **SAM-M10Q stock is 10 pieces** at JLCPCB/LCSC (2026-09-24). Enough for 2 boards, but it can vanish before ordering. Fallback: JLCPCB global sourcing or consignment of Mouser/DigiKey parts. Re-check stock on the order day.
 7. **Battery life** is estimated at ~5–10 h (§7), below dragy's 12 h, until a larger cell or modem-sleep firmware closes it.
 8. **Charging in a hot car stops at 40 °C cell temperature (firmware, §6), with the BQ's TS trip (47.2 °C nominal, ≤ 51.5 °C worst case, §10.4) as the hardware backstop.** This is intended for safety. The pod runs from USB without charging. Operating limits are 85 °C for ESP32-S3-MINI-1 (N8 standard temp), SAM-M10Q and LSM6DSV16X. A windscreen in summer sun can exceed that. The enclosure (P2) needs shading and venting.
 9. **USB current is fixed at 500 mA.** There is no CC-level sensing, so a 3 A USB-C car port is used as a 500 mA port. Rev B can route CC1/CC2 to ADC pins and drive EN1/EN2 through level-safe logic.
-10. **Flashing requires SW3 ON.** With SW3 OFF the MCU is unpowered even on USB (the charger still charges).
+10. **Flashing requires SW3 ON.** With SW3 OFF the MCU is unpowered even on USB; the BQ still powers VSYS from USB, but charging is disabled (CE held high by R18; and on rev A there is no cell).
 11. **Mount orientation.** The patch radiates away from the component side. The pod must hold the component side toward the sky and glass, which constrains the P2 mount design (§11.2).
 
 ## 10A. Bring-up validation (mandatory before trusting the board)
@@ -488,7 +490,7 @@ Review rev2: USB signal integrity, low-battery supply headroom, the real charge-
 |---|---|---|---|
 | 1 | **USB enumeration and flashing** | 2 boards; a 1 m USB-C cable and a USB 2.0 hub, plus one direct laptop port; esptool at 921 600 baud. | Enumerates as USB-Serial/JTAG on first plug-in on both ports, **10 of 10** full flash + verify cycles pass on each board, and a 10-minute serial log shows no disconnects. Any failure = fail (review the pair, rev B gets a 4-layer or controlled-impedance pair). |
 | 2 | **3V3 during WiFi TX bursts** | Scope (≥ 100 MHz, 10× probe, short ground spring) on U1.3 and U2.17 (VCC) to GND; firmware in continuous 802.11b TX at max power, BLE advertising and GNSS on. (a) USB only, no cell; (b) cell at VBAT = 3.5 V under load (bench supply on J2 with 0.1 Ω series to emulate cell + wiring). | Minimum of 3V3 at the module pins **≥ 3.0 V** in both cases over 60 s (infinite persistence), no brown-out reset. If (b) fails, raise the firmware cutoff (§10.5) until it passes; if (a) fails, the USB-only mode is not supported. |
-| 3 | **Charge temperature trips** | Cell with the required B3950 NTC; thermocouple taped to the cell next to the NTC; hair dryer to heat, fridge/freezer to cool; CHG LED and battery current (series meter) logged. First with firmware supervision, then with CHG_EN forced high (firmware disabled) to measure the hardware backstop. Also check whether TS is biased while CE is high (V_TS with CE disabled). | Firmware: charging stops at **≤ 42.4 °C** and **≥ 3.6 °C** cell temperature, and restarts with hysteresis. Hardware backstop: stops at ≤ 51.5 °C and ≥ 1.4 °C (§10.4). ADC error ≤ ±15 mV against a DMM at 0.4 V and 1.9 V. Any trip outside those = fail. |
+| 3 | **Charge temperature trips (bench only)** | (a) **Hardware TS thresholds, no cell heated:** replace the pack NTC with a precision resistor / decade box (0.1 %) on J2.3–J2.2, and a bench supply or a cell **kept at room temperature** on J2.1–J2.2; USB in; CHG_EN driven high on the bench. Step the resistance through the B3950 values for 0…55 °C (e.g. 33.6 kΩ at 0 °C, 5.30 kΩ at 40 °C, 4.35 kΩ at 45 °C, 3.59 kΩ at 50 °C, 2.98 kΩ at 55 °C; β model, R25 = 10 kΩ) and log where charging stops/restarts (CHG_N, battery current), plus V_TS with CE high and low (does the BQ bias TS while CE is high). (b) **Real-cell charging, optional:** a cell with the required NTC charged only at room temperature, never outside the cell manufacturer's charge-temperature rating (no hair dryer / freezer on a charging cell). | (a) Hardware trips at resistances equivalent to ≤ 51.5 °C and ≥ 1.4 °C (§10.4), with the expected hysteresis; CE high (CHG_EN low or MCU unpowered) = no charging at any resistance. (b) Charge terminates normally; cell temperature stays inside its rating. Any trip outside those = fail. The rev B firmware supervision is validated the same way (resistor-simulated NTC), never by heating a charging cell. |
 | 4 | **GNSS C/N0 with WiFi TX on vs off** | Board on the windscreen mount outdoors, open sky, 10 min warm-up; u-center / UBX-NAV-SAT logging; 10 min with WiFi TX idle, then 10 min with continuous TX at the firmware's capped power (BLE ≤ 9 dBm, WiFi ≤ 13 dBm). | Median C/N0 of the 8 strongest satellites drops by **≤ 2 dB** with TX on, and fix/satellite count is unchanged. More = fail (reduce TX power, add shielding, or rev B layout). |
 
 ## 11. Open questions and verification list
@@ -507,7 +509,7 @@ Review rev2: USB signal integrity, low-battery supply headroom, the real charge-
 ### 11.2a Documented deviations (accepted for rev A, review rev2)
 
 - **V_IO / VCC are not tied at the module** (§8): both lanes are 3V3 and join on the trunk ≥ 20 mm away. Their transient voltages are not independently validated; §10A tests 2 and 4 cover the effect.
-- **U1 GND pins are one jumper group in the footprint** (module-internal common ground). This lets DRC pass for GND pins joined only through the module; it does not prove the board-side return paths. Measured on the generated board: the pours reach every U1 GND pad directly except **U1.63 and U1.64** (the two south corner pads), which rely on the module-internal ground. Three small bottom fill fragments in the north-east W–E line bundle carry GND stitching vias but touch no pad (floating copper, DRC-clean); remove them in rev B.
+- **U1 GND pins are one jumper group in the footprint** (module-internal common ground). This lets DRC pass for GND pins joined only through the module; it does not prove the board-side return paths. Measured on the generated board: the pours reach every U1 GND pad directly except **U1.63 and U1.64** (the two south corner pads), which rely on the module-internal ground. The small bottom GND fill fragments between the north-east W–E lines are **not floating**: each reaches the connected top GND pour through its stitching via(s) (KiCad's connectivity/DRC reports no unconnected GND item; review rev3 correction of the rev2 note, which was based on a check against the largest top pour only).
 - **Power-track widths** follow the as-built rule table in §8, not a blanket 0.5 mm.
 
 ### 11.3 VERIFY-AT-LAYOUT (could not be text-verified; image-only PDFs)

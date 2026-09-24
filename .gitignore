@@ -20,3 +20,5 @@ builds/
 
 # @onebeyond/license-checker drops a report file on every failing scan
 license-error-*.md
+
+__pycache__/

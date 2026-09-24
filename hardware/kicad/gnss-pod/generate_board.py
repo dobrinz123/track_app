@@ -49,8 +49,9 @@ FAILS unless POD_NOFAIL is set):
     bottom keep-out (USB_SHADOW) so the reference GND is unbroken.
   * LSM6DSV16X: rule-area keep-out over the land-pattern interior; GND pads
     reach GND through symmetric stubs outside the body (ST TN0018).
-  * J2 is a 3-pin JST-PH (BAT+, BAT-, NTC); TS goes to the pack NTC and to
-    IO6 (ADC1_CH5). Review rev2: no board NTC (RT1 removed); charging is
+  * J2 is a 3-pin JST-PH (BAT+, BAT-, NTC; NOT fitted on USB-only rev A
+    units); TS goes to the pack NTC only (review rev3 removed the TS -> IO6
+    ADC branch). Review rev2: no board NTC (RT1 removed); charging is
     disabled by default (R18 pulls CE to VSYS) and enabled only through Q1
     while IO37 (CHG_EN) is high (R19 gate pull-down). CHG_CE runs on the
     bottom along U1's north edge (y 7.1) to Q1 in the NE corner.
@@ -618,8 +619,6 @@ FANOUT = [
                                (46.64, 21.0)]),
     # TS: U4.1 -> via -> bottom -> J2.3 (pack NTC)
     ("F_TS", "TS", 0.2, 0, [(13.55, 14.0), (13.9, 14.0), (14.2, 14.8)]),
-    ("F_TS", "TS", 0.2, 1, [(18.4, 14.5), (19.25, 14.5)]),          # -> ADC (IO6)
-    ("F_TS", "TS", 0.2, 0, [(19.25, 14.5), (18.0, 14.5)]),
     ("F_TS", "TS", 0.2, 1, [(14.2, 14.8), (18.4, 14.8), (18.4, 9.15), (45.0, 9.15), (45.0, 15.6),
                            (46.64, 17.0)]),
     # BOOT (U1.4) -> SW1 side (via + TP17 in the east corridor)
@@ -692,7 +691,7 @@ FANOUT = [
 FANOUT_VIAS = [
     ("VBAT", 16.5, 14.05), ("TS", 14.2, 14.8), ("BOOT", 19.9, 9.9), ("BOOT", 43.5, 15.7),
     ("VBAT_SENSE", 19.3, 10.45), ("VBAT_SENSE", 40.3, 10.45), ("EN", 32.9, 6.45), ("EN", 49.3, 16.0),
-    ("CHG_CE", 15.4, 7.8), ("CHG_CE", 40.9, 7.1), ("TS", 19.25, 14.5),
+    ("CHG_CE", 15.4, 7.8), ("CHG_CE", 40.9, 7.1),
     ("GNSS_EXTINT", 35.9, 13.65), ("GNSS_EXTINT", 30.75, 13.65),
     ("GNSS_RESET_N", 37.0, 14.5), ("GNSS_RESET_N", 30.75, 14.5),
     ("GNSS_TXD", 39.2, 15.35), ("GNSS_TXD", 30.75, 15.35),
