@@ -90,6 +90,7 @@
   <div class="list" id="list"></div>
 </main>
 
+<script src="/ui/reject.js"></script>
 <script>
 const FILTERS = [["all","Toate"],["review","De revizuit"],["approved","Aprobate"],["posted","Postate"],["rejected","Respinse"]];
 const STATUS_RO = {review:"de revizuit", approved:"aprobat", posted:"postat", rejected:"respins"};
@@ -127,8 +128,8 @@ function render(){
 }
 function card(p){
   const pl = platform[p.id] || "instagram";
-  if (!p.slides.length) return `<article class="card"><div class="side"><div class="row"><span class="chip ${p.status}">${STATUS_RO[p.status]||p.status}</span>
-    <span class="meta">#${p.id}</span></div><div class="title">${esc(p.title)}</div><div class="note">${esc(p.note)}</div></div></article>`;
+  if (!p.slides.length) return `<article class="card" id="card-${p.id}"><div class="side"><div class="row"><span class="chip ${p.status}">${STATUS_RO[p.status]||p.status}</span>
+    <span class="meta">#${p.id}</span></div><div class="title">${esc(p.title)}</div><div class="note">${esc(p.note)}</div><button data-rej="${p.id}">Regenerează / Șterge</button></div></article>`;
   const n = p.slides.length, cur = Math.min(slideAt[p.id] || 0, n - 1);
   const imgs = p.slides.map((s,i) => `<img src="${s}" alt="Slide ${i+1} din ${n}" class="${i===cur?"on":""}" ${i>1?'loading="lazy"':''}>`).join("");
   const thumbs = n > 1 ? `<div class="thumbs">${p.slides.map((s,i) => `<button data-go="${p.id}:${i}" class="${i===cur?"on":""}" aria-label="Slide ${i+1}"><img src="${s}" alt="" loading="lazy"></button>`).join("")}</div>` : "";
@@ -138,7 +139,7 @@ function card(p){
       <button class="nav next" data-step="${p.id}:1" aria-label="Slide-ul următor" ${cur===n-1?"disabled":""}>›</button>` : ""}
     </div>${thumbs}</div>`;
   const dl = p.slides.map((s,i) => `<a href="${s}" download="trace-post-${p.id}-${i+1}.png"></a>`).join("");
-  return `<article class="card">
+  return `<article class="card" id="card-${p.id}">
     ${viewer}
     <div class="side">
       <div class="row"><span class="chip ${p.status}">${STATUS_RO[p.status]||p.status}</span>
@@ -153,7 +154,7 @@ function card(p){
         ${p.pdf ? `<a href="${p.pdf}" download="trace-post-${p.id}-linkedin.pdf"><button style="width:100%">⬇ PDF pentru LinkedIn</button></a>` : `<span></span>`}
         ${p.status!=="approved" ? `<button data-st="${p.id}:approved">✓ Aprobă</button>` : `<button data-st="${p.id}:review">↺ Înapoi la revizuire</button>`}
         ${p.status!=="posted" ? `<button data-st="${p.id}:posted">Marchează postat</button>` : `<button data-st="${p.id}:approved">Nepostat</button>`}
-        ${p.status!=="rejected" ? `<button data-st="${p.id}:rejected">✕ Respinge</button>` : `<button data-st="${p.id}:review">Restaurează</button>`}
+        ${p.status!=="rejected" ? `<button data-rej="${p.id}">✕ Respinge</button>` : `<button data-rej="${p.id}">Regenerează / Șterge</button>`}
       </div>
       <div hidden id="dl-${p.id}">${dl}</div>
     </div></article>`;
@@ -174,6 +175,10 @@ document.addEventListener("click", async e => {
     setTimeout(()=>{ b.textContent="Copiază descrierea"; b.classList.remove("done"); }, 1600); }
   if (b.dataset.dl){ const links = [...document.querySelectorAll(`#dl-${b.dataset.dl} a`)];
     for (const a of links){ a.click(); await new Promise(r=>setTimeout(r,350)); } }
+  if (b.dataset.rej){
+    RejectPanel.open("post", b.dataset.rej, document.getElementById("card-"+b.dataset.rej), d => { if (d.job) poll(); load(); });
+    return;
+  }
   if (b.dataset.st){ const [id,status] = b.dataset.st.split(":");
     await fetch(`/api/posts/${id}/status`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({status})}); load(); }
 });

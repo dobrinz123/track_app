@@ -60,6 +60,21 @@ def slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40]
 
 
+def fresh_dir(base: Path) -> Path:
+    """A regeneration never overwrites the folder of the version it replaces."""
+    if not base.exists():
+        return base
+    n = 2
+    while (base.parent / f"{base.name}-v{n}").exists():
+        n += 1
+    return base.parent / f"{base.name}-v{n}"
+
+
+def standing_notes(state) -> str:
+    from engine.feedback import recurring_notes
+    return recurring_notes(state)
+
+
 def finish_post(script: dict, lang: str, voice: dict, folder: Path) -> dict:
     """Captions per platform + the licence credits (CC BY voice / music) that must travel with the video."""
     post = build_post(script, lang)
@@ -82,13 +97,15 @@ def cmd_research(cfg, state, llm, facts) -> None:
     log(f"research: +{len(ids)} ideas")
 
 
-def produce_one(cfg, state, llm, facts, idea, on_step=lambda msg: None) -> list[int]:
+def produce_one(cfg, state, llm, facts, idea, on_step=lambda msg: None, notes: str = "",
+                previous: dict | None = None, avoid_voice: str | None = None) -> list[int]:
     status = "approved" if cfg["publish"].get("auto_approve") else "review"
     made = []
     for lang in cfg["languages"]:
-        folder = OUT / "videos" / f"{idea['id']:04d}-{lang}-{slug(idea['title'])}"
+        folder = fresh_dir(OUT / "videos" / f"{idea['id']:04d}-{lang}-{slug(idea['title'])}")
         on_step(f"Scriu scriptul ({lang})...")
-        script, problems = write_script(llm, facts, cfg, idea, lang)
+        all_notes = "\n".join(x for x in (notes, standing_notes(state)) if x)
+        script, problems = write_script(llm, facts, cfg, idea, lang, all_notes, previous)
         if problems:
             folder.mkdir(parents=True, exist_ok=True)
             (folder / "rejected_script.json").write_text(json.dumps(
@@ -96,7 +113,8 @@ def produce_one(cfg, state, llm, facts, idea, on_step=lambda msg: None) -> list[
             state.add_video(idea["id"], lang, str(folder), "rejected", "; ".join(problems))
             log(f"idea {idea['id']} [{lang}]: script rejected by guard: {problems}")
             continue
-        voice = pick_voice(cfg["voices"][lang], state.voice_history(lang))
+        history = state.voice_history(lang) + ([avoid_voice] if avoid_voice else [])
+        voice = pick_voice(cfg["voices"][lang], history)
         run_cfg = copy.deepcopy(cfg)
         run_cfg["voices"][lang] = voice
         on_step(f"Voce ({voice_label(voice)}) + randare: '{script['title']}'...")
@@ -148,12 +166,14 @@ def cmd_daily(cfg, state, llm, facts) -> None:
     cmd_publish(cfg, state)
 
 
-def produce_post(cfg, state, llm, facts, idea, fmt: str, on_step=lambda msg: None) -> int | None:
+def produce_post(cfg, state, llm, facts, idea, fmt: str, on_step=lambda msg: None, notes: str = "",
+                 previous: dict | None = None) -> int | None:
     """One image post (fmt: 'carousel' | 'single'): write, check, render slides + LinkedIn PDF, package."""
     status = "approved" if cfg["publish"].get("auto_approve") else "review"
-    folder = OUT / "posts" / f"{idea['id']:04d}-{fmt}-{slug(idea['title'])}"
+    folder = fresh_dir(OUT / "posts" / f"{idea['id']:04d}-{fmt}-{slug(idea['title'])}")
     on_step(f"Scriu postarea ({fmt})...")
-    post, problems = write_post(llm, facts, cfg, idea, fmt)
+    all_notes = "\n".join(x for x in (notes, standing_notes(state)) if x)
+    post, problems = write_post(llm, facts, cfg, idea, fmt, all_notes, previous)
     folder.mkdir(parents=True, exist_ok=True)
     if problems:
         (folder / "rejected_post.json").write_text(json.dumps(

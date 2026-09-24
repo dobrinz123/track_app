@@ -49,7 +49,8 @@ FORMAT_RULES = """Format - a vertical faceless short, 25-45 seconds:
 - 3-6 hashtags without the # sign, mixing broad (trackday) and niche (lap timer) tags."""
 
 
-def write_script(llm: LLM, facts: dict, cfg: dict, idea, lang: str) -> tuple[dict, list[str]]:
+def write_script(llm: LLM, facts: dict, cfg: dict, idea, lang: str, notes: str = "",
+                 previous: dict | None = None) -> tuple[dict, list[str]]:
     system = system_prompt(facts, "scriptwriter") + "\n" + FORMAT_RULES
     circuit = {"tmr": "Transilvania Motor Ring", "motorpark": "MotorPark Romania"}.get(idea["circuit"] or "", "none")
     moment = idea_moment(idea)
@@ -60,6 +61,11 @@ def write_script(llm: LLM, facts: dict, cfg: dict, idea, lang: str) -> tuple[dic
         f"{' (use a kind=' + MOMENT_SCENE[moment] + ' scene)' if moment else ''}\n"
         f"CTA voice line: {facts['cta'][lang]}"
     )
+    if notes:  # regeneration after an editor rejected the execution of this same idea
+        prompt += "\n\nThe editor rejected the previous version. Fix exactly this:\n" + notes
+        if previous:
+            prompt += "\nPrevious version (do not reuse its hook):\n" + "\n".join(
+                f"[{s['kind']}] {s['voice']}" for s in previous.get("scenes", []))
     model = cfg["llm"]["writer_model"]
     script = llm.json("script", model, system, prompt, SCRIPT_SCHEMA)
     need = MOMENT_SCENE.get(moment) if moment else None

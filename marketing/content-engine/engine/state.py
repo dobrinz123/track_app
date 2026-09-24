@@ -16,6 +16,9 @@ create table if not exists videos(
 create table if not exists posts(
   id integer primary key, idea_id integer, format text, dir text, status text,
   created text, published text, note text);
+create table if not exists feedback(
+  id integer primary key, kind text, item_id integer, idea_id integer, reasons text,
+  comment text, action text, created text);
 create table if not exists usage(
   ts text, day text, task text, model text, input_tokens integer,
   output_tokens integer, cost_usd real, cached integer);
@@ -116,6 +119,26 @@ class State:
             "select * from ideas where status in ('new','done') and id not in "
             "(select idea_id from posts where idea_id is not null and status != 'rejected') "
             "order by (pillar = 'intro') desc, id").fetchall()
+
+    # feedback
+    def add_feedback(self, kind: str, item_id: int, idea_id: int | None, reasons: list[str],
+                     comment: str, action: str) -> None:
+        self.db.execute(
+            "insert into feedback(kind,item_id,idea_id,reasons,comment,action,created) values(?,?,?,?,?,?,?)",
+            (kind, item_id, idea_id, json.dumps(reasons), comment, action, now()))
+        self.db.commit()
+
+    def feedback_reason_counts(self) -> list[tuple[str, int]]:
+        counts: dict[str, int] = {}
+        for (raw,) in self.db.execute("select reasons from feedback"):
+            for r in json.loads(raw or "[]"):
+                counts[r] = counts.get(r, 0) + 1
+        return sorted(counts.items(), key=lambda kv: -kv[1])
+
+    def rejected_idea_titles(self, limit: int = 20) -> list[str]:
+        rows = self.db.execute(
+            "select title from ideas where status='rejected' order by id desc limit ?", (limit,)).fetchall()
+        return [r["title"] for r in rows]
 
     # usage
     def log_usage(self, task: str, model: str, usage: dict, cost: float, cached: bool) -> None:

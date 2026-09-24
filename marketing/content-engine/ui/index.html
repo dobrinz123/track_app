@@ -89,6 +89,7 @@
   <div class="grid" id="grid"></div>
 </main>
 
+<script src="/ui/reject.js"></script>
 <script>
 const FILTERS = [["all","Toate"],["review","De revizuit"],["approved","Aprobate"],["posted","Postate"],["rejected","Respinse"]];
 const STATUS_RO = {review:"de revizuit", approved:"aprobat", posted:"postat", rejected:"respins", exported:"exportat", published:"publicat"};
@@ -126,14 +127,14 @@ function card(v){
   const tabs = v.hasVideo ? `<div class="tabs">${PLATFORMS.map(([k,l]) =>
       `<button class="${k===p?"on":""}" data-tab="${v.id}:${k}">${l}</button>`).join("")}</div>
     <textarea readonly rows="6" id="cap-${v.id}">${esc(caption)}</textarea>
-    <button class="copy" data-copy="${v.id}">Copiază descrierea</button>` : `<div class="note">${esc(v.note)}</div>`;
+    <button class="copy" data-copy="${v.id}">Copiază descrierea</button>` : `<div class="note">${esc(v.note)}</div><button data-rej="${v.id}">Regenerează / Șterge</button>`;
   const acts = v.hasVideo ? `<div class="actions">
       ${v.status!=="approved" ? `<button data-st="${v.id}:approved">✓ Aprobă</button>` : `<button data-st="${v.id}:review">↺ Înapoi la revizuire</button>`}
       ${v.status!=="posted" ? `<button data-st="${v.id}:posted">Marchează postat</button>` : `<button data-st="${v.id}:approved">Nepostat</button>`}
       <a href="/media/${v.id}/video.mp4" download="trace-${v.id}.mp4"><button>⬇ Descarcă MP4</button></a>
-      ${v.status!=="rejected" ? `<button data-st="${v.id}:rejected">✕ Respinge</button>` : `<button data-st="${v.id}:review">Restaurează</button>`}
+      ${v.status!=="rejected" ? `<button data-rej="${v.id}">✕ Respinge</button>` : `<button data-rej="${v.id}">Regenerează / Șterge</button>`}
     </div>` : "";
-  return `<article class="card ${v.hasVideo ? "" : "novideo"}">${player}<div class="body">
+  return `<article class="card ${v.hasVideo ? "" : "novideo"}" id="card-${v.id}">${player}<div class="body">
     <div class="row"><span class="chip ${v.status}">${STATUS_RO[v.status]||v.status}</span>
       <span class="meta">#${v.id} · ${v.lang.toUpperCase()} · ${esc((v.created||"").replace("T"," ").slice(0,16))}</span></div>
     ${v.voice ? `<div class="meta">🎙 ${esc(v.voice)}</div>` : ""}
@@ -160,6 +161,10 @@ document.addEventListener("click", async e => {
     const ok = await copyText(document.getElementById("cap-"+b.dataset.copy).value);
     b.textContent = ok ? "Copiat ✓" : "Copierea a eșuat"; b.classList.toggle("done", ok);
     setTimeout(()=>{ b.textContent = "Copiază descrierea"; b.classList.remove("done"); }, 1600);
+  }
+  if (b.dataset.rej){
+    RejectPanel.open("video", b.dataset.rej, document.getElementById("card-"+b.dataset.rej), d => { if (d.job) poll(); load(); });
+    return;
   }
   if (b.dataset.st){
     const [id,status] = b.dataset.st.split(":");
