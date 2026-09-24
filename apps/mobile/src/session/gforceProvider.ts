@@ -402,12 +402,13 @@ async function defaultAccelerometerSource(): Promise<AccelerometerSource> {
  * getters, each `require`-ing a module the app may never have loaded. Metro
  * loads a module the first time through `guardedLoadModule`, and a module
  * that throws while loading goes straight to `ErrorUtils.reportFatalError`,
- * NOT to the `catch` below: on the iOS release build that was a SIGABRT
- * (`RCTExceptionsManager reportFatal`) the moment the gyroscope started,
- * i.e. on "Start Calibration" whenever gyro capture or IMU fusion was on.
- * `Platform` is read from `expo-modules-core` instead: an ES module (Metro
- * returns its exports as-is, no getter walk) that `expo-sensors` has already
- * loaded by the time this runs, so no module is initialised here at all.
+ * NOT to the `catch` below. The iOS release build aborted with exactly that
+ * signature (`RCTExceptionsManager reportFatal` -> SIGABRT) the moment the
+ * gyroscope started, i.e. on "Start Calibration" whenever gyro capture or IMU
+ * fusion was on; the reports carry no JS message, so this is the supported
+ * cause, to be confirmed on the device. `Platform` is read from
+ * `expo-modules-core` instead: an ES module (`__esModule`, so Metro returns
+ * its exports as-is, no getter walk) that Expo initialises at app start.
  *
  * It has to be lazy for the same reason `expo-sensors` does, and for one more:
  * `composition.ts` imports this module and is itself imported directly by
