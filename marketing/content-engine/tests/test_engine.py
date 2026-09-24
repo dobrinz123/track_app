@@ -132,3 +132,28 @@ def test_choose_voices_rewrites_only_the_en_line(tmp_path, monkeypatch):
     server.choose_voices(["edge_andrew_multilingual"])
     cfg = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
     assert cfg["voices"]["en"]["voice"] == "en-US-AndrewMultilingualNeural" and cfg["voices"]["en"]["rate"] == "+0%"
+
+
+def test_feedback_routing_and_notes(tmp_path):
+    from engine.feedback import is_idea_problem, recurring_notes, writer_notes
+    from engine.state import State
+    assert is_idea_problem(["idea-weak", "hook"]) and not is_idea_problem(["hook", "too-long"])
+    notes = writer_notes(["hook", "voice", "claim"], "start with a question")
+    assert "hook" in notes and "fact sheet" in notes and "start with a question" in notes
+    assert "voice" not in notes.lower().split("editor")[0]  # voice/music are handled by picking, not by the writer
+    st = State(tmp_path / "s.db")
+    for _ in range(3):
+        st.add_feedback("post", 1, 1, ["hook"], "", "regenerate")
+    st.add_feedback("post", 2, 1, ["too-long"], "", "regenerate")
+    rec = recurring_notes(st)
+    assert rec.index("opening hook") < rec.index("too much text") and "(3x)" in rec
+
+
+def test_fresh_dir_never_overwrites(tmp_path):
+    import run
+    base = tmp_path / "0007-en-brake"
+    assert run.fresh_dir(base) == base
+    base.mkdir()
+    assert run.fresh_dir(base).name == "0007-en-brake-v2"
+    (tmp_path / "0007-en-brake-v2").mkdir()
+    assert run.fresh_dir(base).name == "0007-en-brake-v3"

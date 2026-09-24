@@ -91,7 +91,8 @@ def _as_script(post: dict) -> dict:
             "caption": post["caption"]}
 
 
-def write_post(llm: LLM, facts: dict, cfg: dict, idea, fmt: str) -> tuple[dict, list[str]]:
+def write_post(llm: LLM, facts: dict, cfg: dict, idea, fmt: str, notes: str = "",
+               previous: dict | None = None) -> tuple[dict, list[str]]:
     system = system_prompt(facts, "social post writer") + "\n" + POST_RULES
     moment = idea_moment(idea)
     prompt = (
@@ -100,6 +101,11 @@ def write_post(llm: LLM, facts: dict, cfg: dict, idea, fmt: str) -> tuple[dict, 
         f"Coaching moment: {moment or 'pick the one that fits best'}\n"
         f"CTA line (last carousel slide title): {facts['cta']['en']}"
     )
+    if notes:  # regeneration after an editor rejected the execution of this same idea
+        prompt += "\n\nThe editor rejected the previous version. Fix exactly this:\n" + notes
+        if previous:
+            prompt += "\nPrevious slides (do not reuse its hook):\n" + "\n".join(
+                f"[{s['kind']}] {s['title']} || {s['body']}" for s in previous.get("slides", []))
     model = cfg["llm"]["writer_model"]
     asked = [prompt]
     post = llm.json(f"post-{fmt}", model, system, prompt, POST_SCHEMA)

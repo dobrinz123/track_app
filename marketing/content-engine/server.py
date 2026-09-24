@@ -7,6 +7,7 @@ Standard library only. Binds to 127.0.0.1, so it is reachable from this PC only.
 from __future__ import annotations
 
 import json
+import shutil
 import re
 import threading
 import traceback
@@ -17,6 +18,7 @@ from urllib.parse import urlparse
 
 import run
 from engine.llm import BudgetExceeded
+from engine.feedback import is_idea_problem, reason_catalog, writer_notes
 from engine.posts import INTRO_SERIES, ensure_intro_series
 from engine.research import research
 
@@ -104,9 +106,85 @@ def generate_post(topic: str | None, fmt: str) -> None:
         JOB["running"] = False
 
 
+HIDDEN = ("deleted", "replaced")
+
+
+def reject_item(kind: str, item_id: int, reasons: list[str], comment: str, action: str) -> dict:
+    """kind 'video' | 'post'. action: keep (label only) | delete | regenerate."""
+    cfg, state, llm, facts = run.load()
+    row = state.video(item_id) if kind == "video" else state.post(item_id)
+    if not row:
+        raise KeyError("not found")
+    idea_id = row["idea_id"]
+    state.add_feedback(kind, item_id, idea_id, reasons, comment, action)
+    setter = state.set_video if kind == "video" else state.set_post
+    note = "; ".join(reasons) + (f" | {comment}" if comment else "")
+    if action == "keep":
+        setter(item_id, status="rejected", note=note)
+        return {"ok": True}
+    if action == "delete":
+        folder = Path(row["dir"])
+        if folder.exists() and run.OUT in folder.resolve().parents:
+            shutil.rmtree(folder, ignore_errors=True)
+        setter(item_id, status="deleted", note=note)
+        if idea_id and is_idea_problem(reasons):
+            state.set_idea_status(idea_id, "rejected")  # never reused; research is told to avoid it
+        return {"ok": True}
+    # regenerate: same idea, the editor's notes go to the writer
+    idea = next((i for i in state.ideas() if i["id"] == idea_id), None)
+    if idea is None:
+        raise RuntimeError("this item has no idea to regenerate from; delete it instead")
+    folder = Path(row["dir"])
+    prev_file = folder / ("script.json" if kind == "video" else "post.json")
+    previous = json.loads(prev_file.read_text(encoding="utf-8")) if prev_file.exists() else None
+    if kind == "post" and previous:
+        previous = previous.get("source", previous)
+    notes = writer_notes(reasons, comment)
+    with JOB_LOCK:
+        if JOB["running"]:
+            raise RuntimeError("O generare rulează deja.")
+        JOB.update(running=True, steps=[], error=None, made=[])
+    setter(item_id, status="replaced", note=note)
+
+    prev_status = row["status"]
+
+    def work():
+        cfg, state, llm, facts = run.load()  # SQLite connections are per thread
+        try:
+            JOB["steps"].append(f"Regenerez „{idea['title']}” cu observațiile tale")
+            if kind == "video":
+                avoid = row["voice"] if "voice" in reasons and "voice" in row.keys() else None
+                JOB["made"] = run.produce_one(cfg, state, llm, facts, idea, on_step=JOB["steps"].append,
+                                              notes=notes, previous=previous, avoid_voice=avoid)
+                if not JOB["made"]:
+                    raise RuntimeError("the new script failed the claim check; see out/engine.log")
+            else:
+                pid = run.produce_post(cfg, state, llm, facts, idea, row["format"], on_step=JOB["steps"].append,
+                                       notes=notes, previous=previous)
+                if pid is None:
+                    raise RuntimeError("the new post failed the claim check; see out/engine.log")
+                JOB["made"] = [pid]
+            JOB["steps"].append("Gata.")
+        except BudgetExceeded as exc:
+            JOB["error"] = f"Bugetul zilnic LLM a fost atins ({exc})."
+        except Exception as exc:
+            JOB["error"] = f"{type(exc).__name__}: {exc}"
+            run.log(f"regenerate {kind} {item_id} failed: {traceback.format_exc(limit=4)}")
+        finally:
+            if JOB["error"]:  # nothing replaced it: bring the old version back, marked rejected with the notes
+                (state.set_video if kind == "video" else state.set_post)(
+                    item_id, status="rejected" if prev_status != "rejected" else prev_status)
+            JOB["running"] = False
+
+    threading.Thread(target=work, daemon=True).start()
+    return {"ok": True, "job": True}
+
+
 def post_payload(state) -> list[dict]:
     items = []
     for row in reversed(state.posts()):
+        if row["status"] in HIDDEN:
+            continue
         folder = Path(row["dir"])
         meta_file = folder / "post.json"
         meta = json.loads(meta_file.read_text(encoding="utf-8")) if meta_file.exists() else {}
@@ -123,6 +201,8 @@ def post_payload(state) -> list[dict]:
 def video_payload(state) -> list[dict]:
     items = []
     for v in reversed(state.videos()):
+        if v["status"] in HIDDEN:
+            continue
         folder = Path(v["dir"])
         post_file = folder / "post.json"
         post = json.loads(post_file.read_text(encoding="utf-8")) if post_file.exists() else None
@@ -236,6 +316,18 @@ class Handler(BaseHTTPRequestHandler):
             _, state, _, _ = run.load()
             row = state.post(int(m.group(1)))
             self._send_file(Path(row["dir"]) / m.group(2) if row else None)
+        elif m := re.fullmatch(r"/ui/([\w-]+\.js)", path):
+            f = run.ROOT / "ui" / m.group(1)
+            if not f.exists():
+                return self.send_error(404)
+            body = f.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/javascript; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif m := re.fullmatch(r"/api/reasons/(video|post)", path):
+            self._json(reason_catalog(m.group(1)))
         elif path == "/voices":
             self._page(VOICES_UI)
         elif path == "/api/voices":
@@ -320,6 +412,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "no post"}, 404)
             state.set_post(int(m.group(1)), status=status)
             self._json({"ok": True})
+        elif m := re.fullmatch(r"/api/(videos|posts)/(\d+)/reject", path):
+            body = self._body()
+            action = body.get("action")
+            if action not in ("keep", "delete", "regenerate"):
+                return self._json({"error": "bad action"}, 400)
+            try:
+                res = reject_item("video" if m.group(1) == "videos" else "post", int(m.group(2)),
+                                  [str(r) for r in body.get("reasons", [])][:12], str(body.get("comment", ""))[:600],
+                                  action)
+            except Exception as exc:
+                return self._json({"error": str(exc)}, 400)
+            self._json(res)
         elif path == "/api/voices/choose":
             body = self._body()
             try:

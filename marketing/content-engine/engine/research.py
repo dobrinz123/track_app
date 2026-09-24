@@ -94,6 +94,7 @@ def research(llm: LLM, state: State, facts: dict, cfg: dict, cache_dir: Path) ->
     signals = [s for s in signals if s and not s.startswith("(source unavailable")]
 
     recent = "; ".join(existing[-25:]) or "none yet"
+    rejected = state.rejected_idea_titles()
     prompt = (
         f"Propose {rcfg['ideas_per_call']} short-video ideas. Favour these pillars: {', '.join(underfed)}.\n"
         f"Each idea = one specific beginner problem or lesson, resolved by ONE of TRACE's three coaching moments "
@@ -103,6 +104,8 @@ def research(llm: LLM, state: State, facts: dict, cfg: dict, cache_dir: Path) ->
         f"at the hairpin and never notice; the pit view shows it' beats 'track day tips').\n"
         f"Use circuit 'tmr' or 'motorpark' only for circuit-guide or when the circuit matters; else 'none'.\n"
         f"Already covered (do not repeat): {recent}\n"
+        + (f"The editor REJECTED these ideas as weak - avoid anything similar: {'; '.join(rejected)}\n" if rejected else "")
+        + ""
     )
     if signals:
         prompt += "What people are currently asking (raw, may be noisy):\n" + "\n---\n".join(signals)
