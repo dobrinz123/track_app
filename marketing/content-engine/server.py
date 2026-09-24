@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 
 import run
 from engine.llm import BudgetExceeded
+from engine.posts import INTRO_SERIES, ensure_intro_series
 from engine.research import research
 
 HOST, PORT = "127.0.0.1", 8765
@@ -24,7 +25,9 @@ UI = run.ROOT / "ui" / "index.html"
 VOICES_UI = run.ROOT / "ui" / "voices.html"
 LAB = run.ROOT / "voice-lab"
 MEDIA = {"video.mp4": "video/mp4", "thumbnail.jpg": "image/jpeg"}
-TYPES = {".mp4": "video/mp4", ".jpg": "image/jpeg", ".wav": "audio/wav", ".mp3": "audio/mpeg"}
+TYPES = {".mp4": "video/mp4", ".jpg": "image/jpeg", ".wav": "audio/wav", ".mp3": "audio/mpeg",
+         ".png": "image/png", ".pdf": "application/pdf"}
+POSTS_UI = run.ROOT / "ui" / "posts.html"
 
 JOB = {"running": False, "steps": [], "error": None, "made": []}
 JOB_LOCK = threading.Lock()
@@ -63,6 +66,58 @@ def generate(topic: str | None) -> None:
         run.log(f"ui generate failed: {traceback.format_exc(limit=4)}")
     finally:
         JOB["running"] = False
+
+
+def generate_post(topic: str | None, fmt: str) -> None:
+    """One image post: from the typed topic, else the next idea no post has used yet."""
+    def step(msg: str) -> None:
+        JOB["steps"].append(msg)
+
+    try:
+        cfg, state, llm, facts = run.load()
+        if topic:
+            idea_id = state.add_idea("custom", topic[:70], topic[:300], None)
+            state.set_idea_status(idea_id, "done")  # typed topics are not left in the clip backlog
+            idea = next(i for i in state.ideas() if i["id"] == idea_id)
+        else:
+            ensure_intro_series(state)  # the product introduction goes out first
+            pool = state.ideas_without_post()
+            if not pool:
+                step("Caut idei noi (Haiku)...")
+                research(llm, state, facts, cfg, run.OUT / "cache")
+                pool = state.ideas_without_post()
+            if not pool:
+                raise RuntimeError("no idea available for a post")
+            idea = pool[0]
+        step(f"Idee: {idea['title']}")
+        pid = run.produce_post(cfg, state, llm, facts, idea, fmt, on_step=step)
+        if pid is None:
+            raise RuntimeError("the post failed the claim check twice; see out/engine.log")
+        JOB["made"] = [pid]
+        step("Gata.")
+    except BudgetExceeded as exc:
+        JOB["error"] = f"Bugetul zilnic LLM a fost atins ({exc})."
+    except Exception as exc:
+        JOB["error"] = f"{type(exc).__name__}: {exc}"
+        run.log(f"ui post generate failed: {traceback.format_exc(limit=4)}")
+    finally:
+        JOB["running"] = False
+
+
+def post_payload(state) -> list[dict]:
+    items = []
+    for row in reversed(state.posts()):
+        folder = Path(row["dir"])
+        meta_file = folder / "post.json"
+        meta = json.loads(meta_file.read_text(encoding="utf-8")) if meta_file.exists() else {}
+        items.append({
+            "id": row["id"], "format": row["format"], "status": row["status"], "created": row["created"],
+            "title": meta.get("title") or row["title"], "note": row["note"],
+            "slides": [f"/media/post/{row['id']}/{n}" for n in meta.get("slides", [])],
+            "pdf": f"/media/post/{row['id']}/linkedin_carousel.pdf" if (folder / "linkedin_carousel.pdf").exists() else None,
+            "captions": meta.get("platforms", {}),
+        })
+    return items
 
 
 def video_payload(state) -> list[dict]:
@@ -168,6 +223,19 @@ class Handler(BaseHTTPRequestHandler):
                         "spend": state.usage_summary()[:1]})
         elif path == "/api/job":
             self._json(JOB)
+        elif path == "/posts":
+            self._page(POSTS_UI)
+        elif path == "/api/posts":
+            _, state, _, _ = run.load()
+            ensure_intro_series(state)
+            done = {r["idea_id"] for r in state.posts() if r["status"] != "rejected"}
+            intro_left = [r["title"] for r in state.ideas() if r["pillar"] == "intro" and r["id"] not in done]
+            self._json({"posts": post_payload(state), "fresh": len(state.ideas_without_post()),
+                        "intro_left": intro_left, "intro_total": len(INTRO_SERIES)})
+        elif m := re.fullmatch(r"/media/post/(\d+)/(slide_\d\d\.png|linkedin_carousel\.pdf)", path):
+            _, state, _, _ = run.load()
+            row = state.post(int(m.group(1)))
+            self._send_file(Path(row["dir"]) / m.group(2) if row else None)
         elif path == "/voices":
             self._page(VOICES_UI)
         elif path == "/api/voices":
@@ -232,6 +300,25 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "O generare rulează deja."}, 409)
                 JOB.update(running=True, steps=[], error=None, made=[])
             threading.Thread(target=generate, args=(topic,), daemon=True).start()
+            self._json({"ok": True})
+        elif path == "/api/posts/generate":
+            body = self._body()
+            topic = (body.get("topic") or "").strip() or None
+            fmt = body.get("format") if body.get("format") in ("carousel", "single") else "carousel"
+            with JOB_LOCK:
+                if JOB["running"]:
+                    return self._json({"error": "O generare rulează deja."}, 409)
+                JOB.update(running=True, steps=[], error=None, made=[])
+            threading.Thread(target=generate_post, args=(topic, fmt), daemon=True).start()
+            self._json({"ok": True})
+        elif m := re.fullmatch(r"/api/posts/(\d+)/status", path):
+            status = self._body().get("status")
+            if status not in ("review", "approved", "rejected", "posted"):
+                return self._json({"error": "bad status"}, 400)
+            _, state, _, _ = run.load()
+            if not state.post(int(m.group(1))):
+                return self._json({"error": "no post"}, 404)
+            state.set_post(int(m.group(1)), status=status)
             self._json({"ok": True})
         elif path == "/api/voices/choose":
             body = self._body()

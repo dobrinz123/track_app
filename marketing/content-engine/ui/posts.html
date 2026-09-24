@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TRACE Postări</title>
+<style>
+  :root { --bg:#0A0A0C; --panel:#121216; --panel2:#1A1A20; --line:#2C2C34; --text:#F2F2F4; --muted:#9A9AA3;
+          --amber:#FFB300; --green:#00E676; --red:#FF3B30; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.45 "Segoe UI", system-ui, sans-serif; }
+  header { position:sticky; top:0; z-index:5; background:rgba(10,10,12,.92); backdrop-filter:blur(8px);
+           border-bottom:1px solid var(--line); padding:14px 20px; display:flex; gap:18px; align-items:center; flex-wrap:wrap; }
+  .brand { font-weight:900; letter-spacing:.08em; font-size:20px; } .brand span { color:var(--amber); }
+  nav a { color:var(--muted); text-decoration:none; margin-right:14px; font-weight:600; } nav a.on { color:var(--amber); }
+  .stats { color:var(--muted); font-size:13px; margin-left:auto; }
+  main { max-width:1320px; margin:0 auto; padding:20px; }
+  .gen { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:16px; display:grid;
+         grid-template-columns:1fr auto auto; gap:12px; align-items:center; }
+  .gen input { width:100%; background:var(--panel2); color:var(--text); border:1px solid var(--line); border-radius:10px; padding:12px 14px; font:inherit; }
+  .gen input:focus { outline:2px solid var(--amber); border-color:transparent; }
+  .seg { display:flex; background:var(--panel2); border:1px solid var(--line); border-radius:10px; padding:3px; }
+  .seg button { border:0; background:transparent; color:var(--muted); padding:8px 12px; border-radius:8px; font:inherit; cursor:pointer; }
+  .seg button.on { background:var(--bg); color:var(--text); }
+  button { font:inherit; cursor:pointer; border-radius:10px; border:1px solid var(--line); background:var(--panel2); color:var(--text); padding:10px 14px; }
+  button:hover { border-color:var(--muted); } button:disabled { opacity:.5; cursor:wait; }
+  .primary { background:var(--amber); color:#111; border:0; font-weight:800; padding:12px 20px; }
+  .job { grid-column:1/-1; color:var(--muted); font-size:14px; display:none; } .job.on { display:block; }
+  .job .err { color:var(--red); } .job li:last-child { color:var(--text); }
+  .spin { display:inline-block; width:12px; height:12px; border:2px solid var(--amber); border-right-color:transparent; border-radius:50%; animation:s .8s linear infinite; vertical-align:-1px; margin-right:6px; }
+  @keyframes s { to { transform:rotate(360deg); } }
+  .intro { margin-top:14px; padding:12px 16px; border-radius:12px; border:1px solid rgba(255,179,0,.4); background:rgba(255,179,0,.08); color:#E6E6EA; font-size:14px; }
+  .intro b { color:var(--amber); }
+  .filters { display:flex; gap:8px; margin:20px 0 14px; flex-wrap:wrap; }
+  .filters button.on { border-color:var(--amber); color:var(--amber); }
+  .list { display:grid; gap:18px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:16px; display:grid;
+          grid-template-columns:minmax(0,1fr) 380px; gap:22px; align-items:start; }
+  .viewer { display:flex; flex-direction:column; align-items:center; gap:12px; min-width:0; }
+  .stage { position:relative; height:min(calc(100vh - 120px), 860px); aspect-ratio:4/5; max-width:100%; border-radius:14px; overflow:hidden;
+           background:#000; border:1px solid var(--line); outline:none; }
+  .stage:focus-visible { outline:2px solid var(--amber); outline-offset:3px; }
+  .stage img { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; opacity:0; transition:opacity .25s ease; }
+  .stage img.on { opacity:1; }
+  .nav { position:absolute; top:50%; translate:0 -50%; width:52px; height:52px; border-radius:50%; border:0;
+         background:rgba(10,10,12,.72); color:#fff; font-size:26px; line-height:1; display:grid; place-items:center; padding:0; }
+  .nav:hover { background:var(--amber); color:#111; }
+  .nav.prev { left:12px; } .nav.next { right:12px; } .nav:disabled { opacity:0; pointer-events:none; }
+  .counter { position:absolute; top:12px; right:12px; background:rgba(10,10,12,.75); padding:4px 10px; border-radius:99px;
+             font:700 13px ui-monospace, Consolas, monospace; }
+  .thumbs { display:flex; gap:8px; flex-wrap:wrap; justify-content:center; }
+  .thumbs button { padding:0; border:2px solid transparent; border-radius:8px; background:none; }
+  .thumbs button.on { border-color:var(--amber); }
+  .thumbs img { width:54px; aspect-ratio:4/5; display:block; border-radius:6px; object-fit:cover; }
+  .side { display:flex; flex-direction:column; gap:10px; min-width:0; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .title { font-weight:700; font-size:16px; }
+  .chip { font-size:12px; font-weight:700; padding:3px 9px; border-radius:999px; border:1px solid; text-transform:uppercase; letter-spacing:.04em; }
+  .chip.review { color:var(--amber); } .chip.approved { color:var(--green); } .chip.posted { color:var(--muted); } .chip.rejected { color:var(--red); }
+  .chip.fmt { color:var(--text); border-color:var(--line); }
+  .meta { color:var(--muted); font-size:12px; }
+  .tabs { display:flex; background:var(--panel2); border-radius:10px; padding:3px; }
+  .tabs button { flex:1; border:0; background:transparent; padding:7px; font-size:13px; color:var(--muted); }
+  .tabs button.on { background:var(--bg); color:var(--text); }
+  textarea { width:100%; min-height:130px; resize:vertical; background:var(--bg); color:var(--text); border:1px solid var(--line);
+             border-radius:10px; padding:10px; font-family:inherit; font-size:14px; line-height:1.4; }
+  .copy { width:100%; background:var(--amber); color:#111; border:0; font-weight:800; } .copy.done { background:var(--green); }
+  .actions { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .note { color:var(--red); font-size:13px; }
+  .empty { color:var(--muted); padding:60px 0; text-align:center; }
+  .hint { color:var(--muted); font-size:12px; }
+  @media (max-width:900px) { .card { grid-template-columns:1fr; } .gen { grid-template-columns:1fr; } .stage { height:auto; width:100%; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">TRACE <span>STUDIO</span></div>
+  <nav><a href="/">Clipuri</a><a href="/posts" class="on">Postări</a><a href="/voices">Voci</a></nav>
+  <div class="stats" id="stats"></div>
+</header>
+<main>
+  <section class="gen">
+    <input id="topic" placeholder="Subiect (opțional) — ex: ce faci la boxe între sesiuni. Gol = următoarea idee.">
+    <div class="seg" id="fmt"><button class="on" data-fmt="carousel">Carusel</button><button data-fmt="single">Imagine unică</button></div>
+    <button class="primary" id="genBtn">Generează postare nouă</button>
+    <div class="job" id="job"></div>
+  </section>
+  <div class="intro" id="intro"></div>
+  <div class="filters" id="filters"></div>
+  <div class="list" id="list"></div>
+</main>
+
+<script>
+const FILTERS = [["all","Toate"],["review","De revizuit"],["approved","Aprobate"],["posted","Postate"],["rejected","Respinse"]];
+const STATUS_RO = {review:"de revizuit", approved:"aprobat", posted:"postat", rejected:"respins"};
+const PLATFORMS = [["instagram","Instagram"],["facebook","Facebook"],["linkedin","LinkedIn"],["x","X"]];
+let filter = "all", posts = [], platform = {}, fmt = "carousel", polling = null, slideAt = {};
+function go(id, i){
+  const p = posts.find(x => String(x.id) === String(id)); if (!p) return;
+  const n = p.slides.length; i = Math.max(0, Math.min(n - 1, i)); slideAt[id] = i;
+  const stage = document.getElementById("stage-"+id); if (!stage) return;
+  stage.querySelectorAll("img").forEach((im,k) => im.classList.toggle("on", k===i));
+  const c = document.getElementById("ctr-"+id); if (c) c.textContent = `${i+1} / ${n}`;
+  const pv = stage.querySelector(".prev"), nx = stage.querySelector(".next");
+  if (pv) pv.disabled = i===0; if (nx) nx.disabled = i===n-1;
+  stage.parentElement.querySelectorAll(".thumbs button").forEach((b,k) => b.classList.toggle("on", k===i));
+}
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+async function load(){
+  const d = await (await fetch("/api/posts")).json();
+  posts = d.posts;
+  document.getElementById("stats").textContent = `${posts.filter(p=>p.slides.length).length} postări · ${d.fresh} idei nefolosite pentru postări`;
+  const left = d.intro_left.length, doneN = d.intro_total - left;
+  document.getElementById("intro").innerHTML = left
+    ? `<b>Seria de prezentare: ${doneN}/${d.intro_total}.</b> Următoarea postare generată fără subiect: „${esc(d.intro_left[0])}”. Postările astea explică ce e TRACE și diferențiatorul (coaching live, la boxe, după sesiune) — publică-le primele, în ordine.`
+    : `<b>Seria de prezentare e completă (${d.intro_total}/${d.intro_total}).</b> Postările noi vin din ideile de coaching.`;
+  render();
+}
+function render(){
+  document.getElementById("filters").innerHTML = FILTERS.map(([k,l]) => {
+    const n = k==="all" ? posts.length : posts.filter(p=>p.status===k).length;
+    return `<button class="${k===filter?"on":""}" data-f="${k}">${l} (${n})</button>`; }).join("");
+  const list = posts.filter(p => filter==="all" || p.status===filter);
+  document.getElementById("list").innerHTML = list.length ? list.map(card).join("")
+    : `<div class="empty">Nicio postare aici încă. Apasă „Generează postare nouă".</div>`;
+}
+function card(p){
+  const pl = platform[p.id] || "instagram";
+  if (!p.slides.length) return `<article class="card"><div class="side"><div class="row"><span class="chip ${p.status}">${STATUS_RO[p.status]||p.status}</span>
+    <span class="meta">#${p.id}</span></div><div class="title">${esc(p.title)}</div><div class="note">${esc(p.note)}</div></div></article>`;
+  const n = p.slides.length, cur = Math.min(slideAt[p.id] || 0, n - 1);
+  const imgs = p.slides.map((s,i) => `<img src="${s}" alt="Slide ${i+1} din ${n}" class="${i===cur?"on":""}" ${i>1?'loading="lazy"':''}>`).join("");
+  const thumbs = n > 1 ? `<div class="thumbs">${p.slides.map((s,i) => `<button data-go="${p.id}:${i}" class="${i===cur?"on":""}" aria-label="Slide ${i+1}"><img src="${s}" alt="" loading="lazy"></button>`).join("")}</div>` : "";
+  const viewer = `<div class="viewer"><div class="stage" id="stage-${p.id}" tabindex="0" data-stage="${p.id}" aria-label="Slide-urile postării ${p.id}">
+      ${imgs}${n > 1 ? `<span class="counter" id="ctr-${p.id}">${cur+1} / ${n}</span>
+      <button class="nav prev" data-step="${p.id}:-1" aria-label="Slide-ul anterior" ${cur===0?"disabled":""}>‹</button>
+      <button class="nav next" data-step="${p.id}:1" aria-label="Slide-ul următor" ${cur===n-1?"disabled":""}>›</button>` : ""}
+    </div>${thumbs}</div>`;
+  const dl = p.slides.map((s,i) => `<a href="${s}" download="trace-post-${p.id}-${i+1}.png"></a>`).join("");
+  return `<article class="card">
+    ${viewer}
+    <div class="side">
+      <div class="row"><span class="chip ${p.status}">${STATUS_RO[p.status]||p.status}</span>
+        <span class="chip fmt">${p.format==="single"?"imagine":"carusel · "+p.slides.length}</span>
+        <span class="meta">#${p.id} · ${esc((p.created||"").replace("T"," ").slice(0,16))}</span></div>
+      <div class="title">${esc(p.title)}</div>
+      <div class="tabs">${PLATFORMS.map(([k,l]) => `<button class="${k===pl?"on":""}" data-tab="${p.id}:${k}">${l}</button>`).join("")}</div>
+      <textarea readonly rows="6" id="cap-${p.id}">${esc(p.captions[pl]||"")}</textarea>
+      <button class="copy" data-copy="${p.id}">Copiază descrierea</button>
+      <div class="actions">
+        <button data-dl="${p.id}">⬇ Descarcă ${p.slides.length > 1 ? "toate slide-urile" : "imaginea"}</button>
+        ${p.pdf ? `<a href="${p.pdf}" download="trace-post-${p.id}-linkedin.pdf"><button style="width:100%">⬇ PDF pentru LinkedIn</button></a>` : `<span></span>`}
+        ${p.status!=="approved" ? `<button data-st="${p.id}:approved">✓ Aprobă</button>` : `<button data-st="${p.id}:review">↺ Înapoi la revizuire</button>`}
+        ${p.status!=="posted" ? `<button data-st="${p.id}:posted">Marchează postat</button>` : `<button data-st="${p.id}:approved">Nepostat</button>`}
+        ${p.status!=="rejected" ? `<button data-st="${p.id}:rejected">✕ Respinge</button>` : `<button data-st="${p.id}:review">Restaurează</button>`}
+      </div>
+      <div hidden id="dl-${p.id}">${dl}</div>
+    </div></article>`;
+}
+async function copyText(t){ try { await navigator.clipboard.writeText(t); return true; } catch {
+  const a=document.createElement("textarea"); a.value=t; document.body.appendChild(a); a.select(); const ok=document.execCommand("copy"); a.remove(); return ok; } }
+
+document.addEventListener("click", async e => {
+  const b = e.target.closest("button"); if (!b) return;
+  if (b.dataset.step){ const [id,d] = b.dataset.step.split(":"); go(id, (slideAt[id]||0) + (+d)); document.getElementById("stage-"+id).focus({preventScroll:true}); return; }
+  if (b.dataset.go){ const [id,i] = b.dataset.go.split(":"); go(id, +i); return; }
+  if (b.dataset.fmt){ fmt = b.dataset.fmt; b.parentElement.querySelectorAll("button").forEach(x=>x.classList.toggle("on", x===b)); }
+  if (b.dataset.f){ filter = b.dataset.f; render(); }
+  if (b.dataset.tab){ const [id,pl] = b.dataset.tab.split(":"); platform[id]=pl; const p = posts.find(x=>String(x.id)===id);
+    document.getElementById("cap-"+id).value = p.captions[pl] || ""; b.parentElement.querySelectorAll("button").forEach(x=>x.classList.toggle("on", x===b)); }
+  if (b.dataset.copy){ const ok = await copyText(document.getElementById("cap-"+b.dataset.copy).value);
+    b.textContent = ok ? "Copiat ✓" : "Copierea a eșuat"; b.classList.toggle("done", ok);
+    setTimeout(()=>{ b.textContent="Copiază descrierea"; b.classList.remove("done"); }, 1600); }
+  if (b.dataset.dl){ const links = [...document.querySelectorAll(`#dl-${b.dataset.dl} a`)];
+    for (const a of links){ a.click(); await new Promise(r=>setTimeout(r,350)); } }
+  if (b.dataset.st){ const [id,status] = b.dataset.st.split(":");
+    await fetch(`/api/posts/${id}/status`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({status})}); load(); }
+});
+document.addEventListener("keydown", e => {
+  const st = e.target.closest && e.target.closest("[data-stage]");
+  const id = st ? st.dataset.stage : null; if (!id) return;
+  if (e.key === "ArrowRight"){ go(id, (slideAt[id]||0) + 1); e.preventDefault(); }
+  if (e.key === "ArrowLeft"){ go(id, (slideAt[id]||0) - 1); e.preventDefault(); }
+});
+document.getElementById("genBtn").onclick = async () => {
+  const topic = document.getElementById("topic").value;
+  const r = await fetch("/api/posts/generate", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({topic, format: fmt})});
+  if (!r.ok){ const d = await r.json(); showJob({running:false, steps:[], error:d.error}); return; }
+  document.getElementById("topic").value = ""; poll();
+};
+document.getElementById("topic").addEventListener("keydown", e => { if (e.key==="Enter") document.getElementById("genBtn").click(); });
+function showJob(j){
+  const el = document.getElementById("job"), btn = document.getElementById("genBtn");
+  el.classList.add("on"); btn.disabled = j.running; btn.textContent = j.running ? "Se generează…" : "Generează postare nouă";
+  el.innerHTML = `<ul style="margin:0;padding-left:18px">${j.steps.map(s=>`<li>${esc(s)}</li>`).join("")}</ul>` +
+    (j.running ? `<div><span class="spin"></span>Durează ~30–60 de secunde.</div>` : "") + (j.error ? `<div class="err">Eroare: ${esc(j.error)}</div>` : "");
+}
+async function poll(){ clearInterval(polling);
+  const tick = async () => { const j = await (await fetch("/api/job")).json(); showJob(j); if (!j.running){ clearInterval(polling); load(); } };
+  await tick(); polling = setInterval(tick, 1500); }
+(async () => { await load(); const j = await (await fetch("/api/job")).json(); if (j.running) poll(); })();
+</script>
+</body>
+</html>

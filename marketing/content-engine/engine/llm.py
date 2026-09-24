@@ -41,9 +41,16 @@ class LLM:
         self.workdir = Path(tempfile.gettempdir()) / "trace-content-engine-empty"
         self.workdir.mkdir(exist_ok=True)
 
-    def json(self, task: str, model: str, system: str, prompt: str, schema: dict) -> dict:
+    def _cache_file(self, model: str, system: str, prompt: str, schema: dict) -> Path:
         key = hashlib.sha256(json.dumps([model, system, prompt, schema], sort_keys=True).encode()).hexdigest()
-        hit = self.cache_dir / f"{key[:32]}.json"
+        return self.cache_dir / f"{key[:32]}.json"
+
+    def forget(self, model: str, system: str, prompt: str, schema: dict) -> None:
+        """Drop a cached answer that turned out to be unusable, so a retry asks the model again."""
+        self._cache_file(model, system, prompt, schema).unlink(missing_ok=True)
+
+    def json(self, task: str, model: str, system: str, prompt: str, schema: dict) -> dict:
+        hit = self._cache_file(model, system, prompt, schema)
         max_age = self.cfg.get("cache_days", 14) * 86400
         if hit.exists() and time.time() - hit.stat().st_mtime < max_age:
             self.state.log_usage(task, model, {}, 0.0, cached=True)

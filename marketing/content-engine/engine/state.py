@@ -13,6 +13,9 @@ create table if not exists ideas(
 create table if not exists videos(
   id integer primary key, idea_id integer, lang text, dir text,
   status text, created text, published text, url text, note text);
+create table if not exists posts(
+  id integer primary key, idea_id integer, format text, dir text, status text,
+  created text, published text, note text);
 create table if not exists usage(
   ts text, day text, task text, model text, input_tokens integer,
   output_tokens integer, cost_usd real, cached integer);
@@ -86,6 +89,33 @@ class State:
         keys = ", ".join(f"{k}=?" for k in fields)
         self.db.execute(f"update videos set {keys} where id=?", (*fields.values(), vid))
         self.db.commit()
+
+    # posts
+    def add_post(self, idea_id: int, fmt: str, folder: str, status: str, note: str = "") -> int:
+        cur = self.db.execute(
+            "insert into posts(idea_id,format,dir,status,created,note) values(?,?,?,?,?,?)",
+            (idea_id, fmt, folder, status, now(), note))
+        self.db.commit()
+        return cur.lastrowid
+
+    def posts(self) -> list[sqlite3.Row]:
+        return self.db.execute(
+            "select p.*, i.title from posts p left join ideas i on i.id=p.idea_id order by p.id").fetchall()
+
+    def post(self, pid: int) -> sqlite3.Row | None:
+        return self.db.execute("select * from posts where id=?", (pid,)).fetchone()
+
+    def set_post(self, pid: int, **fields) -> None:
+        keys = ", ".join(f"{k}=?" for k in fields)
+        self.db.execute(f"update posts set {keys} where id=?", (*fields.values(), pid))
+        self.db.commit()
+
+    def ideas_without_post(self) -> list[sqlite3.Row]:
+        """Ideas are shared by clips and posts: a post may reuse an idea a clip already used."""
+        return self.db.execute(
+            "select * from ideas where status in ('new','done') and id not in "
+            "(select idea_id from posts where idea_id is not null and status != 'rejected') "
+            "order by (pillar = 'intro') desc, id").fetchall()
 
     # usage
     def log_usage(self, task: str, model: str, usage: dict, cost: float, cached: bool) -> None:

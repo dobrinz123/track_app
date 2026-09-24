@@ -72,6 +72,9 @@ def write_script(llm: LLM, facts: dict, cfg: dict, idea, lang: str) -> tuple[dic
         script = llm.json("script-repair", model, system, repair, SCRIPT_SCHEMA)
         problems = check_script(script, facts["launch_status"], idea["circuit"] or None, need)
         problems += fact_check(llm, facts, cfg, script)
+        if problems:  # a rejected answer must not be replayed from the cache on the next try
+            llm.forget(model, system, prompt, SCRIPT_SCHEMA)
+            llm.forget(model, system, repair, SCRIPT_SCHEMA)
     return script, problems
 
 

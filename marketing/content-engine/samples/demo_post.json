@@ -1,0 +1,13 @@
+{
+  "title": "Stop guessing between sessions",
+  "slides": [
+    {"kind": "cover", "title": "You changed ten things. Nothing got faster.", "body": "Between sessions, fix the corner that costs you most.", "screen": "pit-view"},
+    {"kind": "point", "title": "Guessing wastes your next session", "body": "After a session everything feels slow. You change your braking, your line and your gears at once, and learn nothing.", "screen": "none"},
+    {"kind": "screen", "title": "Look where you are losing the most", "body": "", "screen": "pit-view"},
+    {"kind": "point", "title": "Pick one corner. Change one thing.", "body": "The Pit view ranks your three costliest corners and shows your brake points lap by lap. Start with the top one.", "screen": "none"},
+    {"kind": "screen", "title": "Then check it corner by corner", "body": "", "screen": "report"},
+    {"kind": "cta", "title": "Follow TRACE to be first when it launches.", "body": "", "screen": "none"}
+  ],
+  "caption": "Between sessions, most beginners change everything at once.\nFix one corner instead: the one costing you most.\nTrack days only.",
+  "hashtags": ["trackday", "drivingcoach", "motorsport", "beginnerdriver", "racingline"]
+}

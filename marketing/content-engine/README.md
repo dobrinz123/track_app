@@ -20,6 +20,11 @@ Studio.bat                            # sau: python server.py  ->  http://127.0.
 - **Voci** (tab-ul al doilea): mostre pe același text; bifezi ☑ una sau mai multe voci → **Folosește vocile bifate**.
   Cu mai multe, clipurile le folosesc pe rând (cea folosită cel mai demult). Fiecare clip arată 🎙 vocea lui.
 
+- **Postări** (`/posts`): postări cu imagini (carusel 5–8 slide-uri sau imagine unică, 1080×1350) cu ecranele reale ale
+  aplicației; prezentare slide cu slide (săgeți / tastatură / miniaturi), descrieri pentru Instagram, Facebook, LinkedIn, X,
+  PDF pentru caruselele LinkedIn. Prima dată generează **seria de prezentare** (5 postări despre diferențiator), apoi ideile
+  de coaching. Randare: HTML → PNG cu Chrome/Edge headless (`engine/post_render.py`), fără dependențe noi.
+
 Linie de comandă: `python run.py daily | research | produce --count N | status | approve ID | publish | demo`,
 plus `rerender [ID...]` (refă vocea clipurilor existente, fără cost LLM) și `rerender ID --keep-voice`.
 

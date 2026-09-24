@@ -26,6 +26,8 @@ from engine.brand import load_facts
 from engine.llm import LLM, BudgetExceeded
 from engine.publish import build_post, export_ready, upload_youtube, write_package
 from engine.render import render_video
+from engine.post_render import render_post
+from engine.posts import post_captions, write_post
 from engine.research import research
 from engine.script import write_script
 from engine.state import State, now
@@ -144,6 +146,34 @@ def cmd_daily(cfg, state, llm, facts) -> None:
     except BudgetExceeded as exc:
         log(f"stopped: {exc}")
     cmd_publish(cfg, state)
+
+
+def produce_post(cfg, state, llm, facts, idea, fmt: str, on_step=lambda msg: None) -> int | None:
+    """One image post (fmt: 'carousel' | 'single'): write, check, render slides + LinkedIn PDF, package."""
+    status = "approved" if cfg["publish"].get("auto_approve") else "review"
+    folder = OUT / "posts" / f"{idea['id']:04d}-{fmt}-{slug(idea['title'])}"
+    on_step(f"Scriu postarea ({fmt})...")
+    post, problems = write_post(llm, facts, cfg, idea, fmt)
+    folder.mkdir(parents=True, exist_ok=True)
+    if problems:
+        (folder / "rejected_post.json").write_text(json.dumps(
+            {"post": post, "problems": problems}, ensure_ascii=False, indent=2), encoding="utf-8")
+        pid = state.add_post(idea["id"], fmt, str(folder), "rejected", "; ".join(problems))
+        log(f"post {pid} [{fmt}] rejected by guard: {problems}")
+        return None
+    on_step(f"Randez {len(post['slides'])} slide-uri: '{post['title']}'...")
+    slides = render_post(post, folder, REPO)
+    if len(slides) > 1:  # LinkedIn shows carousels as a document: one PDF, one page per slide
+        from PIL import Image
+        pages = [Image.open(p).convert("RGB") for p in slides]
+        pages[0].save(folder / "linkedin_carousel.pdf", save_all=True, append_images=pages[1:])
+    meta = {"title": post["title"], "format": fmt, "slides": [p.name for p in slides],
+            "platforms": post_captions(post)}
+    (folder / "post.json").write_text(json.dumps({**meta, "source": post}, ensure_ascii=False, indent=2),
+                                      encoding="utf-8")
+    pid = state.add_post(idea["id"], fmt, str(folder), status)
+    log(f"post {pid} [{fmt}] '{post['title']}' -> {status}")
+    return pid
 
 
 def cmd_rerender(cfg, state, ids: list[int], keep_voice: bool = False) -> None:
