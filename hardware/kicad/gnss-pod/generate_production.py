@@ -22,6 +22,7 @@ Mirrors hardware/kicad/trace-dongle/generate_production_csv.py: the LCSC table
 is imported from generate_board.py (single source).
 """
 import csv
+import math
 import os
 import subprocess
 import sys
@@ -53,9 +54,56 @@ def run(args):
     return r
 
 
+def component_centre(fp):
+    """Component centre as JLCPCB defines Mid X / Mid Y (the centre of the
+    part body, not the footprint origin): the bounding box of the body
+    outline on the fab layer (already rotated into board coordinates);
+    falls back to the courtyard, then to the pad field."""
+    fab = pcbnew.B_Fab if fp.IsFlipped() else pcbnew.F_Fab
+    M = pcbnew.ToMM
+
+    def bb_mm(bb):
+        return (M(bb.GetLeft()), M(bb.GetTop()), M(bb.GetRight()), M(bb.GetBottom()))
+
+    def merge(a, b):
+        return b if a is None else (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+
+    cyd = fp.GetCourtyard(pcbnew.B_CrtYd if fp.IsFlipped() else pcbnew.F_CrtYd)
+    cbox = bb_mm(cyd.BBox()) if cyd.OutlineCount() else None
+    box = None
+    for g in fp.GraphicalItems():
+        if g.GetClass() != "PCB_SHAPE" or g.GetLayer() != fab:
+            continue
+        # plain float extents per shape (KiCad 10 overflows on some arc bboxes)
+        st = g.GetShape()
+        if st == pcbnew.SHAPE_T_CIRCLE:
+            c, r = g.GetCenter(), M(g.GetRadius())
+            e = (M(c.x) - r, M(c.y) - r, M(c.x) + r, M(c.y) + r)
+        elif st == pcbnew.SHAPE_T_POLY:
+            e = bb_mm(g.GetPolyShape().BBox())
+        else:
+            pts = [g.GetStart(), g.GetEnd()] + ([g.GetArcMid()] if st == pcbnew.SHAPE_T_ARC else [])
+            xs, ys = [M(q.x) for q in pts], [M(q.y) for q in pts]
+            e = (min(xs), min(ys), max(xs), max(ys))
+        # pin-1 / orientation markers drawn outside the body are not body
+        if cbox is not None and not (e[0] >= cbox[0] - 1e-3 and e[1] >= cbox[1] - 1e-3 and
+                                     e[2] <= cbox[2] + 1e-3 and e[3] <= cbox[3] + 1e-3):
+            continue
+        box = merge(box, e)
+    how = "fab body"
+    if box is None and cbox is not None:
+        box, how = cbox, "courtyard"
+    if box is None:
+        for p in fp.Pads():
+            box = merge(box, bb_mm(p.GetBoundingBox()))
+        how = "pads"
+    return (box[0] + box[2]) / 2, (box[1] + box[3]) / 2, how
+
+
 def bom_cpl(board):
     groups = OrderedDict()
     cpl = []
+    moved = []
     for fp in sorted(board.GetFootprints(), key=lambda f: f.GetReference()):
         ref = fp.GetReference()
         if ref in NOT_A_PART or ref in DNP:
@@ -76,9 +124,12 @@ def bom_cpl(board):
             continue
         if fp.IsFlipped():
             raise SystemExit(f"{ref} is on the bottom: spec requires all SMD on top")
-        pos = fp.GetPosition()
-        x = pcbnew.ToMM(pos.x)
-        y = BOARD_H - pcbnew.ToMM(pos.y)
+        cx, cy, how = component_centre(fp)
+        ox, oy = pcbnew.ToMM(fp.GetPosition().x), pcbnew.ToMM(fp.GetPosition().y)
+        x, y = cx, BOARD_H - cy
+        shift = math.hypot(cx - ox, cy - oy)
+        if shift > 0.005:
+            moved.append((ref, how, round(ox, 3), round(BOARD_H - oy, 3), round(x, 3), round(y, 3), round(shift, 3)))
         cpl.append((ref, f"{x:.4f}", f"{y:.4f}", "Top", f"{fp.GetOrientationDegrees() % 360:.1f}"))
 
     def refkey(r):
@@ -95,6 +146,14 @@ def bom_cpl(board):
         for row in sorted(cpl, key=lambda r: refkey(r[0])):
             w.writerow(row)
     print(f"bom.csv: {len(groups)} lines / {sum(len(v) for v in groups.values())} parts; cpl.csv: {len(cpl)} parts")
+    with open(os.path.join(PROD, "cpl-centroid-vs-origin.txt"), "w") as f:
+        f.write("CPL Mid X/Y = component body centre (JLCPCB definition), not the footprint origin.\n")
+        f.write("ref, source, origin X, origin Y, centre X, centre Y, shift mm (bottom-left origin, Y up)\n")
+        for m in moved:
+            f.write(", ".join(str(v) for v in m) + "\n")
+    print("CPL centres differing from the footprint origin:")
+    for m in moved:
+        print("   ", m)
 
 
 def gerbers():
@@ -107,7 +166,7 @@ def gerbers():
          "--use-drill-file-origin", "--subtract-soldermask", OUT_PCB])
     run([KICAD_CLI, "pcb", "export", "drill", "-o", PROD + os.sep, "--format", "excellon",
          "--drill-origin", "plot", "--excellon-units", "mm", OUT_PCB])
-    files = sorted(f for f in os.listdir(PROD) if not f.endswith((".csv", ".zip")))
+    files = sorted(f for f in os.listdir(PROD) if not f.endswith((".csv", ".zip", ".txt")))
     with zipfile.ZipFile(os.path.join(PROD, "gerbers.zip"), "w", zipfile.ZIP_DEFLATED) as z:
         for f in files:
             z.write(os.path.join(PROD, f), f)

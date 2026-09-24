@@ -318,6 +318,25 @@ def lsm6dsv16x():
     _write("LGA-14_2.5x3mm_P0.5mm_LSM6DSV16X", L)
 
 
+def usblc6_sot23_6():
+    """U7 USBLC6-2SC6: the stock KiCad SOT-23-6 land pattern, unchanged, plus
+    a jumper-pad declaration for the device's internal flow-through lines
+    (ST DS Doc ID 11265 Rev 5 Fig. 1: pins 1<->6 = I/O1 and 3<->4 = I/O2 are
+    the same line inside the package), so the PCB routes each D+/D- line into
+    one pin and out of its partner pin (flow-through, no stub)."""
+    src = os.path.join(os.environ.get("LOCALAPPDATA", r"C:\Users\dobri\AppData\Local"),
+                       "Programs", "KiCad", "10.0", "share", "kicad", "footprints",
+                       "Package_TO_SOT_SMD.pretty", "SOT-23-6.kicad_mod")
+    t = open(src, encoding="utf-8").read()
+    t = t.replace('(footprint "SOT-23-6"', '(footprint "SOT-23-6_USBLC6-2_FlowThrough"', 1)
+    i = t.index("\n\t(attr")
+    j = t.index("\n", i + 1)
+    t = t[:j] + '\n\t(jumper_pad_groups ("1" "6") ("3" "4"))' + t[j:]
+    with open(os.path.join(LIB, "SOT-23-6_USBLC6-2_FlowThrough.kicad_mod"), "w",
+              encoding="utf-8", newline="\n") as f:
+        f.write(t)
+
+
 def write_all():
     sam_m10q()
     esp32_s3_mini_1()
@@ -326,6 +345,7 @@ def write_all():
     sofng_ss12d00()
     padrow_1x08()
     lsm6dsv16x()
+    usblc6_sot23_6()
     return LIB
 
 

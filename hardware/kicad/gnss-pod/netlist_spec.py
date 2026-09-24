@@ -22,7 +22,7 @@ generate_board.py):
 Net names follow section 4. The spec leaves a few internal nodes unnamed; they
 get these names:
   VBCKP_SRC (U6.VOUT -> C13 -> R17), LED1_A/LED2_A (resistor -> LED anode),
-  LED3_A (R11 -> LED3 anode), IO5/IO6/IO7/IO14/IO47/IO48 (spare pins -> J3).
+  LED3_A (R11 -> LED3 anode), IO33/IO34/IO35/IO36/IO37/IO47 (spare pins -> J3).
 """
 
 GND_U1 = ["1", "2", "42", "43"] + [str(n) for n in range(46, 66)]
@@ -35,7 +35,7 @@ NETS = {
         + [("U4", "8"), ("U4", "17"), ("U4", "5"), ("U4", "4"), ("U4", "15")]
         + [("U5", "2"), ("U5", "6"), ("U6", "1"), ("U7", "2")]
         + [("J1", "A1"), ("J1", "A12"), ("J1", "B1"), ("J1", "B12"), ("J1", "SH")]
-        + [("J2", "2"), ("J3", "2")]
+        + [("J2", "2"), ("J3", "1")]
         + [("C%d" % n, "2") for n in range(1, 19)]
         + [("R1", "2"), ("R2", "2"), ("R14", "2"), ("RT1", "2"), ("R9", "2"), ("R10", "2")]
         + [("SW1", "2"), ("SW2", "2"), ("SW3", "3")]
@@ -58,7 +58,9 @@ NETS = {
              ("U4", "6"), ("R11", "1"), ("TP5", "1")],
     "ISET": [("U4", "16"), ("R9", "1")],
     "ILIM": [("U4", "12"), ("R10", "1")],
-    "TS": [("U4", "1"), ("RT1", "1")],
+    # TS senses the CELL: J2 is a 3-pin JST-PH (1 = BAT+, 2 = BAT-, 3 = pack
+    # NTC). RT1 is a DNP fallback footprint (fit only for a pack without NTC).
+    "TS": [("U4", "1"), ("J2", "3"), ("RT1", "1")],
     "CHG_N": [("U4", "9"), ("LED3", "1")],
     "LED3_A": [("R11", "2"), ("LED3", "2")],
     "PGOOD_N": [("U4", "7"), ("R12", "1"), ("U1", "6")],
@@ -68,7 +70,7 @@ NETS = {
             ("U2", "17"), ("U2", "2"), ("C9", "1"), ("C10", "1"),
             ("U3", "8"), ("C14", "1"), ("U3", "5"), ("C15", "1"), ("U3", "12"),
             ("R5", "2"), ("R6", "2"), ("R7", "2"), ("R8", "2"), ("R12", "2"),
-            ("J3", "1"), ("TP1", "1")],
+            ("J3", "2"), ("TP1", "1")],
     # --- GNSS backup ---
     "VBCKP_SRC": [("U6", "2"), ("C13", "1"), ("R17", "1")],
     "VBCKP": [("R17", "2"), ("U2", "3"), ("C11", "1"), ("TP18", "1")],
@@ -82,29 +84,36 @@ NETS = {
     "GNSS_RESET_N": [("U1", "36"), ("U2", "18"), ("TP15", "1")],
     "GNSS_EXTINT": [("U1", "37"), ("U2", "19")],
     "GNSS_SAFEBOOT_N": [("U2", "8"), ("TP12", "1")],
-    "I2C_SDA": [("U1", "12"), ("U3", "14"), ("R7", "1"), ("TP10", "1")],
-    "I2C_SCL": [("U1", "13"), ("U3", "13"), ("R8", "1"), ("TP11", "1")],
-    "IMU_INT1": [("U3", "4"), ("U1", "14"), ("TP19", "1")],
-    "IMU_INT2": [("U3", "9"), ("U1", "15")],
+    # IMU on U1.12-14 in the order the top-only lines arrive from U3 (review fix
+    # wave: no via is allowed near U3, so the pin order has to be planar);
+    # INT2 is not connected (it sits between two 3V3 pins of U3, see sec 4)
+    "I2C_SDA": [("U1", "13"), ("U3", "14"), ("R7", "1"), ("TP10", "1")],
+    "I2C_SCL": [("U1", "14"), ("U3", "13"), ("R8", "1"), ("TP11", "1")],
+    "IMU_INT1": [("U3", "4"), ("U1", "12"), ("TP19", "1")],
     "LED1": [("U1", "16"), ("R15", "1")],
     "LED1_A": [("R15", "2"), ("LED1", "2")],
     "LED2": [("U1", "17"), ("R16", "1")],
     "LED2_A": [("R16", "2"), ("LED2", "2")],
     "U0TXD": [("U1", "39"), ("TP13", "1")],
     "U0RXD": [("U1", "40"), ("TP14", "1")],
-    "IO5": [("U1", "9"), ("J3", "3")],
-    "IO6": [("U1", "10"), ("J3", "4")],
-    "IO7": [("U1", "11"), ("J3", "5")],
-    "IO14": [("U1", "18"), ("J3", "6")],
-    "IO47": [("U1", "27"), ("J3", "7")],
-    "IO48": [("U1", "30"), ("J3", "8")],
+    # J3 spare pins (review fix wave: all on U1's south-east corner so their
+    # lines reach J3 on the east edge without crossing U1; no strap, no
+    # power-up glitch pin, all free on the -N8 part)
+    # (pad order = the order the lines leave U1, so the east-strip bus does not
+    # cross itself; J3.1 = GND, J3.2 = 3V3)
+    "IO34": [("U1", "29"), ("J3", "3")],
+    "IO33": [("U1", "28"), ("J3", "4")],
+    "IO47": [("U1", "27"), ("J3", "5")],
+    "IO35": [("U1", "31"), ("J3", "6")],
+    "IO36": [("U1", "32"), ("J3", "7")],
+    "IO37": [("U1", "33"), ("J3", "8")],
 }
 
 # Pads that must stay unconnected (spec: "no connect"). Anything not listed in
 # NETS must be in here, or the self-check fails.
 NO_CONNECT = (
-    [("U1", str(n)) for n in (7, 8) + tuple(range(19, 23)) + (26, 28, 29, 31, 32, 33, 38, 41, 44)]
-    + [("U2", "9"), ("U2", "12"), ("U3", "10"), ("U3", "11"), ("U4", "14"), ("U5", "4"),
+    [("U1", str(n)) for n in (7, 8, 9, 10, 11, 15, 18) + tuple(range(19, 23)) + (26, 30, 38, 41, 44)]
+    + [("U2", "9"), ("U2", "12"), ("U3", "9"), ("U3", "10"), ("U3", "11"), ("U4", "14"), ("U5", "4"),
        ("J1", "A8"), ("J1", "B8")]
 )
 

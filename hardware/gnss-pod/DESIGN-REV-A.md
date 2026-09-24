@@ -17,13 +17,13 @@ No KiCad files are part of this document.
 
 ```
 USB-C (5 V, native USB) ──► U7 ESD ──► U4 BQ24073 power-path charger ──► VSYS (4.4 V on USB / VBAT on battery)
-                                          │ BAT ◄──► J2 1-cell LiPo (JST-PH, hand-soldered)
+                                          │ BAT ◄──► J2 1-cell LiPo (3-pin JST-PH: BAT+, BAT−, pack NTC → TS)
                                           │                └──► U6 XC6206 (always on) ──► VBCKP ──► U2 V_BCKP
 VSYS ──► U5 TLV75733P 1 A LDO (EN ← SW3 slide switch) ──► 3V3 ──► U1 ESP32-S3-MINI-1-N8
                                                              ├──► U2 SAM-M10Q (VCC + V_IO)
                                                              └──► U3 LSM6DSV16X (Vdd + Vdd_IO)
 U2 UART  ◄──► U1 UART1 (GPIO38 TX / GPIO39 RX)   U2 TIMEPULSE ──► U1 GPIO21 (PPS)
-U3 I2C 400 kHz ◄──► U1 (GPIO8 SDA / GPIO9 SCL)    U3 INT1/INT2 ──► U1 GPIO10/GPIO11
+U3 I2C 400 kHz ◄──► U1 (GPIO9 SDA / GPIO10 SCL)   U3 INT1 ──► U1 GPIO8 (INT2 NC)
 U1 USB (GPIO19 D- / GPIO20 D+) ──► USB-C: flashing, serial console, power
 ```
 
@@ -33,15 +33,15 @@ There is no external NAND (that is rev B), no CAN and no USB-UART bridge.
 
 | Point | Decision | Why (source) |
 |---|---|---|
-| Board size | **50 × 72 mm**, not ~50 × 40 | u-blox IM §4.4: the module goes "in the middle of a 50 x 50 mm GND size board", "significant degradation … smaller than 40 x 40 mm²", and "not to place anything closer than 10 mm to each edge". A 15.5 mm module plus 10 mm on every side already needs a 35.5 × 35.5 mm clear square. That leaves no room for the ESP32 (15.4 × 20.5 mm) at the far end of a 40 mm board. **The lead's ~50 × 40 target cannot meet the manual, see §10.1.** |
-| GNSS ground plane | Full 50 × 50 mm GNSS zone plus the electronics zone (50 × 72 total copper) | u-blox allows a larger plane ("A larger ground plane can be used"). The datasheet sensitivity is specified "on a 50 x 50 mm² ground plane" (DS footnote 12). **Expected penalty from board size: none relative to the datasheet.** The real penalties come from the enclosure, the windscreen and the ESP32 radio (§10). |
-| Layer count | **2-layer**, 1.6 mm FR-4 | Neither manual requires 4 layers. SAM-M10Q has an integrated antenna, so there is no 50 Ω RF trace. The ESP32-S3-MINI-1 carries its own RF. USB full-speed needs no controlled impedance. The IM layout example is a solid top-layer ground with short top-layer supply and digital lines, which a 2-layer board can do. The bottom layer stays solid GND under the whole GNSS zone (§8). 4-layer is a drop-in upgrade with the same schematic if bring-up shows GNSS C/N0 loss (§10.3). |
-| Charger | **TI BQ24073RGTR** (power-path, TS/NTC input) | Power-path (DPPM plus battery supplement) runs the pod from USB with a flat or missing cell. There is 6.6 V input OVP. The TS pin stops charging outside 0–50 °C, which matters for a LiPo behind a windscreen. The '73 variant regulates OUT at 4.4 V. The '75 variant regulates at 5.5 V, which is the TLV757P's absolute input limit and would triple LDO heat on USB. |
-| 3.3 V LDO | **TI TLV75733PDYDR**, 1 A, SOT-23-5 with thermal pad | Espressif requires ≥ 0.5 A supply capability (module DS Table 6-2, "Current delivered by external power supply 0.5 A min"). The module's worst-case peak is 355 mA (802.11b at 20.5 dBm). A 1 A LDO with 1.2 A minimum current limit gives about 2× margin. Dropout is 425 mV max at 1 A, which keeps 3.3 V down to a partly discharged cell. The DYD package is 92.5 °C/W JEDEC against 231 °C/W for DBV. **No JLCPCB basic LDO qualifies.** The only basic 1 A part is AMS1117-3.3 (C6186), whose ~1 V dropout does not work from one LiPo cell. |
+| Board size | **50 × 66.95 mm** (review fix: the 5.05 mm ESP32 antenna end overhangs the 72 mm envelope, §8), not ~50 × 40 | u-blox IM §4.4: the module goes "in the middle of a 50 x 50 mm GND size board", "significant degradation … smaller than 40 x 40 mm²", and "not to place anything closer than 10 mm to each edge". A 15.5 mm module plus 10 mm on every side already needs a 35.5 × 35.5 mm clear square. That leaves no room for the ESP32 (15.4 × 20.5 mm) at the far end of a 40 mm board. **The lead's ~50 × 40 target cannot meet the manual, see §10.1.** |
+| GNSS ground plane | Full 50 × 50 mm GNSS zone plus the electronics zone (50 × 66.95 total copper) | u-blox allows a larger plane ("A larger ground plane can be used"). The datasheet sensitivity is specified "on a 50 x 50 mm² ground plane" (DS footnote 12). **Expected penalty from board size: none relative to the datasheet.** The real penalties come from the enclosure, the windscreen and the ESP32 radio (§10). |
+| Layer count | **2-layer**, 1.6 mm FR-4 | Neither manual requires 4 layers. SAM-M10Q has an integrated antenna, so there is no 50 Ω RF trace. The ESP32-S3-MINI-1 carries its own RF. USB: Espressif's layout guide asks for a parallel, equal-length differential pair at 90 Ω ±10 % over continuous reference copper with minimal transitions. Rev A meets all of that except the impedance (review fix wave, §8 "USB pair"): 90 Ω is not practical on 1.6 mm 2-layer FR-4, and at full-speed (12 Mbit/s) over ~25 mm the mismatch is a validation item, not an expected failure. The IM layout example is a solid top-layer ground with short top-layer supply and digital lines, which a 2-layer board can do. The bottom layer stays solid GND under the whole GNSS zone (§8). 4-layer is a drop-in upgrade with the same schematic if bring-up shows GNSS C/N0 loss (§10.3). |
+| Charger | **TI BQ24073RGTR** (power-path, TS/NTC input) | Power-path (DPPM plus battery supplement) runs the pod from USB with a flat or missing cell. There is 6.6 V input OVP. The TS pin reads the **10 kΩ NTC inside the battery pack** (TI: "Connect the TS input to the NTC thermistor in the battery pack") through J2 pin 3 and suspends charging outside the NTC window (≈ 0–50 °C for a 103AT-type B ≈ 3435 K NTC, ≈ 3.5–47 °C for a B ≈ 3950 K pack NTC, §10.4). That matters for a LiPo behind a windscreen. The '73 variant regulates OUT at 4.4 V. The '75 variant regulates at 5.5 V, which is the TLV757P's absolute input limit and would triple LDO heat on USB. |
+| 3.3 V LDO | **TI TLV75733PDYDR**, 1 A, SOT-23-5 with thermal pad | Espressif requires ≥ 0.5 A supply capability (module DS Table 6-2, "Current delivered by external power supply 0.5 A min"). The module's worst-case peak is 355 mA (802.11b at 20.5 dBm). A 1 A LDO with 1.2 A minimum current limit gives about 2× margin on the LDO itself (the USB input path is the tighter limit, see the next rows and §7). Dropout for the DYD package at 1 A is **450 mV max (−40…+85 °C) / 500 mV max (−40…+125 °C)** (SBVS322C §5.5); at the ~0.4 A real peak it is proportionally lower (PMOS in dropout ≈ resistor). From a cell it holds 3.3 V down to VBAT ≈ 3.75 V at a 1 A burst (≈ 3.5 V at 0.4 A), minus the charger's BAT→OUT FET and wiring drop. Below that 3V3 sags, which is why firmware must enforce a low-battery cutoff (§10.5). The DYD package is 92.5 °C/W JEDEC against 231 °C/W for DBV. **No JLCPCB basic LDO qualifies.** The only basic 1 A part is AMS1117-3.3 (C6186), whose ~1 V dropout does not work from one LiPo cell. |
 | V_BCKP | **Dedicated always-on XC6206P332MR (basic) from VBAT, via 0 Ω R17** | The SAM-M10Q backup domain keeps RTC and orbits (IM §4.1.3) and costs 28 µA typ in hardware backup mode (DS Table 15). Tying V_BCKP to the switched 3V3 rail gains nothing, because it dies with VCC. A supercap only lasts hours: 0.1 F from 3.3 V to 1.65 V at 28 µA is ~1.6 h. A 1 µA-Iq LDO from the cell keeps hot/warm-start data for months. That means fast fix acquisition at the track even after the pod sat switched off overnight. The cost is ~3 µA extra. R17 lets it be cut for current measurements. |
 | Power switch | **SPDT slide switch SW3 drives the LDO EN pin** (ON = VSYS, OFF = GND) | The switch carries no load current, so a tiny THT switch is fine. Charging still works while the pod is off, because the BQ24073 is upstream of the switch. SYSOFF-style battery cut (BQ24075) was rejected: TI states that with SYSOFF high "When an adapter is connected, charging is also disabled", so a switched-off pod would not charge. |
 | Battery divider | **1 MΩ / 1 MΩ, unswitched, 100 nF hold cap, to GPIO1 (ADC1_CH0)** | 4.2 V → 2.1 V, inside ADC ATTEN3's 0–2900 mV "effective measurement range" (S3 DS). It draws 2.1 µA at 4.2 V, about 30 years to drain 600 mAh, so a MOSFET switch buys nothing. It must be ADC1: "ADC2 … cannot be used with Wi-Fi simultaneously" (S3 DS §4.2.2.1). Source impedance 500 kΩ × max 50 nA leakage (module DS IIL) is ≤ 25 mV. Calibrate once. The 100 nF gives τ = 50 ms, fine for ≤ 1 Hz sampling. |
-| Input current mode | **USB500 fixed** (EN1 = VSYS, EN2 = GND) | USB-C sink with Rd only: the default USB current is the only guaranteed budget. 450 mA min (BQ DS) covers the 355 + 20 mA 3V3 peak with no battery. With a cell, battery-supplement mode covers bursts. Firmware cannot change this in rev A (§10). |
+| Input current mode | **USB500 fixed** (EN1 = VSYS, EN2 = GND) | USB-C sink with Rd only: the default USB current is the only guaranteed budget. USB500 limits the input at **450 mA min / 475 typ / 500 max** (BQ DS I_INmax). Without a battery that covers the ~380 mA steady 3V3 peak (355 + 20 mA) but **not** the ~480 mA worst case (GNSS inrush during a full-power WiFi TX burst): with no cell fitted, VSYS can dip in that coincidence and the ESP32 may brown out. On USB alone the design therefore does **not** guarantee Espressif's ≥ 0.5 A supply capability; with a cell, battery-supplement mode covers the bursts. Firmware cannot change the input limit in rev A (§10). |
 | Charge current | **R9 = 3.3 kΩ → I_CHG = 890 A·Ω / 3300 Ω ≈ 270 mA typ** (241–295 mA over K_ISET 797–975) | ≤ 0.5 C for any cell ≥ 540 mAh. The target cell is 600–1000 mAh. |
 | GNSS I2C | **Not connected** (UART only) | SAM-M10Q I2C is "peripheral mode with a maximum clock frequency of 320 kHz" (DS §5.2). Sharing the IMU bus would cap the IMU below its 400 kHz. |
 | PPS pin | **GPIO21** | SAM-M10Q "SAFEBOOT_N pin is internally connected to TIMEPULSE pin through a 1 kΩ series resistor". The IM says "Do not drive the TIMEPULSE pin low at startup because it will put the receiver in safeboot mode". The S3 datasheet Table 2-2 lists a **60 µs low-level output glitch at power-up on GPIO1–14, 17, 18**. GPIO21 is not in that table, is not a strapping pin, and has no reset pull-down. |
@@ -58,16 +58,16 @@ Stock and unit price are **as seen on 2026-09-24** from JLCPCB's parts API (`jlc
 | U2 | u-blox SAM-M10Q-00B | C5443880 | Extended | **10** | 22.835 | Lead decision. Antenna, SAW and LNA integrated; up to 25 Hz single-GNSS (high-performance mode). **Stock is only 10: order promptly, see §10.6.** |
 | U3 | ST LSM6DSV16XTR | C5267406 | Extended | 7,141 | 3.485 | Lead decision. ±16 g / ±4000 dps, 4.5 KB FIFO with timestamps, I2C Fast-mode and Fast-mode Plus. |
 | U4 | TI BQ24073RGTR | C15220 | Extended | 33,855 | 0.898 | Power-path Li-ion charger, OUT = 4.4 V, TS/NTC, OVP 6.6 V (§2). |
-| U5 | TI TLV75733PDYDR | C22399950 | Extended | 2,733 | 0.279 | 1 A LDO, 425 mV max dropout at 1 A, thermal-pad SOT-23-5 (§2). |
+| U5 | TI TLV75733PDYDR | C22399950 | Extended | 2,733 | 0.279 | 1 A LDO, DYD dropout 450 mV max at 1 A to 85 °C (500 mV to 125 °C), thermal-pad SOT-23-5 (§2). |
 | U6 | Torex XC6206P332MR-G | C5446 | **Basic** | 462,690 | 0.142 | Always-on V_BCKP supply, Iq 1.0 µA typ / 3.0 µA max, Vin max 6.0 V. |
 | U7 | ST USBLC6-2SC6 | C7519 | Extended | 38,410 | 0.176 | USB D+/D− and VBUS ESD (±8 kV contact per ST). Cheap insurance on a connector that gets plugged in daily in a car. |
 | J1 | HRO TYPE-C-31-M-12 (USB 2.0 Type-C receptacle, 16 contacts) | C165948 | Extended | 98,780 | 0.186 | Listed as SMD. Has 4 shell tabs. JLCPCB-assembled; if JLCPCB rejects the shell tabs the owner hand-solders them (§9). |
-| J2 | JST B2B-PH-K-S(LF)(SN), 2-pin 2.0 mm, top entry, THT | C131337 | (hand) | 211,787 | 0.035 | LiPo connector. **Hand-soldered by owner**, not in the CPL. |
-| J3 | 1×8 2.54 mm pad row (3V3, GND, GPIO5, 6, 7, 14, 47, 48) | — | DNP | — | — | Spare pins for rev-A experiments (e.g. an SPI NAND breakout for logging trials). Bare pads, no part. |
+| J2 | JST B3B-PH-K-S(LF)(SN), 3-pin 2.0 mm, top entry, THT (1 = BAT+, 2 = BAT−, 3 = NTC) | C131339 | (hand) | 150,191 | 0.045 | 1-cell LiPo pack with integrated 10 kΩ NTC (the standard 3-wire pack TI's BQ2407x application assumes). **Hand-soldered by owner**, not in the CPL. (JLCPCB parts API, 2026-09-24.) |
+| J3 | 1×8 2.54 mm pad row (pin 1…8: GND, 3V3, GPIO34, 33, 47, 35, 36, 37) | — | DNP | — | — | Spare pins for rev-A experiments (e.g. an SPI NAND breakout for logging trials). Bare pads, no part. |
 | SW1 | XKB TS-1187A-B-A-B 5.1 × 5.1 mm SMD tact (BOOT, GPIO0) | C318884 | **Basic** | 520,986 | 0.021 | Download-mode strap. |
 | SW2 | XKB TS-1187A-B-A-B (RESET, EN) | C318884 | **Basic** | (same) | 0.021 | Reset. |
 | SW3 | SOFNG SS-12D00-G3 SPDT slide, THT, 3 mm pitch | C22355741 | (hand) | 9,605 | 0.059 | Power switch on the LDO EN pin (§2). **Hand-soldered by owner.** |
-| RT1 | Murata NCP18XH103F03RB 10 kΩ NTC 0603 (B25/50 = 3380 K) | C13564 | Extended | 218,319 | 0.046 | BQ24073 TS input. The TI thresholds assume a 103AT-type (B ≈ 3435 K) curve. The trip points shift slightly (VERIFY on bench, §10.4). |
+| RT1 | Murata NCP18XH103F03RB 10 kΩ NTC 0603 (B25/50 = 3380 K) | C13564 | **DNP** | 218,319 | 0.046 | Fallback footprint only, on TS. **Fit it only for a pack that has no NTC**, and then charging is **NOT** cell-temperature protected (RT1 senses the PCB, not the cell). Never fit it together with an NTC pack (two 10 kΩ in parallel shift both trip points). |
 | LED1 | KENTO KT-0603Y yellow 0603 | C2287 | Extended | 85,024 | 0.011 | Status LED A (GPIO12). Yellow/red (AlGaInP) chosen because green/white InGaN parts need ~3.1 V Vf and barely light from 3.3 V. |
 | LED2 | KENTO KT-0603R red 0603 | C2286 | **Basic** | 4,108,067 | 0.008 | Status LED B (GPIO13). |
 | LED3 | KENTO KT-0603R red 0603 | C2286 | **Basic** | (same) | 0.008 | Charge indicator (BQ CHG). |
@@ -90,7 +90,7 @@ Stock and unit price are **as seen on 2026-09-24** from JLCPCB's parts API (`jlc
 | R15, R16 | 1 kΩ 1 % 0402 | C11702 | Basic | 9,031,305 | 0.002 | LED1/LED2 series (~1.3 mA red). |
 | R17 | 0 Ω 0402 | C17168 | Basic | 10,541,790 | 0.003 | V_BCKP supply link (remove to cut backup for measurement). |
 
-Extended parts JLCPCB must load: U1, U2, U3, U4, U5, U7, J1, RT1, LED1 = **9 unique** (J2 and SW3 are hand-soldered and bought loose).
+Extended parts JLCPCB must load: U1, U2, U3, U4, U5, U7, J1, LED1 = **8 unique** (J2 and SW3 are hand-soldered and bought loose; RT1 is DNP).
 
 ## 4. Netlist (binding, schematic + PCB must match exactly)
 
@@ -100,7 +100,7 @@ Net names in CAPS. `Ux.n` = pin number n (pin maps in §5).
 GND:        U1.1,2,42,43,46-65 (+EPAD), U2.1,4,5,6,10,11,15,16,20, U3.6,7,
             U4.8 (VSS) + thermal pad, U5.2 + thermal pad, U6.1, U7.2,
             J1 GND contacts (A1,A12,B1,B12) + shell tabs, J2.2 (BAT-),
-            all capacitor low sides, R1/R2/R14 low sides, RT1.2, SW1/SW2 one side, SW3 OFF throw
+            all capacitor low sides, R1/R2/R14 low sides, RT1.2 (DNP), SW1/SW2 one side, SW3 OFF throw, J3.1
 
 --- USB / input ---
 VBUS:       J1 VBUS contacts (A4,A9,B4,B9) -> U7.5 (VBUS) -> U4.13 (IN); C1 VBUS->GND
@@ -124,7 +124,8 @@ U4.15 TD   -> GND        (termination enabled)
 U4.14 TMR  -> no connect (TI: "Leave TMR unconnected to set the timers to the default values")
 ISET:       U4.16 -> R9 3.3k -> GND
 ILIM:       U4.12 -> R10 1.5k -> GND
-TS:         U4.1 -> RT1 10k NTC -> GND
+TS:         U4.1 -> J2.3 (pack NTC, 10k; its other end is BAT-/GND inside the pack);
+            RT1 10k NTC 0603 TS->GND = DNP fallback (only for a pack without NTC)
 CHG_N:      U4.9 -> LED3 cathode           (LED3 lights while charging)
 PGOOD_N:    U4.7 -> R12 100k -> 3V3; U4.7 -> U1.6 (IO2)
 
@@ -132,9 +133,11 @@ PGOOD_N:    U4.7 -> R12 100k -> 3V3; U4.7 -> U1.6 (IO2)
 LDO_EN:     U5.3 (EN) -> SW3 common        (SW3: ON throw = VSYS, OFF throw = GND)
 3V3:        U5.5 (OUT); C5 10uF 3V3->GND;
             U1.3 (3V3) + C6 22uF + C7 100nF at the pin;
-            U2.17 (VCC) + U2.2 (V_IO) tied at the module + C9 4.7uF + C10 100nF;
+            U2.17 (VCC) + C9 4.7uF and U2.2 (V_IO) + C10 100nF: two top-layer lanes that
+            join on the 3V3 trunk >= 20 mm from U2 (review fix wave: the tie at the
+            module is not routable on one layer, RESET_N/EXTINT sit between the pins; §8);
             U3.8 (Vdd) + C14 100nF; U3.5 (Vdd_IO) + C15 100nF; U3.12 (CS) -> 3V3 (I2C mode);
-            R5, R6, R7, R8, R12 high sides; J3.1
+            R5, R6, R7, R8, R12 high sides; J3.2 (review fix wave: J3.1/J3.2 swapped)
 U5.4 NC -> no connect
 
 --- GNSS backup U6 XC6206P332MR ---
@@ -152,10 +155,13 @@ GNSS_RESET_N:  U1.36 (IO40, open-drain use only) -> U2.18 (RESET_N)   (NO capaci
 GNSS_EXTINT:   U1.37 (IO41) -> U2.19 (EXTINT)
 GNSS_SAFEBOOT_N: U2.8 -> test pad TP12 only
 U2.9 (SDA), U2.12 (SCL): no connect (internal pull-ups, "Leave open if not used")
-I2C_SDA:    U1.12 (IO8) -> U3.14 (SDA); R7 4.7k -> 3V3
-I2C_SCL:    U1.13 (IO9) -> U3.13 (SCL); R8 4.7k -> 3V3
-IMU_INT1:   U3.4 -> U1.14 (IO10)
-IMU_INT2:   U3.9 -> U1.15 (IO11)
+I2C_SDA:    U1.13 (IO9) -> U3.14 (SDA); R7 4.7k -> 3V3   (review fix wave: pins re-ordered, planar)
+I2C_SCL:    U1.14 (IO10) -> U3.13 (SCL); R8 4.7k -> 3V3
+IMU_INT1:   U3.4 -> U1.12 (IO8)
+IMU_INT2:   U3.9 (INT2) NOT CONNECTED (review fix wave). INT2 sits between two 3V3 pins of U3
+            (CS pin 12 and Vdd pin 8); with no copper allowed through the land pattern (ST TN0018)
+            and no via allowed within 20 mm of U2, an INT2 line to U1 would cut CS off from 3V3.
+            Firmware routes all interrupts to INT1 (the LSM6DSV16X can map every source to INT1).
 U3.1 (SDO/SA0) -> GND  (I2C address 1101010b = 0x6A)
 U3.2 (SDx/AH1/Qvar1) -> GND, U3.3 (SCx/AH2/Qvar2) -> GND   (ST: "Connect to Vdd_IO or GND if the analog hub and Qvar are disabled")
 U3.10 (OCS_Aux), U3.11 (SDO_Aux): no connect, pads soldered (ST mode 1: "Leave pin electrically unconnected and soldered to PCB")
@@ -163,11 +169,15 @@ LED1:       U1.16 (IO12) -> R15 1k -> LED1 anode; LED1 cathode -> GND
 LED2:       U1.17 (IO13) -> R16 1k -> LED2 anode; LED2 cathode -> GND
 U0TXD:      U1.39 (TXD0/GPIO43) -> TP13
 U0RXD:      U1.40 (RXD0/GPIO44) -> TP14
-Spare:      U1.9 (IO5), U1.10 (IO6), U1.11 (IO7), U1.18 (IO14), U1.27 (IO47), U1.30 (IO48) -> J3.3..8; J3.2 = GND
+Spare:      U1.29 (IO34) -> J3.3, U1.28 (IO33) -> J3.4, U1.27 (IO47) -> J3.5, U1.31 (IO35) -> J3.6,
+            U1.32 (IO36) -> J3.7, U1.33 (IO37) -> J3.8; J3.1 = GND, J3.2 = 3V3   (review fix wave: moved from
+            IO5/6/7/14/48, whose pins face the west power chain, to U1's south-east pins so the
+            J3 bus reaches the east strip; IO33-37 are free on the -N8 (no PSRAM), no strap/JTAG)
 Strapping:  U1.7 (IO3), U1.41 (IO45), U1.44 (IO46): NO CONNECT (see §6)
 All other U1 IO pins: no connect.
 
---- test pads (1.0 mm round, bottom side, electronics zone only) ---
+--- test pads (1.0 mm round, bottom side, electronics zone only; exception: TP12 is on the TOP side
+    in the Z1 south strip at the end of the SAFEBOOT_N lane, review fix wave, §8) ---
 TP1 3V3, TP2 GND, TP3 GND, TP4 VBAT, TP5 VSYS, TP6 VBUS, TP7 GNSS_TXD, TP8 GNSS_RXD,
 TP9 PPS, TP10 I2C_SDA, TP11 I2C_SCL, TP12 GNSS_SAFEBOOT_N, TP13 U0TXD, TP14 U0RXD,
 TP15 GNSS_RESET_N, TP16 EN, TP17 BOOT (IO0), TP18 VBCKP, TP19 IMU_INT1
@@ -177,7 +187,9 @@ Notes:
 
 - SAFEBOOT_N / TIMEPULSE: pulling TP12 (or TP9) to GND while the GNSS powers up forces u-blox safeboot for firmware recovery. That is the only reason TP12 exists. Nothing on the board may pull PPS low at power-up.
 - Hardware backup mode (u-blox DS): "In hardware backup mode (VCC = 0 V and V_IO = 0 V), PIOs must not be driven." With SW3 OFF the whole 3V3 domain (MCU included) is unpowered, so nothing drives the GNSS pins.
-- Pin 1 of J2 is BAT+. LiPo pack wiring is not standardised: silkscreen **+** and **−** at J2 and check the pack before first plug-in (there is no reverse-battery protection, §10.5).
+- J2 pinout: **1 = BAT+, 2 = BAT−, 3 = NTC**. LiPo pack wiring is not standardised: the silkscreen marks **+**, **−** and **T** at J2 (bottom side, next to the pins); check the pack against them before the first plug-in (there is no reverse-battery protection, §10.5).
+- A pack plugged in **without** an NTC leaves TS open: V_TS rises above V_COLD and the BQ24073 suspends charging (fail-safe). Fit RT1 only in that case (§3), accepting no cell-temperature protection.
+- **What battery to buy:** 1-cell LiPo, 600–1200 mAh, **with a protection PCM** (over-discharge / over-current), **with an integrated 10 kΩ NTC** (103AT, B ≈ 3435 K preferred; B ≈ 3950 K acceptable, §10.4), **3-wire JST-PH 2.0 mm plug**, wired BAT+ / BAT− / NTC in J2's pin order (re-pin the plug if the pack's order differs).
 
 ## 5. Pin maps (datasheet-verified)
 
@@ -209,12 +221,12 @@ Source: DS13510 Rev 4 Table 2 and Figure 28 (mode 1).
 | Pin | Name | Our use | Pin | Name | Our use |
 |---|---|---|---|---|---|
 | 1 | SDO/SA0 | GND → addr 0x6A | 8 | Vdd | 3V3 + 100 nF |
-| 2 | SDx/AH1/Qvar1 | GND | 9 | INT2 | IO11 |
+| 2 | SDx/AH1/Qvar1 | GND | 9 | INT2 | NC (review fix wave, §4) |
 | 3 | SCx/AH2/Qvar2 | GND | 10 | OCS_Aux | NC, pad soldered |
-| 4 | INT1 | IO10 | 11 | SDO_Aux | NC, pad soldered |
+| 4 | INT1 | IO8 | 11 | SDO_Aux | NC, pad soldered |
 | 5 | Vdd_IO | 3V3 + 100 nF | 12 | CS | 3V3 (I2C enabled) |
-| 6 | GND | GND | 13 | SCL | IO9 |
-| 7 | GND | GND | 14 | SDA | IO8 |
+| 6 | GND | GND | 13 | SCL | IO10 |
+| 7 | GND | GND | 14 | SDA | IO9 |
 
 Supply 1.71–3.6 V. I2C "fast mode (400 kHz) … as well as fast mode plus (1000 kHz)". 0.65 mA in combo high-performance mode.
 
@@ -227,13 +239,15 @@ Source: module DS v1.7 Table 3-1. Only the pins this design uses are listed.
 | 3 | 3V3 | 24 | IO20 / USB_D+ |
 | 4 | IO0 (strap) | 25 | IO21 |
 | 5 | IO1 (ADC1_CH0) | 27 | IO47 |
-| 6 | IO2 (ADC1_CH1) | 30 | IO48 |
+| 6 | IO2 (ADC1_CH1) | 30 | IO48 (NC) |
 | 7 | IO3 (strap) | 34 | IO38 |
-| 9, 10, 11 | IO5, IO6, IO7 | 35 | IO39 (MTCK) |
+| 9, 10, 11 | IO5, IO6, IO7 (NC) | 35 | IO39 (MTCK) |
 | 12, 13 | IO8, IO9 | 36 | IO40 (MTDO) |
 | 14, 15 | IO10, IO11 | 37 | IO41 (MTDI) |
 | 16, 17 | IO12, IO13 | 39 / 40 | TXD0 (GPIO43) / RXD0 (GPIO44) |
-| 18 | IO14 | 41 | IO45 (strap) |
+| 18 | IO14 (NC) | 41 | IO45 (strap) |
+| 28, 29 | IO33, IO34 (→ J3) | 31, 32, 33 | IO35, IO36, IO37 (→ J3) |
+| 19, 20, 21 | IO15, IO16, IO17 (NC) | 22 | IO18 (NC) |
 |  |  | 44 | IO46 (strap) |
 |  |  | 45 | EN ("Do not leave the EN pin floating") |
 
@@ -277,10 +291,10 @@ Strapping pins from S3 DS / module DS §4: **GPIO0 (weak pull-up, boot mode), GP
 | 1 | 5 | VBAT_SENSE (ADC1_CH0) | analog | no | yes (60 µs low) | IE | OK. The glitch only disturbs the RC node briefly. |
 | 2 | 6 | PGOOD_N (100 kΩ pull-up) | in | no | yes | IE | OK. The input is open-drain from the BQ. |
 | 3 | 7 | **NC** | — | **yes** | yes | IE | Left floating on purpose. It only matters if EFUSE_STRAP_JTAG_SEL is burned (it is not). |
-| 8 | 12 | I2C_SDA | io | no | yes | — | OK. A 60 µs low at power-up is a non-event for the IMU, which powers up at the same moment. |
-| 9 | 13 | I2C_SCL | out | no | yes | IE | OK (same reason). |
-| 10 | 14 | IMU_INT1 | in | no | yes | IE | OK. |
-| 11 | 15 | IMU_INT2 | in | no | yes | IE | OK. |
+| 8 | 12 | IMU_INT1 | in | no | yes | IE | OK (review fix wave: was I2C_SDA). |
+| 9 | 13 | I2C_SDA | io | no | yes | IE | OK. A 60 µs low at power-up is a non-event for the IMU, which powers up at the same moment. |
+| 10 | 14 | I2C_SCL | out | no | yes | IE | OK (same reason). |
+| 11 | 15 | **NC** (review fix wave) | — | no | yes | IE | Freed (INT2 not connected, §4). |
 | 12 | 16 | LED1 (yellow) | out | no | yes | IE | OK. A 60 µs flash is invisible. |
 | 13 | 17 | LED2 (red) | out | no | yes | IE | OK. |
 | 19 | 23 | USB_D− | io | no | USB | USB | Native USB. |
@@ -294,7 +308,8 @@ Strapping pins from S3 DS / module DS §4: **GPIO0 (weak pull-up, boot mode), GP
 | 44 | 40 | U0RXD → TP14 | in | no | no | WPU, IE | Fallback console. |
 | 45 | 41 | **NC** | — | **yes** | no | WPD | **Must never be pulled high**: it selects VDD_SPI voltage for the in-package 3.3 V flash. |
 | 46 | 44 | **NC** | — | **yes** | no | WPD | Left at the default. GPIO0 low + GPIO46 low = download mode via SW1. |
-| 5, 6, 7, 14, 47, 48 | 9, 10, 11, 18, 27, 30 | spare → J3 | — | no | 5–14 yes; 47/48 no | — | Free for experiments (e.g. an SPI NAND breakout). |
+| 33, 34, 35, 36, 37, 47 | 28, 29, 31, 32, 33, 27 | spare → J3 | — | no | no | — | Free for experiments (e.g. an SPI NAND breakout). IO33–37 are the octal-PSRAM pins on -R8 variants; the -N8 has no PSRAM, so they are plain GPIOs. Not ADC-capable. |
+| 5, 6, 7, 14, 48 | 9, 10, 11, 18, 30 | NC | — | no | — | — | Freed by the review fix wave (their pins face the power chain). |
 
 Firmware rules this implies (hand to the firmware ticket):
 
@@ -303,6 +318,8 @@ Firmware rules this implies (hand to the firmware ticket):
 - Read VBAT on ADC1 only, with ATTEN3 (0–2900 mV).
 - UART1 on GPIO38/39 at up to 921,600 bit/s.
 - Write the SAM-M10Q high-performance OTP string once during bring-up (IM Table 3) before expecting 20/25 Hz.
+- IMU (review fix wave): I2C on GPIO9 (SDA) / GPIO10 (SCL), INT1 on GPIO8; INT2 is not connected, so map every LSM6DSV16X interrupt source to INT1.
+- J3 spares: GPIO34/33/47/35/36/37 on J3.3…8 (J3.1 GND, J3.2 3V3).
 
 ## 7. Power budget
 
@@ -315,13 +332,17 @@ Datasheet values are marked (DS). Everything else is an **estimate** until measu
 | LSM6DSV16X | 0.65 mA | 0.65 mA | DS features |
 | LED1 + LED2 | ~1.3 mA each | ~1 mA | (3.3 − ~2.0 V) / 1 kΩ |
 | I2C pull-ups | 0.7 mA each while low | < 0.5 mA | 3.3 V / 4.7 kΩ |
-| **3V3 total** | **~380 mA** steady peak; ~480 mA only if GNSS inrush coincided with a full-power WiFi TX burst | **~95–115 mA** BLE-only; **~155–205 mA** with WiFi | LDO I_CL min 1.2 A: ≥ 2.4× margin over 480 mA; meets Espressif's ≥ 0.5 A |
+| **3V3 total** | **~380 mA** steady peak; ~480 mA only if GNSS inrush coincided with a full-power WiFi TX burst | **~95–115 mA** BLE-only; **~155–205 mA** with WiFi | LDO I_CL min 1.2 A: ≥ 2.4× margin over 480 mA at the LDO. The **source** is the limit: USB500 guarantees only 450 mA, so the ≥ 0.5 A Espressif figure is met only with a cell fitted (battery supplement); USB-only operation is safe at the ~380 mA steady peak but not at the 480 mA coincidence (§2) |
 | LDO dissipation (from VSYS = 4.4 V on USB) | (4.4 − 3.3) × 0.48 A = 0.53 W, a transient of milliseconds | 1.1 V × 0.15 A = 0.17 W → ~+15 °C at 92.5 °C/W | TLV757P θJA (DYD, JEDEC) |
 | VSYS (BQ OUT) | 3V3 load + LED3 (≤ 1.6 mA) | ≈ 3V3 average | — |
-| VBUS input | limited to 450–500 mA (USB500) | 3V3 average + charge current (DPPM shares it) | BQ DS |
+| VBUS input | limited to 450–500 mA (USB500, I_INmax 450 min / 475 typ / 500 max) | 3V3 average + charge current (DPPM shares it) | BQ DS |
 | Battery charge | 241–295 mA (R9 = 3.3 kΩ) | — | K_ISET 797–975 A·Ω |
 | VBCKP | ~3 µA while running; 28 µA typ in hardware backup | — | u-blox DS Table 15 + footnote 26 |
 | **OFF-state battery drain** (SW3 OFF, no USB) | — | BQ IBAT(PDWN) ≤ 6.5 µA + LDO shutdown ≤ 1 µA + XC6206 ≤ 3 µA + GNSS backup 28 µA + divider 2.1 µA ≈ **≤ 41 µA** | → 1000 mAh lasts ~2.8 years (cell self-discharge dominates) |
+
+Bulk capacitance near U1 (review item, verified): the module datasheet's peripheral schematic puts **22 µF + 0.1 µF** on 3V3 at the module; that is C6 (22 µF 0805) + C7 (100 nF) at U1.3, plus C5 (10 µF) at the LDO output. Nothing more is called for, so nothing was added. On VSYS, C2 (22 µF) is BQ OUT's bulk (TI: 4.7–47 µF).
+
+**Firmware low-battery cutoff (requirement):** deep sleep with the radios off below VBAT = 3.5 V under load; no WiFi start below 3.6 V (§10.5). The board has no under-voltage cutoff of its own.
 
 Runtime estimate (VBAT current ≈ 3V3 current through an LDO):
 
@@ -334,7 +355,7 @@ dragy Pro advertises 12 h at 25 Hz. Matching it needs ≥ 1200 mAh or aggressive
 
 ## 8. PCB constraints (binding)
 
-**Outline and stack.** 50.0 × 72.0 mm rectangle, 1.6 mm FR-4, 2-layer, 1 oz copper, HASL lead-free (or ENIG; LGA benefits from flatness, cost delta in §9). All SMD parts on the **top** side, so JLCPCB assembles one side only. Coordinates below: origin at the bottom-left corner, X along the 50 mm edge, Y along the 72 mm edge.
+**Outline and stack.** 50.0 × 66.95 mm rectangle (review fix wave, Espressif: the module antenna must overhang the base board; the board ends at the antenna boundary, Y = 66.95, and the 5.05 mm antenna end sticks out beyond it to Y 72.0), 1.6 mm FR-4, 2-layer, 1 oz copper, HASL lead-free (or ENIG; LGA benefits from flatness, cost delta in §9). All SMD parts on the **top** side, so JLCPCB assembles one side only. Coordinates below: origin at the bottom-left corner, X along the 50 mm edge, Y along the 72 mm edge.
 
 **Zones.**
 
@@ -346,25 +367,25 @@ dragy Pro advertises 12 h at 25 Hz. Matching it needs ≥ 1200 mAh or aggressive
   - Top layer: GND pour everywhere except the GNSS signal/supply traces.
   - **Bottom layer: solid, unbroken GND over all of Z1, no traces, no test pads.**
   - GND via field under the module (u-blox: "The GND plane below the module is filled with GND vias").
-- **GNSS routing rule.** All U2 traces run on the **top layer only** until they are ≥ 20 mm from the module edge (IM: "keep at least 20 mm distance from the module edge when swapping any signal from the top to other layers"). That means no via on a GNSS net at Y < 52.75.
+- **GNSS routing rule.** All U2 traces run on the **top layer only** until they are ≥ 20 mm from the module edge (IM: "keep at least 20 mm distance from the module edge when swapping any signal from the top to other layers"). As built this is applied to **every net, not only the GNSS nets**: no via closer than 20 mm to the U2 body (Euclidean distance to the 17.25–32.75 square), and the generator fails the build if any exists. Bottom-layer copper inside Z1 (Y < 50) is GND only (no VSYS/VBAT/GNSS_RXD/PPS runs), also a hard build check.
   - Orientation: rotate U2 so the pin 16–20 edge (VCC, RESET_N, EXTINT) faces +Y (the electronics). VCC is the only line with a series-resistance limit (< 0.2 Ω). For scale, a 0.5 mm × 30 mm 1 oz trace is ≈ 0.03 Ω.
-  - Tie V_IO (pin 2) to VCC (pin 17) with a short top-layer trace around the module corner.
+  - ~~Tie V_IO (pin 2) to VCC (pin 17) with a short top-layer trace around the module corner.~~ **Not routable (spec error):** pins 18/19 (RESET_N, EXTINT) sit between them on the same edge, and a via is not allowed within 20 mm. As built, VCC (0.5 mm) and V_IO (0.5 mm) run as separate top-layer lanes and join on the 3V3 trunk ~20 mm north of the module (VCC through a via, V_IO on top). Both lanes carry their own cap (C9 / C10) at the 10 mm boundary. VCC-lane series resistance is checked by the generator (< 0.2 Ω; ~0.08 Ω as built).
   - The remaining signal pins (TXD, RXD on one flank; TIMEPULSE, SAFEBOOT_N on the far edge; V_BCKP) run as thin traces hugging the module outline, then out to +Y.
   - The layout worker may rotate U2 by 90° steps if it shortens total top-layer GNSS routing. Record the choice here.
   - C9/C10/C11 are low-profile 0402s placed at the 10 mm boundary on the +Y side, not at the pins. u-blox gives no bypass value in text and its 10 mm rule takes precedence (§11.3).
   - GND pads may use 0.2 mm thermal reliefs (IM Fig. 22). Stencil 120 µm and mask 0.1 mm wider than the pads (IM §4.4.1).
 - **Z2, electronics zone, Y 42.75–66.9.**
-  - **U1 ESP32** is centred on X = 25 with its antenna end at the +Y board edge. Body pads span Y ≈ 51.5–66.9 and the antenna area Y ≈ 66.9–72.0.
-  - **West half (X 0–15), power:** J1 USB-C on the west edge centred at Y ≈ 52, then U7 → U4 → U5 in a compact chain with C1/C2/C3/C4/C5. RT1 sits next to J2's position mirrored to the battery (see below).
-  - **East half (X 35–50):** J2 (JST-PH) and SW3 (slide) on the east edge; U6; LED1/LED2/LED3 on the east edge for light pipes; SW1/SW2 near the east edge so enclosure pin-holes line up.
-  - **U3 IMU at (25, ≈46.5)**, between the GNSS keep-out and U1. Keep it ≥ 10 mm from U4 and U5 (heat drift) and ≥ 5 mm from SW1/SW2 (button shock). Align its axes with the board edges and silkscreen the X/Y/Z arrows.
-- **Z3, ESP32 antenna band, Y 66.9–72.0, full board width.**
-  - **Copper keep-out on both layers** and component keep-out across the full 50 mm width. This extends the 15.4 × 5.05 mm module antenna area to the full width, which is the conservative reading of Espressif's "cut off the base board on both sides of the antenna" guidance without routing a slot.
-  - The antenna feed end sits flush with the board edge.
+  - **U1 ESP32** is centred on X = 25. Body pads span Y ≈ 51.5–66.9; the antenna area Y ≈ 66.95–72.0 **overhangs the board edge** (review fix wave).
+  - **West half (X 0–15), power:** U4 → U5 in a compact chain with C1–C7 in the NW corner. **As built (review fix wave):** J1 USB-C sits on the west edge at Y ≈ 48.2, in the band between U1 and the GNSS keep-out (west side strip, outside the 10 mm box), so the D+/D− pair runs J1 → U7 → R3/R4 → U1.23/24 as one top-layer coupled pair with no vias. LED1/LED2/LED3 (+R11/R15/R16) and SW3 moved to the west edge (light pipes / switch on the west face).
+  - **East half (X 35–50):** J2 (3-pin JST-PH) on the east edge (Y ≈ 51); RT1 (DNP) near the NE corner; U6 with C11/C12/C13/R17; the VBAT divider R13/R14/C16; SW1/SW2 and J3 in the east strip of Z1 (outside the keep-out box, top only) so enclosure pin-holes line up. **East-strip bus (review fix wave, hand-routed):** the six J3 lines cross under the GNSS lanes on the bottom (Z2), come up through one row of vias at Y ≈ 52.7 (≥ 20 mm from U2) and run south on the top at 0.5 mm pitch west of J3; the 3V3 line runs west of them to J3.2, R6 and on to R5; BOOT (with R6 on it, east of J3) and EN run east of J3 to SW1/SW2. R5/C8 (EN RC) sit south of SW2 in the Z1 south strip, outside the keep-out box. **TP12 (SAFEBOOT_N) is a top-side pad** at the end of its lane in the Z1 south strip (X 36, Y ≈ 5.4): the lane can no longer climb to Z2 because the east corridor carries the J3 bus. It is > 10 mm from U2.
+  - **U3 IMU at (22.3, 47.2)** as built (review fix wave: 2.7 mm west of the original (25, ≈46.5) to clear the USB pair), between the GNSS keep-out and U1. Keep it ≥ 10 mm from U4 and U5 (heat drift) and ≥ 5 mm from SW1/SW2 (button shock). Align its axes with the board edges and silkscreen the X/Y/Z arrows. **Land pattern (ST TN0018):** no copper through the land-pattern interior (a rule-area keep-out covers it); the GND pads connect with equal, symmetric 0.2 mm stubs outside the body to one via per side. No via is allowed within 20 mm of U2, so every U3 line is top-only near the part: the 3V3 pins (CS, Vdd, Vdd_IO) are joined around the outside (east side, then south of C14/C15) and leave as the inner-most line of the bundle to a via west of U1.63; SCL, SDA and INT1 follow in ring order to U1.14/.13/.12 (hence the re-ordered GPIOs, §4/§6), and INT2 is not connected.
+- **Z3, ESP32 antenna band.** As built the antenna area Y 66.95–72.0 is off the board (overhang); Z3 on the board is the 0.3 mm edge band Y 66.65–66.95 (copper keep-out, both layers) plus Espressif's keep-out around the module.
+  - **Review fix wave:** the earlier full-width copper keep-out on FR-4 was not equivalent to Espressif's cutout (FR-4 stayed under and beside the antenna). The board now ends at the antenna boundary, so there is no FR-4 under or beside the 5.05 mm antenna end at all (Espressif's preferred "antenna outside the base board" placement). The remaining on-board band (0.3 mm to the edge) is a copper and via keep-out on both layers across the full width.
+  - The board edge sits at the antenna boundary (module fab line), so the whole 5.05 mm antenna end overhangs.
   - Dense GND vias along Y = 66.5 on both sides of the module (Espressif: "Sufficient ground copper and dense ground vias … near the antenna").
   - In the product: ≥ 15 mm clearance from metal around the antenna (Espressif).
 
-**Antenna separation.** The ESP32 antenna (Y 66.9–72) and GNSS patch (Y 17.25–32.75) are at opposite ends: ~34 mm edge-to-edge, ~45 mm centre-to-centre. That is the most a 72 mm board gives (see §10.3).
+**Antenna separation.** The ESP32 antenna (Y 66.95–72, overhanging) and GNSS patch (Y 17.25–32.75) are at opposite ends: ~34 mm edge-to-edge, ~45 mm centre-to-centre. That is the most a 72 mm envelope gives (see §10.3).
 
 **Heat.** U4 and U5 go in the far west corner of Z2, away from U2 (u-blox: TCXO is sensitive to "co-located power devices … thermal conduction via the PCB") and away from U3.
 
@@ -374,7 +395,11 @@ dragy Pro advertises 12 h at 25 Hz. Matching it needs ≥ 1200 mAh or aggressive
 - U1 EPAD gets thermal vias per Espressif land pattern Fig. 11-1.
 - U4 and U5 thermal pads get ≥ 4 vias each to the bottom GND.
 
-**Bottom layer in Z2.** GND pour, the test pads TP1–TP19, and short jumper traces (≤ 10 mm) only where top routing cannot close. Nothing on the bottom in Z1 or Z3.
+**Bottom layer in Z2.** GND pour, the test pads TP1–TP19 (except TP12, top side, see above), and jumper traces where top routing cannot close. **As built (review fix wave)** the U1 fan-out needs longer bottom runs than 10 mm: the 3V3 trunk (0.5 mm), VBAT (0.5 mm), TS, BOOT, VBAT_SENSE and EN cross under U1's north edge to the east side, and the GNSS/J3 lines run under U1's east pad column to vias 1.25 mm inside the pad ring. All of it is north of Y = 50 (Z2). Nothing but GND on the bottom in Z1 or Z3.
+
+**USB pair (review fix wave).** D+/D− run as a coupled pair: same (top) layer, zero vias, 0.2 mm tracks at 0.2 mm gap where coupled, length-matched within 0.5 mm (a 0.47 mm bump on D− between U7 and R4 compensates D+ being the outer line at the corners), over the unbroken bottom GND (a bottom-layer keep-out under the pair). Not 90 Ω controlled on 1.6 mm 2-layer FR-4 (that would need ~1.9 mm wide traces); acceptable for USB full-speed (12 Mbit/s) over a few cm.
+
+**Supply taps (review fix wave).** Hand-routed trunks are 0.5 mm. Router-made VBUS/VSYS/VBAT/3V3 segments narrower than 0.5 mm are widened by the generator to 0.5, 0.4 or 0.3 mm, whichever still keeps 0.2 mm clearance; the 0.25 mm neck-downs remain only inside fine-pitch pad fields.
 
 **Mounting.**
 - 4 × M2 NPTH holes (2.2 mm) at (3.5, 3.5), (46.5, 3.5), (3.5, 60.0), (46.5, 60.0).
@@ -388,7 +413,7 @@ dragy Pro advertises 12 h at 25 Hz. Matching it needs ≥ 1200 mAh or aggressive
 
 **Hand-soldered by the owner** (not in the CPL, bought loose from LCSC):
 
-1. J2 JST B2B-PH-K-S (C131337), 2 THT pins.
+1. J2 JST B3B-PH-K-S(LF)(SN) (C131339), 3 THT pins (BAT+, BAT−, NTC).
 2. SW3 SS-12D00-G3 (C22355741), 3 THT pins.
 3. Conditional: the 4 shell tabs of J1 if JLCPCB flags them as through-hole. The 12 signal pads are always machine-placed.
 
@@ -398,22 +423,22 @@ Everything fine-pitch or LGA (U1, U2, U3, U4 QFN, U5, U7, 0402s) is JLCPCB-assem
 
 | Item | Basis | Estimate (USD) |
 |---|---|---|
-| 5 × bare PCB, 2-layer, 50 × 72 mm, HASL | JLCPCB standard; not quoted in the configurator | ~5–10 (ENIG +~15) |
+| 5 × bare PCB, 2-layer, 50 × 66.95 mm, HASL | JLCPCB standard; not quoted in the configurator | ~5–10 (ENIG +~15) |
 | PCBA setup (Economic) | $8.18 | 8.18 |
 | Stencil | $1.53 | 1.53 |
-| Extended-part loading fee | 9 × $3.07 | 27.63 |
+| Extended-part loading fee | 8 × $3.07 | 24.56 |
 | SMT joints | ~2 × 240 joints × $0.0016 | ~0.80 |
 | Parts for 2 boards | SAM 2 × 22.84 + ESP 2 × 4.71 + IMU 2 × 3.48 + BQ 2 × 0.90 + LDO 2 × 0.28 + USB-C, ESD, XC6206, NTC, LEDs, buttons 2 × ~0.70 + passives ~2 × 1.50 (plus JLCPCB attrition extras) | ~70 |
-| Hand-solder parts, loose | 5 × JST + 5 × slide switch | ~0.50 |
+| Hand-solder parts, loose | 5 × JST B3B + 5 × slide switch | ~0.55 |
 | Shipping to Romania (courier) | estimate | ~20–30 |
 | Import VAT and fees | Romanian standard rate on goods + shipping | not computed |
-| **Total before VAT** | | **~135–160** |
+| **Total before VAT** | | **~132–157** |
 
-A 1-cell LiPo (600–1200 mAh, **with a protection circuit**) is not included. Buy it locally.
+A 1-cell LiPo is not included. Buy it locally: 600–1200 mAh, **protected (PCM)**, **integrated 10 kΩ NTC**, **3-wire JST-PH** (§4 notes).
 
 ## 10. Honest limitations and risks (rev A)
 
-1. **Board size vs the lead's ~50 × 40 mm.** This board is 50 × 72 mm. A 50 × 40 board would put the GNSS below u-blox's 40 × 40 mm "significant degradation" limit. It would also force the ESP32 inside the 10 mm GNSS keep-out, or put its 2.4 GHz antenna ~10 mm from the patch. The smallest defensible alternative is ~45 × 65 mm (45 × 45 GNSS zone, below the 50 × 50 optimum, gain penalty not quantified by u-blox).
+1. **Board size vs the lead's ~50 × 40 mm.** This board is 50 × 66.95 mm (72 mm envelope including the overhanging ESP32 antenna). A 50 × 40 board would put the GNSS below u-blox's 40 × 40 mm "significant degradation" limit. It would also force the ESP32 inside the 10 mm GNSS keep-out, or put its 2.4 GHz antenna ~10 mm from the patch. The smallest defensible alternative is ~45 × 65 mm (45 × 45 GNSS zone, below the 50 × 50 optimum, gain penalty not quantified by u-blox).
 2. **No simulation and no physical validation.** Like the dongle, the design is datasheet-derived and must pass bench bring-up before it goes near a car:
    - USB power;
    - charge-cycle with the NTC;
@@ -423,11 +448,11 @@ A 1-cell LiPo (600–1200 mAh, **with a protection circuit**) is not included. B
    1. firmware TX-power cap (BLE ≤ 9 dBm, WiFi ≤ 13 dBm);
    2. 4-layer rebuild;
    3. longer board.
-4. **NTC placement.** RT1 is on the PCB, not in the cell (the lead fixed a 2-pin JST). It senses board temperature near the pack. The TI thresholds (0/50 °C) are tuned for a 103AT curve; Murata's B = 3380 K shifts them by roughly a degree (VERIFY on bench). Rev B could use a 3-pin pack with its own NTC.
-5. **No reverse-polarity protection on J2.** A reversed LiPo destroys U4 and U6. Mitigations: silkscreen polarity, check every pack. The cell must also have its own protection PCM, because nothing on the board cuts off at under-voltage (the LDO simply drops out).
+4. **Cell temperature (TS).** TS reads the pack's own NTC through J2 pin 3 (review fix; the board NTC RT1 is now a DNP fallback). TI's TS function (SLUS810N §9.3.6 and the TS electrical table): the pin sources I_TS = 75 µA (72–78) and suspends charging when V_TS < V_HOT = 0.30 V (0.27–0.33) or > V_COLD = 2.1 V (2.0–2.2), with 3 °C hysteresis; TI states the thresholds for a 10 kΩ NTC with a Vishay Type-2 / 103AT-2 curve. Trip resistances: 4.0 kΩ (hot) and 28 kΩ (cold). Resulting charge window (β model, nominal, then the range over the I_TS / threshold tolerances): **B 3435 K (103AT): 0.5 °C to 50.8 °C** (cold −1.4…2.5 °C, hot 46.7…55.2 °C); **B 3950 K (common pack NTC): 3.5 °C to 47.2 °C** (cold 1.8…5.2 °C, hot 43.7…51.0 °C). The hot trip can exceed a pack's usual 45 °C charge rating at the tolerance corners, so the pack's own rating/PCM stays the last line of defence. VERIFY on bench with the chosen pack. TI's optional Rs/Rp network (Fig. 9-9) only widens the window, so it is not fitted.
+5. **No reverse-polarity protection on J2.** A reversed LiPo destroys U4 and U6. Mitigations: silkscreen polarity, check every pack. The cell must also have its own protection PCM, because nothing on the board cuts off at under-voltage (the LDO simply drops out). **Firmware requirement (binding for the firmware ticket):** measure VBAT on ADC1 and enter deep sleep with the radios off below **3.5 V** under load, and do not start WiFi below **3.6 V**. This keeps TX bursts inside the LDO dropout headroom (§2) and leaves the PCM as the backup, not the primary cutoff.
 6. **SAM-M10Q stock is 10 pieces** at JLCPCB/LCSC (2026-09-24). Enough for 2 boards, but it can vanish before ordering. Fallback: JLCPCB global sourcing or consignment of Mouser/DigiKey parts. Re-check stock on the order day.
 7. **Battery life** is estimated at ~5–10 h (§7), below dragy's 12 h, until a larger cell or modem-sleep firmware closes it.
-8. **Charging in a hot car stops at 50 °C** (TS). This is intended for safety. The pod runs from USB without charging. Operating limits are 85 °C for ESP32-S3-MINI-1 (N8 standard temp), SAM-M10Q and LSM6DSV16X. A windscreen in summer sun can exceed that. The enclosure (P2) needs shading and venting.
+8. **Charging in a hot car stops at the pack NTC's hot trip (≈ 47–51 °C nominal, §10.4)** (TS). This is intended for safety. The pod runs from USB without charging. Operating limits are 85 °C for ESP32-S3-MINI-1 (N8 standard temp), SAM-M10Q and LSM6DSV16X. A windscreen in summer sun can exceed that. The enclosure (P2) needs shading and venting.
 9. **USB current is fixed at 500 mA.** There is no CC-level sensing, so a 3 A USB-C car port is used as a 500 mA port. Rev B can route CC1/CC2 to ADC pins and drive EN1/EN2 through level-safe logic.
 10. **Flashing requires SW3 ON.** With SW3 OFF the MCU is unpowered even on USB (the charger still charges).
 11. **Mount orientation.** The patch radiates away from the component side. The pod must hold the component side toward the sky and glass, which constrains the P2 mount design (§11.2).
@@ -436,7 +461,7 @@ A 1-cell LiPo (600–1200 mAh, **with a protection circuit**) is not included. B
 
 ### 11.1 Lead decisions challenged
 
-- **~50 × 40 mm board: not achievable with u-blox's ground-plane and keep-out guidance. Replaced by 50 × 72 mm (§2, §10.1). Needs LEAD sign-off.**
+- **~50 × 40 mm board: not achievable with u-blox's ground-plane and keep-out guidance. Replaced by 50 × 66.95 mm (72 mm with the antenna overhang; §2, §10.1). Needs LEAD sign-off.**
 - V_BCKP: neither of the two offered options (3V3 rail or supercap) was chosen. A third one was, justified in §2.
 - The rev-0.1 proposal said "4-layer (GNSS RF needs a solid ground)". Rev A is 2-layer because the integrated-antenna SAM-M10Q has no RF trace and a solid bottom GND is achievable. 4-layer stays the fallback (§10.3).
 

@@ -30,33 +30,51 @@ Pipeline
   5. GND: via drops next to GND pads, EPAD/thermal vias, stitching vias,
      both-layer GND pours, antenna keep-out rule areas, zone fill, then
      island stitching / island routing until the pour is one node.
-  6. Post-route checks: bottom-layer jumper length, GNSS via rule, 3V3
-     resistance U5 -> U2.VCC. Then self_check() runs again.
+  6. Post-route checks (hard failures): Z1 bottom GND-only, 20 mm via rule
+     for all nets, 3V3 resistance U5 -> U2.VCC. Then self_check() runs again.
 
 Env: POD_OUT (output path), POD_CKPT / POD_RESUME (checkpoint after the
 repair, to iterate on the later phases), POD_BOT_COST, POD_P1_MORE,
 POD_REROUTE, FREEROUTING_JAR / FREEROUTING_JAVA (only with POD_REROUTE).
 Defaults (POD_BOT_COST=3, POD_P1_MORE=LED1,LED2) are the delivered settings.
 
-Deviations from DESIGN-REV-A.md (all listed in the layout report):
-  * GNSS-net vias closer than 20 mm to U2 (PPS, TP18/VBCKP, GNSS_RXD at
-    17.5-18.7 mm); 3V3 vias in the Z1/Z2 overlap band are on the rail's
-    non-U2 branches (U2's VCC / V_IO branches are the hand lanes, top only).
-  * The Z1/Z2 overlap band (y 22..29.25) carries bottom jumpers; south of
-    the U2 keep-out box edge the bottom is GND only (checked).
-  * Supply trunks 0.5 mm, branches / taps 0.25 mm (spec: >= 0.5 mm).
-  * V_IO and VCC are not tied at the module (no single-layer path); C9 sits
-    on VCC, C10 on V_IO, both on the 3V3 net.
+Review fix wave (Codex rev1), implemented here and checked hard (the build
+FAILS unless POD_NOFAIL is set):
+  * u-blox 20 mm rule applied to EVERY net: no via closer than 20 mm to the
+    U2 body (VIA_ZONE); Z1 bottom copper (y > 22) is GND only; the 3V3
+    resistance U5 -> U2.VCC must be < 0.2 ohm (post_checks).
+  * Board outline 50 x 66.95 mm: the top edge is the ESP32 antenna boundary,
+    so the 5.05 mm antenna end overhangs (Espressif).
+  * USB D+/D-: one hand-routed top-layer coupled pair, zero vias, over a
+    bottom keep-out (USB_SHADOW) so the reference GND is unbroken.
+  * LSM6DSV16X: rule-area keep-out over the land-pattern interior; GND pads
+    reach GND through symmetric stubs outside the body (ST TN0018).
+  * J2 is a 3-pin JST-PH (BAT+, BAT-, NTC); TS goes to the pack NTC, RT1 is
+    a DNP fallback.
+  * Supply taps are widened to 0.5/0.4/0.3 mm where clearance allows
+    (widen_power_taps); the U1 fan-out (TRUNK_3V3, FANOUT) is hand-routed.
+
+Deviations from DESIGN-REV-A.md that remain (also recorded in the spec):
+  * V_IO and VCC are not tied at the module (no single-layer path: RESET_N
+    and EXTINT sit between them); they meet on the 3V3 trunk >= 20 mm away.
+    C9 sits on VCC, C10 on V_IO.
   * U1's GND pins are a footprint jumper-pad group (one node inside the
     module); U1.63 and the DNP C17/C18 GND pads reach GND through it.
-  * IMU GND pins tied under the U3 body; C11, C14, C17, C18 placed/rotated
-    for GND access (GND_RESERVE).
+  * U3 at (22.3, 24.8), 2.7 mm west of the spec position; LEDs and SW3 on
+    the west edge; J3 spares moved to IO33-37/IO47 (J3.1 GND, J3.2 3V3).
+  * IMU pins re-ordered for a planar top-only escape (INT1 IO8, SDA IO9,
+    SCL IO10) and U3 INT2 not connected: INT2 sits between two 3V3 pins of
+    U3, and with no copper through the land pattern and no via within 20 mm
+    of U2 a line to U1 would cut CS off from 3V3.
+  * TP12 (GNSS_SAFEBOOT_N) on the TOP side at the end of its lane in the Z1
+    south strip (the east corridor carries the J3 bus); R5/C8 south of SW2,
+    R6 on the BOOT line east of J3, R12 0.4 mm north.
 
 Coordinates: the spec uses origin bottom-left, Y up (X along the 50 mm edge).
 This board uses KiCad's convention: origin top-left, y down, so
     kicad_x = X,  kicad_y = 72 - Y.
-The ESP32 antenna end is therefore at the TOP (y = 0) and the GNSS zone at
-the BOTTOM (y 22..72).
+The ESP32 antenna end is therefore at the TOP (the board edge is at y = 5.05,
+the antenna overhangs to y = 0) and the GNSS zone at the BOTTOM (y 22..72).
 
 VERIFY-AT-LAYOUT outcomes (spec sec 11.3), also in the report:
   * J1 HRO TYPE-C-31-M-12: KiCad footprint pad names were checked against the
@@ -118,15 +136,43 @@ def lib(name):
 # ---------------------------------------------------------------------------
 # Spec sec 8 geometry, in KiCad coordinates
 # ---------------------------------------------------------------------------
-Z3_Y = BOARD_H - 66.9          # 5.1: antenna band y < 5.1 (both-layer copper keep-out)
+# Board top edge: the ESP32 antenna overhangs it (Espressif module-placement
+# guidance, antenna outside the base board). The module's antenna area is
+# local y -12.8..-7.75 = board y 0..5.05, so the board starts at y 5.05 and
+# is 50 x 66.95 mm. The spec frame (origin bottom-left, y = 72 - Y) is kept.
+BOARD_TOP = 5.05
+Z3_Y = BOARD_TOP + 0.3         # copper stays 0.3 mm inside the antenna edge (edge clearance)
 Z1_Y = BOARD_H - 50.0          # 22.0: GNSS zone y > 22 (bottom solid GND, nothing on bottom)
-GNSS_VIA_Y = BOARD_H - 52.75   # 19.25: no via on a GNSS net at y > 19.25 (spec)
-GNSS_VIA_RELAXED_Y = 21.75     # deviation, see report (via copper stays inside Z2)
-VBUS_EXC = (10.8, 23.7)        # deviation: VBUS bottom/via corner in Z1 (x <, y <), see report
+GNSS_VIA_Y = BOARD_H - 52.75   # 19.25: 20 mm north of the U2 body edge
+# u-blox IM 4.4: "keep at least 20 mm distance from the module edge when
+# swapping ANY signal from the top to other layers": no non-GND via closer
+# than VIA_ZONE mm to the U2 body rectangle (enforced by the router masks and
+# by post_checks(), which fails the build).
+VIA_ZONE = 20.0
+def _seg_rect_dist(a, b, r):
+    """Distance from segment a-b to an axis-aligned rect r = (x0, y0, x1, y1)."""
+    n = max(1, int(math.hypot(b[0] - a[0], b[1] - a[1]) / 0.02))
+    best = 1e9
+    for k in range(n + 1):
+        x = a[0] + (b[0] - a[0]) * k / n
+        y = a[1] + (b[1] - a[1]) * k / n
+        dx = max(r[0] - x, 0, x - r[2])
+        dy = max(r[1] - y, 0, y - r[3])
+        best = min(best, math.hypot(dx, dy))
+    return best
+
+
+U2_BODY = (17.25, 39.25, 32.75, 54.75)
+# bottom keep-out under the USB legs (x0, y0, x1, y1): U1.23/24 down to the band
+USB_SHADOW = (24.45, 19.3, 26.4, 22.1)
+# U1: top copper allowed only within this ring inside the pad ring (fan-out
+# stubs to vias under the module); the inner box stays top-copper free
+U1_INNER = (19.4, 7.2, 30.6, 18.4)
 KEEPOUT = (7.25, BOARD_H - 42.75, 42.75, BOARD_H - 7.25)   # x0, y0(29.25), x1, y1(64.75)
 U2_POS = S(25.0, 25.0)         # (25, 47)
 U1_POS = (25.0, 12.8)          # module body y 0..20.5 = spec Y 51.5..72, antenna flush with top edge
-U3_POS = (25.0, 25.45)        # spec (25, ~46.5); y 25.45 puts the 0.5 mm LGA pads on the 0.1 mm routing grid
+U3_POS = (22.3, 24.8)         # spec (25, ~46.5): 2.7 mm west, see report (IMU pocket north of the USB pair)
+U3_KEEPOUT = (U3_POS[0] - 0.85, U3_POS[1] - 0.6, U3_POS[0] + 0.85, U3_POS[1] + 0.6)   # land-pattern interior (TN0018)
 
 # ---------------------------------------------------------------------------
 # 1. Placement: (ref, libdir, footprint, x, y, rot, side)   side "F" or "B"
@@ -141,110 +187,119 @@ TP = (lib("TestPoint"), "TestPoint_Pad_D1.0mm")
 MH = (lib("MountingHole"), "MountingHole_2.2mm_M2")
 TACT = (lib("Button_Switch_SMD"), "SW_Push_1P1T_XKB_TS-1187A")
 
+# Test pads on the top side (review fix wave): GNSS_SAFEBOOT_N's lane can no
+# longer climb to Z2 (the east corridor carries the J3 bus), so TP12 sits on
+# the top at the lane's end, in the Z1 south strip outside the keep-out box.
+TOP_TPS = {"TP12"}
+
 PLACEMENTS = [
     # -- spec-fixed ----------------------------------------------------------
     ("U1", CUSTOM, "ESP32-S3-MINI-1", *U1_POS, 0, "F"),
     ("U2", CUSTOM, "u-blox_SAM-M10Q", *U2_POS, 0, "F"),    # pins 16-20 edge faces +Y (spec) = -y
     ("U3", CUSTOM, "LGA-14_2.5x3mm_P0.5mm_LSM6DSV16X", *U3_POS, 0, "F"),
-    ("J1", lib("Connector_USB"), "USB_C_Receptacle_HRO_TYPE-C-31-M-12", 3.65, 20.05, 270, "F"),
     ("MH1", *MH, *S(3.5, 3.5), 0, "F"),
     ("MH2", *MH, *S(46.5, 3.5), 0, "F"),
     ("MH3", *MH, *S(3.5, 60.0), 0, "F"),
     ("MH4", *MH, *S(46.5, 60.0), 0, "F"),
-    # -- west half (spec sec 8): J1 -> U7 -> U4 -> U5, NW corner = U5/U4 (heat
-    #    far from U2/U3). Placement grid solved against courtyards by
-    #    place_check(); U4 (VQFN) >= 10 mm from U3 (checked).
-    ("U7", lib("Package_TO_SOT_SMD"), "SOT-23-6", 13.02, 19.95, 0, "F"),
-    ("R4", *R0402, 15.8, 19.0, 90, "F"),
-    ("R3", *R0402, 15.8, 21.0, 90, "F"),
-    # C17/C18 (DNP D+/D- caps) just south of U1's bottom-left corner: their
-    # GND pads tie to U1.63 (module GND corner pad), see GND_RESERVE
-    ("C18", *C0402, 18.0, 21.8, 90, "F"),
-    ("C17", *C0402, 16.8, 23.3, 0, "F"),
-    ("R1", *R0402, 9.94, 18.45, 0, "F"),
-    ("R2", *R0402, 10.2, 22.25, 0, "F"),
+    # -- USB (rev A fix wave): J1 sits on the west edge in the band between U1
+    #    and the GNSS keep-out, so the D+/D- pair runs as one coupled top-layer
+    #    pair (no vias) J1 -> U7 -> R3/R4 -> U1.23/24 entirely over solid
+    #    bottom GND. It also leaves the pocket north of the pair for the IMU,
+    #    whose lines reach U1's west pins on the top layer.
+    ("J1", lib("Connector_USB"), "USB_C_Receptacle_HRO_TYPE-C-31-M-12", 3.65, 23.8, 270, "F"),
+    ("U7", CUSTOM, "SOT-23-6_USBLC6-2_FlowThrough", 11.5, 24.0, 0, "F"),
+    ("R4", *R0402, 14.6, 23.05, 0, "F"),
+    ("R3", *R0402, 14.6, 24.95, 0, "F"),
+    ("R1", *R0402, 9.95, 21.25, 270, "F"),
+    ("R2", *R0402, 10.4, 26.5, 0, "F"),
+    # C17/C18 (DNP D+/D- caps): C17 next to U1.24, C18 on a 0.5 mm stub on the
+    # north-east side of the D- diagonal (clear of the IMU 3V3 branch)
+    ("C18", *C0402, 17.5, 23.9, 90, "F"),
+    ("C17", *C0402, 26.59, 21.35, 0, "F"),
+    # -- west Z2 (spec sec 8): U4 -> U5 power chain, NW corner (heat far from U2/U3)
     ("C1", *C0603, 12.1, 16.4, 0, "F"),
-    ("R9", *R0402, 14.2, 17.2, 90, "F"),
+    ("R9", *R0402, 14.2, 17.7, 90, "F"),
     ("U4", CUSTOM, "TI_RGT0016C_VQFN-16_3x3mm_P0.5mm_EP1.68mm", 12.15, 13.25, 180, "F"),
     ("R10", *R0402, 9.4, 13.3, 90, "F"),
     ("C2", *C0805, 7.8, 12.0, 90, "F"),
-    ("C3", *C0805, 15.3, 12.8, 90, "F"),
-    ("R12", *R0402, 12.4, 10.0, 0, "F"),
+    ("C3", *C0805, 15.3, 13.1, 90, "F"),
+    ("R12", *R0402, 15.3, 15.5, 0, "F"),
+    # power switch on the west edge (top-left corner), next to U5 whose EN it drives
+    ("SW3", CUSTOM, "SW_Slide_SPDT_SOFNG_SS-12D00-G3", 4.7, 7.32, 0, "F"),
     ("U5", CUSTOM, "TI_DYD0005A_SOT-23-5_ThermalPad", 11.7, 7.0, 0, "F"),
-    ("C4", *C0402, 8.55, 6.05, 180, "F"),
+    ("C4", *C0402, 10.4, 9.3, 0, "F"),
     ("C5", *C0603, 15.4, 6.0, 180, "F"),
-    ("C7", *C0402, 16.4, 7.8, 90, "F"),
-    ("C6", *C0805, 15.15, 9.9, 180, "F"),
-    # VBAT divider in the free pocket above MH3
-    ("R13", *R0402, 6.2, 6.4, 90, "F"),
-    ("R14", *R0402, 6.2, 8.5, 90, "F"),
-    ("C16", *C0402, 7.4, 8.5, 90, "F"),
-    # J3 spare pad row (DNP bare SMD pads, no part), west band just north of
-    # the U2 keep-out box (top only, nothing added to the bottom layer).
-    ("J3", CUSTOM, "PadRow_1x08_P2.54mm_SMD", 10.9, 27.7, 0, "F"),
-    # -- east half (spec sec 8): J2 + SW3 on the east edge, U6, LEDs on the edge,
-    #    SW1/SW2 near the edge. THT parts (J2, SW3) stay in Z2 (y < 22) so no
-    #    non-GND pad reaches the solid bottom GND of Z1. x 33..36 is kept free
-    #    as the corridor for the U2 lines climbing to U1's east pins.
-    ("SW3", CUSTOM, "SW_Slide_SPDT_SOFNG_SS-12D00-G3", 45.2, 7.32, 0, "F"),
-    ("SW2", *TACT, 41.2, 13.5, 90, "F"),
-    ("R5", *R0402, 34.1, 6.6, 90, "F"),
-    ("C8", *C0402, 34.1, 9.0, 90, "F"),
-    ("J2", lib("Connector_JST"), "JST_PH_B2B-PH-K_1x02_P2.00mm_Vertical", 46.6, 19.0, 90, "F"),
-    ("RT1", *R0603, 43.4, 19.0, 90, "F"),
-    ("U6", lib("Package_TO_SOT_SMD"), "SOT-23", 40.0, 19.6, 0, "F"),
-    ("C12", *C0402, 43.2, 21.2, 0, "F"),
-    ("C13", *C0402, 39.5, 22.0, 0, "F"),
-    ("R6", *R0402, 34.1, 11.2, 90, "F"),  # BOOT pull-up: on the BOOT route to SW1 (east)
-    ("SW1", *TACT, 42.0, 25.5, 0, "F"),
-    ("LED1", *LED0603, 48.45, 23.5, 0, "F"),
-    ("LED2", *LED0603, 48.45, 25.5, 0, "F"),
-    ("LED3", *LED0603, 48.45, 27.5, 0, "F"),
-    ("R15", *R0402, 46.4, 23.5, 90, "F"),
-    ("R16", *R0402, 46.4, 25.5, 90, "F"),
-    ("R11", *R0402, 46.4, 27.5, 90, "F"),
-    # -- GNSS support at the +Y edge of the 10 mm keep-out (spec sec 8) -------------
-    # C9 (4.7 uF) on the VCC branch, C10 (100 nF) on the V_IO branch: the two
-    # U2 supply pins cannot be tied at the module on one layer (see report).
-    # R17 sits west with C11 because V_BCKP (pin 3) must escape west.
-    ("C9", *C0402, 35.6, 27.6, 0, "F"),
-    ("C10", *C0402, 23.3, 28.55, 0, "F"),
-    ("C11", *C0402, 21.3, 28.55, 0, "F"),        # VBCKP pad west (lane end), GND east
-    ("R17", *R0402, 21.2, 26.6, 270, "F"),
-    # -- IMU support --------------------------------------------------------------
-    ("C14", *C0402, 27.8, 26.2, 270, "F"),       # GND pad south (strap into Z1)
-    ("C15", *C0402, 22.6, 26.4, 90, "F"),
-    ("R7", *R0402, 22.9, 22.6, 90, "F"),
-    ("R8", *R0402, 27.6, 23.0, 90, "F"),
+    ("C7", *C0402, 16.44, 7.8, 90, "F"),
+    ("C6", *C0805, 14.9, 9.9, 180, "F"),
+    # VBAT divider east of U1 (its VBAT_SENSE line crosses under U1)
+    ("R13", *R0402, 41.6, 10.2, 0, "F"),
+    ("R14", *R0402, 41.6, 11.3, 0, "F"),
+    ("C16", *C0402, 41.6, 12.4, 0, "F"),
+    # I2C pull-ups in the free space left by J1 (they reach SDA/SCL through
+    # vias >= 20 mm from U2, next to the TP10/TP11 test pads' vias)
+    ("R7", *R0402, 13.2, 19.25, 0, "F"),
+    ("R8", *R0402, 13.2, 20.3, 0, "F"),
+    # -- IMU (spec sec 8 "U3 between the GNSS keep-out and U1"), in the pocket
+    #    north of the USB pair; its caps below it
+    ("C15", *C0402, 20.9, 26.85, 180, "F"),
+    ("C14", *C0402, 23.9, 26.85, 180, "F"),
+    # -- GNSS support on the U2 lanes, at the +Y edge of the 10 mm keep-out ------
+    ("C10", *C0402, 34.68, 26.0, 0, "F"),        # on the V_IO lane (x 34.2), GND pad east
+    ("C9", *C0402, 37.58, 26.0, 0, "F"),         # on the VCC lane (x 37.1), GND pad east
+    # -- east Z2: SW3 top right, V_BCKP LDO chain, EN RC / BOOT pull-up, battery
+    ("U6", lib("Package_TO_SOT_SMD"), "SOT-23", 38.4, 8.6, 0, "F"),
+    ("R17", *R0402, 37.2, 6.1, 180, "F"),        # V_BCKP lane ends on R17.2 (west pad)
+    ("C11", *C0402, 39.2, 6.1, 0, "F"),          # V_BCKP cap (u-blox 10 mm rule: not at the pin)
+    ("C13", *C0402, 36.3, 11.0, 0, "F"),
+    ("C12", *C0402, 38.3, 11.0, 0, "F"),
+    ("R5", *R0402, 43.0, 66.8, 180, "F"),       # EN RC, south of SW2 (end of the EN lane)
+    ("C8", *C0402, 43.0, 68.0, 180, "F"),
+    ("R6", *R0402, 46.9, 47.5, 180, "F"),       # BOOT pull-up, on the BOOT lane east of J3
+    # J2 on the east edge (3-pin, pins north->south 3, 2, 1 = NTC, BAT-, BAT+)
+    ("J2", lib("Connector_JST"), "JST_PH_B3B-PH-K_1x03_P2.00mm_Vertical", 46.64, 21.0, 90, "F"),
+    ("RT1", *R0603, 44.0, 5.9, 0, "F"),        # DNP fallback (pack without NTC)
+    # -- status LEDs on the west edge for light pipes (review fix wave: frees
+    #    the east corridor), series resistors next to them
+    ("LED1", *LED0603, 1.75, 15.3, 0, "F"),
+    ("LED2", *LED0603, 1.75, 16.85, 0, "F"),
+    ("LED3", *LED0603, 4.95, 15.3, 0, "F"),
+    ("R15", *R0402, 4.95, 16.85, 0, "F"),
+    ("R11", *R0402, 7.45, 15.3, 0, "F"),
+    ("R16", *R0402, 7.45, 16.85, 0, "F"),
+    # -- east strip (Z1 outside the keep-out box, top only): J3 spare pads,
+    #    SW1/SW2 near the edge
+    ("J3", CUSTOM, "PadRow_1x08_P2.54mm_SMD", 44.35, 39.9, 90, "F"),
+    ("SW1", *TACT, 46.3, 53.8, 90, "F"),
+    ("SW2", *TACT, 46.3, 61.6, 90, "F"),
     # -- bottom test pads (spec: bottom, electronics zone only -> y < 22) ----------
-    ("TP1", *TP, 19.9, 7.4, 0, "B"),
-    ("TP17", *TP, 19.9, 9.6, 0, "B"),
-    ("TP10", *TP, 19.9, 11.8, 0, "B"),
-    ("TP11", *TP, 19.9, 14.0, 0, "B"),
-    ("TP19", *TP, 19.9, 16.2, 0, "B"),
-    ("TP16", *TP, 30.1, 7.4, 0, "B"),
-    ("TP14", *TP, 30.1, 9.6, 0, "B"),
-    ("TP13", *TP, 30.1, 11.8, 0, "B"),
-    ("TP15", *TP, 30.1, 14.0, 0, "B"),
-    ("TP7", *TP, 30.1, 16.2, 0, "B"),
-    ("TP8", *TP, 27.6, 16.4, 0, "B"),
-    ("TP12", *TP, 25.0, 16.4, 0, "B"),
-    ("TP2", *TP, 22.4, 7.4, 0, "B"),
-    ("TP3", *TP, 25.0, 7.4, 0, "B"),
-    # via-in-pad test pads on the hand-routed PPS / V_BCKP copper (see HAND_EXTRA)
-    ("TP9", *TP, 26.7, 21.45, 0, "B"),
-    ("TP18", *TP, 21.9, 20.75, 0, "B"),
+    ("TP1", *TP, 38.0, 12.3, 0, "B"),
+    ("TP17", *TP, 43.5, 15.7, 0, "B"),
+    ("TP10", *TP, 9.9, 18.8, 0, "B"),
+    ("TP11", *TP, 9.9, 20.95, 0, "B"),
+    ("TP19", *TP, 12.0, 21.0, 0, "B"),
+    ("TP16", *TP, 40.0, 6.5, 0, "B"),
+    ("TP14", *TP, 29.4, 11.3, 0, "B"),
+    ("TP13", *TP, 29.4, 13.4, 0, "B"),
+    ("TP2", *TP, 9.4, 16.3, 0, "B"),
+    ("TP3", *TP, 3.35, 15.9, 0, "B"),
+    # GNSS-net test pads: next to the lane vias (>= 20 mm from U2)
+    ("TP15", *TP, 34.05, 14.5, 0, "B"),
+    ("TP7", *TP, 36.2, 15.35, 0, "B"),
+    ("TP8", *TP, 31.9, 16.2, 0, "B"),
+    ("TP9", *TP, 32.9, 19.2, 0, "B"),
+    ("TP12", *TP, 36.0, 66.6, 0, "F"),     # top side, end of the SAFEBOOT_N lane (see sec 8 note)
+    ("TP18", *TP, 33.5, 11.3, 0, "B"),
     ("TP4", *TP, 13.0, 9.4, 0, "B"),
     ("TP5", *TP, 8.4, 9.9, 0, "B"),
-    ("TP6", *TP, 10.5, 17.3, 0, "B"),
+    ("TP6", *TP, 6.6, 16.2, 0, "B"),
 ]
 
 VALUES = {
     "U1": "ESP32-S3-MINI-1-N8", "U2": "SAM-M10Q-00B", "U3": "LSM6DSV16XTR", "U4": "BQ24073RGTR",
     "U5": "TLV75733PDYDR", "U6": "XC6206P332MR-G", "U7": "USBLC6-2SC6",
-    "J1": "TYPE-C-31-M-12", "J2": "B2B-PH-K-S(LF)(SN)", "J3": "DNP 1x8 spare pads",
+    "J1": "TYPE-C-31-M-12", "J2": "B3B-PH-K-S(LF)(SN)", "J3": "DNP 1x8 spare pads",
     "SW1": "TS-1187A-B-A-B BOOT", "SW2": "TS-1187A-B-A-B RESET", "SW3": "SS-12D00-G3 POWER",
-    "RT1": "NCP18XH103F03RB 10k NTC", "LED1": "KT-0603Y yellow", "LED2": "KT-0603R red",
+    "RT1": "DNP NCP18XH103F03RB 10k NTC (fallback)", "LED1": "KT-0603Y yellow", "LED2": "KT-0603R red",
     "LED3": "KT-0603R red CHG",
     "C1": "1uF 50V X5R 0603", "C2": "22uF 25V X5R 0805", "C3": "22uF 25V X5R 0805",
     "C6": "22uF 25V X5R 0805", "C4": "1uF 25V X5R 0402", "C8": "1uF 25V X5R 0402",
@@ -265,7 +320,7 @@ for i in range(1, 5):
 # LCSC codes, spec sec 3 (checked live by the spec author on 2026-09-24)
 LCSC = {
     "U1": "C2913206", "U2": "C5443880", "U3": "C5267406", "U4": "C15220", "U5": "C22399950",
-    "U6": "C5446", "U7": "C7519", "J1": "C165948", "J2": "C131337",
+    "U6": "C5446", "U7": "C7519", "J1": "C165948", "J2": "C131339",
     "SW1": "C318884", "SW2": "C318884", "SW3": "C22355741", "RT1": "C13564",
     "LED1": "C2287", "LED2": "C2286", "LED3": "C2286",
     "C1": "C15849", "C2": "C45783", "C3": "C45783", "C6": "C45783",
@@ -277,7 +332,7 @@ LCSC = {
     "R12": "C25741", "R13": "C26083", "R14": "C26083", "R15": "C11702", "R16": "C11702",
     "R17": "C17168",
 }
-DNP = {"C17", "C18", "J3"}              # footprint only, never assembled
+DNP = {"C17", "C18", "J3", "RT1"}              # footprint only, never assembled
 HAND_SOLDER = {"J2", "SW3"}              # bought loose, hand-soldered by the owner (spec sec 9)
 NOT_A_PART = {f"TP{i}" for i in range(1, 20)} | {f"MH{i}" for i in range(1, 5)}
 
@@ -286,9 +341,9 @@ NOT_A_PART = {f"TP{i}" for i in range(1, 20)} | {f"MH{i}" for i in range(1, 5)}
 # 2. Board construction helpers
 # ---------------------------------------------------------------------------
 def add_outline(board):
-    """50 x 72 mm rectangle (spec sec 8), square corners (the antenna edge
-    must be straight and flush with the module)."""
-    pts = [(0, 0), (BOARD_W, 0), (BOARD_W, BOARD_H), (0, BOARD_H)]
+    """50 x 66.95 mm rectangle, square corners. The top edge is the ESP32
+    antenna boundary: the antenna area overhangs the board (Espressif)."""
+    pts = [(0, BOARD_TOP), (BOARD_W, BOARD_TOP), (BOARD_W, BOARD_H), (0, BOARD_H)]
     for a, b in zip(pts, pts[1:] + pts[:1]):
         s = pcbnew.PCB_SHAPE(board)
         s.SetShape(pcbnew.SHAPE_T_SEGMENT)
@@ -420,17 +475,14 @@ def place_check(fps):
         x0, y0, x1, y1 = courtyard_bbox(fp)
         if ref != "U2" and x1 > k0x and x0 < k1x and y1 > k0y and y0 < k1y:
             errs.append(f"{ref} courtyard enters the 10 mm GNSS keep-out box")
-        if ref != "U1" and y0 < Z3_Y - 0.001:
-            errs.append(f"{ref} courtyard enters the antenna band Z3 (y < {Z3_Y:.2f})")
+        if ref != "U1" and y0 < BOARD_TOP - 0.001:
+            errs.append(f"{ref} courtyard crosses the antenna edge (y < {BOARD_TOP:.2f})")
         if fp.IsFlipped() and max(pcbnew.ToMM(p.GetBoundingBox().GetBottom()) for p in fp.Pads()) > Z1_Y:
             errs.append(f"{ref} is on the bottom inside Z1 (bottom must be solid GND)")
-        if ref not in ("U1", "J1") and (x0 < 0 or y0 < 0 or x1 > BOARD_W or y1 > BOARD_H):
+        if ref not in ("U1", "J1") and (x0 < 0 or y0 < BOARD_TOP or x1 > BOARD_W or y1 > BOARD_H):
             errs.append(f"{ref} courtyard outside the board")
-        if fp.IsFlipped() is False and ref.startswith("TP"):
+        if fp.IsFlipped() is False and ref.startswith("TP") and ref not in TOP_TPS:
             errs.append(f"{ref} must be on the bottom")
-    for ref in fps:
-        if ref.startswith("TP") and not fps[ref].IsFlipped():
-            errs.append(f"{ref} not on bottom")
     # U3 distances (sec 8): >= 10 mm from U4/U5, >= 5 mm from SW1/SW2 (courtyard gap)
 
     def gap(a, b):
@@ -497,83 +549,211 @@ TRUNK = {
 W_TAP = 0.25
 NO_TOP_UNDER = ("U1", "U2", "U3", "U4", "U5", "U7", "J1")
 
-# U2 escapes, hand-routed on F.Cu (spec sec 8 "GNSS routing rule"). On one
-# layer, with no vias allowed within 20 mm of the module, the escape order
-# around the module is fixed by the pin order. So the 8 escapes are scripted
-# as lanes that hug the module (0.45 mm pitch, 0.6 mm next to the 0.5 mm supply),
-# and the router continues from each lane end:
-#   east bundle, west->east: EXTINT, RESET_N, VCC(3V3), RXD, TXD, SAFEBOOT_N
-#     (top-edge pins go north then east, flank pins go east, SAFEBOOT_N goes
-#     south then east round the corner), all climbing north at x 33.7..37.8
-#     towards U1's east pins; they hand off at y = 22.0.
-#   west, west->east: PPS (south, then round the west flank; it must end
-#     west of the east bundle to reach U1.25 on U1's bottom row), V_BCKP -> C11,
-#     V_IO (3V3) -> C10.
-# VCC and V_IO are NOT tied at the module: a one-layer tie round the corner
-# would enclose RESET_N/EXTINT (spec error). They meet through the 3V3 rail.
+# U2 escapes, hand-routed on F.Cu (spec sec 8 "GNSS routing rule"). No via
+# may sit within 20 mm of the module (u-blox IM 4.4: "keep at least 20 mm
+# distance from the module edge when swapping any signal from the top to other
+# layers"), so every U2 line stays on the top layer until it is north of
+# y ~19.3, where the router takes over. All lanes climb north in one bundle
+# east of U1 (the only way into Z2 that does not cross the USB pair).
+#   The cyclic pin order fixes the bundle order, west -> east:
+#   PPS 32.9 | V_BCKP 33.5 | V_IO 34.2 | EXTINT 35.9, RESET_N 36.4, VCC 37.1,
+#   RXD 38.7, TXD 39.2, SAFEBOOT_N 39.7.
+#   PPS, V_BCKP and V_IO leave the west/south pins, go round the west flank
+#   and east along the band; PPS then runs west along U1's bottom row into
+#   U1.25 (no via at all), V_BCKP climbs past U1 to R17/C11 (no via), V_IO
+#   ends on the 3V3 trunk. The north pins go north then east, the east pins
+#   east, SAFEBOOT_N south then east round the corner.
+# VCC and V_IO cannot be tied at the module on one layer (RESET_N/EXTINT sit
+# between them in the pin order, spec error): they meet on the 3V3 trunk right
+# where both lanes reach it, 20 mm north of the module (VCC through a via,
+# V_IO on the top layer).
 U2_ESCAPES = [
-    # east bundle, all on the 0.1 mm routing grid: lanes x 33.7 / 34.2 / 34.8 /
-    # 36.8 / 37.3 / 37.8 (0.5 mm pitch, 0.6 mm next to the 0.5 mm supply), hand-off y 22.0
-    ("GNSS_EXTINT", 0.2, [(23.1, 40.4), (23.1, 36.9), (33.7, 36.9), (33.7, 22.0)]),
-    ("GNSS_RESET_N", 0.2, [(25.0, 40.4), (25.0, 37.4), (34.2, 37.4), (34.2, 22.0)]),
-    ("3V3", 0.5, [(26.9, 40.4), (26.9, 38.0), (34.8, 38.0), (34.8, 22.0)]),        # VCC, passes C9.1
-    ("GNSS_RXD", 0.2, [(31.6, 45.1), (36.8, 45.1), (36.8, 22.0)]),
-    ("GNSS_TXD", 0.2, [(31.6, 47.0), (37.3, 47.0), (37.3, 22.0)]),
-    ("GNSS_SAFEBOOT_N", 0.2, [(25.0, 53.6), (25.0, 56.1), (37.8, 56.1), (37.8, 22.0)]),
-    # west: PPS (outermost), V_BCKP, V_IO
-    ("PPS", 0.2, [(23.1, 53.6), (23.1, 56.1), (15.6, 56.1), (15.6, 25.0)]),
-    ("VBCKP", 0.2, [(18.4, 47.0), (16.1, 47.0), (16.1, 29.4), (20.82, 29.4), (20.82, 28.55)]),  # -> C11.1
-    ("3V3", 0.5, [(18.4, 45.1), (16.8, 45.1), (16.8, 30.1), (22.82, 30.1), (22.82, 28.55)]),    # V_IO -> C10.1
+    ("GNSS_EXTINT", 0.2, [(23.1, 40.4), (23.1, 36.9), (35.9, 36.9), (35.9, 13.65)]),
+    ("GNSS_RESET_N", 0.2, [(25.0, 40.4), (25.0, 37.4), (36.4, 37.4), (36.4, 18.9), (37.0, 18.3),
+                           (37.0, 14.5)]),
+    ("3V3", 0.5, [(26.9, 40.4), (26.9, 38.0), (37.1, 38.0), (37.1, 19.25)]),       # VCC, passes C9.1
+    ("GNSS_RXD", 0.2, [(31.6, 45.1), (38.7, 45.1), (38.7, 16.9), (38.4, 16.6), (38.4, 16.2)]),
+    ("GNSS_TXD", 0.2, [(31.6, 47.0), (39.2, 47.0), (39.2, 15.35)]),
+    ("GNSS_SAFEBOOT_N", 0.2, [(25.0, 53.6), (25.0, 56.1), (35.0, 56.1), (36.0, 57.1),
+                              (36.0, 66.6)]),                                   # -> TP12 (top)
+    ("PPS", 0.2, [(23.1, 53.6), (23.1, 56.1), (15.7, 56.1), (15.7, 29.0), (32.9, 29.0),
+                  (32.9, 20.7), (26.7, 20.7), (26.7, 19.8)]),                        # -> U1.25
+    ("VBCKP", 0.2, [(18.4, 47.0), (16.2, 47.0), (16.2, 29.5), (33.5, 29.5), (33.5, 6.2),
+                    (36.72, 6.2), (36.72, 6.1)]),                                    # -> R17.2
+    ("3V3", 0.5, [(18.4, 45.1), (16.8, 45.1), (16.8, 30.1), (34.2, 30.1), (34.2, 20.0)]),  # V_IO, passes C10.1
+]
+# 3V3 trunk (hand-routed, 0.5 mm): U1.3 -> via under U1 -> bottom along U1's
+# north edge -> via -> top down the east side of U1 -> V_IO lane end, and a
+# bottom link to the VCC lane's via. All its vias are >= 20 mm from U2.
+TRUNK_3V3 = [
+    ("TRUNK", "3V3", 0.5, 0, [(18.0, 8.55), (17.3, 8.55), (16.9, 9.4)]),
+    ("TRUNK", "3V3", 0.5, 1, [(16.9, 9.4), (16.9, 7.65), (35.0, 7.65)]),
+    ("TRUNK", "3V3", 0.5, 0, [(35.0, 7.65), (35.0, 20.0), (34.2, 20.0)]),
+    ("TRUNK", "3V3", 0.5, 1, [(35.0, 19.25), (37.1, 19.25), (40.0, 19.25)]),
+    # 3V3 tap for the east strip (J3.1, EN/BOOT pull-ups), through TP1
+    ("TRUNK", "3V3", 0.3, 1, [(35.0, 12.3), (38.0, 12.3)]),
+]
+TRUNK_VIAS = [("3V3", 16.9, 9.4), ("3V3", 35.0, 7.65), ("3V3", 35.0, 19.25), ("3V3", 37.1, 19.25),
+              ("3V3", 35.0, 12.3), ("3V3", 40.0, 19.25)]
+
+# U1 fan-out and the lines that must cross from U1's west side / the charger
+# to the east (hand-routed, review fix wave). Everything that changes layer
+# does so >= 20 mm from U2. Under U1 the bottom carries, north of the EPAD
+# thermal vias: 3V3 trunk (y 7.0), VBAT (7.8), TS (8.5), BOOT (9.4) and
+# VBAT_SENSE (10.1); east of U1 they fan out to J2, the divider, SW1 and the
+# 3V3 tap. The U1 pins east/south-east (GNSS UART, RESET, EXTINT, U0, the J3
+# spares) use vias 1.25 mm inside the pad ring.
+FANOUT = [
+    # VBAT: C3.1 -> via -> bottom -> J2.1 (BAT+)
+    ("F_VBAT", "VBAT", 0.5, 0, [(16.0, 14.05), (16.5, 14.05)]),
+    ("F_VBAT", "VBAT", 0.5, 1, [(16.5, 14.05), (17.6, 12.95), (17.6, 8.45), (48.3, 8.45), (48.3, 21.0),
+                               (46.64, 21.0)]),
+    # TS: U4.1 -> via -> bottom -> J2.3 (pack NTC)
+    ("F_TS", "TS", 0.2, 0, [(13.55, 14.0), (13.9, 14.0), (14.2, 14.8)]),
+    ("F_TS", "TS", 0.2, 1, [(14.2, 14.8), (18.4, 14.8), (18.4, 9.15), (45.0, 9.15), (45.0, 15.6),
+                           (46.64, 17.0)]),
+    # BOOT (U1.4) -> SW1 side (via + TP17 in the east corridor)
+    ("F_BOOT", "BOOT", 0.2, 0, [(18.0, 9.4), (19.9, 9.9)]),
+    ("F_BOOT", "BOOT", 0.2, 1, [(19.9, 9.9), (43.5, 9.9), (43.5, 15.7)]),
+    # VBAT_SENSE (U1.5) -> divider R13/R14/C16 east of U1
+    ("F_VSNS", "VBAT_SENSE", 0.2, 0, [(18.0, 10.25), (19.3, 10.45)]),
+    ("F_VSNS", "VBAT_SENSE", 0.2, 1, [(19.3, 10.45), (40.3, 10.45)]),
+    # EN (U1.45) -> TP16 -> SW2 / EN RC in the east strip
+    ("F_EN", "EN", 0.2, 0, [(32.0, 6.85), (30.6, 6.9)]),
+    ("F_EN", "EN", 0.2, 1, [(30.6, 6.9), (31.0, 6.5), (40.0, 6.5), (49.3, 6.5), (49.3, 16.0)]),
+    # GNSS UART / RESET_N / EXTINT: lane via -> bottom -> via inside the pad ring
+    ("F_EXT", "GNSS_EXTINT", 0.2, 1, [(35.9, 13.65), (30.75, 13.65)]),
+    ("F_EXT", "GNSS_EXTINT", 0.2, 0, [(30.75, 13.65), (32.0, 13.65)]),
+    ("F_RST", "GNSS_RESET_N", 0.2, 1, [(37.0, 14.5), (34.0, 14.5), (30.75, 14.5)]),
+    ("F_RST", "GNSS_RESET_N", 0.2, 0, [(30.75, 14.5), (32.0, 14.5)]),
+    ("F_TXD", "GNSS_TXD", 0.2, 1, [(39.2, 15.35), (36.2, 15.35), (30.75, 15.35)]),
+    ("F_TXD", "GNSS_TXD", 0.2, 0, [(30.75, 15.35), (32.0, 15.35)]),
+    ("F_RXD", "GNSS_RXD", 0.2, 1, [(38.4, 16.2), (31.9, 16.2), (30.75, 16.2)]),
+    ("F_RXD", "GNSS_RXD", 0.2, 0, [(30.75, 16.2), (32.0, 16.2)]),
+    # PPS test pad TP9 (via-in-pad) on a stub of the PPS lane
+    ("PPS", "PPS", 0.2, 0, [(32.9, 20.7), (32.9, 19.2)]),
+    # UART0 test pads
+    ("F_U0T", "U0TXD", 0.2, 0, [(32.0, 11.95), (30.75, 11.95)]),
+    ("F_U0T", "U0TXD", 0.2, 1, [(30.75, 11.95), (29.4, 13.4)]),
+    ("F_U0R", "U0RXD", 0.2, 0, [(32.0, 11.1), (30.75, 11.1)]),
+    ("F_U0R", "U0RXD", 0.2, 1, [(30.75, 11.1), (29.4, 11.3)]),
+    # J3 spares: south-east corner of U1 -> east (vias east of the lanes)
+    ("F_IO47", "IO47", 0.2, 0, [(28.4, 19.8), (28.4, 18.3)]),
+    ("F_IO47", "IO47", 0.2, 1, [(28.4, 18.3), (28.4, 20.85), (42.25, 20.85), (42.25, 19.3)]),
+    ("F_IO33", "IO33", 0.2, 0, [(29.25, 19.8), (29.25, 18.3)]),
+    ("F_IO33", "IO33", 0.2, 1, [(29.25, 18.3), (29.25, 20.45), (41.5, 20.45), (41.5, 19.3)]),
+    ("F_IO34", "IO34", 0.2, 0, [(30.1, 19.8), (30.1, 18.3)]),
+    ("F_IO34", "IO34", 0.2, 1, [(30.1, 18.3), (30.1, 20.05), (40.75, 20.05), (40.75, 19.3)]),
+    ("F_IO35", "IO35", 0.2, 0, [(32.0, 18.75), (30.75, 18.75)]),
+    ("F_IO35", "IO35", 0.2, 1, [(30.75, 18.75), (31.3, 18.2), (43.0, 18.2), (43.0, 19.3)]),
+    ("F_IO36", "IO36", 0.2, 0, [(32.0, 17.9), (30.75, 17.9)]),
+    ("F_IO36", "IO36", 0.2, 1, [(30.75, 17.9), (31.05, 17.6), (43.75, 17.6), (43.75, 19.3)]),
+    ("F_IO37", "IO37", 0.2, 0, [(32.0, 17.05), (30.75, 17.05)]),
+    ("F_IO37", "IO37", 0.2, 1, [(30.75, 17.05), (44.5, 17.05), (44.5, 19.3)]),
+    # east strip (Z1, top only): the vias above sit in one row (y 19.3, 0.75 mm
+    # pitch, >= 20 mm from U2); each line drops 0.3 mm, runs 45 deg SW into a
+    # 0.5 mm-pitch bus west of J3 and turns east into its pad (east-most line
+    # to the north-most pad, so nothing crosses). 3V3 is the west-most line and
+    # continues to J3.2, R6 and R5; BOOT and EN run east of J3.
+    ("F_IO34", "IO34", 0.2, 0, [(40.75, 19.3), (40.75, 19.6), (40.2, 20.15), (40.2, 43.71), (44.35, 43.71)]),
+    ("F_IO33", "IO33", 0.2, 0, [(41.5, 19.3), (41.5, 19.6), (40.7, 20.4), (40.7, 41.17), (44.35, 41.17)]),
+    ("F_IO47", "IO47", 0.2, 0, [(42.25, 19.3), (42.25, 19.6), (41.2, 20.65), (41.2, 38.63), (44.35, 38.63)]),
+    ("F_IO35", "IO35", 0.2, 0, [(43.0, 19.3), (43.0, 19.6), (41.7, 20.9), (41.7, 36.09), (44.35, 36.09)]),
+    ("F_IO36", "IO36", 0.2, 0, [(43.75, 19.3), (43.75, 19.6), (42.2, 21.15), (42.2, 33.55), (44.35, 33.55)]),
+    ("F_IO37", "IO37", 0.2, 0, [(44.5, 19.3), (44.5, 19.6), (42.7, 21.4), (42.7, 31.01), (44.35, 31.01)]),
+    ("TRUNK", "3V3", 0.3, 0, [(40.0, 19.25), (40.0, 19.6), (39.7, 19.9), (39.7, 66.8), (42.49, 66.8)]),
+    ("TRUNK", "3V3", 0.3, 0, [(39.7, 46.25), (44.35, 46.25), (46.39, 46.25), (46.39, 47.5)]),
+    ("F_BOOT", "BOOT", 0.2, 0, [(43.5, 15.7), (44.6, 15.7), (45.35, 16.45), (45.35, 22.3), (47.41, 24.36),
+                               (47.41, 49.8), (44.42, 49.8), (44.42, 50.8)]),
+    ("F_EN", "EN", 0.2, 0, [(49.3, 16.0), (49.3, 65.7), (44.42, 65.7), (44.42, 64.6)]),
+    ("F_EN", "EN", 0.2, 0, [(44.42, 65.7), (43.51, 65.7), (43.51, 68.0)]),
+]
+FANOUT_VIAS = [
+    ("VBAT", 16.5, 14.05), ("TS", 14.2, 14.8), ("BOOT", 19.9, 9.9), ("BOOT", 43.5, 15.7),
+    ("VBAT_SENSE", 19.3, 10.45), ("VBAT_SENSE", 40.3, 10.45), ("EN", 30.6, 6.9), ("EN", 49.3, 16.0),
+    ("GNSS_EXTINT", 35.9, 13.65), ("GNSS_EXTINT", 30.75, 13.65),
+    ("GNSS_RESET_N", 37.0, 14.5), ("GNSS_RESET_N", 30.75, 14.5),
+    ("GNSS_TXD", 39.2, 15.35), ("GNSS_TXD", 30.75, 15.35),
+    ("GNSS_RXD", 38.4, 16.2), ("GNSS_RXD", 30.75, 16.2),
+    ("PPS", 32.9, 19.2), ("VBCKP", 33.5, 11.3),
+    ("U0TXD", 30.75, 11.95), ("U0RXD", 30.75, 11.1),
+    ("IO47", 28.4, 18.3), ("IO47", 42.25, 19.3), ("IO33", 29.25, 18.3), ("IO33", 41.5, 19.3),
+    ("IO34", 30.1, 18.3), ("IO34", 40.75, 19.3), ("IO35", 30.75, 18.75), ("IO35", 43.0, 19.3),
+    ("IO36", 30.75, 17.9), ("IO36", 43.75, 19.3), ("IO37", 30.75, 17.05), ("IO37", 44.5, 19.3),
 ]
 
-# Hand-routed continuations (group, net, width, layer 0=F/1=B, points).
-#   PPS: its lane ends west of the band at (15.6, 25.0). It dives at y 21.7
-#   (via copper still inside Z2), runs on the bottom along U1's bottom edge and
-#   comes up under U1.25, so everything that runs north-south under U1 crosses
-#   it on the top layer. TP9 sits via-in-pad on the east via.
-#   V_BCKP: a branch from R17.2 goes north to TP18 (via-in-pad).
+# Hand-routed USB (group, net, width, layer 0=F/1=B, points): one coupled
+# top-layer pair (0.2 mm tracks, 0.2 mm gap where coupled), no vias, over the
+# solid bottom GND of Z1 and the USB_SHADOW keep-out. J1's interleaved D+/D-
+# contacts are joined just outside the pad row (D+ east, D- under the body).
+USB_PAIR = {
+    # D- carries a 0.47 mm bump between U7 and R4: it matches the pair's
+    # lengths (D+ is the outer line at both 45/90 degree corners)
+    "USB_DN_C": [[(8.2, 23.05), (10.36, 23.05)],
+                 [(12.64, 23.05), (13.0, 23.05), (13.2, 22.58), (13.6, 22.58), (13.8, 23.05), (14.12, 23.05)]],
+    "USB_DP_C": [[(8.9, 24.55), (9.3, 24.95), (10.36, 24.95)], [(12.64, 24.95), (14.12, 24.95)]],
+    "USB_DN": [[(15.08, 23.05), (15.6, 23.05), (20.55, 28.0), (25.0, 28.0), (25.0, 19.8)],
+               [(17.5, 24.95), (17.5, 24.41)]],                # DNP C18 stub
+    "USB_DP": [[(15.08, 24.95), (16.934, 24.95), (20.384, 28.4), (25.85, 28.4), (25.85, 19.8)]],
+}
 HAND_EXTRA = [
-    ("PPS", "PPS", 0.2, 0, [(15.6, 25.0), (14.1, 23.6), (14.1, 21.7)]),
-    ("PPS", "PPS", 0.2, 1, [(14.1, 21.7), (26.7, 21.7)]),
-    ("PPS", "PPS", 0.2, 0, [(26.7, 21.7), (26.7, 19.8)]),
-    ("VBTP", "VBCKP", 0.2, 0, [(21.2, 27.11), (21.9, 27.11), (21.9, 20.75)]),
-    # J1: A6/B6 (D+) and A7/B7 (D-) interleave at 0.5 mm pitch, so no via fits
-    # between them. D+ is joined just east of the pad row; D- just west of it
-    # (under the receptacle body, clear of the NPTH pegs at y 17.11 / 22.89).
-    ("J1DP", "USB_DP_C", 0.2, 0, [(8.2, 19.8), (8.9, 19.8), (8.9, 20.8), (8.2, 20.8)]),
-    ("J1DN", "USB_DN_C", 0.2, 0, [(7.2, 19.3), (6.6, 19.3), (6.6, 20.3), (7.2, 20.3)]),
-    # J1 lower VBUS pair (A9/B4, in Z1 behind CC2): short top neck, via in the
-    # documented Z1-corner exception, bottom run through the J3 pad gap, and up
-    # again through TP6 (VBUS test pad, via-in-pad).
-    ("J1VB", "VBUS", 0.3, 0, [(8.3, 22.45), (8.8, 22.45), (9.1, 23.2)]),
-    ("J1VB", "VBUS", 0.5, 1, [(9.1, 23.2), (9.9, 22.4), (9.9, 18.2), (10.5, 17.6), (10.5, 17.3)]),
-    # U7.5 (VBUS) sits between its own D+/D- flow-through outputs: via beside it
-    ("U7VB", "VBUS", 0.25, 0, [(14.1, 19.95), (14.95, 19.95)]),
+    ("J1DP", "USB_DP_C", 0.2, 0, [(8.2, 23.55), (8.9, 23.55), (8.9, 24.55), (8.2, 24.55)]),
+    ("J1DN", "USB_DN_C", 0.2, 0, [(7.2, 23.05), (6.6, 23.05), (6.6, 24.05), (7.2, 24.05)]),
+    # J1's two VBUS pad pairs (A4/B9 north, A9/B4 south) are joined by a spine
+    # under the receptacle body between its shell tabs, which then leaves J1
+    # to the north (the pair blocks the east side).
+    ("J1VB", "VBUS", 0.2, 0, [(7.1, 26.1), (6.4, 25.95), (4.55, 25.95)]),
+    ("J1VB", "VBUS", 0.2, 0, [(7.1, 21.5), (6.4, 21.65), (4.55, 21.65)]),
+    ("J1VB", "VBUS", 0.3, 0, [(4.55, 25.95), (4.55, 17.9)]),
+    # U7.5 (VBUS) sits between its own D+/D- flow-through outputs: it escapes
+    # under the SOT-23-6 body (between the pad rows) and out of its north end
+    ("U7VB", "VBUS", 0.25, 0, [(12.64, 24.0), (11.5, 24.0), (11.5, 21.3)]),
+    # CC1: J1.A5 -> R1.1 west of R1's GND pad
+    ("CC1", "CC1", 0.2, 0, [(8.2, 22.55), (9.25, 22.55), (9.25, 21.2), (9.71, 20.74), (9.95, 20.74)]),
+    # IMU (review fix wave, ST TN0018: nothing through the land-pattern interior;
+    # no via is allowed within 20 mm of U2, so everything near U3 is top-only
+    # and planar). U3's 3V3 pins (CS 12, Vdd 8, Vdd_IO 5) are joined around the
+    # outside (east side, then south of C14/C15) and leave as the inner-most
+    # line of the bundle to a via west of U1.63; SCL, SDA, INT1 follow in ring
+    # order to U1.14, .13, .12 (vias to the bottom for R7/R8/TP10/TP11/TP19).
+    ("U3V", "3V3", 0.2, 0, [(22.8, 23.89), (22.8, 23.3), (22.8, 21.9), (21.45, 20.55), (17.1, 20.55),
+                            (17.1, 19.15)]),
+    ("U3V", "3V3", 0.2, 0, [(22.8, 23.3), (24.2, 23.3), (24.2, 25.55), (23.46, 25.55)]),
+    ("U3V", "3V3", 0.2, 0, [(24.2, 25.55), (24.2, 26.85), (24.38, 26.85)]),
+    ("U3V", "3V3", 0.2, 0, [(24.38, 26.85), (24.38, 27.5), (21.38, 27.5), (21.38, 26.85)]),
+    ("U3V", "3V3", 0.2, 0, [(21.8, 25.71), (21.8, 26.4), (21.38, 26.82)]),
+    ("IMU_SCL", "I2C_SCL", 0.2, 0, [(22.3, 23.89), (22.3, 22.0), (21.35, 21.05), (16.5, 21.05),
+                                   (16.5, 17.9), (17.0, 17.9), (18.0, 17.9)]),
+    ("IMU_SDA", "I2C_SDA", 0.2, 0, [(21.8, 23.89), (21.8, 22.1), (21.25, 21.55), (16.0, 21.55),
+                                   (16.0, 17.05), (16.95, 17.05), (18.0, 17.05)]),
+    ("IMU_INT1", "IMU_INT1", 0.2, 0, [(21.14, 25.55), (19.35, 25.55), (19.35, 22.05), (15.5, 22.05),
+                                     (15.5, 16.6), (15.5, 16.2), (18.0, 16.2)]),
 ]
-# Reserved GND copper, placed before any routing (fixed for every router):
-# the IMU and its caps sit in the busy band between U1 and the GNSS keep-out,
-# where the GND pour would otherwise be cut into islands. Each GND pad gets a
-# stub + via, and bottom GND straps run south into the solid Z1 bottom pour.
-# (width, layer 0=F/1=B, points)
+for _net, _runs in USB_PAIR.items():
+    for _pts in _runs:
+        HAND_EXTRA.append(("USB_" + _net, _net, 0.2, 0, _pts))
+HAND_EXTRA += TRUNK_3V3 + FANOUT
+HAND_VIAS = list(TRUNK_VIAS) + FANOUT_VIAS + [("3V3", 17.1, 19.15), ("I2C_SCL", 17.0, 17.9),
+                                             ("I2C_SDA", 16.95, 17.05), ("IMU_INT1", 15.5, 16.6)]
+# Reserved GND copper, placed before any routing (fixed for every router).
+# IMU (ST TN0018: no copper through the land-pattern interior, symmetric
+# connections): the three GND pads of the west column get equal 0.2 mm stubs
+# westward to one via; the two GND pads of the south row get equal stubs
+# southward to one via. Caps next to their GND vias. (width, layer, points)
 GND_RESERVE_TRACKS = [
-    # IMU: U3.1-3 (SA0, SDx, SCx -> GND) + C15.2 tied to U3.6 inside the pad
-    # ring (under the solder-masked body), U3.6/7 strapped south on the top
-    # layer into the Z1 top pour
-    (0.2, 0, [(23.84, 24.7), (23.84, 25.7)]),
-    (0.2, 0, [(22.6, 25.92), (23.2, 25.75), (23.84, 25.7)]),
-    (0.2, 0, [(23.84, 25.7), (24.75, 25.7), (25.0, 25.95), (25.0, 26.36)]),
-    (0.25, 0, [(25.0, 26.36), (25.25, 26.95)]),
-    (0.25, 0, [(25.5, 26.36), (25.25, 26.95)]),
-    (0.3, 0, [(25.25, 26.95), (25.25, 29.7)]),
-    (0.3, 0, [(27.8, 26.68), (27.8, 29.7)]),                       # C14.2 (IMU Vdd cap) south
-    (0.25, 0, [(21.78, 28.55), (21.8, 29.1)]),                     # C11.2 -> via into Z1
-    (0.25, 0, [(18.0, 19.8), (18.0, 21.32)]),                      # U1.63 (GND) -> C18.2
-    (0.25, 0, [(17.28, 23.3), (17.28, 21.6), (18.0, 21.32)]),      # C17.2 -> C18.2
+    (0.2, 0, [(21.1375, 24.05), (20.5, 24.05), (20.5, 25.05), (21.1375, 25.05)]),   # U3.1, U3.3
+    (0.2, 0, [(21.1375, 24.55), (19.95, 24.55)]),                                    # U3.2 -> via
+    (0.2, 0, [(22.3, 25.7125), (22.3, 26.45), (22.8, 26.45), (22.8, 25.7125)]),     # U3.6, U3.7
+    (0.2, 0, [(23.42, 26.85), (22.8, 26.45)]),                                        # C14.2
+    (0.25, 0, [(17.5, 23.39), (17.5, 22.75)]),                                       # C18.2
+    (0.25, 0, [(27.07, 21.35), (27.8, 21.35)]),                                      # C17.2
+    (0.25, 0, [(35.16, 26.0), (35.16, 26.8)]),                                       # C10.2
+    (0.25, 0, [(38.06, 26.0), (38.06, 26.8)]),                                       # C9.2
+    (0.25, 0, [(10.36, 24.0), (9.55, 24.0)]),                                        # U7.2 (between D+/D-)
 ]
-GND_RESERVE_VIAS = [(21.8, 29.1)]
-
-HAND_VIAS = [("PPS", 14.1, 21.7), ("PPS", 26.7, 21.7), ("VBCKP", 21.9, 20.75),
-             ("VBUS", 9.1, 23.2), ("VBUS", 10.5, 17.3), ("VBUS", 14.95, 19.95)]
+GND_RESERVE_VIAS = [(19.95, 24.55), (22.55, 26.45), (17.5, 22.75), (27.8, 21.35),
+                    (35.16, 26.8), (38.06, 26.8), (9.55, 24.0),
+                    (41.5, 5.8)]     # U6/C11 top pocket -> bottom strip north of the EN line
 
 
 def pad_shape(p):
@@ -699,22 +879,30 @@ class PodRouter:
                     self.terms.setdefault(net, []).append((f"{fp.GetReference()}.{p.GetNumber()}", p, ls, shape))
                     if shape[0] == "rect" and min(shape[3], shape[4]) * 2 <= 0.61:
                         self.fine.setdefault(net, []).append(shape)
-        # merge coincident pads (J1 A4/B9 etc.) into one terminal
+        # merge coincident pads (J1 A4/B9 etc.) and pads joined inside the part
+        # (JUMPERS) into one terminal
         for net, lst in self.terms.items():
             merged = []
             for key, p, ls, shape in lst:
                 c = p.GetPosition()
                 pos = (round(pcbnew.ToMM(c.x), 3), round(pcbnew.ToMM(c.y), 3))
+                jk_ = jumper_key(*key.split("."))
                 for m in merged:
-                    if m["pos"] == pos:
+                    if m["pos"] == pos or (jk_ is not None and jk_ in m.get("jk", ())):
                         m["keys"].append(key)
                         m["pads"].append((p, ls, shape))
                         break
                 else:
-                    merged.append({"pos": pos, "keys": [key], "pads": [(p, ls, shape)]})
+                    merged.append({"pos": pos, "keys": [key], "pads": [(p, ls, shape)],
+                                   "jk": {jk_} if jk_ is not None else set()})
             self.terms[net] = merged
         # antenna band Z3: copper keep-out, both layers (spec sec 8)
         R.add_obstacle(("rect", BOARD_W / 2, Z3_Y / 2, BOARD_W / 2, Z3_Y / 2), [0, 1], -2, clr=0.0)
+        # U3 land-pattern interior (ST TN0018): no track on top, no via, any net
+        kx0, ky0, kx1, ky1 = U3_KEEPOUT
+        R.add_obstacle(("rect", (kx0 + kx1) / 2, (ky0 + ky1) / 2, (kx1 - kx0) / 2, (ky1 - ky0) / 2),
+                       [0], -2, clr=0.0)
+        R.forbid_vias(("rect", (kx0 + kx1) / 2, (ky0 + ky1) / 2, (kx1 - kx0) / 2, (ky1 - ky0) / 2), extra=0.0)
         # thermal vias (U1 EPAD, U4/U5 thermal pads) are fixed GND copper for the router
         self.thermal = thermal_vias(fps)
         for (x, y) in self.thermal + GND_RESERVE_VIAS:
@@ -731,28 +919,30 @@ class PodRouter:
         for net, x, y in HAND_VIAS:
             R.add_obstacle(("seg", x, y, x, y, VIA_D / 2), [0, 1], self.nid[net])
             R.forbid_vias(("seg", x, y, x, y, VIA_DRILL / 2), extra=0.3)
-        # --- static region masks (spec sec 8) ------------------------------------
+        # --- static region masks (spec sec 8 + the u-blox 20 mm rule) ------------
         X, Y = R.X, R.Y
         m = HW[1] + 0.1
-        # bottom: Z2 and the Z1/Z2 overlap band, never south of the 10 mm box edge
-        self.bot_ok = (Y > Z3_Y + m) & (Y < KEEPOUT[1] - 0.3 - m)
-        self.via_ok = (Y > Z3_Y + 0.6) & (Y < KEEPOUT[1] - 0.3 - 0.6)
-        # GND (late GND-island joins only): anywhere outside Z3, incl. under
-        # part bodies, where the GND pour is anyway
+        bx0, by0, bx1, by1 = U2_BODY
+        ddx = np.maximum(np.maximum(bx0 - X, X - bx1), 0.0)
+        ddy = np.maximum(np.maximum(by0 - Y, Y - by1), 0.0)
+        self.u2_dist = np.hypot(ddx, ddy)
+        # USB legs (U1.23/24 down to the band): nothing on the bottom under them,
+        # so the pair keeps a continuous GND reference over its whole length
+        self.usb_shadow = (X > USB_SHADOW[0]) & (X < USB_SHADOW[2]) & (Y > USB_SHADOW[1]) & (Y < USB_SHADOW[3])
+        # bottom: Z2 only (Z1, y > 22, is solid GND on the bottom: spec sec 8)
+        self.bot_ok = (Y > Z3_Y + m) & (Y < Z1_Y - m) & ~self.usb_shadow
+        # vias: Z2 only, and >= 20 mm from the U2 body (u-blox IM 4.4, any signal)
+        self.via_ok = ((Y > Z3_Y + 0.6) & (Y < Z1_Y - VIA_D / 2 - 0.1) & (self.u2_dist >= VIA_ZONE)
+                       & ~self.usb_shadow)
+        # GND (late GND-island joins only): anywhere, incl. under part bodies
         self.gnd_ok = (Y > Z3_Y + m) & (Y < BOARD_H - 0.3 - m) & (X > 0.3 + m) & (X < BOARD_W - 0.3 - m)
         self.via_ok_gnd = self.gnd_ok & (Y > Z3_Y + 0.6)
-        # spec: no GNSS via at spec Y < 52.75 (y > 19.25). Allowed down to y < 21.4
-        # (>= 17.85 mm from the module edge) at a heavy cost: needed for the
-        # PPS / TP18 topology (see report). post_checks() lists every such via.
-        self.via_ok_gnss = self.via_ok & (Y < GNSS_VIA_RELAXED_Y)
-        self.via_pen_gnss = np.where(Y > GNSS_VIA_Y - 0.35, 60.0, 0.0)
-        # J1's lower VBUS pair (A9/B4, y 22.45) lies in Z1 behind CC2: its only
-        # way out is a via. Deviation: VBUS may use the bottom / vias in this
-        # small corner of Z1 (x < 10.8, y < 23.7), 14 mm from the U2 box.
-        self.vbus_z1 = (X < VBUS_EXC[0]) & (Y < VBUS_EXC[1])
-        self.bot_ok_vbus = self.bot_ok | (self.vbus_z1 & (Y > Z3_Y + m))
-        self.via_ok_vbus = self.via_ok | (self.vbus_z1 & (Y < VBUS_EXC[1] - 0.35) & (Y > Z3_Y + 0.6))
+        # one rule for every net now (kept as attributes for the callers)
+        self.via_ok_gnss = self.via_ok
+        self.via_pen_gnss = np.zeros(X.shape)
+        self.bot_ok_vbus, self.via_ok_vbus = self.bot_ok, self.via_ok
         under = np.zeros(X.shape, bool)
+        ring = np.zeros(X.shape, bool)
         for ref in NO_TOP_UNDER:
             fp = fps[ref]
             x0, y0, x1, y1 = body_rect(fp)
@@ -766,11 +956,21 @@ class PodRouter:
                     continue
                 _, cx, cy, hw, hh = shp
                 allow |= (np.abs(X - cx) <= hw + 0.4) & (np.abs(Y - cy) <= hh + 0.4)
+            if ref == "U1":
+                # fan-out ring 1 mm inside U1's pad ring: short top stubs to
+                # vias under the module (costly, see penalty below)
+                ix0, iy0, ix1, iy1 = U1_INNER
+                ring = box & ~((X > ix0) & (X < ix1) & (Y > iy0) & (Y < iy1))
+                allow |= ring
             under |= box & ~allow
         self.under = under
         self.top_ok_all = ~under
-        # non-GNSS nets stay out of Z1 below the keep-out box edge (top = GND pour there)
-        self.top_ok_nongnss = ~under & (Y < KEEPOUT[1] - 0.3)
+        k0x, k0y, k1x, k1y = KEEPOUT
+        inbox = (X > k0x) & (X < k1x) & (Y > k0y) & (Y < k1y)
+        # the keep-out box is hand-routed GNSS lanes only; the band north of it
+        # and the side strips carry the low-profile parts' top-layer traces
+        self.top_ok_nongnss = ~under & ~inbox
+        self.u1_ring = ring
         # soft cost around every pad so early routes leave pin escapes open
         pen = [np.zeros(X.shape), np.zeros(X.shape)]
         for fp in fps.values():
@@ -783,16 +983,13 @@ class PodRouter:
                 d = R._dist(shape, sl)
                 for l in pad_layers(p):
                     pen[l][sl] += np.where(d < 0.6, PAD_PEN, 0.0)
+        pen[0] = pen[0] + np.where(self.u1_ring & ~self.under, 4.0, 0.0)
         self.penalty = pen
 
     def region(self, net):
         if net == "GND":
             return self.gnd_ok, self.gnd_ok, self.via_ok_gnd
-        # Z1 is hand-routed (U2_ESCAPES); the router stays north of the box edge
-        if net in spec.GNSS_NETS:
-            return self.top_ok_nongnss, self.bot_ok, self.via_ok_gnss
-        if net == "VBUS":
-            return self.top_ok_nongnss, self.bot_ok_vbus, self.via_ok_vbus
+        # one rule set for every signal / supply net (spec sec 8 + u-blox 20 mm)
         return self.top_ok_nongnss, self.bot_ok, self.via_ok
 
     def term_cells(self, term, net):
@@ -836,8 +1033,6 @@ class PodRouter:
         """GNSS nets: GNSS rule (top only in Z1, vias only >= 20 mm from U2).
         3V3: the U2 supply branches (U2 pins and their caps C9/C10) follow the
         GNSS rule; the rest of the rail is an ordinary power net."""
-        if net == "3V3" and not any(k.split(".")[0] in ("U2", "C9", "C10") for k in keys):
-            return self.top_ok_nongnss, self.bot_ok, self.via_ok
         return self.region(net)
 
     # -- label rebuild (for rip-up) ------------------------------------------------
@@ -1439,7 +1634,8 @@ def thermal_vias(fps):
     tp = [p for p in fps["U5"].Pads() if p.GetNumber() == "6"][0].GetPosition()
     tx, ty = pcbnew.ToMM(tp.x), pcbnew.ToMM(tp.y)
     for dy in (-0.45, 0.45, -1.45, 1.45):
-        out.append((tx, ty + dy))
+        # the north one is pulled in when it would reach the Z3 edge band
+        out.append((tx, max(ty + dy, Z3_Y + VIA_D / 2 + 0.05)))
     return out
 
 
@@ -1582,6 +1778,25 @@ def add_zones(board, nets):
     for x, y in [(0, 0), (BOARD_W, 0), (BOARD_W, Z3_Y), (0, Z3_Y)]:
         o.Append(pcbnew.VECTOR2I(MM(x), MM(y)))
     board.Add(ko)
+    # U3 (LSM6DSV16X): no copper at all inside its land pattern, not even the
+    # GND pour (ST TN0018 sec 3.1/3.2); the pads connect outward only.
+    ux, uy = U3_POS
+    ki = pcbnew.ZONE(board)
+    ki.SetIsRuleArea(True)
+    ls = pcbnew.LSET()
+    ls.AddLayer(pcbnew.F_Cu)
+    ki.SetLayerSet(ls)
+    ki.SetDoNotAllowZoneFills(True)
+    ki.SetDoNotAllowTracks(True)
+    ki.SetDoNotAllowVias(True)
+    ki.SetDoNotAllowPads(False)
+    ki.SetDoNotAllowFootprints(False)
+    ki.SetZoneName("U3_LGA_INTERIOR_KEEPOUT")
+    o = ki.Outline()
+    o.NewOutline()
+    for x, y in [(ux - 0.85, uy - 0.6), (ux + 0.85, uy - 0.6), (ux + 0.85, uy + 0.6), (ux - 0.85, uy + 0.6)]:
+        o.Append(pcbnew.VECTOR2I(MM(x), MM(y)))
+    board.Add(ki)
     # Z1 bottom: nothing but GND (spec sec 8): tracks/vias are allowed only for
     # GND, which KiCad rule areas cannot express per net, so this is enforced by
     # the router region masks and checked in post_checks().
@@ -1624,7 +1839,7 @@ def design_rules(board):
 
 # Parts whose reference stays on the silkscreen (the rest go to F.Fab only:
 # 0402 fields are too dense for readable silk; the BOM/CPL carry the refs).
-SILK_REFS = {"U1", "U2", "U3", "U5", "J1", "J3", "SW2", "SW3"}
+SILK_REFS = {"U1", "U2", "U3", "J2", "J3", "SW1", "SW2", "SW3"}   # U5/J1: no room (board edge / U7)
 
 
 def silkscreen(board, fps):
@@ -1646,15 +1861,33 @@ def silkscreen(board, fps):
     # full around the connector), mirrored so it reads from the bottom
     for p in fps["J2"].Pads():
         c = p.GetPosition()
-        mark = "+" if p.GetNumber() == "1" else "-"
-        add_text(board, mark, pcbnew.ToMM(c.x) + 1.9, pcbnew.ToMM(c.y), pcbnew.B_SilkS, 1.0, mirror=True)
+        mark = {"1": "+", "2": "-", "3": "T"}[p.GetNumber()]
+        # J2 is rotated (pins in a column along y): the mark goes west of its pad
+        add_text(board, mark, pcbnew.ToMM(c.x) - 1.8, pcbnew.ToMM(c.y), pcbnew.B_SilkS, 1.0, mirror=True)
+    add_text(board, "BAT: + - NTC", 43.6, 21.6, pcbnew.B_SilkS, 0.8, rot=90, mirror=True)
     sw3 = {p.GetNumber(): p.GetPosition() for p in fps["SW3"].Pads()}
-    add_text(board, "ON", pcbnew.ToMM(sw3["1"].x), pcbnew.ToMM(sw3["1"].y) - 2.9, pcbnew.F_SilkS, 0.8)
-    add_text(board, "OFF", pcbnew.ToMM(sw3["3"].x), pcbnew.ToMM(sw3["3"].y) - 2.9, pcbnew.F_SilkS, 0.8)
+    add_text(board, "ON", pcbnew.ToMM(sw3["1"].x), pcbnew.ToMM(sw3["1"].y) + 2.75, pcbnew.F_SilkS, 0.6)
+    add_text(board, "OFF", pcbnew.ToMM(sw3["3"].x), pcbnew.ToMM(sw3["3"].y) + 2.75, pcbnew.F_SilkS, 0.6)
+    # LED1/LED2 are stacked 1.55 mm apart for the light pipes: LED2's top silk
+    # line would sit on LED1's bottom line. Keep LED1's; drop LED2's top line
+    # and start LED2's cathode bar 0.25 mm lower.
+    lim = max(pcbnew.ToMM(g.GetBoundingBox().GetBottom()) for g in fps["LED1"].GraphicalItems()
+              if g.GetLayer() == pcbnew.F_SilkS) + 0.25
+    for g in list(fps["LED2"].GraphicalItems()):
+        if g.GetLayer() != pcbnew.F_SilkS or g.GetClass() != "PCB_SHAPE" or g.GetShape() != pcbnew.SHAPE_T_SEGMENT:
+            continue
+        a, b = g.GetStart(), g.GetEnd()
+        if pcbnew.ToMM(max(a.y, b.y)) < lim:
+            fps["LED2"].Remove(g)
+        elif pcbnew.ToMM(min(a.y, b.y)) < lim:
+            if a.y < b.y:
+                g.SetStart(pcbnew.VECTOR2I(a.x, MM(lim)))
+            else:
+                g.SetEnd(pcbnew.VECTOR2I(b.x, MM(lim)))
     # IMU axes (spec sec 8): arrows south-east of U3, clear of pads
     ux, uy = U3_POS
-    add_text(board, "X>", ux + 1.4, uy + 2.5, pcbnew.F_SilkS, 0.7)
-    add_text(board, "Y^", ux + 1.4, uy + 3.35, pcbnew.F_SilkS, 0.7)
+    add_text(board, "X>", 17.0, 26.9, pcbnew.F_SilkS, 0.7)
+    add_text(board, "Y^", 17.0, 27.75, pcbnew.F_SilkS, 0.7)
     add_text(board, "TRACE GNSS POD rev A", 25.0, 67.0, pcbnew.B_SilkS, 1.2, mirror=True)
     add_text(board, "2026-09", 25.0, 69.0, pcbnew.B_SilkS, 0.8, mirror=True)
 
@@ -1693,24 +1926,39 @@ def post_checks(board, pr):
     pr.long_runs = long_runs
     print("bottom jumper runs: %d; longest %.1f mm; > 10 mm: %s"
           % (len(runs), max(runs)[0] if runs else 0.0, [(n, round(L, 1)) for L, n in long_runs]))
-    # nothing on the bottom in Z1 except GND
-    z1_bottom = sorted({t.GetNetname() for t in bt
-                        if max(pcbnew.ToMM(t.GetStart().y), pcbnew.ToMM(t.GetEnd().y)) + pcbnew.ToMM(t.GetWidth()) / 2 > Z1_Y})
-    z1_vias = sorted({(v.GetNetname(), round(pcbnew.ToMM(v.GetPosition().x), 2), round(pcbnew.ToMM(v.GetPosition().y), 2))
-                      for v in vias if v.GetNetname() != "GND" and pcbnew.ToMM(v.GetPosition().y) + VIA_D / 2 > Z1_Y})
-    print("non-GND bottom tracks reaching Z1: %s; non-GND vias in Z1: %s" % (z1_bottom, z1_vias))
-    # GNSS vias closer than 20 mm to the module edge
-    ux, uy = U2_POS
-    close = []
+    # HARD RULES (the build fails on any of these):
+    #  1. Z1 (y > 22) bottom: GND only - no non-GND track, via or pad copper
+    #  2. no non-GND via closer than 20 mm to the U2 body (u-blox IM 4.4)
+    fails = []
+    for t in bt:
+        if t.GetNetname() == "GND":
+            continue
+        ymax = max(pcbnew.ToMM(t.GetStart().y), pcbnew.ToMM(t.GetEnd().y)) + pcbnew.ToMM(t.GetWidth()) / 2
+        if ymax > Z1_Y:
+            fails.append(f"Z1 bottom: {t.GetNetname()} track reaches y {ymax:.2f}")
+    for fp in board.GetFootprints():
+        for p in fp.Pads():
+            if p.GetNetname() in ("", "GND") or not p.IsOnLayer(pcbnew.B_Cu):
+                continue
+            if pcbnew.ToMM(p.GetBoundingBox().GetBottom()) > Z1_Y:
+                fails.append(f"Z1 bottom: pad {fp.GetReference()}.{p.GetNumber()} ({p.GetNetname()})")
+    bx0, by0, bx1, by1 = U2_BODY
+    zone_min = []
     for v in vias:
         n = v.GetNetname()
-        if n in spec.GNSS_NETS and pcbnew.ToMM(v.GetPosition().y) > GNSS_VIA_Y:
-            x, y = pcbnew.ToMM(v.GetPosition().x), pcbnew.ToMM(v.GetPosition().y)
-            dx = max(abs(x - ux) - 7.75, 0)
-            dy = max(abs(y - uy) - 7.75, 0)
-            close.append((n, round(x, 2), round(y, 2), round(math.hypot(dx, dy), 2)))
-    pr.gnss_close = close
-    print("GNSS-net vias < 20 mm from the U2 edge (spec Y < 52.75): %s" % close)
+        if n == "GND":
+            continue
+        x, y = pcbnew.ToMM(v.GetPosition().x), pcbnew.ToMM(v.GetPosition().y)
+        d = math.hypot(max(bx0 - x, x - bx1, 0), max(by0 - y, y - by1, 0))
+        zone_min.append((round(d, 2), n, round(x, 2), round(y, 2)))
+        if y + VIA_D / 2 > Z1_Y:
+            fails.append(f"Z1 bottom: {n} via at ({x:.2f}, {y:.2f})")
+        if d < VIA_ZONE - 1e-6:
+            fails.append(f"20 mm rule: {n} via at ({x:.2f}, {y:.2f}) only {d:.2f} mm from U2")
+    zone_min.sort()
+    pr.via_zone_min = zone_min[:5]
+    print("closest non-GND vias to the U2 body (mm, net, x, y):", zone_min[:5])
+    pr.hard_fails = fails
     # 3V3 series resistance U5.5 -> U2.17 (1 oz copper, 0.49 mOhm/sq)
     RS = 0.49e-3
     nodes = {}
@@ -1826,6 +2074,16 @@ def post_checks(board, pr):
               [s_ for s_ in samples if s_[2] in (na, nb)][:4])
     print("3V3 series resistance U5.OUT -> U2.VCC along copper: %s (limit 200 mOhm, u-blox IM 4.1.1)"
           % ("n/a" if best is None else "%.0f mOhm" % (best * 1000)))
+    if best is None or best > 0.2:
+        fails.append("3V3 series resistance U5 -> U2.VCC not computed or >= 200 mOhm")
+    if fails:
+        print("POST-ROUTE HARD CHECKS FAILED:")
+        for f_ in fails:
+            print("   ", f_)
+        if not os.environ.get("POD_NOFAIL"):
+            raise SystemExit(4)
+    else:
+        print("post-route hard checks OK: Z1 bottom is GND only; no non-GND via within 20 mm of U2")
 
 
 # ---------------------------------------------------------------------------
@@ -1843,7 +2101,7 @@ def post_checks(board, pr):
 SES_PATH = os.path.join(HERE, "routing", "gnss-pod.ses")
 # local, crossing-heavy nets around U1's bottom edge and the IMU also go in phase 1
 PHASE1_EXTRA = {"USB_DP", "USB_DN", "USB_DP_C", "USB_DN_C", "I2C_SDA", "I2C_SCL", "IMU_INT1", "IMU_INT2",
-                "IO5", "IO6", "IO7", "IO14", "IO47", "IO48"} | set(filter(None, os.environ.get("POD_P1_MORE", "LED1,LED2").split(",")))
+                "IO33", "IO34", "IO35", "IO36", "IO37", "IO47"} | set(filter(None, os.environ.get("POD_P1_MORE", "LED1,LED2").split(",")))
 DSN_PATH = os.path.join(HERE, "routing", "gnss-pod.dsn")
 
 
@@ -1857,9 +2115,43 @@ def phase1_order(pr):
         trunk = net in spec.POWER_NETS and any(k in tr for k in ka) and any(k in tr for k in kb)
         gnss = net in spec.GNSS_NETS and net != "3V3"
         imu3 = net == "3V3" and any(k.split(".")[0] in ("U3", "C14", "C15", "R7", "R8") for k in ka + kb)
-        if trunk or gnss or imu3 or net in PHASE1_EXTRA:
+        only = os.environ.get("POD_P1_ONLY")
+        if only is not None:
+            if net in only.split(",") or (imu3 and "IMU3V3" in only):
+                out.append(c)
+            continue
+        if trunk or gnss or imu3 or net in PHASE1_EXTRA or os.environ.get("POD_P1_ALL"):
             out.append(c)
     return sorted(out, key=lambda c: (c[1] not in spec.GNSS_NETS, c[0], c[1], c[2], c[3]))
+
+
+def via_zone_polygon(margin=0.05):
+    """Board area closer than VIA_ZONE to the U2 body (rounded rectangle,
+    clipped to the board), as a polygon for KiCad rule areas."""
+    x0, y0, x1, y1 = U2_BODY
+    r = VIA_ZONE + margin
+    pts = [(0.0, BOARD_H)]
+    # west side up to the NW arc, arc, top edge, NE arc, east side
+    for k in range(0, 31):
+        a = math.pi + k * (math.pi / 2) / 30          # 180 -> 270 deg
+        x, y = x0 + r * math.cos(a), y0 + r * math.sin(a)
+        if x >= 0:
+            pts.append((x, y))
+        elif not pts[1:] and False:
+            pass
+    first_x = pts[1][0] if len(pts) > 1 else 0.0
+    if first_x > 0:
+        yb = y0 - math.sqrt(max(r * r - (x0 - 0.0) ** 2, 0))
+        pts.insert(1, (0.0, yb))
+    for k in range(0, 31):
+        a = 1.5 * math.pi + k * (math.pi / 2) / 30    # 270 -> 360 deg
+        x, y = x1 + r * math.cos(a), y0 + r * math.sin(a)
+        if x <= BOARD_W:
+            pts.append((x, y))
+    yb = y0 - math.sqrt(max(r * r - (BOARD_W - x1) ** 2, 0))
+    pts.append((BOARD_W, yb))
+    pts.append((BOARD_W, BOARD_H))
+    return pts
 
 
 def rule_area(board, pts, layers, name, tracks=True, vias=True):
@@ -1904,13 +2196,21 @@ def freerouting_phase(board, fps):
     W, H = BOARD_W, BOARD_H
     tmp = [
         rule_area(board, [(0, 0), (W, 0), (W, Z3_Y), (0, Z3_Y)], [pcbnew.F_Cu, pcbnew.B_Cu], "tmp_Z3"),
-        # bottom: nothing south of the 10 mm keep-out box edge (see report, Z1/Z2 overlap)
-        rule_area(board, [(0, KEEPOUT[1] - 0.3), (W, KEEPOUT[1] - 0.3), (W, H), (0, H)], [pcbnew.B_Cu], "tmp_Z1B"),
-        # top: Z1 below the box edge carries only the hand-routed GNSS lanes
-        rule_area(board, [(0, KEEPOUT[1] - 0.3), (W, KEEPOUT[1] - 0.3), (W, H), (0, H)], [pcbnew.F_Cu], "tmp_Z1T"),
-        # no GNSS-style via crowding just under U1's bottom row is not needed; keep bodies clear
-        rule_area(board, [(18.6, 6.4), (31.4, 6.4), (31.4, 19.2), (18.6, 19.2)], [pcbnew.F_Cu], "tmp_U1"),
-        rule_area(board, [(0, 15.7), (6.8, 15.7), (6.8, 24.4), (0, 24.4)], [pcbnew.F_Cu], "tmp_J1"),
+        # bottom: Z1 (y > 22) is solid GND
+        rule_area(board, [(0, Z1_Y), (W, Z1_Y), (W, H), (0, H)], [pcbnew.B_Cu], "tmp_Z1B"),
+        # no via within 20 mm of the U2 body (u-blox IM 4.4)
+        rule_area(board, via_zone_polygon(), [pcbnew.F_Cu, pcbnew.B_Cu], "tmp_viazone",
+                  tracks=False, vias=True),
+        # top: the keep-out box carries only the hand-routed U2 lanes
+        rule_area(board, [(KEEPOUT[0], KEEPOUT[1]), (KEEPOUT[2], KEEPOUT[1]), (KEEPOUT[2], KEEPOUT[3]),
+                          (KEEPOUT[0], KEEPOUT[3])], [pcbnew.F_Cu], "tmp_box"),
+        # U1: top copper only in the fan-out ring inside the pad ring
+        rule_area(board, [(U1_INNER[0], U1_INNER[1]), (U1_INNER[2], U1_INNER[1]), (U1_INNER[2], U1_INNER[3]),
+                          (U1_INNER[0], U1_INNER[3])], [pcbnew.F_Cu], "tmp_U1"),
+        rule_area(board, [(0, 19.45), (6.8, 19.45), (6.8, 28.15), (0, 28.15)], [pcbnew.F_Cu], "tmp_J1"),
+        rule_area(board, [(USB_SHADOW[0], USB_SHADOW[1]), (USB_SHADOW[2], USB_SHADOW[1]),
+                          (USB_SHADOW[2], USB_SHADOW[3]), (USB_SHADOW[0], USB_SHADOW[3])],
+                  [pcbnew.B_Cu], "tmp_usb"),
     ]
     # GND_RESERVE copper goes to Freerouting as keep-out areas, not as GND
     # wiring (GND is not in its design): lifted here, put back after import
@@ -2268,6 +2568,66 @@ def cleanup_dangling(board, rounds=6):
     return removed
 
 
+def widen_power_taps(board, widths=(0.5, 0.4, 0.3)):
+    """Supply taps (VBUS/VSYS/VBAT/3V3 segments narrower than 0.5 mm) are
+    widened to the largest of `widths` that still keeps 0.2 mm to every
+    other-net pad, track and via on the same layer (exact KiCad shapes) and
+    0.3 mm to the board edge. Hand-routed copper is left as drawn."""
+    protect = hand_segment_keys()
+    L = {pcbnew.F_Cu: pcbnew.F_Cu, pcbnew.B_Cu: pcbnew.B_Cu}
+    items = {pcbnew.F_Cu: [], pcbnew.B_Cu: []}
+    for t in board.GetTracks():
+        for lay in (pcbnew.F_Cu, pcbnew.B_Cu):
+            if t.IsOnLayer(lay):
+                items[lay].append([t.GetNetname(), t.GetBoundingBox(), t.GetEffectiveShape(lay), t.m_Uuid.AsString()])
+    for fp in board.GetFootprints():
+        for p in fp.Pads():
+            for lay in (pcbnew.F_Cu, pcbnew.B_Cu):
+                if p.IsOnLayer(lay) or p.HasHole():
+                    items[lay].append([p.GetNetname(), p.GetBoundingBox(), p.GetEffectiveShape(lay), p.m_Uuid.AsString()])
+    changed = {}
+    for t in board.GetTracks():
+        n = t.GetNetname()
+        if t.GetClass() != "PCB_TRACK" or n not in spec.POWER_NETS or _is_hand(t, protect):
+            continue
+        w0 = pcbnew.ToMM(t.GetWidth())
+        if w0 >= widths[0] - 1e-6:
+            continue
+        lay = t.GetLayer()
+        uid = t.m_Uuid.AsString()
+        a, e = t.GetStart(), t.GetEnd()
+        seg = pcbnew.SEG(pcbnew.VECTOR2I(a), pcbnew.VECTOR2I(e))
+        for w in widths:
+            if w <= w0 + 1e-6:
+                break
+            clr = MM(0.2 + w / 2)
+            m = MM(0.2 + w / 2 + 0.05)
+            x0, x1 = min(a.x, e.x) - m, max(a.x, e.x) + m
+            y0, y1 = min(a.y, e.y) - m, max(a.y, e.y) + m
+            ok = True
+            for net2, bb, sh, obj in items[lay]:
+                if net2 == n or obj == uid:
+                    continue
+                if bb.GetRight() < x0 or bb.GetLeft() > x1 or bb.GetBottom() < y0 or bb.GetTop() > y1:
+                    continue
+                if sh.Collide(seg, clr):
+                    ok = False
+                    break
+            ex = [pcbnew.ToMM(v) for v in (a.x, e.x)]
+            ey = [pcbnew.ToMM(v) for v in (a.y, e.y)]
+            if min(ex) < 0.3 + w / 2 or max(ex) > BOARD_W - 0.3 - w / 2 or \
+               min(ey) < BOARD_TOP + 0.3 + w / 2 or max(ey) > BOARD_H - 0.3 - w / 2:
+                ok = False
+            if ok:
+                t.SetWidth(MM(w))
+                for it in items[lay]:
+                    if it[3] == uid:
+                        it[1], it[2] = t.GetBoundingBox(), t.GetEffectiveShape(lay)
+                changed[w] = changed.get(w, 0) + 1
+                break
+    print(f"supply taps widened: {dict(sorted(changed.items()))} segments (by new width)")
+
+
 def add_vias(board, net, pts):
     n = board.FindNet(net)
     out = []
@@ -2298,12 +2658,27 @@ def add_track(board, net, x0, y0, x1, y1, w, layer):
 #     top of all existing copper). Copper clusters per net come from a
 #     union-find over pads, tracks and vias.
 # ---------------------------------------------------------------------------
+# Pads joined inside the part (KiCad jumper pad groups): U7's flow-through
+# lines, and the tact switches' duplicate pad numbers (A-B, C-D shorted).
+JUMPERS = {"U7": [{"1", "6"}, {"3", "4"}],
+           "SW1": [{"1"}, {"2"}], "SW2": [{"1"}, {"2"}]}
+
+
+def jumper_key(ref, num):
+    for gi, g in enumerate(JUMPERS.get(ref, [])):
+        if num in g:
+            return (ref, gi)
+    return None
+
+
 def net_clusters(board, net):
     items = []   # (kind, geom, layers)
+    jk = []
     for fp in board.GetFootprints():
         for p in fp.Pads():
             if p.GetNetname() == net and pad_layers(p):
                 items.append(("pad", pad_shape(p), set(pad_layers(p))))
+                jk.append(jumper_key(fp.GetReference(), p.GetNumber()))
     for t in board.GetTracks():
         if t.GetNetname() != net:
             continue
@@ -2336,6 +2711,14 @@ def net_clusters(board, net):
         for j in range(i + 1, n):
             if items[i][2] & items[j][2] and find(i) != find(j) and touch(items[i], items[j]):
                 par[find(i)] = find(j)
+    first = {}
+    for i, k in enumerate(jk):
+        if k is None:
+            continue
+        if k in first:
+            par[find(i)] = find(first[k])
+        else:
+            first[k] = i
     groups = {}
     for i in range(n):
         groups.setdefault(find(i), []).append(items[i])
@@ -2691,6 +3074,8 @@ class _Clear:
             return False
         if not self._mask_ok(a[0], a[1], b[0], b[1], l):
             return False
+        if l == 0 and _seg_rect_dist(a, b, U3_KEEPOUT) < w / 2 + 0.01:
+            return False
         s = pcbnew.SEG(pcbnew.VECTOR2I(MM(a[0]), MM(a[1])), pcbnew.VECTOR2I(MM(b[0]), MM(b[1])))
         lo_x, hi_x = min(a[0], b[0]) - m, max(a[0], b[0]) + m
         lo_y, hi_y = min(a[1], b[1]) - m, max(a[1], b[1]) + m
@@ -2710,6 +3095,8 @@ class _Clear:
         if not (0 <= i < R.nx and 0 <= j < R.ny) or not self.vmask[j, i]:
             return False
         if v[1] < Z3_Y + VIA_D / 2 or not (0.3 + VIA_D / 2 <= v[0] <= BOARD_W - 0.3 - VIA_D / 2):
+            return False
+        if _seg_rect_dist(v, v, U3_KEEPOUT) < VIA_D / 2 + 0.01:
             return False
         for hx, hy, hr in self.holes:
             if math.hypot(v[0] - hx, v[1] - hy) < hr + VIA_DRILL / 2 + 0.25:
@@ -3418,6 +3805,38 @@ def hard_route(pr, net, src, dst, soft=None):
 #     collide with is ripped and rerouted too, until nothing conflicts.
 #     Hand-routed copper (U2_ESCAPES, HAND_EXTRA) stays fixed.
 # ---------------------------------------------------------------------------
+def drop_usb_redundant(board):
+    """Review fix wave (USB pair symmetry): the routers do not know that U7's
+    pins 1/6 and 3/4 are one line inside the package (footprint jumper
+    groups), so they may bridge them under the body, and they may leave
+    copies of hand segments. Remove, on the USB nets only, every non-hand
+    track that (a) joins two pads of U7 or (b) lies entirely on another
+    track of the same net and layer."""
+    protect = hand_segment_keys()
+    M = pcbnew.ToMM
+    u7 = [p for fp in board.GetFootprints() if fp.GetReference() == "U7" for p in fp.Pads()]
+    usb = [t for t in board.GetTracks() if t.GetClass() == "PCB_TRACK" and t.GetNetname().startswith("USB_D")]
+
+    def on_u7(v):
+        return any(p.HitTest(v) for p in u7)
+
+    def within(t, o):
+        seg = pcbnew.SEG(pcbnew.VECTOR2I(o.GetStart()), pcbnew.VECTOR2I(o.GetEnd()))
+        return all(seg.Distance(pcbnew.VECTOR2I(q)) <= MM(0.01) for q in (t.GetStart(), t.GetEnd()))
+    gone = []
+    for t in usb:
+        if _is_hand(t, protect):
+            continue
+        if (on_u7(t.GetStart()) and on_u7(t.GetEnd())) or any(
+                o is not t and o not in gone and o.GetNetname() == t.GetNetname() and o.GetLayer() == t.GetLayer()
+                and within(t, o) for o in usb):
+            gone.append(t)
+    for t in gone:
+        print(f"  USB cleanup: removed {t.GetNetname()} ({M(t.GetStart().x):.2f},{M(t.GetStart().y):.2f})"
+              f"-({M(t.GetEnd().x):.2f},{M(t.GetEnd().y):.2f})")
+        detach(board, t)
+
+
 def hand_segment_keys():
     keys = set()
     for net, w, pts in U2_ESCAPES:
@@ -3678,6 +4097,8 @@ def finish(board, fps=None, pr=None, resume=False):
     for t in board.GetTracks():
         if t.GetClass() == "PCB_TRACK" and t.GetWidth() < MM(0.2):
             t.SetWidth(MM(0.2))
+    drop_usb_redundant(board)
+    widen_power_taps(board)
     # GND stage
     sync_router(pr, board)
     drops, stubs, stitch = place_gnd_vias(pr, fps)

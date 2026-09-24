@@ -1,0 +1,3 @@
+CPL Mid X/Y = component body centre (JLCPCB definition), not the footprint origin.
+ref, source, origin X, origin Y, centre X, centre Y, shift mm (bottom-left origin, Y up)
+U1, fab body, 25.0, 59.2, 25.0, 61.75, 2.55
