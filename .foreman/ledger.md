@@ -962,3 +962,13 @@ CHAIN: gates (typecheck 0, lint 0 errors, 3413 tests = 1787 core + 1626 mobile, 
 FORENSICS: main.jsbundle contains TEST_LOOP_ACTIVE, "let it finish saving", vehicle_identity_settings, "session records remained", "could not verify the vehicle identity", "could not clear the test-loop adoption journal", "All stored data deleted".
 CONTAINS vs build 13: cloud session work (delete-all wipes VIN + vehicle data + learned circuits; Signal Finder early-wake fix; prompt audit) + P18 fix waves.
 E2E LIMITS: web preview has no SQLite and no GPS -- on-disk wipe and the Test Loop refusal are covered only by tests; device check (handoff step 4) still owed.
+
+## *** BUILD 15 DELIVERED — 2026-09-24 ***
+Run 35995749261 on release-15 @ 793c80b (= origin/main a36c3d7 + the gyro crash fix; nothing else) -> builds/ipa/TRACE-v15-gyro-crash-fix-release-2026-09-24.ipa
+14,458,059 bytes | md5 8757f5934c7a97cdaa9ab6354ebcce52
+BUG (owner, 2026-09-24, iPhone17,1 / iOS 18.7.8, build 14): Start Calibration -> app closes whenever "Record yaw rate from the gyroscope" (default ON) or "IMU sensor fusion" is on. Owner bisected the two toggles himself. Three .ips reports: JS fatal (RCTExceptionsManager reportFatal -> SIGABRT on the TurboModule queue), no JS message.
+CAUSE (supported, confirmed by Codex's own probe of Metro's runtime; device retest pending): gforceProvider defaultAccelerometerRestVector() did `await import('react-native')` -> Metro importAll walks every enumerable RN export (lazy getters requiring never-loaded modules) -> a module throwing on first load goes guardedLoadModule -> ErrorUtils.reportFatalError, bypassing the try/catch. Only reached when the gyroscope starts; tests injected the rest vector, web preview uses react-native-web — never exercised.
+FIX: Platform from expo-modules-core (__esModule, initialised by Expo at start). Regression test fails if the gyro path loads react-native again (fails on the old code).
+CHAIN: gates on the exact release tree (LF worktree checkout: typecheck 0, lint 0 errors, 3414 tests = 1787 + 1627, expo export 0) -> Codex GYRO-CRASH-REV1 PASS_WITH_NOTES 0 HIGH -> web E2E (TMR clean-lap replay with gyro capture ON: calibration accepted 95 %, no page errors; web cannot reproduce the crash) -> artifact: build SHA carries the fix (Hermes references modules by id, so strings cannot show it).
+OWNER RETEST: gyro capture ON -> Start session -> Continue anyway -> Start Calibration at home must not close.
+NOTE: a fresh Windows worktree checks files out CRLF and breaks 4 byte-exact tests (circuit assets, voice-pack .mjs shebang) — gates must run on an LF checkout (`git -c core.autocrlf=false checkout -- .`).
