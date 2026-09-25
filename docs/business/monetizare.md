@@ -17,14 +17,14 @@ ipoteze**, marcate ca atare. Nimic de aici nu s-a validat cu clienți reali.
    momente: live, la boxe, după sesiune) e plătit. Diferențiatorul se vinde, nu cronometrul.
 2. **Prețuri propuse:** Pro **9,99 €/lună** sau **59,99 €/an** (−50% față de lunar). Lunarul există ca
    ancoră; anualul e ce vrei să vinzi, pentru că sezonul de track day e ~aprilie–octombrie.
-3. **Două categorii de abonamente:** **A — fără hardware** (doar aplicația, disponibilă de la lansare) și
-   **B — cu pod și hardware** (mai târziu). Bugetul e strâns, deci la lansare se vinde **doar categoria A**:
-   costă aproape nimic de pornit și nu blochează bani în stoc. Categoria B apare abia când abonamentele o
-   pot finanța; atunci pod-ul se vinde în pachet cu un an de Pro la 149 €.
+3. **Două generații de ofertă:** **V1** (la lansare) = aplicația + **pachetul Pro anual cu adaptor OBD
+   BLE, 79,99 €**; **V2** (mai târziu) = pachetul cu **pod**, 149 €. Bugetul e strâns, deci V1 folosește un
+   adaptor gata făcut, deja certificat CE de producător, cumpărat în loturi mici. V2 vine abia când
+   veniturile din V1 pot finanța certificarea și lotul de pod-uri.
 4. **Prima sesiune pe circuit e gratuită integral.** Omul vede raportul pe viraj _al lui_, pe turele _lui_,
    apoi dă de paywall. E cel mai puternic argument de vânzare pe care îl ai.
-5. **Ordinea:** întâi aplicația (free + Pro, categoria A), abia apoi pod-ul (categoria B), după validarea
-   pe teren, certificarea CE și după ce abonamentele acoperă lotul. Pod-ul nu se vinde înainte ca aplicația
+5. **Ordinea:** întâi V1 (free + Pro + pachetul cu adaptor OBD), abia apoi V2 cu pod, după validarea
+   pe teren, certificarea CE și după ce V1 acoperă lotul. Pod-ul nu se vinde înainte ca aplicația
    să fi cronometrat tururi reale.
 
 ---
@@ -82,18 +82,18 @@ funcții dependente de hardware (App Store Review Guidelines 3.1.4 — **de reve
 
 ---
 
-## 3. Lista de abonamente — două categorii
+## 3. Lista de abonamente — V1 (lansare) și V2 (cu pod)
 
-| Categorie                  | Pentru cine                                           | Disponibil        | Ce plătești la start                          |
-| -------------------------- | ----------------------------------------------------- | ----------------- | --------------------------------------------- |
-| **A — Fără hardware**      | oricine are telefon; OBD opțional, cumpărat de client | **de la lansare** | aproape nimic (conturi de magazin, avocat)    |
-| **B — Cu pod și hardware** | cine vrea GNSS 20–25 Hz + IMU, sau totul într-o cutie | **mai târziu**    | certificare CE + lot de pod-uri (~9–17 mii €) |
+| Generație                        | Ce vinzi                                               | Disponibil        | Ce plătești la start                                             |
+| -------------------------------- | ------------------------------------------------------ | ----------------- | ---------------------------------------------------------------- |
+| **V1 — aplicație + adaptor OBD** | Free, Pro lunar/anual, **Pro anual + adaptor OBD BLE** | **de la lansare** | conturi de magazin, avocat, un lot mic de adaptoare (~500–850 €) |
+| **V2 — cu pod**                  | pod + Pro, pod singur, pod + adaptor                   | **mai târziu**    | certificare CE + lot de pod-uri (~9–17 mii €)                    |
 
-**De ce așa:** bugetul e strâns. Categoria A n-are stoc, n-are vamă, n-are garanție pe hardware și n-are
-certificare: fiecare abonat nou e aproape tot profit (§4). Categoria B blochează mii de euro înainte de
-prima vânzare. Deci A plătește pentru B, nu invers.
+**De ce așa:** bugetul e strâns. Adaptorul OBD e un produs gata făcut, cu marcaj CE de la producător: n-ai
+certificare de plătit, iar un lot de 20–30 de bucăți costă câteva sute de euro. Pod-ul blochează mii de
+euro înainte de prima vânzare. Deci V1 plătește pentru V2, nu invers.
 
-### 3.1 Categoria A — Fără hardware (disponibilă de la lansare)
+### 3.1 V1 — Abonamentele (disponibile de la lansare)
 
 | Plan                                               | Preț (TVA inclus)  | Echivalent lunar | Net pentru tine\* |
 | -------------------------------------------------- | ------------------ | ---------------- | ----------------- |
@@ -105,10 +105,8 @@ prima vânzare. Deci A plătește pentru B, nu invers.
 \* Net = preț ÷ 1,21 (TVA RO 21%) × 0,85 (comision App Store / Google Play 15% prin Small Business Program /
 abonamente Google). Aproximativ; comisionul se aplică pe prețul fără TVA.
 
-Ce include: tot tabelul din §2 (Free vs Pro), cu GPS-ul telefonului. **Adaptorul OBD merge și în
-categoria A**, dar îl cumpără clientul singur (BLE ELM327 de ~26–34 $, de ex. Vgate iCar Pro BLE sau
-Veepeak OBDCheck BLE, sau MHD pe BMW). În aplicație pui o pagină „Adaptoare compatibile”; dacă folosești
-linkuri de afiliere (eMAG, Amazon), câștigi un comision mic **fără stoc și fără risc**.
+Ce include: tot tabelul din §2 (Free vs Pro), cu GPS-ul telefonului. Cine are deja un adaptor compatibil
+îl folosește pe al lui.
 
 **De ce 9,99 € lunar și nu 7,99 €:** un utilizator sezonier plătește lunar doar ~7 luni pe an. La 7,99 € ar
 plăti 55,93 € — aproape cât anualul, deci n-ar avea niciun motiv să aleagă anualul. La 9,99 € plătește
@@ -119,10 +117,56 @@ plăti 55,93 € — aproape cât anualul, deci n-ar avea niciun motiv să aleag
 frica de „abonament care mă taxează iarna”. Dezavantaj: pierzi reînnoirea automată. Recomand să pornești
 fără el și să-l adaugi doar dacă datele arată abandon mare la paywall pe motiv de „nu vreau abonament”.
 
-**Buget minim ca să pornești categoria A:** Apple Developer 99 $/an, Google Play 25 $ o dată, avocat pentru
-politică și termeni ~1.000–2.500 €. Abonamentele trec prin StoreKit / Google Play Billing, fără server.
+### 3.2 V1 — Pachetul Pro anual + adaptor OBD (produsul principal la lansare)
 
-### 3.2 Categoria B — Cu pod și hardware (mai târziu, indisponibilă la lansare)
+| Ofertă                          | Preț (TVA inclus)                  | Ce primește clientul                                | Mesaj                                    |
+| ------------------------------- | ---------------------------------- | --------------------------------------------------- | ---------------------------------------- |
+| **Pro anual + adaptor OBD BLE** | **79,99 €** (~400 lei)             | adaptor BLE ELM327 + card cu cod pentru 12 luni Pro | „Adaptorul la doar 20 € peste abonament” |
+| Reînnoire Pro în anul 2         | 59,99 €/an (automat, prin magazin) | —                                                   | adaptorul rămâne al lui                  |
+
+Separat, clientul ar plăti 59,99 € + ~25–32 € pe un adaptor BLE de firmă (Vgate iCar Pro BLE sau
+Veepeak OBDCheck BLE, 26–34 $ în `gnss-device-design.md` §8.3), deci ~85–92 €.
+
+**De ce merită pachetul, deși lasă cam cât un abonament simplu (§4.2):**
+
+- Adaptorul aduce frâna și pedala în analiză, deci raportul pe viraj e vizibil mai bun decât cu telefonul
+  singur. Cine vede raportul complet reînnoiește mai ușor.
+- E un motiv concret să plătești anual, nu lunar.
+- Cutia poate sta pe raftul de la recepția circuitului și la organizatorii de track day. O aplicație nu
+  poate sta acolo.
+- Adaptorul rămâne compatibil cu V2: pod-ul a fost proiectat să citească exact un adaptor BLE ELM327
+  (`hardware/gnss-pod/DESIGN.md`, iKiKin V03H4). Clientul din V1 cumpără doar pod-ul când apare V2.
+
+**Condiție tehnică, înainte de primul adaptor vândut:** aplicația de azi citește OBD **doar prin WiFi/TCP**
+(`apps/mobile/src/session/tcpObdTransport.ts`; nu există nicio bibliotecă BLE în `apps/mobile/package.json`).
+Un adaptor BLE nu merge încă. Două drumuri:
+
+1. **Adaugi transportul BLE în aplicație (recomandat).** O bibliotecă BLE compatibilă cu Expo, peste
+   `elm327Session` din `@circuit/core`, care există deja. E muncă de câteva săptămâni, dar e aceeași muncă
+   de care V2 are oricum nevoie: pod-ul vorbește tot BLE. Plus: telefonul păstrează internetul.
+2. **Vinzi un adaptor WiFi ELM327**, care merge azi fără cod nou. Dezavantaje: telefonul pierde internetul
+   cât e conectat (aplicația merge offline, deci pe circuit e acceptabil), iar clonele WiFi ieftine au
+   calitate foarte variabilă. Bun doar ca soluție de avarie.
+
+**Cum îl vinzi fără bani blocați:**
+
+- **Lot mic:** 20–30 de bucăți de la un distribuitor din UE (~500–850 € la ~18–28 €/buc, **estimare de
+  confirmat cu oferta distribuitorului**). Din UE ești doar distribuitor, nu importator, deci conformitatea
+  CE rămâne a producătorului. Tot ai obligația de înregistrare DEEE ca vânzător de echipamente electrice.
+- **Testezi fiecare model pe cel puțin 3–4 mașini diferite** înainte să-l pui în cutie. Adaptorul trebuie
+  să funcționeze cu PID-urile standard pe care le citește aplicația (pedala: 0x49/0x5A). Frâna depinde de
+  marca mașinii (`docs/architecture/analysis-engine.md` §1): spune clar în pagina produsului ce primește
+  clientul pe mașina lui.
+- **Magazin propriu** (Stripe) și eMAG Marketplace. Adaptorul e un bun fizic, deci nu trece prin App Store;
+  anul de Pro vine ca **cod de ofertă** pe un card din cutie (mecanismul de mai jos, §3.3).
+- Drept de retur de 14 zile pentru vânzarea online și garanție legală de 2 ani: păstrează 1–2 adaptoare de
+  schimb din fiecare lot.
+
+**Buget minim ca să pornești V1:** Apple Developer 99 $/an, Google Play 25 $ o dată, avocat pentru
+politică și termeni ~1.000–2.500 €, primul lot de adaptoare ~500–850 €. Abonamentele trec prin
+StoreKit / Google Play Billing, fără server.
+
+### 3.3 V2 — Cu pod (mai târziu, indisponibil la lansare)
 
 În aplicație și pe site apare ca **„În curând”**, cu formular de listă de așteptare (doar e-mail, fără
 avans, deci fără cost și fără obligații legale de rambursare). Prețurile de mai jos sunt ținta de atunci:
@@ -134,19 +178,20 @@ avans, deci fără cost și fără obligații legale de rambursare). Prețurile 
 | Reînnoire Pro pentru posesorii de pod  | 49,99 €/an           | loialitate                         | păstrează abonatul în anul 2                                |
 | Pod + Adaptor OBD BLE (pachet complet) | 179 € + 1 an Pro     | pod + adaptor BLE cumpărat en-gros | „tot ce-ți trebuie, într-o cutie”                           |
 
-Abonații din categoria A care cumpără pod-ul trec în categoria B fără să piardă nimic: anul de Pro din
-cutie se adaugă la abonamentul existent.
+Clienții V1 cumpără „Pod + 1 an Pro” la 149 € și nu pierd nimic: adaptorul lor merge cu pod-ul, iar anul de
+Pro din cutie se adaugă la abonamentul existent. Nu recomand un preț separat, mai mic, pentru pod-ul lor:
+cu rezerva de +30% din §4.1, un pod vândut sub ~140 € aproape nu mai lasă nimic.
 
 **Cum livrezi anul de Pro din cutie fără să ocolești magazinele:** coduri de ofertă generate din App Store
 Connect (Offer Codes pentru abonamente) și coduri promoționale Google Play, tipărite pe un card în cutie.
 Clientul le răscumpără în aplicație, abonamentul trece prin Apple/Google, iar la final de an se reînnoiește
 automat la prețul normal. **Verifică limitele trimestriale de coduri și regulile curente înainte de primul lot.**
 
-**Când se deschide categoria B:** când sunt îndeplinite toate trei:
+**Când se deschide V2:** când sunt îndeplinite toate trei:
 
 1. pod-ul a trecut validarea pe teren și certificarea CE;
 2. lista de așteptare are ~100 de e-mailuri;
-3. venitul net din categoria A acoperă lotul de 100 (~5.500–9.000 €) fără împrumut.
+3. venitul net din V1 acoperă lotul de 100 (~5.500–9.000 €) fără împrumut.
 
 ---
 
@@ -184,15 +229,16 @@ Ce înseamnă pentru plan:
 
 ### 4.2 Contribuția pe vânzare
 
-| Vânzare                              | Încasat fără TVA | − plată (~2%) − livrare (~5 €) | − cost pod | **Contribuție**        |
-| ------------------------------------ | ---------------- | ------------------------------ | ---------- | ---------------------- |
-| Pod singur, 189 €                    | 156,20 €         | −7,70 €                        | −42…−69 €  | **~80–107 €**          |
-| Pod + 1 an Pro, 149 €                | 123,14 €         | −7,70 €                        | −42…−69 €  | **~46–73 €** în anul 1 |
-| … + reînnoire an 2 (49,99 €)         | 41,31 €          | −15% magazin                   | —          | **+~35 €**             |
-| Pro anual, doar aplicația            | —                | —                              | —          | **~42 €/an**           |
-| Pro lunar, 7 luni de sezon           | —                | —                              | —          | **~49 €/an**           |
-| _Cu rezerva de +30%:_ pod singur     | 156,20 €         | −7,70 €                        | −55…−90 €  | **~59–94 €**           |
-| _Cu rezerva de +30%:_ pod + 1 an Pro | 123,14 €         | −7,70 €                        | −55…−90 €  | **~25–60 €** în anul 1 |
+| Vânzare                              | Încasat fără TVA | − plată (~2%) − livrare (~5 €) | − cost pod                    | **Contribuție**        |
+| ------------------------------------ | ---------------- | ------------------------------ | ----------------------------- | ---------------------- |
+| Pod singur, 189 €                    | 156,20 €         | −7,70 €                        | −42…−69 €                     | **~80–107 €**          |
+| Pod + 1 an Pro, 149 €                | 123,14 €         | −7,70 €                        | −42…−69 €                     | **~46–73 €** în anul 1 |
+| … + reînnoire an 2 (49,99 €)         | 41,31 €          | −15% magazin                   | —                             | **+~35 €**             |
+| **V1: Pro anual + adaptor, 79,99 €** | 66,11 €          | −6,60 €                        | −18…−28 € (adaptor, estimare) | **~32–42 €** în anul 1 |
+| Pro anual, doar aplicația            | —                | —                              | —                             | **~42 €/an**           |
+| Pro lunar, 7 luni de sezon           | —                | —                              | —                             | **~49 €/an**           |
+| _Cu rezerva de +30%:_ pod singur     | 156,20 €         | −7,70 €                        | −55…−90 €                     | **~59–94 €**           |
+| _Cu rezerva de +30%:_ pod + 1 an Pro | 123,14 €         | −7,70 €                        | −55…−90 €                     | **~25–60 €** în anul 1 |
 
 Cu rezerva de +30% și varianta SAM-M10Q, pachetul la 149 € lasă doar ~25 € în anul 1. Dacă cotația
 pentru 100 de bucăți confirmă costuri apropiate de cele ale prototipului, fie treci pe MAX-M10S (după
@@ -226,22 +272,24 @@ produsul de vânzare va avea baterie, deci intră și obligațiile pentru bateri
 ## 5. Scenarii pentru primul an (ipoteze, nu prognoză)
 
 Presupuneri: 70% din plătitori aleg anualul, lunarii plătesc în medie 6 luni. **Primul an e doar
-categoria A** (fără hardware). Rândurile pentru pod arată ce ar aduce categoria B când se deschide
+V1** (aplicația + pachetul cu adaptor OBD). Pachetul cu adaptor lasă cam cât un abonament anual simplu
+(§4.2), deci cifrele de mai jos nu se schimbă mult în funcție de câți îl aleg. Rândurile pentru pod arată ce
+ar aduce V2 când se deschide
 (contribuție medie ~60 € pe pachet), nu venit din primul an.
 
-|                                 | Prudent      | Mediu         | Optimist      |
-| ------------------------------- | ------------ | ------------- | ------------- |
-| Instalări (RO + UE)             | 1.500        | 5.000         | 15.000        |
-| Conversie free → Pro            | 4%           | 6%            | 8%            |
-| Abonați plătitori               | 60           | 300           | 1.200         |
-| **Net an 1, categoria A**       | **~2.500 €** | **~12.600 €** | **~50.400 €** |
-| Finanțează categoria B?         | nu           | la limită     | da            |
-| _Ulterior, cat. B:_ pachete pod | 30           | 120           | 400           |
-| _Ulterior, cat. B:_ contribuție | ~1.800 €     | ~7.200 €      | ~24.000 €     |
+|                             | Prudent      | Mediu         | Optimist      |
+| --------------------------- | ------------ | ------------- | ------------- |
+| Instalări (RO + UE)         | 1.500        | 5.000         | 15.000        |
+| Conversie free → Pro        | 4%           | 6%            | 8%            |
+| Abonați plătitori           | 60           | 300           | 1.200         |
+| **Net an 1, V1**            | **~2.500 €** | **~12.600 €** | **~50.400 €** |
+| Finanțează V2?              | nu           | la limită     | da            |
+| _Ulterior, V2:_ pachete pod | 30           | 120           | 400           |
+| _Ulterior, V2:_ contribuție | ~1.800 €     | ~7.200 €      | ~24.000 €     |
 
-Citirea onestă: **în scenariul prudent, categoria A nu adună destul ca să finanțeze pod-ul în primul an.**
-Asta e în regulă: categoria A e profitabilă singură, iar categoria B se deschide abia când își permite
-(condițiile din §3.2).
+Citirea onestă: **în scenariul prudent, V1 nu adună destul ca să finanțeze pod-ul în primul an.**
+Asta e în regulă: V1 e profitabil singur, iar V2 se deschide abia când își permite
+(condițiile din §3.3).
 Ratele de conversie sunt ipoteze pentru aplicații de nișă pentru pasionați; măsoară-le pe TestFlight și în
 primele luni, apoi refă tabelul.
 
@@ -265,21 +313,23 @@ Regulile din `brand/facts.yaml` se aplică și aici: fără cifre de precizie, f
 
 ## 7. Plan de lansare comercială
 
-**Faza 1 — categoria A, la lansarea în magazine** (după Etapele A–E din planul de lansare)
+**Faza 1 — V1, la lansarea în magazine** (după Etapele A–E din planul de lansare)
 
 - Free + Pro lunar/anual, fără hardware. Oferta Fondator (39,99 €/an blocat) pentru primii 200.
 - Prima sesiune pe circuit deblocată complet. Paywall-ul apare în raportul _lor_, cu virajele 2–N estompate.
+- Pachetul Pro anual + adaptor OBD BLE la 79,99 €, pe magazinul propriu și pe eMAG, **după** ce aplicația
+  are transport BLE (§3.2) și adaptorul a fost testat pe mai multe mașini.
 - Tehnic: StoreKit 2 / Google Play Billing (de ex. prin RevenueCat), un singur flag `isPro` în setări,
   verificat local — nu e nevoie de backend pentru abonamente.
 
 **Faza 2 — lista de așteptare pentru pod** (în paralel cu faza 1, cost zero)
 
-- Pe landing-ul existent (`marketing/landing/`) și în aplicație: categoria B marcată „În curând”, cu
+- Pe landing-ul existent (`marketing/landing/`) și în aplicație: V2 (pod-ul) marcat „În curând”, cu
   formular doar pentru e-mail. Fără avans, deci fără bani de returnat și fără obligații de livrare.
-- Pragul: **~100 de e-mailuri** și venit din categoria A care acoperă lotul (§3.2).
-- Certificarea CE se plătește tot din veniturile categoriei A, nu înainte.
+- Pragul: **~100 de e-mailuri** și venit din V1 care acoperă lotul (§3.3).
+- Certificarea CE se plătește tot din veniturile din V1, nu înainte.
 
-**Faza 3 — se deschide categoria B, după validare pe teren și CE**
+**Faza 3 — V2 cu pod, după validare pe teren și CE**
 
 - Pachetul Pod + 1 an Pro la 149 €; pod singur 189 €.
 - Canale: magazin propriu (Stripe), eMAG Marketplace, recepția circuitelor (TMR, MotorPark) cu comision.
@@ -296,14 +346,16 @@ Regulile din `brand/facts.yaml` se aplică și aici: fără cifre de precizie, f
 
 ## 8. Riscuri
 
-| Risc                                       | De ce contează                              | Ce faci                                                                                |
-| ------------------------------------------ | ------------------------------------------- | -------------------------------------------------------------------------------------- |
-| Sezonalitate                               | abonații lunari pleacă în noiembrie         | anualul e opțiunea implicită în paywall; lunarul la 9,99 €                             |
-| Nișă mică în RO                            | sute, nu zeci de mii de piloți activi       | EN de la lansare, circuite învățate = orice circuit din UE                             |
-| Aplicația n-a cronometrat încă un tur real | nu poți vinde ce n-a fost verificat         | monetizare doar după validarea de la MotorPark/TMR                                     |
-| Pod-ul: CE, garanție, retururi, suport     | costuri fixe mari pentru un volum mic       | lista de așteptare cu prag; pornești cu MAX-M10S doar după bring-up RF                 |
-| Regulile magazinelor se schimbă            | coduri în cutie, deblocări hardware         | reverifică ghidurile Apple/Google la fiecare lot                                       |
-| Coaching-ul oprit pe geometrie neoficială  | valoarea Pro scade pe circuitele nevalidate | parteneriate cu circuitele (faza 4); arată clar pe ce circuite e coaching live complet |
+| Risc                                       | De ce contează                              | Ce faci                                                                                   |
+| ------------------------------------------ | ------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Sezonalitate                               | abonații lunari pleacă în noiembrie         | anualul e opțiunea implicită în paywall; lunarul la 9,99 €                                |
+| Nișă mică în RO                            | sute, nu zeci de mii de piloți activi       | EN de la lansare, circuite învățate = orice circuit din UE                                |
+| Aplicația n-a cronometrat încă un tur real | nu poți vinde ce n-a fost verificat         | monetizare doar după validarea de la MotorPark/TMR                                        |
+| Adaptorul OBD nu merge pe toate mașinile   | retururi, recenzii proaste                  | listă de mașini testate; pagină clară „ce primești pe mașina ta”; 1–2 adaptoare de schimb |
+| Aplicația nu are încă BLE                  | pachetul V1 nu se poate vinde fără el       | transportul BLE înainte de primul adaptor vândut; e aceeași muncă de care are nevoie V2   |
+| Pod-ul: CE, garanție, retururi, suport     | costuri fixe mari pentru un volum mic       | lista de așteptare cu prag; pornești cu MAX-M10S doar după bring-up RF                    |
+| Regulile magazinelor se schimbă            | coduri în cutie, deblocări hardware         | reverifică ghidurile Apple/Google la fiecare lot                                          |
+| Coaching-ul oprit pe geometrie neoficială  | valoarea Pro scade pe circuitele nevalidate | parteneriate cu circuitele (faza 4); arată clar pe ce circuite e coaching live complet    |
 
 ---
 
