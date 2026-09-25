@@ -19,7 +19,7 @@ ipoteze**, marcate ca atare. Nimic de aici nu s-a validat cu clienți reali.
    ancoră; anualul e ce vrei să vinzi, pentru că sezonul de track day e ~aprilie–octombrie.
 3. **Pod-ul se vinde în pachet cu un an de Pro: 149 €** (față de 189 € pod-ul singur + 59,99 € anul de Pro
    = 248,99 €). Clientul „economisește 100 €”, tu încasezi hardware-ul cu marjă și câștigi un abonat.
-4. **Prima sesiune pe circuit e gratuită integral.** Omul vede raportul pe viraj *al lui*, pe turele *lui*,
+4. **Prima sesiune pe circuit e gratuită integral.** Omul vede raportul pe viraj _al lui_, pe turele _lui_,
    apoi dă de paywall. E cel mai puternic argument de vânzare pe care îl ai.
 5. **Ordinea:** întâi aplicația (free + Pro), abia apoi pod-ul, după validarea pe teren și certificarea CE.
    Pod-ul nu se vinde înainte ca aplicația să fi cronometrat tururi reale.
@@ -53,24 +53,24 @@ Regula: **free trebuie să fie util singur** (altfel nu se instalează și nu se
 să fie motivul pentru care ai instalat aplicația**. Tăiem analiza, nu datele: turele tale rămân ale tale,
 indiferent dacă plătești.
 
-| Funcție | Free | Pro |
-|---|:---:|:---:|
-| Cronometraj GPS, sectoare S1/S2/S3, cel mai bun tur | ✅ | ✅ |
-| Delta live față de cel mai bun tur | ✅ | ✅ |
-| Funcționare offline, date doar pe telefon | ✅ | ✅ |
-| Circuitele incluse (TMR, MotorPark) | ✅ | ✅ |
-| Circuite învățate (un tur → circuit propriu) | 1 | nelimitat |
-| Istoric sesiuni și timpi | complet | complet |
-| **Prima sesiune pe circuit: tot Pro deblocat** | ✅ | — |
-| Pit view: „unde pierzi cel mai mult” | doar virajul #1 | top 3 + puncte de frânare/lift tur cu tur |
-| Raport după sesiune, pe viraj | sumar (timp pierdut pe viraj) | complet: frânare, lift, v min, ieșire, G, cel mai bun demonstrat |
-| Banda de coaching live înainte de viraj | — | ✅ |
-| Callout-uri vocale („Brake hard / Brake / Lift”) | — | ✅ |
-| Sugestii între sesiuni (după 2 tururi curate) | — | ✅ |
-| Canale OBD în analiză (frână, pedală, turație) | se înregistrează | analizate în raport |
-| Comparare între sesiuni / zile diferite | — | ✅ |
-| Export raport (PDF/imagine, RO/EN) | cu watermark | curat |
-| **Cu GNSS Pod conectat:** 20–25 Hz + IMU din pod | ✅ | ✅ |
+| Funcție                                             |             Free              |                               Pro                                |
+| --------------------------------------------------- | :---------------------------: | :--------------------------------------------------------------: |
+| Cronometraj GPS, sectoare S1/S2/S3, cel mai bun tur |              ✅               |                                ✅                                |
+| Delta live față de cel mai bun tur                  |              ✅               |                                ✅                                |
+| Funcționare offline, date doar pe telefon           |              ✅               |                                ✅                                |
+| Circuitele incluse (TMR, MotorPark)                 |              ✅               |                                ✅                                |
+| Circuite învățate (un tur → circuit propriu)        |               1               |                            nelimitat                             |
+| Istoric sesiuni și timpi                            |            complet            |                             complet                              |
+| **Prima sesiune pe circuit: tot Pro deblocat**      |              ✅               |                                —                                 |
+| Pit view: „unde pierzi cel mai mult”                |        doar virajul #1        |            top 3 + puncte de frânare/lift tur cu tur             |
+| Raport după sesiune, pe viraj                       | sumar (timp pierdut pe viraj) | complet: frânare, lift, v min, ieșire, G, cel mai bun demonstrat |
+| Banda de coaching live înainte de viraj             |               —               |                                ✅                                |
+| Callout-uri vocale („Brake hard / Brake / Lift”)    |               —               |                                ✅                                |
+| Sugestii între sesiuni (după 2 tururi curate)       |               —               |                                ✅                                |
+| Canale OBD în analiză (frână, pedală, turație)      |       se înregistrează        |                       analizate în raport                        |
+| Comparare între sesiuni / zile diferite             |               —               |                                ✅                                |
+| Export raport (PDF/imagine, RO/EN)                  |         cu watermark          |                              curat                               |
+| **Cu GNSS Pod conectat:** 20–25 Hz + IMU din pod    |              ✅               |                                ✅                                |
 
 Ultimul rând e intenționat în free: funcțiile care depind de hardware se deblochează la împerechere, nu prin
 abonament. Asta face pod-ul vandabil și singur (inclusiv celor care folosesc RaceChrono, fiindcă pod-ul
@@ -83,11 +83,11 @@ funcții dependente de hardware (App Store Review Guidelines 3.1.4 — **de reve
 
 ### 3.1 Abonamentul (aplicația singură)
 
-| Plan | Preț (TVA inclus) | Echivalent lunar | Net pentru tine* |
-|---|---|---|---|
-| **Pro lunar** | 9,99 € (~50 lei) | 9,99 € | ~7,02 €/lună |
-| **Pro anual** | 59,99 € (~300 lei) | 5,00 € | ~42,14 €/an |
-| Fondator (primii 200, anual, preț blocat pe viață) | 39,99 € | 3,33 € | ~28,09 €/an |
+| Plan                                               | Preț (TVA inclus)  | Echivalent lunar | Net pentru tine\* |
+| -------------------------------------------------- | ------------------ | ---------------- | ----------------- |
+| **Pro lunar**                                      | 9,99 € (~50 lei)   | 9,99 €           | ~7,02 €/lună      |
+| **Pro anual**                                      | 59,99 € (~300 lei) | 5,00 €           | ~42,14 €/an       |
+| Fondator (primii 200, anual, preț blocat pe viață) | 39,99 €            | 3,33 €           | ~28,09 €/an       |
 
 \* Net = preț ÷ 1,21 (TVA RO 21%) × 0,85 (comision App Store / Google Play 15% prin Small Business Program /
 abonamente Google). Aproximativ; comisionul se aplică pe prețul fără TVA.
@@ -103,12 +103,12 @@ fără el și să-l adaugi doar dacă datele arată abandon mare la paywall pe m
 
 ### 3.2 GNSS Pod și pachetele
 
-| Ofertă | Preț (TVA inclus) | Ce primește clientul | Mesaj |
-|---|---|---|---|
-| **Pod singur** | 189 € (~945 lei) | pod + suport magnetic + cablu | sub RaceBox Mini S (199–266 $), peste Dragy DRG70-C (159 $) |
-| **Pod + 1 an Pro** (recomandat) | **149 €** (~745 lei) | pod + cod pentru 12 luni Pro | „Economisești 100 €” (vs 248,99 €) |
-| Reînnoire Pro pentru posesorii de pod | 49,99 €/an | loialitate | păstrează abonatul în anul 2 |
-| Pod + Adaptor OBD BLE (pachet complet) | 179 € + 1 an Pro | pod + adaptor BLE cumpărat en-gros | „tot ce-ți trebuie, într-o cutie” |
+| Ofertă                                 | Preț (TVA inclus)    | Ce primește clientul               | Mesaj                                                       |
+| -------------------------------------- | -------------------- | ---------------------------------- | ----------------------------------------------------------- |
+| **Pod singur**                         | 189 € (~945 lei)     | pod + suport magnetic + cablu      | sub RaceBox Mini S (199–266 $), peste Dragy DRG70-C (159 $) |
+| **Pod + 1 an Pro** (recomandat)        | **149 €** (~745 lei) | pod + cod pentru 12 luni Pro       | „Economisești 100 €” (vs 248,99 €)                          |
+| Reînnoire Pro pentru posesorii de pod  | 49,99 €/an           | loialitate                         | păstrează abonatul în anul 2                                |
+| Pod + Adaptor OBD BLE (pachet complet) | 179 € + 1 an Pro     | pod + adaptor BLE cumpărat en-gros | „tot ce-ți trebuie, într-o cutie”                           |
 
 **Cum livrezi anul de Pro din cutie fără să ocolești magazinele:** coduri de ofertă generate din App Store
 Connect (Offer Codes pentru abonamente) și coduri promoționale Google Play, tipărite pe un card în cutie.
@@ -121,11 +121,11 @@ automat la prețul normal. **Verifică limitele trimestriale de coduri și regul
 
 ### 4.1 Costul pod-ului (din repo)
 
-| Variantă | Cost | Sursă |
-|---|---|---|
-| Prototip, unitatea 1 (SAM-M10Q) | ~95–130 $ livrat | `gnss-device-design.md` §8.1 |
-| Lot de 100, MAX-M10S | **~32 $/buc** BOM | §8.2 |
-| Lot de 100, SAM-M10Q (fără riscul RF) | **~59 $/buc** BOM | §8.2 |
+| Variantă                              | Cost              | Sursă                        |
+| ------------------------------------- | ----------------- | ---------------------------- |
+| Prototip, unitatea 1 (SAM-M10Q)       | ~95–130 $ livrat  | `gnss-device-design.md` §8.1 |
+| Lot de 100, MAX-M10S                  | **~32 $/buc** BOM | §8.2                         |
+| Lot de 100, SAM-M10Q (fără riscul RF) | **~59 $/buc** BOM | §8.2                         |
 
 Peste BOM mai adaug (**estimări**, nu cotații): ambalaj + suport + cablu ~5 $, transport din China + vamă
 ~4 $, rebuturi 5%, rezervă de garanție 5% (garanția legală în UE e de 2 ani). Cost aterizat estimat:
@@ -133,13 +133,13 @@ Peste BOM mai adaug (**estimări**, nu cotații): ambalaj + suport + cablu ~5 $,
 
 ### 4.2 Contribuția pe vânzare
 
-| Vânzare | Încasat fără TVA | − plată (~2%) − livrare (~5 €) | − cost pod | **Contribuție** |
-|---|---|---|---|---|
-| Pod singur, 189 € | 156,20 € | −7,70 € | −42…−69 € | **~80–107 €** |
-| Pod + 1 an Pro, 149 € | 123,14 € | −7,70 € | −42…−69 € | **~46–73 €** în anul 1 |
-| … + reînnoire an 2 (49,99 €) | 41,31 € | −15% magazin | — | **+~35 €** |
-| Pro anual, doar aplicația | — | — | — | **~42 €/an** |
-| Pro lunar, 7 luni de sezon | — | — | — | **~49 €/an** |
+| Vânzare                      | Încasat fără TVA | − plată (~2%) − livrare (~5 €) | − cost pod | **Contribuție**        |
+| ---------------------------- | ---------------- | ------------------------------ | ---------- | ---------------------- |
+| Pod singur, 189 €            | 156,20 €         | −7,70 €                        | −42…−69 €  | **~80–107 €**          |
+| Pod + 1 an Pro, 149 €        | 123,14 €         | −7,70 €                        | −42…−69 €  | **~46–73 €** în anul 1 |
+| … + reînnoire an 2 (49,99 €) | 41,31 €          | −15% magazin                   | —          | **+~35 €**             |
+| Pro anual, doar aplicația    | —                | —                              | —          | **~42 €/an**           |
+| Pro lunar, 7 luni de sezon   | —                | —                              | —          | **~49 €/an**           |
 
 Concluzia importantă: **pachetul lasă mai puțin în anul 1 decât pod-ul singur, dar aduce un abonat.** Dacă
 jumătate din cumpărătorii de pachet reînnoiesc, pachetul depășește pod-ul singur până la finalul anului 2.
@@ -147,15 +147,15 @@ jumătate din cumpărătorii de pachet reînnoiesc, pachetul depășește pod-ul
 
 ### 4.3 Costuri fixe (estimări de ordin de mărime, de confirmat)
 
-| Cost | Sumă | Când |
-|---|---|---|
-| Apple Developer Program | 99 $/an | înainte de TestFlight |
-| Google Play Console | 25 $ o dată | înainte de primul build Android |
-| Avocat: politică de confidențialitate + termeni (RO/EN) | ~1.000–2.500 € | Etapa C din planul de lansare |
+| Cost                                                          | Sumă               | Când                                |
+| ------------------------------------------------------------- | ------------------ | ----------------------------------- |
+| Apple Developer Program                                       | 99 $/an            | înainte de TestFlight               |
+| Google Play Console                                           | 25 $ o dată        | înainte de primul build Android     |
+| Avocat: politică de confidențialitate + termeni (RO/EN)       | ~1.000–2.500 €     | Etapa C din planul de lansare       |
 | **Certificare CE/RED + EMC pentru pod** (laborator acreditat) | **~3.000–8.000 €** | înainte de orice vânzare a pod-ului |
-| Înregistrare DEEE și baterii (Regulamentul UE 2023/1542) | câteva sute €/an | înainte de vânzare |
-| Primul lot de 100 pod-uri | ~4.500–7.000 € | după certificare |
-| Contabilitate SRL | ~100 €/lună | continuu |
+| Înregistrare DEEE și baterii (Regulamentul UE 2023/1542)      | câteva sute €/an   | înainte de vânzare                  |
+| Primul lot de 100 pod-uri                                     | ~4.500–7.000 €     | după certificare                    |
+| Contabilitate SRL                                             | ~100 €/lună        | continuu                            |
 
 Certificarea e costul care decide dacă pod-ul merită: la o contribuție medie de ~60 € pe pachet, doar
 certificarea cere **~50–130 de pachete vândute** ca să fie acoperită. Modulul ESP32 are certificare
@@ -169,16 +169,16 @@ produsul de vânzare va avea baterie, deci intră și obligațiile pentru bateri
 Presupuneri: 70% din plătitori aleg anualul, lunarii plătesc în medie 6 luni, pod-ul pornește în a doua
 jumătate a sezonului, contribuție medie ~60 € pe pachet.
 
-| | Prudent | Mediu | Optimist |
-|---|---|---|---|
-| Instalări (RO + UE) | 1.500 | 5.000 | 15.000 |
-| Conversie free → Pro | 4% | 6% | 8% |
-| Abonați plătitori | 60 | 300 | 1.200 |
-| Net abonamente | ~2.500 € | ~12.600 € | ~50.400 € |
-| Pachete pod vândute | 30 | 120 | 400 |
-| Contribuție pod | ~1.800 € | ~7.200 € | ~24.000 € |
-| **Total contribuție** | **~4.300 €** | **~19.800 €** | **~74.400 €** |
-| Acoperă certificarea + lotul? | nu | la limită | da |
+|                               | Prudent      | Mediu         | Optimist      |
+| ----------------------------- | ------------ | ------------- | ------------- |
+| Instalări (RO + UE)           | 1.500        | 5.000         | 15.000        |
+| Conversie free → Pro          | 4%           | 6%            | 8%            |
+| Abonați plătitori             | 60           | 300           | 1.200         |
+| Net abonamente                | ~2.500 €     | ~12.600 €     | ~50.400 €     |
+| Pachete pod vândute           | 30           | 120           | 400           |
+| Contribuție pod               | ~1.800 €     | ~7.200 €      | ~24.000 €     |
+| **Total contribuție**         | **~4.300 €** | **~19.800 €** | **~74.400 €** |
+| Acoperă certificarea + lotul? | nu           | la limită     | da            |
 
 Citirea onestă: **în scenariul prudent, pod-ul nu-și acoperă costurile fixe în primul an.** De aceea
 aplicația trebuie lansată prima și pod-ul fabricat doar când lista de așteptare îl justifică (vezi §7).
@@ -189,13 +189,13 @@ primele luni, apoi refă tabelul.
 
 ## 6. Comparație cu ce există
 
-| Produs | Model | Preț orientativ | Ce face TRACE diferit |
-|---|---|---|---|
-| RaceChrono Pro / Harry's LapTimer | aplicație, plată unică | ~10–30 € | ei dau grafice; TRACE spune *ce* să schimbi, pe viraj, în limba ta |
-| RaceBox Mini / Mini S | hardware + aplicație | 199–266 $ | pod-ul TRACE vorbește același protocol, costă mai puțin, vine cu coaching |
-| Dragy DRG70-C (+ Dragy OBD) | hardware + aplicație | 159 $ (+49–119 $) | Dragy e orientat pe accelerări; TRACE pe circuit și pe începători |
-| Garmin Catalyst | hardware cu coaching | ~1.000 €+ | TRACE oferă coaching pe viraj la o fracțiune din preț |
-| Instructor pe circuit | serviciu | ~50–150 €/sesiune | TRACE nu înlocuiește instructorul (nu pretinde asta), dar e acolo la fiecare tur |
+| Produs                            | Model                  | Preț orientativ   | Ce face TRACE diferit                                                            |
+| --------------------------------- | ---------------------- | ----------------- | -------------------------------------------------------------------------------- |
+| RaceChrono Pro / Harry's LapTimer | aplicație, plată unică | ~10–30 €          | ei dau grafice; TRACE spune _ce_ să schimbi, pe viraj, în limba ta               |
+| RaceBox Mini / Mini S             | hardware + aplicație   | 199–266 $         | pod-ul TRACE vorbește același protocol, costă mai puțin, vine cu coaching        |
+| Dragy DRG70-C (+ Dragy OBD)       | hardware + aplicație   | 159 $ (+49–119 $) | Dragy e orientat pe accelerări; TRACE pe circuit și pe începători                |
+| Garmin Catalyst                   | hardware cu coaching   | ~1.000 €+         | TRACE oferă coaching pe viraj la o fracțiune din preț                            |
+| Instructor pe circuit             | serviciu               | ~50–150 €/sesiune | TRACE nu înlocuiește instructorul (nu pretinde asta), dar e acolo la fiecare tur |
 
 Prețurile pentru RaceChrono, Harry's, Garmin și instructori sunt orientative și **nu sunt verificate în
 repo**; RaceBox și Dragy sunt din `gnss-device-design.md` §8.3. Verifică-le înainte de materiale publice.
@@ -206,21 +206,25 @@ Regulile din `brand/facts.yaml` se aplică și aici: fără cifre de precizie, f
 ## 7. Plan de lansare comercială
 
 **Faza 1 — aplicația, la lansarea în magazine** (după Etapele A–E din planul de lansare)
+
 - Free + Pro lunar/anual. Oferta Fondator (39,99 €/an blocat) pentru primii 200.
-- Prima sesiune pe circuit deblocată complet. Paywall-ul apare în raportul *lor*, cu virajele 2–N estompate.
+- Prima sesiune pe circuit deblocată complet. Paywall-ul apare în raportul _lor_, cu virajele 2–N estompate.
 - Tehnic: StoreKit 2 / Google Play Billing (de ex. prin RevenueCat), un singur flag `isPro` în setări,
   verificat local — nu e nevoie de backend pentru abonamente.
 
 **Faza 2 — lista de așteptare pentru pod** (în paralel cu faza 1)
+
 - Pagină pe landing-ul existent (`marketing/landing/`): „Rezervă pod-ul — 20 € avans, returnabil”.
 - Pragul de fabricație: **~100 de rezervări** acoperă lotul; sub prag, returnezi avansurile.
 - Avansurile nu finanțează certificarea — pe aceea o plătești tu sau o amâni până la prag.
 
 **Faza 3 — pod-ul, după validare pe teren și CE**
+
 - Pachetul Pod + 1 an Pro la 149 €; pod singur 189 €.
 - Canale: magazin propriu (Stripe), eMAG Marketplace, recepția circuitelor (TMR, MotorPark) cu comision.
 
 **Faza 4 — B2B (după ce ai 50+ abonați activi)**
+
 - **Școli de pilotaj / organizatori de track day:** licență de instructor + flotă de 10 pod-uri la preț de
   volum; închiriere pod la circuit, ~15 €/zi.
 - **Circuite:** geometrie validată împreună cu circuitul → trece la `'official'`, ceea ce deblochează
@@ -231,14 +235,14 @@ Regulile din `brand/facts.yaml` se aplică și aici: fără cifre de precizie, f
 
 ## 8. Riscuri
 
-| Risc | De ce contează | Ce faci |
-|---|---|---|
-| Sezonalitate | abonații lunari pleacă în noiembrie | anualul e opțiunea implicită în paywall; lunarul la 9,99 € |
-| Nișă mică în RO | sute, nu zeci de mii de piloți activi | EN de la lansare, circuite învățate = orice circuit din UE |
-| Aplicația n-a cronometrat încă un tur real | nu poți vinde ce n-a fost verificat | monetizare doar după validarea de la MotorPark/TMR |
-| Pod-ul: CE, garanție, retururi, suport | costuri fixe mari pentru un volum mic | lista de așteptare cu prag; pornești cu MAX-M10S doar după bring-up RF |
-| Regulile magazinelor se schimbă | coduri în cutie, deblocări hardware | reverifică ghidurile Apple/Google la fiecare lot |
-| Coaching-ul oprit pe geometrie neoficială | valoarea Pro scade pe circuitele nevalidate | parteneriate cu circuitele (faza 4); arată clar pe ce circuite e coaching live complet |
+| Risc                                       | De ce contează                              | Ce faci                                                                                |
+| ------------------------------------------ | ------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Sezonalitate                               | abonații lunari pleacă în noiembrie         | anualul e opțiunea implicită în paywall; lunarul la 9,99 €                             |
+| Nișă mică în RO                            | sute, nu zeci de mii de piloți activi       | EN de la lansare, circuite învățate = orice circuit din UE                             |
+| Aplicația n-a cronometrat încă un tur real | nu poți vinde ce n-a fost verificat         | monetizare doar după validarea de la MotorPark/TMR                                     |
+| Pod-ul: CE, garanție, retururi, suport     | costuri fixe mari pentru un volum mic       | lista de așteptare cu prag; pornești cu MAX-M10S doar după bring-up RF                 |
+| Regulile magazinelor se schimbă            | coduri în cutie, deblocări hardware         | reverifică ghidurile Apple/Google la fiecare lot                                       |
+| Coaching-ul oprit pe geometrie neoficială  | valoarea Pro scade pe circuitele nevalidate | parteneriate cu circuitele (faza 4); arată clar pe ce circuite e coaching live complet |
 
 ---
 
