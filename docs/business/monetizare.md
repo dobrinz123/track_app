@@ -121,25 +121,49 @@ automat la prețul normal. **Verifică limitele trimestriale de coduri și regul
 
 ### 4.1 Costul pod-ului (din repo)
 
-| Variantă                              | Cost              | Sursă                        |
-| ------------------------------------- | ----------------- | ---------------------------- |
-| Prototip, unitatea 1 (SAM-M10Q)       | ~95–130 $ livrat  | `gnss-device-design.md` §8.1 |
-| Lot de 100, MAX-M10S                  | **~32 $/buc** BOM | §8.2                         |
-| Lot de 100, SAM-M10Q (fără riscul RF) | **~59 $/buc** BOM | §8.2                         |
+| Variantă                              | Cost                 | Sursă                                        |
+| ------------------------------------- | -------------------- | -------------------------------------------- |
+| Prototip, unitatea 1 (SAM-M10Q)       | ~95–130 $ livrat     | `gnss-device-design.md` §8.1                 |
+| **Comanda de prototip rev A, reală**  | **270 $ tot inclus** | plătit, 2026-09 (vamă, transport, asamblare) |
+| Lot de 100, MAX-M10S                  | **~32 $/buc** BOM    | §8.2                                         |
+| Lot de 100, SAM-M10Q (fără riscul RF) | **~59 $/buc** BOM    | §8.2                                         |
 
 Peste BOM mai adaug (**estimări**, nu cotații): ambalaj + suport + cablu ~5 $, transport din China + vamă
 ~4 $, rebuturi 5%, rezervă de garanție 5% (garanția legală în UE e de 2 ani). Cost aterizat estimat:
 **~42 € (MAX-M10S) până la ~69 € (SAM-M10Q)** pe bucată.
 
+**Ce spune costul real al prototipului.** Estimarea din `DESIGN-REV-A.md` §9 era ~132–157 $ **fără TVA**
+(5 PCB + 2 asamblate). Comanda reală a costat **270 $ cu tot cu vamă, transport și asamblare**, adică
++72% până la +105% față de estimare. TVA-ul de 21% explică doar ~30 $ din diferență; restul vine din
+taxele de curierat/vămuire, taxele de piese Extended și transport. Dacă e comanda din `ORDERING-RO.md`
+(2 plăci asamblate), un pod de prototip a ieșit **~135 $ bucata**, de ~2–4 ori peste costul țintă la volum.
+
+Ce înseamnă pentru plan:
+
+- **Costul de prototip nu e costul de producție.** Taxele fixe (setup PCBA, piese Extended ~28 $, curier)
+  se împart la 2 plăci acum și la 100 la un lot. Ele nu se repetă per bucată.
+- **Dar estimările din repo au ieșit prea optimiste.** Pentru lotul de 100, pune o rezervă de **+30%**
+  peste costul aterizat: **~55 € (MAX-M10S) până la ~90 € (SAM-M10Q)** pe bucată, până ai o cotație reală.
+- **Pe firmă plătitoare de TVA**, TVA-ul de import se recuperează, deci la un lot comandat pe SRL costul
+  efectiv scade față de ce ai plătit ca persoană fizică.
+- **Cere cotație JLCPCB pentru 100 de bucăți înainte de orice precomandă**, cu transport DDP (taxe
+  incluse), ca să nu mai apară surprize la vamă.
+
 ### 4.2 Contribuția pe vânzare
 
-| Vânzare                      | Încasat fără TVA | − plată (~2%) − livrare (~5 €) | − cost pod | **Contribuție**        |
-| ---------------------------- | ---------------- | ------------------------------ | ---------- | ---------------------- |
-| Pod singur, 189 €            | 156,20 €         | −7,70 €                        | −42…−69 €  | **~80–107 €**          |
-| Pod + 1 an Pro, 149 €        | 123,14 €         | −7,70 €                        | −42…−69 €  | **~46–73 €** în anul 1 |
-| … + reînnoire an 2 (49,99 €) | 41,31 €          | −15% magazin                   | —          | **+~35 €**             |
-| Pro anual, doar aplicația    | —                | —                              | —          | **~42 €/an**           |
-| Pro lunar, 7 luni de sezon   | —                | —                              | —          | **~49 €/an**           |
+| Vânzare                              | Încasat fără TVA | − plată (~2%) − livrare (~5 €) | − cost pod | **Contribuție**        |
+| ------------------------------------ | ---------------- | ------------------------------ | ---------- | ---------------------- |
+| Pod singur, 189 €                    | 156,20 €         | −7,70 €                        | −42…−69 €  | **~80–107 €**          |
+| Pod + 1 an Pro, 149 €                | 123,14 €         | −7,70 €                        | −42…−69 €  | **~46–73 €** în anul 1 |
+| … + reînnoire an 2 (49,99 €)         | 41,31 €          | −15% magazin                   | —          | **+~35 €**             |
+| Pro anual, doar aplicația            | —                | —                              | —          | **~42 €/an**           |
+| Pro lunar, 7 luni de sezon           | —                | —                              | —          | **~49 €/an**           |
+| _Cu rezerva de +30%:_ pod singur     | 156,20 €         | −7,70 €                        | −55…−90 €  | **~59–94 €**           |
+| _Cu rezerva de +30%:_ pod + 1 an Pro | 123,14 €         | −7,70 €                        | −55…−90 €  | **~25–60 €** în anul 1 |
+
+Cu rezerva de +30% și varianta SAM-M10Q, pachetul la 149 € lasă doar ~25 € în anul 1. Dacă cotația
+pentru 100 de bucăți confirmă costuri apropiate de cele ale prototipului, fie treci pe MAX-M10S (după
+validarea RF), fie urci pachetul la **169 €** și pod-ul singur la **199 €**, tot sub RaceBox Mini S.
 
 Concluzia importantă: **pachetul lasă mai puțin în anul 1 decât pod-ul singur, dar aduce un abonat.** Dacă
 jumătate din cumpărătorii de pachet reînnoiesc, pachetul depășește pod-ul singur până la finalul anului 2.
@@ -147,18 +171,20 @@ jumătate din cumpărătorii de pachet reînnoiesc, pachetul depășește pod-ul
 
 ### 4.3 Costuri fixe (estimări de ordin de mărime, de confirmat)
 
-| Cost                                                          | Sumă               | Când                                |
-| ------------------------------------------------------------- | ------------------ | ----------------------------------- |
-| Apple Developer Program                                       | 99 $/an            | înainte de TestFlight               |
-| Google Play Console                                           | 25 $ o dată        | înainte de primul build Android     |
-| Avocat: politică de confidențialitate + termeni (RO/EN)       | ~1.000–2.500 €     | Etapa C din planul de lansare       |
-| **Certificare CE/RED + EMC pentru pod** (laborator acreditat) | **~3.000–8.000 €** | înainte de orice vânzare a pod-ului |
-| Înregistrare DEEE și baterii (Regulamentul UE 2023/1542)      | câteva sute €/an   | înainte de vânzare                  |
-| Primul lot de 100 pod-uri                                     | ~4.500–7.000 €     | după certificare                    |
-| Contabilitate SRL                                             | ~100 €/lună        | continuu                            |
+| Cost                                                          | Sumă                                | Când                                |
+| ------------------------------------------------------------- | ----------------------------------- | ----------------------------------- |
+| **Prototip rev A (deja cheltuit)**                            | **270 $**                           | plătit                              |
+| Apple Developer Program                                       | 99 $/an                             | înainte de TestFlight               |
+| Google Play Console                                           | 25 $ o dată                         | înainte de primul build Android     |
+| Avocat: politică de confidențialitate + termeni (RO/EN)       | ~1.000–2.500 €                      | Etapa C din planul de lansare       |
+| **Certificare CE/RED + EMC pentru pod** (laborator acreditat) | **~3.000–8.000 €**                  | înainte de orice vânzare a pod-ului |
+| Înregistrare DEEE și baterii (Regulamentul UE 2023/1542)      | câteva sute €/an                    | înainte de vânzare                  |
+| Primul lot de 100 pod-uri                                     | ~5.500–9.000 € (cu rezerva de +30%) | după certificare                    |
+| Contabilitate SRL                                             | ~100 €/lună                         | continuu                            |
 
 Certificarea e costul care decide dacă pod-ul merită: la o contribuție medie de ~60 € pe pachet, doar
-certificarea cere **~50–130 de pachete vândute** ca să fie acoperită. Modulul ESP32 are certificare
+certificarea cere **~50–130 de pachete vândute** ca să fie acoperită. Cu rezerva de +30% (contribuție
+medie ~42 €), pragul urcă la **~70–190 de pachete**. Modulul ESP32 are certificare
 proprie, dar produsul final tot are nevoie de declarație CE sub RED. Rev A e doar pe USB, fără baterie;
 produsul de vânzare va avea baterie, deci intră și obligațiile pentru baterii.
 
