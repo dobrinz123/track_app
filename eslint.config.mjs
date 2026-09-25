@@ -18,9 +18,22 @@ export default [
       'apps/mobile/expo-env.d.ts',
       'apps/mobile/android/**',
       'apps/mobile/ios/**',
+      // Agent worktrees are full repo checkouts; lint them from their own root.
+      '.claude/**',
+      // Python virtualenvs (marketing voice-lab) ship vendored JS.
+      '**/.venv*/**',
     ],
   },
   js.configs.recommended,
+  {
+    // Marketing content-engine review UI: plain browser scripts.
+    files: ['marketing/**/ui/**/*.js'],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+      },
+    },
+  },
   {
     files: ['**/*.ts', '**/*.tsx'],
     languageOptions: {
