@@ -30,6 +30,7 @@ export * from './fusion';
 export * from './profile';
 export * from './catalog';
 export * from './corners';
+export * from './geometryValidation';
 
 export {
   CoachEngine,
